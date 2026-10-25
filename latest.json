@@ -8,5 +8,7 @@
   "sha256": "8645378ad6f4965c4df79e2ee11f7074c1877dab2b5110988a852f217f191338",
   "size": 299164495,
   "portable": true,
-  "downloadUrl": "https://github.com/Sparkle0v0Hxl/-/releases/download/v2.0.2/HuaXiaoLing-2.0.2-Portable.zip"
+  "downloadUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.0.2/HuaXiaoLing-2.0.2-Portable.zip",
+  "releaseUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/tag/v2.0.2",
+  "repoUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher"
 }
