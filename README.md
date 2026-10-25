@@ -109,6 +109,12 @@ npm start
 
 ### 版本历史
 
+#### 2.0.3
+- 绝区零战绩查询：输入 UID 即可查看式舆防卫战、虚构叙事、危局强袭战战绩，含总分、评级与阵容详情
+- 新增角色昵称映射，搜索、抽卡与歌单中的角色名支持常用简称
+- 战绩查询接入云端缓存与本地索引，重复查询更快
+- 修复若干界面细节
+
 #### 2.0.2
 - 修复米游社扫码登录：登录框不再反复弹出、来回重建
 - 支持 v2 系列 cookie（`cookie_token_v2` 等），账号无角色时不再误判为未登录
@@ -220,6 +226,12 @@ The script automatically excludes `data/` (user data), `downloads/` (cache), `.b
 Gacha records, account credentials (encrypted), playlists and configuration all live here. **Upgrades never touch this directory.**
 
 ### Changelog
+
+#### 2.0.3
+- Zenless Zone Zero battle records: enter your UID to view Shiyu Defense, Fictional Narrative and Deadly Assault results with score, rating and team details
+- Character nickname mapping, so search, gacha and playlists accept common aliases
+- Battle records use a cloud cache plus a local index, so repeat lookups are faster
+- Misc UI fixes
 
 #### 2.0.2
 - Fixed HoYoLAB QR-code login: the login dialog no longer pops up repeatedly or rebuilds itself
