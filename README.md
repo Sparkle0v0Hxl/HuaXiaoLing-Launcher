@@ -6,7 +6,7 @@
 >
 > A launcher for Genshin Impact, Honkai: Star Rail, Zenless Zone Zero, NTE and Arknights: Endfield.
 
-当前版本 / Current version: **2.0.2**
+当前版本 / Current version: **2.0.3**
 
 **语言 / Language：** [中文](#中文) ｜ [English](#english)
 
@@ -47,7 +47,7 @@ GitHub 单文件上限 100 MB，以下两个文件超限，**需要从 Release �
 | `花筱灵启动器.exe` | 238 MB | 仓库根目录 |
 | `resources/endfield-packs/EndBilibili/` | 199 MB | 覆盖同名目录 |
 
-不想自己拼装的话，直接下载 Release 里的 `HuaXiaoLing-2.0.2-Portable.zip`，解压即用。
+不想自己拼装的话，直接下载 Release 里的 `HuaXiaoLing-2.0.3-Portable.zip`，解压即用。
 
 ### 运行
 
@@ -165,7 +165,7 @@ GitHub caps a single file at 100 MB. The two files below exceed that limit and *
 | `花筱灵启动器.exe` | 238 MB | Repository root |
 | `resources/endfield-packs/EndBilibili/` | 199 MB | Overwrite the directory of the same name |
 
-If you'd rather not assemble it yourself, just download `HuaXiaoLing-2.0.2-Portable.zip` from the Release — unzip and run.
+If you'd rather not assemble it yourself, just download `HuaXiaoLing-2.0.3-Portable.zip` from the Release — unzip and run.
 
 ### Running
 
