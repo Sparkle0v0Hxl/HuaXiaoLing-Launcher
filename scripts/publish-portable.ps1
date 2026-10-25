@@ -48,7 +48,13 @@ param(
 
     [switch]$Force,
 
-    [switch]$SkipZip
+    [switch]$SkipZip,
+
+    # 打包前自动瘦身（删旧包 / 探针 / 备份 / 日志）。用 -SkipPrune 跳过。
+    [switch]$SkipPrune,
+
+    # 瘦身时除当前版本外额外保留几个历史 zip
+    [int]$KeepPrev = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +85,16 @@ foreach ($script in @('HXL-Updater.ps1', 'self-heal.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $updaterDir $script))) {
         throw "缺少 resources\updater\$script，自更新会失败"
     }
+}
+
+# 发布前瘦身：清掉旧包、探针目录、备份和日志，避免 build 越滚越大
+$pruneScript = Join-Path $PSScriptRoot 'prune-before-release.ps1'
+if ($SkipPrune) {
+    Write-Step "跳过瘦身（-SkipPrune）"
+} elseif (Test-Path -LiteralPath $pruneScript) {
+    & $pruneScript -Root $repoRoot -CurrentVersion $Version -KeepPrev $KeepPrev
+} else {
+    Write-Warning "找不到 scripts\prune-before-release.ps1，跳过瘦身"
 }
 
 if (-not (Test-Path -LiteralPath $OutDir)) {

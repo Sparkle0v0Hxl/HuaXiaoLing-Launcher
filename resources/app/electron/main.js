@@ -373,6 +373,133 @@ async function saveSecret(name, value) {
   return true;
 }
 
+/* ---------------- 米游社多账号存储 ---------------- */
+
+/*
+ * 一个米游社通行证账号底下挂着四款游戏的角色，但一个人完全可能有多个通行证
+ * （小号、家里人共用一台电脑）。所以登录态不能只存一条 cookie，得存成账号列表。
+ *
+ * 结构（版本 2）：
+ *   { version: 2, activeId: '<账号 id>', accounts: [{ id, cookie, savedAt, roles, label }] }
+ *
+ * 账号 id 取 cookie 里的 ltuid_v2（通行证数字 id），同一个账号重新登录就覆盖
+ * 而不是新增一条。
+ *
+ * 旧版本只存了 { cookie, savedAt } 一条，readHoyolabStore 会就地迁移成一条账号，
+ * 用户升级后不需要重新登录。
+ */
+const HOYOLAB_STORE_VERSION = 2;
+
+/** 从 cookie 里取通行证账号 id（ltuid_v2 优先）。 */
+function hoyolabAccountId(cookieStr) {
+  return (
+    miyoushe.cookieValue(cookieStr, 'ltuid_v2') ||
+    miyoushe.cookieValue(cookieStr, 'ltuid') ||
+    miyoushe.cookieValue(cookieStr, 'account_id_v2') ||
+    miyoushe.cookieValue(cookieStr, 'account_id') ||
+    ''
+  );
+}
+
+/** 账号显示名：优先角色昵称，其次 UID，最后退回账号 id 尾号。 */
+function hoyolabAccountLabel(account) {
+  const roles = Array.isArray(account.roles) ? account.roles : [];
+  const named = roles.find((role) => role && role.nickname);
+  if (named) return named.nickname;
+  const withUid = roles.find((role) => role && role.uid);
+  if (withUid) return `UID ${withUid.uid}`;
+  return account.id ? `账号 ${String(account.id).slice(-6)}` : '米游社账号';
+}
+
+/** 给渲染层看的账号信息 —— 一定不含 cookie。 */
+function publicHoyolabAccount(account) {
+  return {
+    id: account.id,
+    label: hoyolabAccountLabel(account),
+    savedAt: account.savedAt || 0,
+    roles: Array.isArray(account.roles) ? account.roles : [],
+  };
+}
+
+async function readHoyolabStore(providerId) {
+  const empty = { version: HOYOLAB_STORE_VERSION, accounts: [], activeId: '' };
+  const raw = await loadSecret(`hoyolab-${providerId}`);
+  if (!raw) return empty;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return empty;
+  }
+  if (!parsed || typeof parsed !== 'object') return empty;
+
+  // 旧格式迁移：{ cookie, savedAt }
+  if (typeof parsed.cookie === 'string' && parsed.cookie && !Array.isArray(parsed.accounts)) {
+    const account = {
+      id: hoyolabAccountId(parsed.cookie) || 'legacy',
+      cookie: parsed.cookie,
+      savedAt: Number(parsed.savedAt) || 0,
+      roles: [],
+      label: '',
+    };
+    return { version: HOYOLAB_STORE_VERSION, accounts: [account], activeId: account.id };
+  }
+
+  const accounts = (Array.isArray(parsed.accounts) ? parsed.accounts : [])
+    .filter((account) => account && typeof account.cookie === 'string' && account.cookie)
+    .map((account) => ({
+      id: String(
+        account.id || hoyolabAccountId(account.cookie) || `a${Math.random().toString(36).slice(2, 8)}`
+      ),
+      cookie: account.cookie,
+      savedAt: Number(account.savedAt) || 0,
+      roles: Array.isArray(account.roles) ? account.roles : [],
+      label: String(account.label || ''),
+    }));
+
+  // 按 id 去重（历史上可能把同一个账号写了两条）
+  const seen = new Set();
+  const unique = [];
+  for (const account of accounts) {
+    if (seen.has(account.id)) continue;
+    seen.add(account.id);
+    unique.push(account);
+  }
+
+  const activeId = unique.some((account) => account.id === parsed.activeId)
+    ? parsed.activeId
+    : unique[0]?.id || '';
+  return { version: HOYOLAB_STORE_VERSION, accounts: unique, activeId };
+}
+
+async function writeHoyolabStore(providerId, store) {
+  await saveSecret(`hoyolab-${providerId}`, JSON.stringify(store));
+}
+
+/** 取某个账号：指定 id > 当前激活 > 第一个。 */
+function pickHoyolabAccount(store, accountId) {
+  const wanted = String(accountId || '');
+  if (wanted) {
+    const found = store.accounts.find((account) => account.id === wanted);
+    if (found) return found;
+  }
+  return store.accounts.find((account) => account.id === store.activeId) || store.accounts[0] || null;
+}
+
+/** 校验并刷新某个账号缓存的角色列表（失败时保留旧列表，只带出原因）。 */
+async function verifyHoyolabAccount(account, providerId) {
+  try {
+    const result = await miyoushe.verifyCookie(account.cookie, providerId);
+    if (result.ok && Array.isArray(result.roles)) {
+      account.roles = result.roles;
+      account.savedAt = account.savedAt || Date.now();
+    }
+    return { ok: Boolean(result.ok), roles: account.roles || [], reason: result.ok ? '' : result.reason || '' };
+  } catch (error) {
+    return { ok: false, roles: account.roles || [], reason: String(error?.message || error) };
+  }
+}
+
 function bundledEndfieldPackRoot() {
   for (const candidate of [
     path.join(process.resourcesPath || '', 'endfield-packs'),
@@ -1734,6 +1861,17 @@ async function discoverBuiltinServers() {
       if (!hasConfig) {
         // 没有 config.ini：通常是资源替换包（B服 / 国际服增量包），标记为需要重建。
         // 但不要清空 path / root，否则用户手动配好的客户端会直接消失。
+        if (server.confirmed) {
+          // 用户手动选过这个启动程序：即使没有 config.ini，也尊重用户的选择，
+          // 不再反复标成「需要重建」，否则用户刚配好就打不开。
+          if (server.incomplete || server.packPath || server.unavailable) {
+            server.incomplete = false;
+            server.packPath = '';
+            server.unavailable = false;
+            changed += 1;
+          }
+          continue;
+        }
         server.incomplete = true;
         if (!server.packPath) server.packPath = server.path;
         changed += 1;
@@ -1988,6 +2126,8 @@ function publicGame(game) {
           : game.coverUrl || coverUrl(game.cover),
     installed: targetExists(game.target),
     running: running.has(game.id),
+    // 更新弹窗的置顶图没配来源时，用它标注「图片来源」。
+    officialSite: OFFICIAL_SITES[game.builtinKey] || '',
     activeServerId: game.activeServerId || null,
     servers: (game.servers || []).map((server) => ({
       ...server,
@@ -2986,6 +3126,22 @@ function installIpc() {
 
     const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
 
+    /*
+     * 「添加账号」时先把登录窗口的会话清干净。
+     *
+     * 登录窗口和已保存的账号是两个东西：已登录的 cookie 存在 safeStorage 里，
+     * 而窗口这个 persist 分区里还留着上一次的登录态。不清的话，点「添加账号」
+     * 打开米游社就直接是已登录的旧账号，轮询立刻把同一个账号再存一遍 ——
+     * 用户永远加不上第二个通行证。
+     */
+    if (input.addAccount) {
+      try {
+        await ses.clearStorageData({
+          storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'],
+        });
+      } catch {}
+    }
+
     return new Promise((resolve) => {
       let settled = false;
       /** 是否已经注过「自动点头像」脚本（只注一次，见下面的注释）。 */
@@ -3096,8 +3252,32 @@ function installIpc() {
             lastVerifyReason = result.reason || '';
             return;
           }
-          await saveSecret(`hoyolab-${providerId}`, JSON.stringify({ cookie: cookieStr, savedAt: Date.now() }));
-          finish({ ok: true, provider: providerId, roles: result.roles });
+          /*
+           * 存成账号列表：同一个通行证账号重新登录就覆盖那一条，
+           * 不同账号则新增，并把新登录的这个设为当前账号。
+           */
+          const store = await readHoyolabStore(providerId);
+          const accountId = hoyolabAccountId(cookieStr) || `a${Date.now().toString(36)}`;
+          const account = {
+            id: accountId,
+            cookie: cookieStr,
+            savedAt: Date.now(),
+            roles: result.roles || [],
+            label: '',
+          };
+          const index = store.accounts.findIndex((item) => item.id === accountId);
+          if (index >= 0) store.accounts[index] = account;
+          else store.accounts.push(account);
+          store.activeId = accountId;
+          await writeHoyolabStore(providerId, store);
+          finish({
+            ok: true,
+            provider: providerId,
+            roles: result.roles,
+            accountId,
+            activeId: accountId,
+            accounts: store.accounts.map(publicHoyolabAccount),
+          });
         } catch (error) {
           lastVerifyReason = String(error?.message || error);
           // 网络抖动就下一轮再试
@@ -3116,63 +3296,265 @@ function installIpc() {
     });
   });
 
+  /*
+   * 登录状态查询。
+   *
+   * 多账号之后这里返回的是「账号列表 + 当前账号的角色」：
+   * 只验证当前激活的那一个账号（verifyCookie 一轮就是四个 gameBiz 请求，
+   * 账号一多会明显拖慢启动），其它账号直接用上次缓存的角色列表。
+   */
   ipcMain.handle('hoyolab:status', async (_event, input = {}) => {
     const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const raw = await loadSecret(`hoyolab-${providerId}`);
-    if (!raw) return { ok: true, loggedIn: false, roles: [] };
-    let saved;
+    let store;
     try {
-      saved = JSON.parse(raw);
+      store = await readHoyolabStore(providerId);
     } catch (error) {
-      return { ok: true, loggedIn: false, roles: [], reason: '登录状态损坏，请重新登录' };
+      return { ok: true, loggedIn: false, roles: [], accounts: [], activeId: '', reason: '登录状态损坏，请重新登录' };
     }
-    try {
-      const result = await miyoushe.verifyCookie(saved.cookie, providerId);
-      return {
-        ok: true,
-        loggedIn: result.ok,
-        roles: result.roles,
-        savedAt: saved.savedAt || 0,
-        reason: result.ok ? '' : result.reason || '',
-      };
-    } catch (error) {
-      return { ok: true, loggedIn: false, roles: [], reason: String(error.message || error) };
+    const accounts = store.accounts.map(publicHoyolabAccount);
+    if (!store.accounts.length) {
+      return { ok: true, loggedIn: false, roles: [], accounts: [], activeId: '' };
     }
+
+    const account = pickHoyolabAccount(store, input.accountId) || store.accounts[0];
+    const verify = await verifyHoyolabAccount(account, providerId);
+    if (verify.ok) {
+      // 角色列表刷新过就顺手写回去，下次启动不用再查
+      try {
+        await writeHoyolabStore(providerId, store);
+      } catch {}
+    }
+    return {
+      ok: true,
+      loggedIn: verify.ok,
+      roles: verify.ok ? verify.roles : account.roles || [],
+      accounts: store.accounts.map(publicHoyolabAccount),
+      activeId: account.id,
+      savedAt: account.savedAt || 0,
+      reason: verify.ok ? '' : verify.reason || '',
+    };
   });
 
+  /*
+   * 切换当前账号。
+   * 只改 activeId，不重新登录；角色列表跟着新账号走。
+   */
+  ipcMain.handle('hoyolab:switch', async (_event, input = {}) => {
+    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
+    const store = await readHoyolabStore(providerId);
+    const account = pickHoyolabAccount(store, input.accountId);
+    if (!account) return { ok: false, reason: '还没有登录米游社', accounts: [], activeId: '', roles: [] };
+    store.activeId = account.id;
+    const verify = await verifyHoyolabAccount(account, providerId);
+    try {
+      await writeHoyolabStore(providerId, store);
+    } catch {}
+    return {
+      ok: true,
+      loggedIn: verify.ok,
+      roles: verify.ok ? verify.roles : account.roles || [],
+      accounts: store.accounts.map(publicHoyolabAccount),
+      activeId: account.id,
+      reason: verify.ok ? '' : verify.reason || '',
+    };
+  });
+
+  /*
+   * 退出登录。
+   *   { provider, id } —— 只移除这一个账号（删的是当前账号就自动切到第一个）
+   *   { provider }     —— 移除全部账号并清掉登录窗口的 cookie
+   */
   ipcMain.handle('hoyolab:logout', async (_event, input = {}) => {
     const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
+    const removeId = String(input.id || '');
+    const store = await readHoyolabStore(providerId);
+
+    if (removeId && store.accounts.some((account) => account.id === removeId)) {
+      store.accounts = store.accounts.filter((account) => account.id !== removeId);
+      if (store.activeId === removeId) store.activeId = store.accounts[0]?.id || '';
+      await writeHoyolabStore(providerId, store);
+      // 只有全删光了才清 cookie 分区，否则会顺手把别的账号也一起踢掉
+      if (!store.accounts.length) {
+        try {
+          const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
+          await ses.clearStorageData({ storages: ['cookies'] });
+        } catch {}
+      }
+      return {
+        ok: true,
+        removedId: removeId,
+        accounts: store.accounts.map(publicHoyolabAccount),
+        activeId: store.activeId,
+      };
+    }
+
     await saveSecret(`hoyolab-${providerId}`, '');
     try {
       const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
       await ses.clearStorageData({ storages: ['cookies'] });
     } catch {}
-    return { ok: true };
+    return { ok: true, accounts: [], activeId: '' };
   });
 
   /*
    * 战绩数据（每日便笺 / 深渊 / 剧场…）。
-   * api 由能力注册表给出，这里只负责补 cookie 和 DS2。
+   * 接口路径由能力注册表（game-features.js 的 TRAITS）给出，这里只负责：
+   * 补 cookie、拼查询参数、补 DS2、选对宿主与 Referer。
+   *
+   * 两种入参，都保留：
+   *   { provider, api }                        —— 旧用法：直接给相对路径
+   *   { provider, game, feature, uid, region } —— 新用法：路径和参数都从 TRAITS 来
+   *
+   * 新用法里 uid/region 由渲染层从角色列表带过来。放在渲染层是因为
+   * hoyolab:status 本来就会把角色列表返回给前端，前端已经在展示它；
+   * 如果这里再查一遍 passport，每点一次卡片就多四次网络请求。
    */
   ipcMain.handle('hoyolab:record', async (_event, input = {}) => {
     const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const raw = await loadSecret(`hoyolab-${providerId}`);
-    if (!raw) throw new Error('还没有登录米游社，请先在工具页点「登录」');
-    let saved;
-    try {
-      saved = JSON.parse(raw);
-    } catch {
-      throw new Error('登录状态损坏，请重新登录');
+    const store = await readHoyolabStore(providerId);
+    if (!store.accounts.length) {
+      return { ok: false, error: '还没有登录米游社，请先在工具页点「登录」', retcode: null, url: '', debug: null };
     }
-    const api = String(input.api || '');
-    if (!api.startsWith('/')) throw new Error('接口路径不合法');
-    try {
-      return { ok: true, data: await miyoushe.fetchRecord(api, saved.cookie, providerId) };
-    } catch (error) {
-      if (error.retcode === 10001 || error.retcode === 10001) {
-        await saveSecret(`hoyolab-${providerId}`, '');
+    /*
+     * 战绩归属于某个具体的通行证账号：按 accountId 取，没指定就用当前激活的那个。
+     * 这一步必须在拼接口之前定下来 —— 不同账号的 uid 不能混着查。
+     */
+    const account = pickHoyolabAccount(store, input.accountId);
+    if (!account) {
+      return { ok: false, error: '没有找到这个米游社账号，请重新登录', retcode: null, url: '', debug: null };
+    }
+    const saved = account;
+
+    const provider = gameFeatures.LOGIN_PROVIDERS[providerId] || gameFeatures.LOGIN_PROVIDERS.miyoushe;
+    let api = String(input.api || '');
+    let referer = '';
+    let withDs = true;
+
+    if (input.game && input.feature) {
+      const trait = gameFeatures.traitOf(input.game, input.feature);
+      if (!trait || trait.kind !== 'game-record') {
+        throw new Error('这个功能不在战绩接口的支持范围内');
       }
-      throw error;
+      /*
+       * 留一个「接口已下线」的出口：trait 上写了 unavailable 就直接回一句人话。
+       * 这里 return 而不是 throw —— throw 穿过 IPC 会变
+       * 「Error invoking remote method ...」，界面上就是一句没法读的错误。
+       * （原来绝区零的临界推演走的是这条，后来整条功能被删掉了，出口留着备用。）
+       */
+      if (trait.unavailable) {
+        return { ok: false, error: String(trait.unavailable), retcode: null, url: '', debug: null };
+      }
+      const uid = String(input.uid || '').trim();
+      const region = String(input.region || '').trim();
+      if (!uid || !region) {
+        throw new Error('没有读到这个游戏的角色，请先在工具页重新登录一次');
+      }
+      // schedule_type：1 当期，2 上期。只有深渊类接口模板里带 {schedule}
+      const schedule = Number(input.schedule) === 2 ? 2 : 1;
+      api = String(trait.api)
+        .replace(/\{server\}/g, encodeURIComponent(region))
+        .replace(/\{role_id\}/g, encodeURIComponent(uid))
+        .replace(/\{region\}/g, encodeURIComponent(region))
+        .replace(/\{uid\}/g, encodeURIComponent(uid))
+        .replace(/\{schedule\}/g, String(schedule));
+      if (/\{[a-z_]+\}/.test(api)) {
+        throw new Error(`接口模板里还有没替换的参数：${api}`);
+      }
+      const baseKey = trait.host === 'act' ? 'act' : 'record';
+      const base = provider.api && provider.api[baseKey];
+      if (!base) {
+        throw new Error('当前登录通道没有接入这个功能（国际服暂未接入战绩查询）');
+      }
+      api = `${base}${api}`;
+      referer = trait.referer === 'act' ? provider.api.refererAct : provider.api.refererRecord;
+      withDs = trait.ds !== false;
+    } else {
+      if (!api.startsWith('/')) throw new Error('接口路径不合法');
+      referer = input.referer === 'act' ? provider.api.refererAct : provider.api.refererRecord;
+    }
+
+    /*
+     * 排查用的请求头矩阵：同一个地址依次换几种头组合打一遍，
+     * 把每个组合的 retcode 一起带回去。5003 这类风控错误光看一句话
+     * 根本判断不出是哪个头被拒，只能这样 A/B。
+     */
+    if (input.probe) {
+      const variants = [
+        { name: 'A 现状（全部头 + DS2）', opts: {} },
+        { name: 'B 全部头、不带 DS2', opts: { ds: false } },
+        { name: 'C 去掉 X-Requested-With + DS2', opts: { withXrw: false } },
+        { name: 'D 去掉 X-Requested-With、不带 DS2', opts: { withXrw: false, ds: false } },
+        { name: 'E 去掉 XRW + Origin + DS2', opts: { withXrw: false, origin: 'https://webstatic.mihoyo.com' } },
+        { name: 'F 固定指纹 0000000000000 + DS2', opts: { deviceFp: '0000000000000' } },
+        { name: 'G client_type=2 + DS2', opts: { clientType: '2' } },
+        { name: 'H 桌面 UA + DS2', opts: { ua: miyoushe.UA } },
+      ];
+      const results = [];
+      for (const variant of variants) {
+        try {
+          const data = await miyoushe.fetchRecord(api, saved.cookie, providerId, {
+            referer,
+            ds: withDs && variant.opts.ds !== false,
+            ...variant.opts,
+          });
+          results.push({
+            name: variant.name,
+            ok: true,
+            keys: data && typeof data === 'object' ? Object.keys(data).slice(0, 6) : [],
+          });
+        } catch (error) {
+          results.push({
+            name: variant.name,
+            ok: false,
+            retcode: error.retcode === undefined ? null : error.retcode,
+            message: error.message || String(error),
+          });
+        }
+      }
+      return { ok: true, probe: results, url: api, deviceFp: await miyoushe.ensureDeviceFp(saved.cookie) };
+    }
+
+    try {
+      const data = await miyoushe.fetchRecord(api, saved.cookie, providerId, { referer, ds: withDs });
+      // url 一起带回去，出问题时能直接在控制台看到实际请求了什么
+      return { ok: true, data, url: api };
+    } catch (error) {
+      /*
+       * 以前这里两个条件都写成 10001，等于「参数错误就清登录态」，
+       * 一次拼错参数的请求就会把好好的登录态删掉。
+       * 真正代表凭据失效的是 -100（未登录）和 -101（登录过期）。
+       */
+      if (error.retcode === -100 || error.retcode === -101) {
+        /*
+         * 只摘掉这一个账号，别把其它通行证一起清了 ——
+         * 多账号下某个小号过期是很正常的事，连坐会让人莫名其妙地重新登录。
+         */
+        const fresh = await readHoyolabStore(providerId);
+        fresh.accounts = fresh.accounts.filter((item) => item.id !== account.id);
+        if (fresh.activeId === account.id) fresh.activeId = fresh.accounts[0]?.id || '';
+        await writeHoyolabStore(providerId, fresh);
+      }
+      /*
+       * 不 throw：ipcMain.handle 抛错时 Electron 只把 message 传回渲染进程，
+       * retcode 和实际请求地址都会丢，用户和排查的人都只能看到一句话。
+       * 当成返回值带回去，前端就能把「打的是哪个地址、服务端回了什么码」显示出来。
+       */
+      /*
+       * 诊断信息：只带 cookie 的字段名，不带值。
+       * 5003 这类风控/参数错误，常见原因是 cookie 里缺 ltoken 或 cookie_token 中的某一项，
+       * 但这层信息用户在界面上完全看不到，出问题时只能干瞪眼。
+       */
+      const cookieKeys = String(saved.cookie || '')
+        .split(';')
+        .map((part) => part.split('=')[0].trim())
+        .filter(Boolean);
+      return {
+        ok: false,
+        error: error.message || String(error),
+        retcode: typeof error.retcode === 'number' ? error.retcode : null,
+        url: error.url || api,
+        debug: { cookieKeys },
+      };
     }
   });
   ipcMain.handle('app:ui-scale', (_event, value) => {
@@ -4842,6 +5224,10 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
       if (!targetExists(serverPath)) throw new Error('这个启动程序不存在');
       server.path = serverPath;
       server.confirmed = true;
+      // 用户手动指定了有效启动程序：它就是一个可用的客户端，不再视为「需要重建」。
+      server.incomplete = false;
+      server.unavailable = false;
+      if (server.packPath === server.path) server.packPath = '';
     }
     const serverRoot = String(input?.root || '').trim();
     if (serverRoot) {
@@ -5898,7 +6284,31 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
         if (key && knownKeys.has(key)) idToKey.set(game.id, key);
       }
       const sessionWindows = screenshotLib.sessionWindowsFrom(playLog, (id) => idToKey.get(id) || '');
-      const result = await screenshotLib.listScreenshots({ customRoots, sessionWindows });
+      // 截图管理要指向「每个游戏的截图目录」，而不是电脑自带的截图文件夹。
+      // 游戏安装目录 = exe 所在目录，截图通常落在 <游戏目录>\ScreenShot 及常见变体。
+      // 所以当用户没手动配置截图目录时，就从各游戏安装路径推导出它的截图目录，
+      // 而不是退回 defaultRoots 里的 Pictures\Screenshots。
+      const screenshotRoots = {};
+      if (customRoots && Object.keys(customRoots).length) {
+        screenshotRoots.custom = customRoots;
+      } else {
+        for (const game of store.data?.games || []) {
+          const key = idToKey.get(game.id);
+          const dirs = new Set();
+          for (const server of game.servers || []) {
+            if (!server.path || !targetExists(server.path)) continue;
+            const gameDir = path.dirname(server.path);
+            const shotNames = ['ScreenShot', 'Screenshot', '截图', 'screenshot', 'Screenshots', 'ScreenShots'];
+            for (const name of shotNames) dirs.add(path.join(gameDir, name));
+            dirs.add(path.join(gameDir, 'Photos'));
+          }
+          if (key && dirs.size) screenshotRoots[key] = [...dirs];
+        }
+      }
+      const result = await screenshotLib.listScreenshots({
+        customRoots: screenshotRoots.custom || screenshotRoots,
+        sessionWindows,
+      });
       // 刷新缩略图白名单：只有本次扫描出来的路径能被 hxl-shot 协议读到
       screenshotAllow.clear();
       for (const list of Object.values(result.groups || {})) {

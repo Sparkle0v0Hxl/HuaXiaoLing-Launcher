@@ -227,8 +227,26 @@ async function qqPlaylistSongs(session, dissId) {
 /* 酷狗                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 从酷狗登录会话里取出用户 ID。
+ *
+ * 酷狗在不同版本写不同的 cookie 名（实测出现过 userid / UserId / KUGOUID /
+ * KugouID / user_id / kg_user_id），登录时我们把整袋 cookie 都存进了 session，
+ * 但接口和网页脚本都只认 session.userid 这一个键，一旦那袋里写的是别的名字，
+ * 就会报「登录信息里没有酷狗用户 ID」——即使明明已经登录了。
+ * 这里按候选名逐个找，命中第一个非空值。
+ */
+function kugouUserId(session) {
+  const names = ['userid', 'UserId', 'KUGOUID', 'KugouID', 'kg_user_id', 'user_id', 'KgUserID'];
+  for (const name of names) {
+    const value = session?.[name];
+    if (value != null && String(value).trim()) return String(value).replace(/\D/g, '');
+  }
+  return '';
+}
+
 async function kugouMyPlaylists(session) {
-  const userid = String(session.userid || '').replace(/\D/g, '');
+  const userid = kugouUserId(session);
   if (!userid) throw new Error('登录信息里没有酷狗用户 ID，请重新登录');
   const cookie = session.__cookieHeader || '';
   const headers = { referer: 'https://www.kugou.com/yy/html/user.html', cookie };
@@ -394,7 +412,8 @@ function qqPlaylistsScript(session) {
 }
 
 function kugouPlaylistsScript(session) {
-  const userid = String(session.userid || '').replace(/\D/g, '');
+  // 和 kugouMyPlaylists 用同一个规范化查找，避免 web 脚本读不到 userid
+  const userid = kugouUserId(session);
   const urls = [
     `https://mobilecdn.kugou.com/api/v3/user/playlist?userid=${userid}&page=1&pagesize=50&type=0`,
     `https://www.kugou.com/yy/index.php?r=playlist/user&userid=${userid}&page=1&pagesize=50`,

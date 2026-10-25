@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('launcher', {
   hoyolab: {
     login: (input) => ipcRenderer.invoke('hoyolab:login', input),
     status: (input) => ipcRenderer.invoke('hoyolab:status', input),
+    switchAccount: (input) => ipcRenderer.invoke('hoyolab:switch', input),
     logout: (input) => ipcRenderer.invoke('hoyolab:logout', input),
     record: (input) => ipcRenderer.invoke('hoyolab:record', input),
   },

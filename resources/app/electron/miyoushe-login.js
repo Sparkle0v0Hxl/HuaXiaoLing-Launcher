@@ -21,6 +21,9 @@
  */
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const PROVIDERS = {
   miyoushe: {
@@ -138,6 +141,17 @@ const REQUIRED_COOKIE_KEYS = LOGIN_COOKIE_GROUPS.map((group) => group[0]);
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+/*
+ * 接口 UA 和登录窗口 UA 必须分开。
+ *
+ * 登录窗口要让用户看到正常的桌面版米游社页面，所以用桌面 Chrome UA；
+ * 但米游社的 OpenAPI 明确认「移动端 wv + miHoYoBBS/<版本>」这个 UA，
+ * 用桌面 UA 调战绩接口会被风控直接挡掉（retcode 5003），
+ * 报错只有一句「战绩接口返回 5003」，用户完全看不出是 UA 的问题。
+ */
+const RECORD_UA =
+  'Mozilla/5.0 (Linux; Android 13; Pixel 5 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 Mobile Safari/537.36 miHoYoBBS/2.90.1';
+
 /* ------------------------------------------------------------------ */
 /* cookie 工具                                                         */
 /* ------------------------------------------------------------------ */
@@ -208,6 +222,29 @@ function createDs2(url, salt2) {
 /* 接口调用                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * 米游社网页自己会带一组 x-rpc-* 头，其中 device_id 是浏览器生成的 GUID，
+ * 生成一次就长期不变。少这几个头时战绩接口经常直接返回 5003（风控拒绝），
+ * 而报错信息只有一句「战绩接口返回 5003」，用户完全看不出该怎么办。
+ *
+ * 这里按 userData 目录 + 主机名派生一个稳定的 GUID：
+ * 每次启动都随机换一个反而更像机器人，固定下来才和真实浏览器一致。
+ */
+let cachedDeviceId = '';
+function deviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+  let seed = os.hostname();
+  try {
+    const { app } = require('electron');
+    seed = `${app.getPath('userData')}|${os.hostname()}`;
+  } catch {
+    /* 非 Electron 环境（单测）下只用主机名 */
+  }
+  const hex = crypto.createHash('md5').update(seed, 'utf8').digest('hex');
+  cachedDeviceId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  return cachedDeviceId;
+}
+
 async function readJson(response) {
   const text = await response.text();
   try {
@@ -240,7 +277,10 @@ async function fetchRolesDetailed(cookieStr, providerId = 'miyoushe') {
         headers: {
           Cookie: cookieStr,
           Referer: provider.api.refererAct,
-          'User-Agent': UA,
+          'User-Agent': RECORD_UA,
+          'x-rpc-app_version': '2.90.1',
+          'x-rpc-client_type': '5',
+          'x-rpc-device_id': deviceId(),
         },
       });
       const json = await readJson(response);
@@ -303,24 +343,232 @@ async function verifyCookie(cookieStr, providerId = 'miyoushe') {
 
 /**
  * 调一个战绩接口，自动补 DS2。
- * path 传 '/game_record/app/genshin/api/dailyNote?server=cn_gf01&role_id=xxx'。
+ *
+ * path 可以是相对路径，例如
+ *   '/game_record/app/genshin/api/dailyNote?server=cn_gf01&role_id=xxx'
+ * 也可以是完整 URL —— 崩坏3 的便笺在 act-api-takumi 上，和默认的
+ * api-takumi-record 不是同一个宿主，所以允许直接传绝对地址。
+ *
+ * options.referer —— 覆盖 Referer。绝区零/崩坏3 走 act.mihoyo.com，
+ *   原神/星铁走 webstatic.mihoyo.com，Referer 不对会被风控拦。
+ * options.ds —— 是否带 DS2 头，默认带（服务器对多余头是忽略的）。
  */
-async function fetchRecord(path, cookieStr, providerId = 'miyoushe') {
-  const provider = PROVIDERS[providerId] || PROVIDERS.miyoushe;
-  const url = `${provider.api.record}${path}`;
-  const response = await fetch(url, {
-    headers: {
-      Cookie: cookieStr,
-      DS: createDs2(url, provider.api.salt2),
-      Referer: provider.api.refererRecord,
-      'User-Agent': UA,
-      'X-Requested-With': 'com.mihoyo.hyperion',
-    },
+/**
+ * 从 cookie 串里取某一项的值（找不到返回空串）。
+ *
+ * 米游社网页会把设备指纹一起写进 cookie：`DEVICEFP`（指纹本体）、
+ * `_MHYUUID`（网页的 device_id）。这两个值服务端会跟请求头交叉校验，
+ * 头部自己编造一个对不上的指纹会被风控挡掉（retcode 5003）。
+ */
+function cookieValue(cookieStr, name) {
+  for (const part of String(cookieStr || '').split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    if (part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return '';
+}
+
+/**
+ * 向米哈游的公共接口申领一个 device_fp（设备指纹）。
+ *
+ * 为什么必须做这件事：战绩接口（api-takumi-record）从 2024 年起校验
+ * 「合法设备信息」，头部里塞 `0000000000000` 或随便编一个指纹会被直接
+ * 打成 retcode 5003（原神）/ 10053（星铁）。Starward 就是这么解决的
+ * （Scighost/Starward#669，commit f1d8b3a "device info and fingerprint"）。
+ *
+ * 申领流程（与 Starward 的 HyperionClient.GetDeviceFpAsync 一致）：
+ *   POST https://public-data-api.mihoyo.com/device-fp/api/getFp
+ *   body {device_id, seed_id, seed_time, platform, device_fp, app_name, ext_fields, bbs_device_id}
+ *   返回 {code, msg, device_fp}
+ * 拿到的 device_fp 直接塞进 x-rpc-device_fp，bbs_device_id 用同一个 device_id。
+ */
+let cachedDeviceFp = '';
+
+/**
+ * 指纹文件放在 userData 下：申领到的 device_fp 要长期复用。
+ * 每次启动都重新申领一个新指纹，在米哈游风控看来就是「一天换八台手机」，
+ * 反而更容易被判成异常账号（1034）。
+ */
+function deviceFpFile() {
+  try {
+    const { app } = require('electron');
+    return path.join(app.getPath('userData'), 'device-fp.json');
+  } catch {
+    return '';
+  }
+}
+
+function readSavedDeviceFp() {
+  const file = deviceFpFile();
+  if (!file) return '';
+  try {
+    const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return typeof json.fp === 'string' ? json.fp : '';
+  } catch {
+    return '';
+  }
+}
+
+function saveDeviceFp(fp) {
+  const file = deviceFpFile();
+  if (!file || !fp) return;
+  try {
+    fs.writeFileSync(file, JSON.stringify({ fp, savedAt: Date.now() }), 'utf8');
+  } catch {
+    /* 写不进去就只留在内存里，下次启动重新申领 */
+  }
+}
+
+function randomProductName() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let out = '';
+  for (let index = 0; index < 6; index += 1) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+async function ensureDeviceFp(cookieStr) {
+  if (cachedDeviceFp) return cachedDeviceFp;
+  const saved = readSavedDeviceFp();
+  if (saved) {
+    cachedDeviceFp = saved;
+    return cachedDeviceFp;
+  }
+  const uuid = cookieValue(cookieStr, '_MHYUUID') || deviceId();
+  const productName = randomProductName();
+  const extFields = JSON.stringify({
+    proxyStatus: 0,
+    isRoot: 0,
+    romCapacity: '512',
+    deviceName: 'Pixel5',
+    productName,
+    romRemain: '512',
+    hostname: 'db1ba5f7c000000',
+    screenSize: '1080x2400',
+    isTablet: 0,
+    aaid: '',
+    model: 'Pixel5',
+    brand: 'google',
+    hardware: 'windows_x86_64',
+    deviceType: 'redfin',
+    devId: 'REL',
+    serialNumber: 'unknown',
+    sdCapacity: 125943,
+    buildTime: '1704316741000',
+    buildUser: 'cloudtest',
+    simState: 0,
+    ramRemain: '124603',
+    appUpdateTimeDiff: 1716369357492,
+    deviceInfo: `google/${productName}/redfin:13/TQ3A.230901.001/2311.40000.5.0:user/release-keys`,
+    vaid: '',
+    buildType: 'user',
+    sdkVersion: '33',
+    ui_mode: 'UI_MODE_TYPE_NORMAL',
+    isMockLocation: 0,
+    cpuType: 'arm64-v8a',
+    isAirMode: 0,
+    ringMode: 2,
+    chargeStatus: 3,
+    manufacturer: 'Google',
+    emulatorStatus: 0,
+    appMemory: '512',
+    osVersion: '13',
+    vendor: 'unknown',
+    accelerometer: '',
+    sdRemain: 123276,
+    buildTags: 'release-keys',
+    packageName: 'com.mihoyo.hyperion',
+    networkType: 'WiFi',
+    oaid: '',
+    debugStatus: 1,
+    ramCapacity: '125943',
+    magnetometer: '',
+    display: 'TQ3A.230901.001',
+    appInstallTimeDiff: 1706444666737,
+    packageVersion: '2.20.2',
+    gyroscope: '',
+    batteryStatus: 85,
+    hasKeyboard: 10,
+    board: 'windows',
   });
+  const body = {
+    device_id: crypto.randomBytes(8).toString('hex'),
+    seed_id: crypto.randomUUID(),
+    seed_time: String(Date.now()),
+    platform: '2',
+    device_fp: '0000000000000',
+    app_name: 'bbs_cn',
+    ext_fields: extFields,
+    bbs_device_id: uuid,
+  };
+  try {
+    const response = await fetch('https://public-data-api.mihoyo.com/device-fp/api/getFp', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': RECORD_UA,
+        Referer: 'https://www.miyoushe.com/',
+      },
+      body: JSON.stringify(body),
+    });
+    const json = await readJson(response);
+    // 实际返回：{retcode:0, message:'OK', data:{device_fp, code:200, msg:'ok'}}
+    const fp = json && json.data && typeof json.data.device_fp === 'string' ? json.data.device_fp : '';
+    if (json && json.retcode === 0 && fp) {
+      cachedDeviceFp = fp;
+      saveDeviceFp(fp);
+    }
+  } catch {
+    /* 申领失败就退回 cookie 里网页自己的指纹，不影响主流程 */
+  }
+  return cachedDeviceFp;
+}
+
+async function fetchRecord(path, cookieStr, providerId = 'miyoushe', options = {}) {
+  const provider = PROVIDERS[providerId] || PROVIDERS.miyoushe;
+  const raw = String(path || '');
+  const url = /^https?:\/\//i.test(raw) ? raw : `${provider.api.record}${raw}`;
+  /*
+   * 请求头逐项对齐 Starward 的 HyperionClient：
+   * - Referer 按接口分组（原神/星铁 webstatic，绝区零/崩3 act）
+   * - User-Agent 用米游社 APP 的 UA（miHoYoBBS/2.90.1），不是桌面的 Chrome UA
+   * - x-rpc-device_fp 优先用 cookie 里米游社网页自己申领到的指纹
+   * 这些头少一个都可能被风控打成 5003。
+   * X-Requested-With 默认不带 —— Starward 的所有便笺/战绩接口都没有这个头
+   * （只有绝区零的式舆/危局例外），带上去反而会被绝区零便笺拒成 10041。
+   * 需要时显式传 withXrw: true。
+   */
+  const headers = {
+    Accept: 'application/json, text/plain, */*',
+    Cookie: cookieStr,
+    Referer: options.referer || provider.api.refererRecord,
+    'User-Agent': options.ua || RECORD_UA,
+    'x-rpc-app_version': options.appVersion || '2.90.1',
+    'x-rpc-client_type': options.clientType || '5',
+    'x-rpc-device_id': options.deviceId || cookieValue(cookieStr, '_MHYUUID') || deviceId(),
+    'x-rpc-device_fp':
+      options.deviceFp || (await ensureDeviceFp(cookieStr)) || cookieValue(cookieStr, 'DEVICEFP') || '0000000000000',
+    /* Starward 的便笺/战绩请求都不带 x-rpc-lang，带上会被绝区零便笺判 10041 */
+    ...(options.lang ? { 'x-rpc-lang': options.lang } : {}),
+  };
+  if (options.withXrw === true) {
+    headers['X-Requested-With'] = 'com.mihoyo.hyperion';
+  }
+  if (options.origin) {
+    headers.Origin = options.origin;
+  }
+  if (options.ds !== false) {
+    headers.DS = createDs2(url, provider.api.salt2);
+  }
+  const response = await fetch(url, { headers });
   const json = await readJson(response);
   if (json.retcode !== 0) {
     const error = new Error(json.message || `战绩接口返回 ${json.retcode}`);
     error.retcode = json.retcode;
+    error.url = url;
     throw error;
   }
   return json.data;
@@ -331,10 +579,13 @@ module.exports = {
   REQUIRED_COOKIE_KEYS,
   LOGIN_COOKIE_GROUPS,
   UA,
+  RECORD_UA,
   cookieHeader,
   filterCookies,
   hasLoginCookie,
+  cookieValue,
   createDs2,
+  ensureDeviceFp,
   fetchAllRoles,
   fetchRolesDetailed,
   verifyCookie,

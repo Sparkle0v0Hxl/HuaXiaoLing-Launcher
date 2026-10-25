@@ -28,6 +28,15 @@ const AUDIO_FX_STORAGE = 'vela:audio-fx';
 /** 可选的界面缩放档位。窗口本体尺寸固定，靠缩放把内容等比放大或缩小。 */
 const UI_SCALE_STEPS = [80, 90, 100, 110, 120, 130];
 
+/**
+ * 项目的 GitHub 地址。
+ *
+ * 内置的「检查更新」走 latest.json，网络受限或想直接看版本说明时，
+ * 设置页还留了一个手动入口，直接跳到发版页自己下 ZIP。
+ */
+const REPO_URL = 'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher';
+const REPO_RELEASES_URL = `${REPO_URL}/releases`;
+
 function normalizeUiScale(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 100;
@@ -172,6 +181,27 @@ const state = {
     defaults.enabled = defaults.preset !== 'off';
     return defaults;
   })(),
+  /*
+   * 战绩页状态。
+   *
+   * cache 的键是 `${game}/${feature}`，值是 { loading, error, view, url, at }。
+   * 之所以按组合缓存而不是只存一份：用户会在「原神便笺 → 深渊 → 星铁便笺」
+   * 之间来回点，每次都重新请求既慢又容易触发风控。
+   */
+  record: {
+    feature: 'daily-note',
+    game: 'genshin',
+    // 上期/当期开关：1 当期，2 上期
+    schedule: 1,
+    /*
+     * 当前看的是哪个通行证账号（米游社多账号）。
+     * 空串表示「跟随工具页当前激活的账号」，登录/切换账号时会同步写进来。
+     */
+    account: '',
+    // 每个游戏选中的角色 { genshin: { uid, region, nickname, level } }
+    role: {},
+    cache: {},
+  },
 };
 let liveSocket = null;
 let liveHeartbeat = null;
@@ -192,6 +222,7 @@ const PAGE_META = {
   song: { label: '点歌台', eyebrow: 'KARAOKE' },
   news: { label: '动态', eyebrow: 'JOURNAL' },
   tools: { label: '工具', eyebrow: 'TOOLBOX' },
+  record: { label: '战绩', eyebrow: 'RECORD' },
   screenshots: { label: '截图管理', eyebrow: 'GALLERY' },
   graphics: { label: '画质配置', eyebrow: 'GRAPHICS' },
   // 公告已并入动态页；保留键只为兼容旧数据的 lastPage
@@ -845,12 +876,125 @@ function formatUpdateSize(bytes) {
   return `${Math.max(1, Math.round(size / 1024))} KB`;
 }
 
+/**
+ * 更新弹窗 / 动态详情里的配图。
+ *
+ * 图片挂在 news.json 的 `image` 字段上（每个版本一张、取游戏库里的游戏），
+ * `imageSource` 是找到这张图的页面，`imageCredit` 是显示用的来源名。
+ * 来源链接一律做成按钮走 openExternal，不在页面里直接外跳。
+ */
+function newsFigure(post, extraClass) {
+  if (!post || !post.image) return '';
+  const credit = post.imageSource
+    ? `<button class="figure-credit" data-action="open-external" data-url="${esc(post.imageSource)}" title="${esc(post.imageSource)}">图片来源：${esc(post.imageCredit || post.imageSource)}</button>`
+    : '';
+  return `
+    <figure class="news-figure ${extraClass || ''}">
+      <img src="${esc(post.image)}" alt="${esc(post.title || '')}" loading="lazy" referrerpolicy="no-referrer" />
+      ${credit}
+    </figure>`;
+}
+
+/**
+ * 按版本号在本地动态里找那一条，用来取这一版的配图。
+ * 找不到就返回 null，弹窗退化成纯文字。
+ */
+function releaseEntry(version) {
+  const target = String(version || '')
+    .replace(/^v/i, '')
+    .trim();
+  if (!target) return null;
+  return (
+    (state.news || []).find(
+      (item) =>
+        String(item.version || '')
+          .replace(/^v/i, '')
+          .trim() === target
+    ) || null
+  );
+}
+
+/** 版本号 → 一个稳定的整数，用来决定这一版挑哪款游戏当封面。 */
+function versionHash(text) {
+  const raw = String(text || '');
+  let hash = 0;
+  for (let i = 0; i < raw.length; i++) {
+    hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+/**
+ * 更新弹窗的置顶图。
+ *
+ * 取图顺序：
+ *   1. news.json 里这一版自己的 `image`（带找图来源）；
+ *   2. 下面这张选好的官方美术图（按版本号挑一款游戏，来源写官网）；
+ *   3. 再没有就用游戏库里那款游戏已经下载好的封面。
+ * 第 2、3 步都不需要联网准备，所以每次发版一定有图。
+ */
+const HERO_ART = {
+  genshin: {
+    image:
+      'https://sdk-webstatic.mihoyo.com/upload/ann/2026/09/23/92220da84f2e0fbeb5b6ddfd09b22336_6625910379513968240_transformed.jpg',
+    source: 'https://ys.mihoyo.com/main/news/detail/21888',
+    credit: '原神官网',
+  },
+  starrail: {
+    image:
+      'https://sdk-webstatic.mihoyo.com/upload/ann/2026/09/15/0e28df09eb425be765a8f22f6b30c9c6_554111496134813712_transformed.png',
+    source: 'https://sr.mihoyo.com/main/news',
+    credit: '星穹铁道官网',
+  },
+  neverness: {
+    image: 'https://yh.wanmei.com/images/cover260924/box3Slide1.jpg',
+    source: 'https://yh.wanmei.com/',
+    credit: '异环官网',
+  },
+  zzz: {
+    image:
+      'https://launcher-webstatic.mihoyo.com/launcher-public/2026/10/20/c20eaf6a8a32d6342da4d5334be51bfe_5591770470767677066.png',
+    source: 'https://zzz.mihoyo.com/',
+    credit: '绝区零官网',
+  },
+  endfield: {
+    image: 'https://web.hycdn.cn/upload/image/20261016/79d9bdebd562b2b7421339c40d5c1199.jpg',
+    source: 'https://endfield.hypergryph.com/',
+    credit: '明日方舟：终末地官网',
+  },
+};
+
+function versionHero(version) {
+  const entry = releaseEntry(version);
+  if (entry && entry.image) return entry;
+  const games = (state.games || []).filter((game) => game.coverUrl || game.startCoverUrl);
+  if (!games.length) return entry;
+  const pick = games[versionHash(version) % games.length];
+  const art = HERO_ART[pick.builtinKey];
+  if (art) {
+    return {
+      ...(entry || {}),
+      image: art.image,
+      imageSource: art.source,
+      imageCredit: art.credit,
+    };
+  }
+  return {
+    ...(entry || {}),
+    image: pick.startCoverUrl || pick.coverUrl,
+    imageSource: pick.officialSite || '',
+    imageCredit: pick.officialSite ? `${pick.name} 官网` : '',
+  };
+}
+
 function openUpdateModal(info) {
   const data = info || state.update || {};
   const size = formatUpdateSize(data.size);
+  const entry = versionHero(data.latest);
   openModal(`
     <div class="modal-backdrop" data-backdrop>
-      <div class="modal narrow" role="dialog" aria-modal="true">
+      <div class="modal narrow update-modal" role="dialog" aria-modal="true">
+        ${newsFigure(entry, 'update-hero')}
         <div class="modal-head">
           <div>
             <h2>发现新版本 v${esc(data.latest || '')}</h2>
@@ -862,8 +1006,11 @@ function openUpdateModal(info) {
           ${data.notes ? `<div class="update-notes"><strong>这一版改了什么</strong>${notesMarkup(data.notes)}</div>` : '<p class="desc">没有附带更新说明。</p>'}
           <div class="update-progress" id="update-modal-progress" hidden><div class="update-progress-bar"><span style="width:0%"></span></div><small>准备下载…</small></div>
           <p class="desc" style="margin-top:14px">更新会关闭启动器、覆盖程序文件然后自动重新打开。游戏、账号、抽卡记录、歌单和设置都在数据目录里，不会被覆盖。</p>
+          <p class="desc">不想走弹窗更新的话，也可以去 GitHub 自己下新版 ZIP，覆盖程序文件同样不会动数据。</p>
         </div>
         <div class="modal-foot">
+          <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_RELEASES_URL}" title="${REPO_RELEASES_URL}">${icon('external')}打开发布页</button>
+          <span style="flex:1"></span>
           <button class="btn btn-ghost" data-close>稍后再说</button>
           <button class="btn btn-primary" data-action="apply-update">${icon('download')}立即更新</button>
         </div>
@@ -910,10 +1057,12 @@ function openReleaseNotesModal(info) {
   if (!release || releaseNotesOpen) return;
   releaseNotesOpen = true;
   const meta = [data.date ? esc(data.date) : '', data.title ? esc(data.title) : ''].filter(Boolean).join(' · ');
+  const entry = versionHero(release.version);
   openModal(
     `
     <div class="modal-backdrop" data-backdrop>
-      <div class="modal release-notes" role="dialog" aria-modal="true" aria-labelledby="release-notes-title">
+      <div class="modal release-notes update-modal" role="dialog" aria-modal="true" aria-labelledby="release-notes-title">
+        ${newsFigure(entry, 'update-hero')}
         <div class="modal-head">
           <div>
             <h2 id="release-notes-title">更新内容 · v${esc(release.version)}</h2>
@@ -927,6 +1076,7 @@ function openReleaseNotesModal(info) {
           </ul>
         </div>
         <div class="modal-foot">
+          <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_RELEASES_URL}" title="${REPO_RELEASES_URL}">${icon('external')}打开发布页</button>
           <label class="release-notes-ask"><input type="checkbox" id="release-notes-ask" checked /> 以后有更新也这样弹出来</label>
           <button class="btn btn-primary" data-close>知道了</button>
         </div>
@@ -1477,6 +1627,46 @@ function navigate(route, options = {}) {
       if (state.route === 'tools') render({ preserveScroll: true });
     });
   }
+  if (route === 'record') {
+    /*
+     * 战绩页只认 13 个战绩功能。抽卡记录、截图管理、画质配置这些
+     * 从别处误传进来时回落到每日便笺，不能把它们当战绩页的内容渲染。
+     */
+    const requested = String(options.feature || state.record.feature || 'daily-note');
+    const feature = RECORD_FEATURE_SET.has(requested) ? requested : 'daily-note';
+    const changed = feature !== state.record.feature;
+    state.record.feature = feature;
+    if (options.game) {
+      state.record.game = String(options.game);
+    } else if (changed) {
+      /*
+       * 从工具页点「打开 X」进来时只知道功能，不知道该看哪个游戏。
+       * 优先选「已经登录且支持这个功能」的那款，用户点完就能直接看到数据。
+       */
+      state.record.game = pickRecordGame(feature);
+    }
+    if (options.schedule) state.record.schedule = Number(options.schedule) === 2 ? 2 : 1;
+    /*
+     * 战绩页依赖两份数据：能力矩阵（这个游戏支持哪些功能）和登录态（有哪些角色）。
+     * 两份都要先就位再请求，否则会拿空 uid 去调接口、或者标签行少几个游戏。
+     */
+    (async () => {
+      if (!state.features) await loadFeatures();
+      /*
+       * 能力矩阵回来后才发现「这个游戏不支持当前功能」很常见：
+       * 深境螺旋只有原神有，切到星铁时不该停在空页，落到它自己的第一个战绩功能。
+       */
+      const supported = recordFeaturesOf(state.record.game);
+      if (supported.length && !supported.includes(state.record.feature)) {
+        state.record.feature = supported[0];
+      }
+      await refreshHoyolabStatus('miyoushe');
+      if (state.route !== 'record') return;
+      render({ preserveScroll: true });
+      await loadRecord();
+      if (state.route === 'record') render({ preserveScroll: true });
+    })();
+  }
   if (route === 'screenshots' && !state.shots && !state.shotsLoading) {
     loadScreenshots(false);
   }
@@ -1551,6 +1741,7 @@ function render(options = {}) {
     downloads: downloadsView,
     news: newsView,
     tools: toolsView,
+    record: recordView,
     screenshots: shotsView,
     graphics: graphicsView,
     announcements: announcementsView,
@@ -5164,7 +5355,8 @@ async function loadFeatures(force = false) {
   } finally {
     state.featuresLoading = false;
   }
-  if (state.route === 'tools') render({ preserveScroll: true });
+  // 战绩页也靠这份矩阵决定标签行显示哪些游戏
+  if (state.route === 'tools' || state.route === 'record') render({ preserveScroll: true });
   // 侧栏「工具」子项依赖这份数据，拿到后立刻补上
   renderNavToolsSub();
   return state.features;
@@ -5183,69 +5375,161 @@ async function loadFeatures(force = false) {
 /** 哪些游戏用米游社那套登录。 */
 const MIYOUSHE_GAMES = ['genshin', 'starrail', 'zzz', 'bh3'];
 
-async function refreshHoyolabStatus(provider = 'miyoushe', force = false) {
+async function refreshHoyolabStatus(provider = 'miyoushe', force = false, accountId = '') {
   const cacheKey = `hoyolab-${provider}`;
-  if (!force && state.hoyolab?.[cacheKey]) return state.hoyolab[cacheKey];
+  if (!force && !accountId && state.hoyolab?.[cacheKey]) return state.hoyolab[cacheKey];
   state.hoyolab = state.hoyolab || {};
-  state.hoyolab[cacheKey] = { loading: true, roles: [] };
+  const previous = state.hoyolab[cacheKey] || {};
+  state.hoyolab[cacheKey] = { ...previous, loading: true, roles: previous.roles || [] };
   try {
     if (!window.launcher?.hoyolab?.status) throw new Error('当前版本不支持米游社登录');
-    const result = await window.launcher.hoyolab.status({ provider });
+    const result = await window.launcher.hoyolab.status({
+      provider,
+      accountId: accountId || undefined,
+    });
+    const accounts = Array.isArray(result?.accounts) ? result.accounts : [];
+    const activeId = String(result?.activeId || '');
     state.hoyolab[cacheKey] = {
       loading: false,
       loggedIn: Boolean(result?.loggedIn),
       roles: Array.isArray(result?.roles) ? result.roles : [],
+      accounts,
+      activeId,
       savedAt: result?.savedAt || 0,
       reason: result?.reason || '',
     };
+    // 战绩页选中的账号如果已经不在了，回到当前激活的账号
+    if (state.record.account && accounts.length && !accounts.some((item) => item.id === state.record.account)) {
+      state.record.account = '';
+    }
+    if (!state.record.account && activeId) state.record.account = activeId;
   } catch (error) {
-    state.hoyolab[cacheKey] = { loading: false, loggedIn: false, roles: [], reason: humanError(error) };
+    state.hoyolab[cacheKey] = {
+      loading: false,
+      loggedIn: false,
+      roles: [],
+      accounts: [],
+      activeId: '',
+      reason: humanError(error),
+    };
   }
   return state.hoyolab[cacheKey];
 }
 
-async function doHoyolabLogin(provider = 'miyoushe', game = 'genshin') {
+async function doHoyolabLogin(provider = 'miyoushe', game = 'genshin', addAccount = false) {
   if (!window.launcher?.hoyolab?.login) {
     toast('当前版本不支持米游社登录', 'error');
     return;
   }
-  toast('已打开登录窗口，扫码或输入手机号即可', 'info');
+  toast(
+    addAccount ? '登录窗口已打开，登录完成后会追加成一个新账号' : '已打开登录窗口，扫码或输入手机号即可',
+    'info'
+  );
   try {
-    const result = await window.launcher.hoyolab.login({ provider, game });
+    const result = await window.launcher.hoyolab.login({ provider, game, addAccount });
     if (!result?.ok) {
       if (!result?.cancelled) toast(result?.reason || '登录失败', 'error');
       return;
     }
+    const accounts = Array.isArray(result.accounts) ? result.accounts : [];
+    const activeId = String(result.activeId || result.accountId || '');
     state.hoyolab = state.hoyolab || {};
     state.hoyolab[`hoyolab-${provider}`] = {
       loading: false,
       loggedIn: true,
       roles: Array.isArray(result.roles) ? result.roles : [],
+      accounts,
+      activeId,
       savedAt: Date.now(),
     };
+    /*
+     * 换了账号，上一个账号的战绩缓存和选中的角色都不能再用了 ——
+     * 缓存键里没有账号维度，不清就会拿别人的数据冒充这个账号的。
+     */
+    state.record.account = activeId;
+    state.record.role = {};
+    state.record.cache = {};
     const count = state.hoyolab[`hoyolab-${provider}`].roles.length;
-    toast(`登录成功，读到 ${count} 个角色`, 'success');
+    const extra = accounts.length > 1 ? `，当前共 ${accounts.length} 个账号` : '';
+    toast(`登录成功，读到 ${count} 个角色${extra}`, 'success');
     render({ preserveScroll: true });
   } catch (error) {
     toast(humanError(error) || '登录失败', 'error');
   }
 }
 
-async function doHoyolabLogout(provider = 'miyoushe') {
+async function doHoyolabLogout(provider = 'miyoushe', accountId = '') {
   try {
-    await window.launcher.hoyolab.logout({ provider });
+    const result = await window.launcher.hoyolab.logout({ provider, id: accountId || undefined });
+    const accounts = Array.isArray(result?.accounts) ? result.accounts : [];
+    const activeId = String(result?.activeId || '');
     state.hoyolab = state.hoyolab || {};
-    state.hoyolab[`hoyolab-${provider}`] = { loading: false, loggedIn: false, roles: [] };
-    toast('已退出米游社登录', 'info');
+    state.hoyolab[`hoyolab-${provider}`] = {
+      loading: false,
+      loggedIn: accounts.length > 0,
+      roles: [],
+      accounts,
+      activeId,
+    };
+    state.record.role = {};
+    state.record.cache = {};
+    state.record.account = activeId;
+    // 还有别的账号时，把当前账号的角色列表顺手拉回来
+    if (accounts.length) await refreshHoyolabStatus(provider, true);
+    toast(accountId ? '已移除这个米游社账号' : '已退出米游社登录', 'info');
     render({ preserveScroll: true });
+    if (state.route === 'record' && accounts.length) {
+      await loadRecord(true);
+      render({ preserveScroll: true });
+    }
   } catch (error) {
     toast(humanError(error) || '退出失败', 'error');
   }
 }
 
-/** 米游社登录卡片：一个面板覆盖四款米家游戏。 */
+/** 切换当前米游社账号：工具页的账号卡片和战绩页的账号条共用。 */
+async function doHoyolabSwitch(provider = 'miyoushe', accountId = '') {
+  if (!window.launcher?.hoyolab?.switchAccount) {
+    toast('当前版本不支持切换账号', 'error');
+    return;
+  }
+  try {
+    const result = await window.launcher.hoyolab.switchAccount({ provider, accountId });
+    if (!result?.ok) {
+      toast(result?.reason || '切换账号失败', 'error');
+      return;
+    }
+    const accounts = Array.isArray(result.accounts) ? result.accounts : [];
+    const activeId = String(result.activeId || '');
+    state.hoyolab = state.hoyolab || {};
+    state.hoyolab[`hoyolab-${provider}`] = {
+      loading: false,
+      loggedIn: Boolean(result.loggedIn),
+      roles: Array.isArray(result.roles) ? result.roles : [],
+      accounts,
+      activeId,
+      reason: result.reason || '',
+    };
+    state.record.account = activeId;
+    state.record.role = {};
+    state.record.cache = {};
+    const label = accounts.find((item) => item.id === activeId)?.label || '这个账号';
+    toast(`已切到 ${label}`, 'success');
+    render({ preserveScroll: true });
+    if (state.route === 'record') {
+      await loadRecord(true);
+      render({ preserveScroll: true });
+    }
+  } catch (error) {
+    toast(humanError(error) || '切换账号失败', 'error');
+  }
+}
+
+/** 米游社登录卡片：一个面板覆盖四款米家游戏，可以挂多个通行证账号。 */
 function hoyolabLoginCard() {
-  const status = state.hoyolab?.['hoyolab-miyoushe'] || { loading: true, roles: [] };
+  const status = state.hoyolab?.['hoyolab-miyoushe'] || { loading: true, roles: [], accounts: [] };
+  const accounts = Array.isArray(status.accounts) ? status.accounts : [];
+  const activeId = String(status.activeId || '');
   const roleChips = (status.roles || [])
     .filter((role) => MIYOUSHE_GAMES.includes(role.game))
     .map(
@@ -5256,19 +5540,41 @@ function hoyolabLoginCard() {
     )
     .join('');
 
+  const accountRows = accounts
+    .map((account) => {
+      const isActive = account.id === activeId;
+      return `<div class="miyo-account ${isActive ? 'is-active' : ''}">
+        <div class="miyo-account-main">
+          <span class="miyo-account-name">${esc(account.label || account.id)}</span>
+          <span class="miyo-account-meta">${account.roles.length} 个角色${isActive ? ' · 使用中' : ''}</span>
+        </div>
+        <div class="miyo-account-actions">
+          ${
+            isActive
+              ? ''
+              : `<button class="btn ghost xs" data-action="hoyolab-switch" data-value="${esc(account.id)}">切换</button>`
+          }
+          <button class="btn ghost xs" data-action="hoyolab-remove" data-value="${esc(account.id)}" title="移除这个账号">${icon('trash', 'xs')}</button>
+        </div>
+      </div>`;
+    })
+    .join('');
+
   return `<div class="page glass-panel miyo-card">
     <div class="miyo-head">
       <div>
         <div class="eyebrow">MIYOUSHE</div>
         <h2>米游社账号</h2>
-        <p class="page-desc">原神 / 星穹铁道 / 绝区零 / 崩坏3 共用一套登录。在弹出窗口里扫码或输手机号，登录完成会自动关闭。</p>
+        <p class="page-desc">原神 / 星穹铁道 / 绝区零 / 崩坏3 共用一套登录。可以挂多个通行证账号，战绩页按账号分开查。在弹出窗口里扫码或输手机号，登录完成会自动关闭。</p>
       </div>
       <div class="miyo-actions">
         ${
           status.loggedIn
-            ? `<span class="miyo-state is-on">${icon('check', 'xs')}已登录</span>
-               <button class="btn ghost" data-action="hoyolab-login" data-value="miyoushe">${icon('refresh', 'xs')}重新登录</button>
-               <button class="btn ghost" data-action="hoyolab-logout" data-value="miyoushe">退出</button>`
+            ? `<span class="miyo-state is-on">${icon('check', 'xs')}已登录${
+                accounts.length > 1 ? ` ${accounts.length} 个账号` : ''
+              }</span>
+               <button class="btn accent" data-action="hoyolab-login" data-value="miyoushe" data-mode="add">${icon('plus', 'xs')}添加账号</button>
+               <button class="btn ghost" data-action="hoyolab-logout" data-value="miyoushe">全部退出</button>`
             : `<span class="miyo-state">${status.loading ? '读取中' : '未登录'}</span>
                <button class="btn accent" data-action="hoyolab-login" data-value="miyoushe">${icon('link', 'xs')}打开米游社登录</button>`
         }
@@ -5280,6 +5586,7 @@ function hoyolabLoginCard() {
       <span>${icon('shield', 'xs')}账号密码</span>
       <em>登录态只保存在本机，不会上传</em>
     </div>
+    ${accountRows ? `<div class="miyo-accounts">${accountRows}</div>` : ''}
     ${roleChips ? `<div class="miyo-roles">${roleChips}</div>` : ''}
     ${status.reason && !status.loggedIn ? `<p class="miyo-hint">${esc(status.reason)}</p>` : ''}
   </div>`;
@@ -5616,8 +5923,28 @@ function toolsFeatureName(data, key) {
 /* 侧栏「工具」分组                                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * 战绩类功能：全部进战绩页，具体看哪个游戏哪个面板由 data-feature 决定。
+ * 顺序和 game-features.js 里 FEATURES 的登记顺序一致。
+ */
+const RECORD_FEATURES = [
+  'daily-note',
+  'abyss',
+  'theater',
+  'stygian',
+  'ultra-endless',
+  'battle-field',
+  'forgotten-hall',
+  'pure-fiction',
+  'apocalyptic-shadow',
+  'simulated-universe',
+  'shiyu-defense',
+  'deadly-assault',
+];
+
 /** 哪些功能已经在界面上有独立页面，点侧栏能真的跳过去。 */
 const TOOLS_NAV_TARGET = {
+  ...Object.fromEntries(RECORD_FEATURES.map((key) => [key, 'record'])),
   gacha: 'gacha',
   'play-time': 'home',
   screenshot: 'screenshots',
@@ -5952,6 +6279,517 @@ function toolsView() {
   </div>`;
 }
 
+/* ------------------------------------------------------------------ */
+/* 战绩页                                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这些接口的模板里带 {schedule}，所以页面上要能切本期/上期。
+ * 其余功能（便笺、剧场、幽境危战、超弦空间、记忆战场）只有当期一份数据。
+ */
+const RECORD_SCHEDULE_FEATURES = [
+  'abyss',
+  'forgotten-hall',
+  'pure-fiction',
+  'apocalyptic-shadow',
+  'shiyu-defense',
+  'deadly-assault',
+];
+
+/**
+ * 战绩页只认这 13 个功能。
+ *
+ * 工具页里同一个游戏下面还挂着抽卡记录、截图管理、画质配置、公告、游玩时长，
+ * 它们各自有独立页面，不属于战绩。标签栏必须按这个集合过滤 ——
+ * 否则会把这些也列进战绩页，看着像塞了一堆不相干的东西。
+ */
+const RECORD_FEATURE_SET = new Set(RECORD_FEATURES);
+
+/**
+ * 米哈游的「账号异常」错误码家族（源：Starward GameRecordPage.HandleMiHoYoApiException）。
+ * 1034 需要人机验证，5003 是设备指纹或高频请求，其余几个是同一族的变体。
+ * 遇到这些码不该显示「请求失败」，而要说清楚该怎么恢复。
+ */
+const RECORD_VERIFY_RETCODES = [1034, 5003, 10035, 10041, 10053];
+
+/** 官方战绩页，用户需要人工验证时用它兜底（米游社网页版，带登录态就能看）。 */
+const RECORD_WEB_URL = 'https://webstatic.mihoyo.com/app/community-game-records/index.html';
+
+/*
+ * 缓存键要带账号：多账号下同一个人可能有多个通行证，
+ * 不同账号的原神 uid 完全不同，只用「游戏/功能/期数」做键会串号。
+ */
+function recordCacheKey(game, feature, schedule) {
+  const account =
+    state.record.account || state.hoyolab?.['hoyolab-miyoushe']?.activeId || 'active';
+  return `${account}/${game}/${feature}/${Number(schedule) === 2 ? 2 : 1}`;
+}
+
+/** 只取路径部分显示在角色行末尾，方便核对打的是哪个接口；URL 非法就留空。 */
+function recordUrlPath(url) {
+  try {
+    return new URL(String(url)).pathname;
+  } catch {
+    return '';
+  }
+}
+
+/** 米游社那个账号在指定游戏下的角色；优先用户手动选过的那个。 */
+function recordRoleOf(game) {
+  const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
+  const owned = roles.filter((role) => role && role.game === game && role.uid);
+  const manual = state.record.role?.[game];
+  if (manual?.uid) {
+    const hit = owned.find((role) => String(role.uid) === String(manual.uid));
+    return hit || manual;
+  }
+  return owned[0] || null;
+}
+
+/** 同一个账号在某款游戏下的全部角色（可以是多个 uid，比如三个崩3服务器）。 */
+function recordRolesOf(game) {
+  const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
+  return roles.filter((role) => role && role.game === game && role.uid);
+}
+
+/** 战绩页当前选中的通行证账号；state.record.account 为空时跟随激活账号。 */
+function recordAccountOf() {
+  const status = state.hoyolab?.['hoyolab-miyoushe'];
+  const accounts = Array.isArray(status?.accounts) ? status.accounts : [];
+  const wanted = String(state.record.account || status?.activeId || '');
+  return (
+    accounts.find((item) => item.id === wanted) ||
+    accounts.find((item) => item.id === status?.activeId) ||
+    accounts[0] ||
+    null
+  );
+}
+
+/**
+ * 账号条：只有挂了一个以上的通行证账号才显示。
+ * 单账号时这一行没有信息量，只会让页面显得啰嗦。
+ */
+function recordAccountLineHtml() {
+  const status = state.hoyolab?.['hoyolab-miyoushe'];
+  const accounts = Array.isArray(status?.accounts) ? status.accounts : [];
+  if (accounts.length < 2) return '';
+  const current = recordAccountOf();
+  const chips = accounts
+    .map((account) => {
+      const active = current && String(account.id) === String(current.id);
+      return `<button class="record-account-chip${active ? ' is-active' : ''}" data-action="record-account" data-value="${esc(account.id)}" title="${esc(account.roles.length)} 个角色">
+        ${esc(account.label || account.id)}
+      </button>`;
+    })
+    .join('');
+  return `<div class="record-account-line">
+    <span class="record-account-caption">${icon('shield', 'xs')}账号</span>
+    ${chips}
+  </div>`;
+}
+
+/**
+ * 角色（UID）行。
+ * 同一款游戏有多个角色时列成可点的胶囊 —— 崩3 一个账号经常挂着三台服务器。
+ */
+function recordRoleLineHtml(game, role, cache) {
+  if (!role) return '';
+  const owned = recordRolesOf(game);
+  const meta = (item) =>
+    `${esc(item.regionName || item.region || '')}${item.level ? ` · Lv.${esc(item.level)}` : ''}`;
+  const url = cache?.url
+    ? `<span class="record-role-url" title="${esc(cache.url)}">${esc(recordUrlPath(cache.url))}</span>`
+    : '';
+
+  if (owned.length > 1) {
+    const chips = owned
+      .map((item) => {
+        const active = String(item.uid) === String(role.uid);
+        /*
+         * 崩3 的昵称往往就是「玩家<uid>」，再补一个 uid 徽标纯属重复，
+         * 这种情况直接用 uid 当名字。
+         */
+        const nickname = String(item.nickname || '');
+        const label = nickname && !nickname.includes(String(item.uid)) ? nickname : `UID ${item.uid}`;
+        return `<button class="record-role-chip${active ? ' is-active' : ''}" data-action="record-role" data-value="${esc(item.uid)}" title="${esc(item.regionName || item.region || '')}">
+          ${esc(label)}
+        </button>`;
+      })
+      .join('');
+    return `<div class="record-role-line">
+      <span class="record-role-caption">${icon('gamepad', 'xs')}角色</span>
+      ${chips}
+      <span class="record-role-meta">${meta(role)}</span>
+      ${url}
+    </div>`;
+  }
+
+  const gameMeta = (state.features?.games || []).find((item) => item.key === game) || {};
+  return `<div class="record-role-line">
+    <span class="record-role-name">${esc(role.nickname || '未命名')}</span>
+    <span class="record-role-meta">${esc(gameMeta.name || '')} · UID ${esc(role.uid || '')}${
+      role.regionName ? ` · ${esc(role.regionName)}` : ''
+    }${role.level ? ` · Lv.${esc(role.level)}` : ''}</span>
+    ${url}
+  </div>`;
+}
+
+/** 某个游戏支持的战绩功能（按 FEATURES 的声明顺序，每日便笺永远在第一个）。 */
+function recordFeaturesOf(game) {
+  const matrix = state.features?.matrix || {};
+  return (matrix[game] || []).filter((key) => RECORD_FEATURE_SET.has(key));
+}
+
+/** 至少有一个战绩功能的游戏。只有抽卡/截图这类功能的游戏根本不进战绩页。 */
+function recordGames() {
+  return (state.features?.games || [])
+    .map((game) => game.key)
+    .filter((key) => recordFeaturesOf(key).length > 0);
+}
+
+/** 从工具页点进来时挑一个「有角色、且支持这个功能」的游戏。 */
+function pickRecordGame(feature) {
+  const matrix = state.features?.matrix || {};
+  const games = recordGames();
+  const candidates = games.filter((key) => Array.isArray(matrix[key]) && matrix[key].includes(feature));
+  if (!candidates.length) return state.record.game || 'genshin';
+  const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
+  const loggedIn = new Set(roles.filter((role) => role?.uid).map((role) => role.game));
+  return candidates.find((key) => loggedIn.has(key)) || candidates[0];
+}
+
+/**
+ * 拉一次战绩数据。
+ *
+ * 同一个 (游戏, 功能, 期数) 只请求一次，结果存在 state.record.cache 里。
+ * 没登录、或这个游戏下没角色时直接返回、不发请求 —— 页面显示登录提示，
+ * 而不是弹「请求失败」让用户以为接口坏了。
+ */
+async function loadRecord(force = false) {
+  const game = state.record.game;
+  const feature = state.record.feature;
+  const schedule = state.record.schedule;
+  const key = recordCacheKey(game, feature, schedule);
+  const cached = state.record.cache[key];
+  if (!force && cached && !cached.loading) return cached;
+
+  const role = recordRoleOf(game);
+  if (!role) return { skipped: true };
+
+  const entry = { loading: true, error: '', view: null, url: '', at: Date.now() };
+  state.record.cache[key] = entry;
+  try {
+    if (!window.launcher?.hoyolab?.record) throw new Error('当前版本不支持战绩查询');
+    const result = await window.launcher.hoyolab.record({
+      provider: 'miyoushe',
+      // 指定账号：不然主进程会用「当前激活的那个」，和界面上选的可能不是同一个
+      accountId: state.record.account || undefined,
+      game,
+      feature,
+      uid: role.uid,
+      region: role.region,
+      schedule,
+    });
+    /*
+     * 主进程现在把接口报错当成返回值（ok:false）带回来，而不是 throw ——
+     * Electron 的 IPC 在 throw 时只保留 message，实际请求地址和 retcode 都会丢。
+     */
+    if (result && result.ok === false) {
+      entry.error = result.error || '请求失败';
+      entry.url = result.url || '';
+      entry.retcode = typeof result.retcode === 'number' ? result.retcode : null;
+      entry.debug = result.debug || null;
+      /*
+       * 1034 / 5003 / 10035 / 10041 / 10053 是米哈游的「账号异常」家族
+       * （Starward 把这一组统一提示成「账号异常，需要验证账号」）。
+       * 光把 retcode 甩给用户没有任何意义，这里翻译成能照着做的说明。
+       *
+       * 但这一族里其实是两种完全不同的情况：
+       *   1034 / 5003 —— 查得太频繁，或者请求的身份不干净。等一会儿能自愈。
+       *   10035 / 10041 / 10053 —— 接口本身对当前角色不开放（同一套请求
+       *     有时候能读到别的功能，说明不是登录或风控问题），等也没用。
+       */
+      if (RECORD_VERIFY_RETCODES.includes(entry.retcode)) {
+        entry.error =
+          entry.retcode === 1034 || entry.retcode === 5003
+            ? `米哈游把这次查询当成了异常请求（retcode ${entry.retcode}）。` +
+              '大多是短时间内查得太频繁，等几分钟点「刷新」就好；' +
+              '如果一直这样，点下面的「打开官方战绩页」在网页里看一次，完成它要求的验证后再回来刷新。'
+            : `米哈游拒绝了这个角色的这条战绩（retcode ${entry.retcode}）。` +
+              '这个错误码不是查询太频繁，而是接口对当前角色没有开放这条数据 —— ' +
+              '换个功能或换个游戏看看，也可以点下面的「打开官方战绩页」去网页上确认一下。';
+        entry.needVerify = true;
+      }
+      entry.at = Date.now();
+      return entry;
+    }
+    entry.view = window.HXLRecord ? window.HXLRecord.parse(game, feature, result?.data) : null;
+    entry.url = result?.url || '';
+    entry.at = Date.now();
+  } catch (error) {
+    entry.error = humanError(error) || '请求失败';
+  } finally {
+    entry.loading = false;
+  }
+  return entry;
+}
+
+/** 用户点刷新 / 切游戏 / 切期数时走这里：先把格子标成加载中，再请求、再重绘。 */
+async function reloadRecord() {
+  /*
+   * 先占位成 loading 再重绘：否则切游戏/切功能时用户盯着旧数据看一两秒，
+   * 分不清是「点了没反应」还是「真的在加载」。
+   */
+  const key = recordCacheKey(state.record.game, state.record.feature, state.record.schedule);
+  state.record.cache[key] = { loading: true, error: '', view: null, url: '', at: Date.now() };
+  if (state.route === 'record') render({ preserveScroll: true });
+  await loadRecord(true);
+  if (state.route === 'record') render({ preserveScroll: true });
+}
+
+/* --------------------------- 渲染小件 --------------------------- */
+
+function recordStarsHtml(stars, max) {
+  if (stars === null || stars === undefined) return '';
+  const full = Math.max(0, Math.min(Number(stars) || 0, 9));
+  const total = Math.max(full, Math.min(Number(max) || full, 9));
+  return `<span class="record-stars" title="${full}/${total}">${'★'.repeat(full)}<em>${'☆'.repeat(total - full)}</em></span>`;
+}
+
+function recordAvatarHtml(avatar) {
+  const name = String(avatar?.name || '');
+  const icon = String(avatar?.icon || '');
+  const value = String(avatar?.value || '');
+  const img = icon
+    ? `<img data-record-avatar src="${esc(icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : '<span class="record-avatar-blank"></span>';
+  return `<span class="record-avatar" title="${esc([name, value].filter(Boolean).join(' · '))}">${img}${
+    value ? `<em>${esc(value)}</em>` : ''
+  }</span>`;
+}
+
+function recordMetricHtml(metric) {
+  const tone = metric.tone ? ` is-${esc(metric.tone)}` : '';
+  return `<div class="record-metric${tone}">
+    <span class="record-metric-label">${esc(metric.label)}</span>
+    <strong class="record-metric-value">${esc(metric.value)}${metric.unit ? `<em>${esc(metric.unit)}</em>` : ''}</strong>
+    ${metric.note ? `<span class="record-metric-note">${esc(metric.note)}</span>` : ''}
+  </div>`;
+}
+
+function recordBarHtml(bar) {
+  const value = Number(bar.value) || 0;
+  const max = Number(bar.max) || 0;
+  const percent = max > 0 ? Math.max(0, Math.min(100, Math.round((value / max) * 100))) : 0;
+  const tone = bar.tone ? ` is-${esc(bar.tone)}` : '';
+  return `<div class="record-bar${tone}">
+    <div class="record-bar-head">
+      <span>${esc(bar.label)}</span>
+      <strong>${value}/${max}</strong>
+    </div>
+    <div class="record-bar-track"><i style="width:${percent}%"></i></div>
+    ${bar.note ? `<div class="record-bar-note">${esc(bar.note)}</div>` : ''}
+  </div>`;
+}
+
+function recordItemHtml(item) {
+  const tone = item.tone ? ` is-${esc(item.tone)}` : '';
+  const stars = recordStarsHtml(item.stars, item.starsMax);
+  const meta = (item.meta || []).filter(Boolean);
+  const avatars = (item.avatars || []).filter(Boolean);
+  return `<div class="record-item${tone}">
+    <div class="record-item-main">
+      <div class="record-item-title">${esc(item.title || '')}${stars}</div>
+      ${item.subtitle ? `<div class="record-item-sub">${esc(item.subtitle)}</div>` : ''}
+      ${
+        meta.length
+          ? `<div class="record-item-meta">${meta.map((tag) => `<span>${esc(tag)}</span>`).join('')}</div>`
+          : ''
+      }
+    </div>
+    ${
+      avatars.length
+        ? `<div class="record-item-avatars">${avatars.map(recordAvatarHtml).join('')}</div>`
+        : ''
+    }
+  </div>`;
+}
+
+function recordSectionHtml(section) {
+  const items = (section.items || []).filter(Boolean);
+  if (!items.length) return '';
+  return `<section class="record-section">
+    <div class="record-section-head">
+      <h2>${esc(section.title)}</h2>
+      ${section.hint ? `<span>${esc(section.hint)}</span>` : ''}
+    </div>
+    <div class="record-section-body is-${esc(section.layout || 'rows')}">
+      ${items.map(recordItemHtml).join('')}
+    </div>
+  </section>`;
+}
+
+function recordBodyHtml(view) {
+  if (!view) {
+    return `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>数据格式不认识</h3>
+      <p>解析器返回了空结果，可能是接口改版了。</p></div>`;
+  }
+  if (view.empty) {
+    return `<div class="empty"><div class="empty-icon">${icon('info')}</div><h3>还没有数据</h3>
+      <p>${esc(view.empty)}</p></div>`;
+  }
+
+  const hero = view.headline
+    ? `<div class="record-hero">
+        <span class="record-hero-label">${esc(view.headline.label)}</span>
+        <strong class="record-hero-value">${esc(view.headline.value)}</strong>
+        ${view.headline.note ? `<span class="record-hero-note">${esc(view.headline.note)}</span>` : ''}
+      </div>`
+    : '';
+
+  const bars = (view.bars || []).length
+    ? `<div class="record-bars">${view.bars.map(recordBarHtml).join('')}</div>`
+    : '';
+
+  const metrics = (view.metrics || []).length
+    ? `<div class="record-metrics">${view.metrics.map(recordMetricHtml).join('')}</div>`
+    : '';
+
+  const sections = (view.sections || []).map(recordSectionHtml).join('');
+
+  return `${hero}${bars}${metrics}${sections}`;
+}
+
+/* --------------------------- 页面主体 --------------------------- */
+
+function recordTabsHtml(data, feature, game) {
+  const matrix = data?.matrix || {};
+  /*
+   * 游戏栏永远列出「有战绩功能」的全部游戏，而不是只列支持当前功能的那些。
+   * 理由是功能标签的集合本来就随游戏变（原神没有忘却之庭），如果游戏栏也跟着缩，
+   * 用户点一下「深境螺旋」就只剩原神一个游戏，想换到星铁得先退回每日便笺，
+   * 等于每次换游戏都要多走一步。留着四个游戏，切换时由 record-game 落回该游戏支持的功能。
+   * data.matrix 是工具页的全量能力表（含抽卡、截图、画质、公告），
+   * 不过滤就会把「这款游戏只有抽卡记录」也画成一个战绩标签。
+   */
+  const games = (data?.games || []).filter((item) => (matrix[item.key] || []).some((key) => RECORD_FEATURE_SET.has(key)));
+  const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
+  const owned = new Set(roles.filter((role) => role?.uid).map((role) => role.game));
+
+  const gameTabs = games
+    .map((item) => {
+      const active = item.key === game;
+      return `<button class="record-tab${active ? ' is-active' : ''}" data-action="record-game" data-value="${esc(item.key)}">
+        ${esc(item.name)}${owned.has(item.key) ? '<span class="record-tab-dot is-on"></span>' : ''}
+      </button>`;
+    })
+    .join('');
+
+  const features = (data?.features || []).filter(
+    (item) => item.category === 'record' && (matrix[game] || []).includes(item.key),
+  );
+  const featureTabs = features
+    .map((item) => {
+      const active = item.key === feature;
+      return `<button class="record-tab record-tab-feature${active ? ' is-active' : ''}" data-action="record-feature" data-value="${esc(item.key)}">
+        ${esc(item.name)}
+      </button>`;
+    })
+    .join('');
+
+  const scheduleTabs = RECORD_SCHEDULE_FEATURES.includes(feature)
+    ? `<div class="record-tabs record-tabs-schedule">
+        <button class="record-tab${state.record.schedule === 1 ? ' is-active' : ''}" data-action="record-schedule" data-value="1">本期</button>
+        <button class="record-tab${state.record.schedule === 2 ? ' is-active' : ''}" data-action="record-schedule" data-value="2">上期</button>
+      </div>`
+    : '';
+
+  return `
+    ${gameTabs ? `<div class="record-tabs record-tabs-game">${gameTabs}</div>` : ''}
+    ${featureTabs ? `<div class="record-tabs record-tabs-feature">${featureTabs}</div>` : ''}
+    ${scheduleTabs}`;
+}
+
+function recordView() {
+  const feature = state.record.feature;
+  const game = state.record.game;
+  const data = state.features;
+  const status = state.hoyolab?.['hoyolab-miyoushe'];
+  const role = recordRoleOf(game);
+  const cache = state.record.cache[recordCacheKey(game, feature, state.record.schedule)] || null;
+  const featureMeta = (data?.features || []).find((item) => item.key === feature) || {};
+  const gameMeta = (data?.games || []).find((item) => item.key === game) || {};
+
+  let body = '';
+  if (status?.loading || (!status && data)) {
+    body = `<div class="empty"><div class="empty-icon">${icon('login')}</div><h3>正在读取米游社登录状态</h3>
+      <p>第一次打开战绩页会多等一会儿。</p></div>`;
+  } else if (!status?.loggedIn) {
+    body = `${hoyolabLoginCard()}
+      <div class="record-hint">
+        <p>${icon('info', 'xs')}战绩数据来自米游社公开的战绩接口，需要先登录一次；登录态会被保存，下次不用再扫。</p>
+      </div>`;
+  } else if (!role) {
+    body = `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>这个账号下没有${esc(gameMeta.name || '这个游戏')}的角色</h3>
+      <p>换一个游戏看看，或者用另一个米游社账号登录。</p></div>`;
+  } else if (cache?.loading) {
+    body = `<div class="empty"><div class="empty-icon">${icon('refresh')}</div><h3>正在读取${esc(featureMeta.name || '战绩')}</h3>
+      <p>${esc(role.nickname || '')}${role.uid ? ` · ${esc(role.uid)}` : ''}</p></div>`;
+  } else if (cache?.error) {
+    body = `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>读取失败</h3>
+      <p>${esc(cache.error)}</p>
+      <p class="record-url">${esc(cache.url || '')}</p>
+      <div class="record-error-actions">
+        <button class="btn ghost" data-action="record-refresh">${icon('refresh', 'xs')}重试</button>
+        ${
+          cache.needVerify
+            ? `<button class="btn ghost" data-action="record-open-web">${icon('external', 'xs')}打开官方战绩页</button>`
+            : ''
+        }
+      </div></div>`;
+  } else if (cache?.view) {
+    body = recordBodyHtml(cache.view);
+  } else {
+    body = `<div class="empty"><div class="empty-icon">${icon('info')}</div><h3>还没有数据</h3>
+      <p>点右侧「刷新」读一次。</p></div>`;
+  }
+
+  const rawJson = cache?.view?.raw
+    ? JSON.stringify(cache.view.raw, null, 2)
+    : cache?.view
+      ? ''
+      : '';
+
+  return `<div class="page record-page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">${PAGE_META.record.eyebrow}</div>
+        <h1>战绩</h1>
+        <p class="page-desc">${esc(featureMeta.desc || '米游社账号在各游戏里的实时进度与周期玩法成绩。')}</p>
+      </div>
+      <div class="record-head-actions">
+        <button class="btn ghost" data-action="record-refresh">${icon('refresh', 'xs')}刷新</button>
+      </div>
+    </div>
+
+    ${recordTabsHtml(data, feature, game)}
+
+    ${recordAccountLineHtml()}
+    ${recordRoleLineHtml(game, role, cache)}
+
+    <div class="record-body">${body}</div>
+
+    ${
+      rawJson
+        ? `<details class="record-raw">
+            <summary>原始返回（排查字段用）</summary>
+            <pre>${esc(rawJson)}</pre>
+          </details>`
+        : ''
+    }
+  </div>`;
+}
+
 /**
  * 非米游社的通行证登录卡片（鹰角 / 完美世界 / 库街区）。
  *
@@ -6121,12 +6959,16 @@ function newsView() {
           </div>
         </div>
         <div class="news-feature-art" aria-hidden="true">
-          <svg class="glyph" viewBox="0 0 120 120">
+          ${
+            feature.image
+              ? `<img src="${esc(feature.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+              : `<svg class="glyph" viewBox="0 0 120 120">
             <circle cx="60" cy="60" r="52" />
             <circle cx="60" cy="60" r="34" opacity=".55" />
             <path d="M60 8v104M8 60h104" opacity=".35" />
             <path d="M60 26c6 22 12 28 34 34-22 6-28 12-34 34-6-22-12-28-34-34 22-6 28-12 34-34Z" />
-          </svg>
+          </svg>`
+          }
         </div>
       </button>
       <div class="news-list">
@@ -6145,8 +6987,29 @@ function newsView() {
           )
           .join('')}
       </div>
+      ${newsUpdateSection()}
       ${newsNoticeSection()}
     </div>`;
+}
+
+/**
+ * 动态页上的「更新公告」：最新一版改了什么。
+ * 原来是设置页里软更新面板下的一小段，移到这里后设置页更短，
+ * 更新内容也和新版资讯放在一起看更顺。
+ */
+function newsUpdateSection() {
+  const notes = state.update && state.update.notes;
+  if (!notes || !notes.length) return '';
+  return `
+    <section class="news-update">
+      <div class="section-head">
+        <div>
+          <h3>${icon('download', 'xs')}这一版改了什么 · v${esc(state.update.latest)}</h3>
+          <p>最近一次更新到这里的内容</p>
+        </div>
+      </div>
+      <div class="update-notes">${notesMarkup(notes)}</div>
+    </section>`;
 }
 
 
@@ -6578,9 +7441,8 @@ function settingsView() {
           </div>
         </section>
 
-        <section class="settings-panel">
-          <h2>${icon('settings')}行为</h2>
-          <p class="desc">决定启动器如何出现和离开。</p>
+        <details class="settings-panel settings-collapse">
+          <summary><span class="settings-summary-title">${icon('settings')}行为</span><span class="settings-summary-desc">托盘、开机自启、帧率、自动同步等，点开查看</span></summary>
           <div class="setting-row">
             <div class="setting-copy"><strong>关闭时收进托盘</strong><span>点击关闭按钮后继续在后台运行，双击托盘图标可以回来。</span></div>
             <div class="setting-control">${switchMarkup('closeToTray', settings.closeToTray)}</div>
@@ -6622,11 +7484,10 @@ function settingsView() {
             <div class="setting-copy"><strong>自动获取终末地抽卡记录</strong><span>打开游戏内抽卡记录后，自动读取 HGWebview 日志并同步；异环仍需其导出工具生成 JSON。</span></div>
             <div class="setting-control">${switchMarkup('autoGacha', settings.autoGacha !== false)}</div>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-panel">
-          <h2>${icon('folder-open')}存储</h2>
-          <p class="desc">下载、运行时和终末地更新。</p>
+        <details class="settings-panel settings-collapse">
+          <summary><span class="settings-summary-title">${icon('folder-open')}存储</span><span class="settings-summary-desc">下载、运行时、终末地渠道包与管理员，点开查看</span></summary>
           <div class="setting-row">
             <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
             <div class="setting-control">
@@ -6684,7 +7545,7 @@ function settingsView() {
                 </div>`
               : ''
           }
-        </section>
+        </details>
 
         <section class="settings-panel">
           <h2>${icon('download')}软件更新</h2>
@@ -6708,8 +7569,17 @@ function settingsView() {
               ${state.update && state.update.hasUpdate ? `<button class="btn btn-primary" data-action="apply-update" ${state.update.downloading ? 'disabled' : ''}>${icon('download')}更新到 v${esc(state.update.latest)}</button>` : ''}
             </div>
           </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>手动更新</strong>
+              <span>不想等弹窗时，可以到 GitHub 自己下新版 ZIP。解压后覆盖程序文件即可，<code>data</code> 文件夹里的游戏、账号、抽卡记录和设置都不会被覆盖。</span>
+            </div>
+            <div class="setting-control update-action-control">
+              <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_RELEASES_URL}">${icon('external')}打开发布页</button>
+              <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_URL}">${icon('external')}仓库</button>
+            </div>
+          </div>
           ${state.update && state.update.downloading ? `<div class="update-progress"><div class="update-progress-bar"><span style="width:${Number(state.update.percent) || 0}%"></span></div><small>正在下载 ${Number(state.update.percent) || 0}%</small></div>` : ''}
-          ${state.update && state.update.notes ? `<div class="update-notes"><strong>v${esc(state.update.latest)} 更新内容</strong>${notesMarkup(state.update.notes)}</div>` : ''}
         </section>
 
         <section class="settings-panel">
@@ -6770,6 +7640,17 @@ function bindView() {
   });
   document.querySelectorAll('img[data-gacha-icon]').forEach((img) => {
     img.addEventListener('error', () => img.remove(), { once: true });
+  });
+  // 战绩页的角色头像是外链，挂掉时留一个占位方块而不是显示破图标
+  document.querySelectorAll('img[data-record-avatar]').forEach((img) => {
+    img.addEventListener(
+      'error',
+      () => {
+        img.classList.add('is-broken');
+        img.removeAttribute('src');
+      },
+      { once: true }
+    );
   });
 
   const search = document.querySelector('#game-search');
@@ -8339,28 +9220,103 @@ async function handleAction(action, id, element, event = null) {
     case 'refresh-notices':
       await loadNoticeBoard(true);
       break;
+    case 'record-refresh':
+      await reloadRecord();
+      break;
+    case 'record-game': {
+      const next = element.dataset.value || '';
+      if (!next || next === state.record.game) break;
+      state.record.game = next;
+      // 换游戏时回本期：上期切换只对深渊类功能有意义，换了游戏容易迷路
+      state.record.schedule = 1;
+      /*
+       * 换到的游戏不一定有当前这个功能（星铁没有深境螺旋、崩3没有忘却之庭），
+       * 停在一个不存在的组合上只会看到空页，落到它自己的第一个战绩功能。
+       */
+      const supported = recordFeaturesOf(next);
+      if (supported.length && !supported.includes(state.record.feature)) {
+        state.record.feature = supported[0];
+      }
+      await reloadRecord();
+      break;
+    }
+    case 'record-feature': {
+      const next = element.dataset.value || '';
+      // 只有 13 个战绩功能能进这里；别的键一律忽略
+      if (!next || next === state.record.feature || !RECORD_FEATURE_SET.has(next)) break;
+      state.record.feature = next;
+      state.record.schedule = 1;
+      await reloadRecord();
+      break;
+    }
+    case 'record-schedule': {
+      const next = Number(element.dataset.value) === 2 ? 2 : 1;
+      if (next === state.record.schedule) break;
+      state.record.schedule = next;
+      await reloadRecord();
+      break;
+    }
+    /*
+     * 同一款游戏里换角色（uid）。
+     * 崩3 一个账号经常挂着三台服务器，原神也有人一个通行证两个号 ——
+     * 换 uid 等于换一整套数据，缓存必须一起作废。
+     */
+    case 'record-role': {
+      const uid = element.dataset.value || '';
+      if (!uid) break;
+      const game = state.record.game;
+      const role = recordRolesOf(game).find((item) => String(item.uid) === String(uid));
+      if (!role) break;
+      state.record.role[game] = {
+        game,
+        uid: role.uid,
+        region: role.region,
+        nickname: role.nickname,
+        level: role.level,
+        regionName: role.regionName,
+      };
+      state.record.cache = {};
+      await reloadRecord();
+      break;
+    }
+    /* 换通行证账号：交给 doHoyolabSwitch，它会同时刷新登录态和战绩。 */
+    case 'record-account':
+      await doHoyolabSwitch('miyoushe', element.dataset.value || '');
+      break;
+    /*
+     * 接口一直报 1034/5003 时，官方网页往往还能打开 —— 让用户在网页里
+     * 完成一次人机验证（米游社的风控是跟着账号走的），回来刷新就通了。
+     */
+    case 'record-open-web':
+      if (!window.launcher?.openExternal) {
+        toast('当前版本不能打开外部链接', 'error');
+        break;
+      }
+      await window.launcher.openExternal(RECORD_WEB_URL);
+      break;
     case 'tools-refresh':
       await loadFeatures(true);
       if (!state.features?.error) toast('功能列表已刷新');
       break;
     case 'tools-open': {
       const key = element.dataset.feature || '';
-      // 功能 -> 现有页面。没有对应页面的功能给出明确说明，而不是跳一个空页。
-      const target = {
-        gacha: 'gacha',
-        'play-time': 'home',
-        screenshot: 'screenshots',
-        graphics: 'graphics',
-        notice: 'news',
-        'install-manager': 'start',
-      }[key];
-      if (target) {
-        navigate(target);
-        if (target === 'screenshots') loadScreenshots(false);
-        if (target === 'graphics') loadGraphics(state.graphicsGame);
-      } else {
+      /*
+       * 功能 → 现有页面的映射统一放在 TOOLS_NAV_TARGET（侧栏也用同一张表），
+       * 避免出现「侧栏能跳、工具页点不动」这种两处不一致。
+       */
+      const target = TOOLS_NAV_TARGET[key];
+      if (!target) {
         toast('这个能力需要在游戏里或官方平台查看', 'info');
+        break;
       }
+      if (target === 'record') {
+        // 战绩页要知道具体看哪个功能；看哪款游戏由 navigate 里按登录态自动挑
+        navigate('record', { feature: key });
+        break;
+      }
+      navigate(target);
+      if (target === 'screenshots') loadScreenshots(false);
+      if (target === 'graphics') loadGraphics(state.graphicsGame);
       break;
     }
     case 'install-open-miyoushe': {
@@ -8372,7 +9328,17 @@ async function handleAction(action, id, element, event = null) {
       await loadScreenshots(true);
       break;
     case 'hoyolab-login':
-      await doHoyolabLogin(element.dataset.value || 'miyoushe');
+      await doHoyolabLogin(
+        element.dataset.value || 'miyoushe',
+        'genshin',
+        element.dataset.mode === 'add'
+      );
+      break;
+    case 'hoyolab-switch':
+      await doHoyolabSwitch('miyoushe', element.dataset.value || '');
+      break;
+    case 'hoyolab-remove':
+      await doHoyolabLogout('miyoushe', element.dataset.value || '');
       break;
     case 'hoyolab-logout':
       await doHoyolabLogout(element.dataset.value || 'miyoushe');
@@ -9540,6 +10506,7 @@ function openNewsModal(id) {
             <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
             <span>${esc(post.readTime || '')}</span>
           </div>
+          ${newsFigure(post)}
           ${body}
         </div>
         <div class="modal-foot">
@@ -9653,6 +10620,18 @@ function onState(next) {
 /* global events & boot                                                */
 /* ------------------------------------------------------------------ */
 
+// 封面图挂掉时整块收掉，别留一个破图标（CSP 禁止内联 onerror，只能捕获阶段监听）。
+document.addEventListener(
+  'error',
+  (event) => {
+    const img = event.target;
+    if (!img || img.tagName !== 'IMG') return;
+    const figure = img.closest('.news-figure');
+    if (figure) figure.remove();
+  },
+  true,
+);
+
 document.addEventListener('click', async (event) => {
   const feedback = event.target.closest('button, [data-nav], [data-action]');
   if (
@@ -9693,7 +10672,17 @@ document.addEventListener('click', async (event) => {
       }
       return;
     }
-    navigate(nav.dataset.nav);
+    /*
+     * 侧栏「工具」子项里，战绩类都指向同一个 record 页，
+     * 靠 data-feature 区分具体看哪个功能 —— 只传 route 的话会永远停在便笺。
+     */
+    const navRoute = nav.dataset.nav;
+    const navFeature = nav.dataset.feature || '';
+    if (navRoute === 'record' && navFeature) {
+      navigate('record', { feature: navFeature });
+    } else {
+      navigate(navRoute);
+    }
     // 从工具子项跳走时把分组收起来，省得占着侧栏
     if (nav.classList.contains('nav-sub-item')) {
       state.navToolsOpen = false;

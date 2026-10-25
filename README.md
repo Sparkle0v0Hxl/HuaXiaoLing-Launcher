@@ -1,253 +1,358 @@
-<div align="center">
+# 花筱灵启动器
 
-# 花筱灵启动器 · HANABI STAGE
+**当前版本：v2.0.4**
 
-> 原神、崩坏：星穹铁道、绝区零、异环、明日方舟：终末地的启动器！
->
-> A launcher for Genshin Impact, Honkai: Star Rail, Zenless Zone Zero, NTE and Arknights: Endfield.
+一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
-当前版本 / Current version: **2.0.3**
-
-**语言 / Language：** [中文](#中文) ｜ [English](#english)
-
-</div>
+> 原创实现，与米哈游 / HoYoverse、Hypergryph、完美世界 / Hotta Studio、Starward 均无隶属关系。界面氛围参考《崩坏：星穹铁道》的花火，使用原创几何图形与项目所有者提供的角色插画；程序不内置官方游戏素材，封面与动态背景在联网时从官方页面获取并缓存到本机。
 
 ---
 
-<a id="中文"></a>
+## 它是什么
 
-## 中文
+不是又一个「点击启动 exe」的壳。它解决的问题是：
 
-一个本地优先的桌面游戏书架，基于 Electron。Minecraft、终末地、绝区零、鸣潮等游戏统一管理，附带抽卡记录、音乐播放、账号登录等工具。
+- 一个游戏装了官服、B服、国际服三份客户端，硬盘被同样的资源吃掉三遍；
+- 每次换服都要去翻不同的安装目录、不同的启动器；
+- 抽卡记录散落在 Starward、导出文件、官方接口里，看不到统一视图。
 
-### 这个仓库里有什么
-
-本仓库包含**完整源码与运行资源**，clone 下来即可修改、构建。
-
-```
-resources/
-  app/                  ← 应用本体（Electron 主进程 + 渲染层）
-    electron/           主进程代码（37 个模块）
-    src/                渲染层（界面、样式）
-    package.json        版本号以这里为准
-  updater/              自更新脚本（HXL-Updater.ps1 / self-heal.ps1）
-  netease-api/          内置网易云音乐服务
-  endfield-packs/       终末地渠道包（Arknights / EndGlobal / EndOfficial / EndPlay / EndSteam）
-scripts/
-  publish-portable.ps1  打包发布脚本
-  selftest-update.js    自更新自测
-```
-
-#### 不在仓库里的两个组件
-
-GitHub 单文件上限 100 MB，以下两个文件超限，**需要从 Release 下载后放回对应位置**：
-
-| 文件 | 大小 | 放到哪里 |
-|---|---|---|
-| `花筱灵启动器.exe` | 238 MB | 仓库根目录 |
-| `resources/endfield-packs/EndBilibili/` | 199 MB | 覆盖同名目录 |
-
-不想自己拼装的话，直接下载 Release 里的 `HuaXiaoLing-2.0.3-Portable.zip`，解压即用。
-
-### 运行
-
-便携版，不需要安装：
-
-```
-花筱灵启动器.exe
-```
-
-如果显卡驱动有问题、启动白屏，用安全模式：
-
-```
-启动-安全模式.bat
-```
-
-安全模式会附加 `--safe-mode --no-sandbox --disable-gpu`，跳过硬件加速。
-
-#### 从源码调试
-
-```powershell
-cd resources\app
-npm install
-npm start
-```
-
-需要 Node.js 18+ 和 Electron 45。
-
-### 打包发版
-
-```powershell
-.\scripts\publish-portable.ps1 -Version 2.0.3 -Notes "修复 xxx`n优化 yyy"
-```
-
-产物在 `build\release\`：
-
-- `HuaXiaoLing-2.0.3-Portable.zip` — 发布包
-- `latest.json` — 更新清单（含 sha256 和大小）
-
-脚本会自动排除 `data/`（用户数据）、`downloads/`（缓存）、`.bak` 备份、日志和本地清单。
-
-#### 发版流程
-
-1. 改 `resources/app/package.json` 的 `version`（**必须和 `-Version` 参数一致**，否则启动器认为更新无效）
-2. 跑上面的打包脚本
-3. 把 zip 传到 Release
-4. 把 `latest.json` 的 `url` 改成实际下载地址
-5. 推送 `latest.json`
-
-> 版本号不能重复发布。已装 2.0.2 的用户，只有看到 2.0.3 才会收到更新。
-
-> 发版后别忘了改本页顶部的「当前版本」、正文里的包名，以及下面的版本历史。
-
-### 数据存放在哪
-
-| 模式 | 位置 |
-|---|---|
-| 默认 | `%USERPROFILE%\Documents\花筱灵启动器\data` |
-| 便携模式 | 根目录下的 `data`（设置里可切换） |
-
-抽卡记录、账号凭据（加密）、歌单、配置都在这里。**升级不会动这个目录。**
-
-### 版本历史
-
-#### 2.0.3
-- 绝区零战绩查询：输入 UID 即可查看式舆防卫战、虚构叙事、危局强袭战战绩，含总分、评级与阵容详情
-- 新增角色昵称映射，搜索、抽卡与歌单中的角色名支持常用简称
-- 战绩查询接入云端缓存与本地索引，重复查询更快
-- 修复若干界面细节
-
-#### 2.0.2
-- 修复米游社扫码登录：登录框不再反复弹出、来回重建
-- 支持 v2 系列 cookie（`cookie_token_v2` 等），账号无角色时不再误判为未登录
-- 登录失败显示具体原因，不再只有「登录超时」
-- 工具页登录状态区分「正在读取 / 已登录 / 未登录」
-
-#### 2.0.1
-- 修复自更新：发现新版本、显示更新说明、带进度下载、sha256 校验、覆盖后自动重开
-
-### 许可
-
-MIT。第三方组件许可见 `LICENSES.chromium.html`、`LICENSE.electron.txt` 及各依赖自带的 LICENSE 文件。
-
-<div align="right"><a href="#english">↓ English</a></div>
+花筱灵启动器把这三件事收进一个界面，并且**不往 C 盘写任何东西**——整个文件夹拷走就是完整搬家。
 
 ---
 
-<a id="english"></a>
+## 核心能力
 
-## English
+### 多服务器与硬链接去重
 
-A local-first desktop game library built on Electron. It unifies Minecraft, Arknights: Endfield, Zenless Zone Zero, Wuthering Waves and more in one place, with built-in gacha tracking, a music player and account login tools.
+同一个游戏可以同时挂官服 / B服 / 国际服（终末地还有 Play / Steam），当前服务器在启动页一眼可见，点一下就连切带启动。
 
-### What's in this repository
+当两个客户端在同一磁盘、且某些文件完全相同时，可以把它们合并成一份数据：
 
-This repository contains the **complete source code and runtime resources**. Clone it and you can modify and build it yourself.
+- 只处理**相对路径相同、大小相同、内容哈希相同**的文件；
+- 不同文件、独有文件、存档一律不动；
+- 支持「完整校验」（SHA-256）和「快速比较」（首尾各 1MB）两档；
+- 合并后两边仍然从各自目录启动，互不影响。
 
-```
-resources/
-  app/                  ← The app itself (Electron main process + renderer)
-    electron/           Main process code (37 modules)
-    src/                Renderer (UI, styles)
-    package.json        Version number is defined here
-  updater/              Self-update scripts (HXL-Updater.ps1 / self-heal.ps1)
-  netease-api/          Bundled NetEase Cloud Music service
-  endfield-packs/       Endfield channel packs (Arknights / EndGlobal / EndOfficial / EndPlay / EndSteam)
-scripts/
-  publish-portable.ps1  Package & release script
-  selftest-update.js    Self-update smoke test
-```
+> 跨盘会直接拒绝（Windows 硬链接限制）。更新前建议保留官方启动器兜底。
 
-#### Two components not in the repository
+### 启动页
 
-GitHub caps a single file at 100 MB. The two files below exceed that limit and **must be downloaded from the Release and put back in place**:
+- **官方动态背景**：终末地取官网首屏视频，异环直接读本机官方启动器里的 `bg.mp4`；
+- **自动去文字**：官方图常烧录标题，启动页会用「去字版本」做背景，静态图按网格检测文字块并用周边像素填补，视频则叠加定向遮罩带；两者都能和启动器自己的标题共存；
+- **动图可暂停、可导出**：右下角两个按钮，暂停状态按游戏记忆，导出走「另存为」对话框；
+- **服务器胶囊**：一行列出所有渠道，点击即切；右上角齿轮打开完整管理面板（重建、编辑、目录、清除、移除全在里面）；
+- 窗口最小化 / 最大化 / 关闭按钮就在启动页右上角，不用退回主界面。
 
-| File | Size | Where to put it |
+### 抽卡记录
+
+五个游戏统一成同一套界面：概览 KPI、卡池垫数、卡池统计、最近获得，出金带「X 抽」垫数徽章与角色立绘。
+
+数据来源：
+
+| 游戏 | 来源 | 更新方式 |
 |---|---|---|
-| `花筱灵启动器.exe` | 238 MB | Repository root |
-| `resources/endfield-packs/EndBilibili/` | 199 MB | Overwrite the directory of the same name |
+| 原神 / 星铁 / 绝区零 | Starward 本地数据库 | 自动读取，也支持官方 webCache 增量同步 |
+| 明日方舟：终末地 | 官方 `ef-webview` 接口 | 网页登录后自动从游戏日志取 Token，角色池 + 武器池一起拉 |
+| 异环 | NTE_Gacha_Exporter 导出 JSON | 导入后自动补全名称与头像 |
 
-If you'd rather not assemble it yourself, just download `HuaXiaoLing-2.0.3-Portable.zip` from the Release — unzip and run.
+**图鉴自动更新**：终末地角色名与立绘取自官网干员页，异环取自官网角色头像 + 社区名称表；缓存 24 小时，新版本上线后下次刷新就会带上新角色，不需要改代码。抓取失败一律回退旧缓存，抽卡页不会因为网络问题打不开。
 
-### Running
+### 点歌台
 
-Portable build, no installation needed:
+- 内置 NeteaseCloudMusicApi，首次使用自动在后台启动，无需手动装服务；
+- 网易云扫码登录、歌单导入、关键词搜索、歌词同步、音质切换（标准 / 较高 / 极高 / 无损 / Hi-Res）；
+- 四种播放模式：顺序、列表循环、单曲循环、随机；
+- **3D 音效**：原声 / 宽阔声场 / 音乐厅 / 耳机 HRTF / 低音增强 / 人声清晰，强度可调；跨域音源会自动回退原声并提示；
+- **B 站弹幕点歌**：连上直播间后，弹幕发「点歌 歌名」自动搜索入队；
+- 可拖动的迷你播放器，跨页面不中断播放。
+
+### 官方公告
+
+五款游戏的官网公告汇总成一张公告墙，每 10 分钟自动刷新，启动时后台预取，点开即跳官网。
+
+### 其他
+
+- **游戏库**：封面自定义、搜索、筛选、收藏、游玩时长统计；
+- **下载管理器**：http/https 直链，断点续传、暂停、继续；
+- **HoYo Sophon 差异更新**：按官方清单比对文件 MD5，硬链接复用已有文件，只下载缺失分块；
+- **终末地渠道运行时**：用官服文件硬链接生成运行时，只覆盖少量渠道 SDK，不额外占体积；
+- **星铁解锁帧率**：设置页直接切 30 / 60 / 120；
+- **外观**：深色 / 浅色 / 跟随系统，四种强调色，自定义称呼与头像；
+- **界面音效**：WebAudio 合成，无需资源文件；
+- **公告页**、**动态页**、**下载页**、**设置页**各司其职。
+
+---
+
+## 完全便携
+
+程序不在 C 盘留任何数据。所有内容都在启动器文件夹旁边：
 
 ```
-花筱灵启动器.exe
+花筱灵启动器\
+├─ 花筱灵启动器.exe
+├─ data\          ← 配置、登录会话、封面、背景视频、抽卡数据、缓存
+├─ downloads\     ← 下载的游戏、更新包、导出的动图
+└─ resources\     ← 程序资源（含内置网易云 API 与终末地渠道包）
 ```
 
-If you get a blank window due to graphics driver issues, use safe mode:
+- 如果放在不可写的位置（例如 `Program Files`），会自动退回系统 AppData，避免启动失败；
+- 旧版本放在 `%APPDATA%\花筱灵启动器` 的数据会在首次运行时**自动迁移**过来，只搬配置、登录、封面和背景，缓存直接丢弃；
+- 备份只需要拷 `data` 文件夹。
 
-```
-启动-安全模式.bat
-```
+> 唯一的例外：终末地抽卡 Token 必须从游戏自己写的 `AppData\LocalLow\Hypergryph\Endfield\sdklogs\HGWebview.log` 读取，这是游戏的位置，只能读不能移。
 
-Safe mode appends `--safe-mode --no-sandbox --disable-gpu` to skip hardware acceleration.
+---
 
-#### Debugging from source
+## 上手
+
+1. 解压 `HuaXiaoLing-1.0.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+2. 双击 `花筱灵启动器.exe`；
+3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
+4. 想加别的游戏，主页点「添加游戏」。
+
+### 硬链接切换服务器的正确姿势
+
+1. 分别安装好不同服务器的客户端，**不要装在同一个目录**；
+2. 在启动页点服务器胶囊旁的齿轮 → 「管理服务器」→ 为每个客户端指定启动程序；
+3. 关闭游戏和官方启动器，点「硬链接去重」；
+4. 第一次建议用「完整校验」，确认文件一致后再合并；
+5. 之后点服务器胶囊就能连切带启动。
+
+### 终末地
+
+- 渠道包已内置，官方发版时后台自动同步；
+- 启动需要管理员权限，会在 `PlatformProcess.exe` 下以 `Games.exe` 父进程方式拉起，这样才会出现官方登录界面；
+- B服 / 国际服 / Play / Steam 的差异运行时由启动器生成，原官服目录不会被修改。
+
+---
+
+## Windows 安全提示
+
+便携包是**未签名**的 Electron 程序，SmartScreen / Defender 可能提示「未知发布者」或「对电脑有危害」。这不是因为包含恶意代码，而是没有代码签名证书、文件没有下载声誉。
+
+**不要为了运行它而关闭系统安全防护。** 请先核对发布页提供的 SHA-256，确认来源可信，再选择「更多信息 → 仍要运行」。正式分发需要 OV / EV 代码签名证书。
+
+---
+
+## 已知限制
+
+- **Sophon 更新**只做文件级覆盖与补齐，不处理官方清单里的删除项，也不重建被改名的文件；更新前建议保留官方启动器兜底。
+- **硬链接**仅限同盘；官方启动器如果原地覆盖文件，可能同时影响两边。
+- **Starward 抽卡**只读取已同步的数据，不代替 Starward 登录。
+- **异环抽卡**没有公开接口，只能导入 Exporter 导出的 JSON。
+- **异环图鉴**只能匹配官网已公布的角色（约 19 位），未公布的会用首字兜底。
+- **终末地武器池**已接入同步，但界面暂未按武器类型分组。
+- **弹幕点歌**只支持 B 站，其他平台未接。
+- **无损音质**需要网易云会员，未登录通常返回 320kbps。
+- **动态背景去文字**是基于亮度方差与边缘密度的启发式检测，不是 OCR，文字压在复杂背景上可能擦不干净。
+
+---
+
+## 开发
 
 ```powershell
-cd resources\app
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
-Requires Node.js 18+ and Electron 45.
-
-### Building a release
+打包 unpacked 目录：
 
 ```powershell
-.\scripts\publish-portable.ps1 -Version 2.0.3 -Notes "fix xxx`nimprove yyy"
+pnpm pack
 ```
 
-Outputs land in `build\release\`:
+注意 `build.files` 只包含 `electron/`、`src/`、图标和文档，**不包含** `resources/netease-api` 与 `resources/endfield-packs`，打包后需要手动补进 `resources/`。
 
-- `HuaXiaoLing-2.0.3-Portable.zip` — the release package
-- `latest.json` — update manifest (includes sha256 and size)
+### 技术栈
 
-The script automatically excludes `data/` (user data), `downloads/` (cache), `.bak` backups, logs and local manifests.
+- Electron 45，主进程 `electron/main.js`（约 4700 行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
+- 渲染层通过 `preload.js` 暴露的 `window.launcher` 调用 IPC，开启 `contextIsolation` 与 `sandbox`；
+- 领域模块：`link.js`（硬链接）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
 
-#### Release checklist
+测试钩子：`HX_SMOKE=1` 启动冒烟、`HX_CAPTURE=1` 生成页面截图、`HX_USER_DATA` 隔离数据目录。
 
-1. Bump `version` in `resources/app/package.json` (**must match the `-Version` argument**, otherwise the launcher treats the update as invalid)
-2. Run the packaging script above
-3. Upload the zip to the Release
-4. Point `url` in `latest.json` at the real download address
-5. Push `latest.json`
+---
 
-> Version numbers cannot be reused. Users already on 2.0.2 will only receive an update when they see 2.0.3.
+## 更新日志
 
-> After a release, remember to update the "Current version" line at the top of this page, the package name in the text, and the changelog below.
+每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
-### Where data is stored
+### v2.0.4
 
-| Mode | Location |
-|---|---|
-| Default | `%USERPROFILE%\Documents\花筱灵启动器\data` |
-| Portable | `data` under the root directory (switchable in settings) |
+- 启动页抽屉里每一款游戏的封面完整露出来：标题条移到封面下方，不再盖在图片上，也不再有压暗的幕布挡图，整体更贴合主页的卡片气质。
+- 设置页重新整理：不常用的功能收进折叠块，默认只露出常用项，页面短了很多。
+- 更新公告回到「动态」页展示，这一版改了什么一眼就能看到。
+- 更新方式多了一条：也可以在 GitHub 仓库页面手动下载更新 —— https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher
 
-Gacha records, account credentials (encrypted), playlists and configuration all live here. **Upgrades never touch this directory.**
+### v1.6.3
 
-### Changelog
+- 小播放器重做：主页贴在侧栏底部，点开是完整控制卡，也能拖动摆放；到启动页直接嵌进「选择游戏」右边的标题行，跟着抽屉进出。
+- 启动页游戏卡片回到整张封面铺满，加压暗、状态点和悬停缩放；标题、公告卡片、动图按钮统一成更克制的舞台风格。
+- 抽屉收缩方式保持不变，仍是悬停展开、移开收回到标题条。
+- 修复未播放时隐藏的播放器仍占点击区域的问题。
 
-#### 2.0.3
-- Zenless Zone Zero battle records: enter your UID to view Shiyu Defense, Fictional Narrative and Deadly Assault results with score, rating and team details
-- Character nickname mapping, so search, gacha and playlists accept common aliases
-- Battle records use a cloud cache plus a local index, so repeat lookups are faster
-- Misc UI fixes
+### v1.6.2
 
-#### 2.0.2
-- Fixed HoYoLAB QR-code login: the login dialog no longer pops up repeatedly or rebuilds itself
-- Added support for v2-series cookies (`cookie_token_v2` etc.); accounts without characters are no longer misreported as logged out
-- Login failures now show the actual reason instead of a bare "login timed out"
-- The tools page now distinguishes "reading / logged in / logged out"
+- 启动器支持自己更新：设置里填一个更新源（网址、局域网共享或本地路径都行），旧版本在别的电脑上也能发现新版本。
+- 更新弹窗写清这一版改了什么，带下载进度和体积；装完自动重新打开，直接覆盖程序文件。
+- 游戏、账号、抽卡记录、歌单和设置都在数据目录里，更新不会动它们。
 
-#### 2.0.1
-- Fixed self-update: detects new versions, shows release notes, downloads with progress, verifies sha256, and relaunches automatically after an overwrite
+### v1.6.1
 
-### License
+- 异环抽卡支持自动抓取（下载组件 + 提权运行 + 自动导入，可自动翻页）。
+- 抽卡页新增五星记录：角色/武器筛选、按月分组、单次抽数、平均/最快/最慢统计。
+- 修复服务器路径可能被自动检测清空、导致误报「未安装」的问题。
 
-MIT. Third-party licenses are in `LICENSES.chromium.html`, `LICENSE.electron.txt`, and the LICENSE files bundled with each dependency.
+### v1.6.0
 
-<div align="right"><a href="#中文">↑ 中文</a></div>
+- 点歌台整体重做成音乐软件布局：左侧播放队列 / 搜索 / 账号三个页签，右侧常驻歌词、播放设置和音效，底部一条完整播放控制栏。
+- 队列和歌词改成内部滚动，歌多的时候不会再把这个页面撑破、把播放条挤出屏幕。
+- 搜索、粘贴链接、导入歌单合并成一条输入行。
+- QQ 音乐 / 酷狗 / 网易云的登录入口收进「账号」页，登录状态直接可见。
+- 服务器页下线：切换、重建、编辑目录、硬链接去重都在启动页完成，侧栏不再保留重复入口。
+
+### v1.5.10
+
+- 修复 QQ 音乐、酷狗扫码登录认不出浏览器的问题（登录窗口换成普通浏览器 UA，并补齐微信 / QQ 登录的跳转白名单）。
+- 修复登录状态偶尔丢失：会话改存到启动器数据目录，不再依赖浏览器窗口生命周期。
+
+### v1.5.9
+
+- 修复「在启动页切着游戏，某些游戏会丢路径、提示检测安装」：自动检测只补全空缺路径，不再清掉已经配置好的客户端。
+- 启动页切服务器只改启动目标，不会再把其它服务器的路径一起清空。
+
+### v1.5.8
+
+- 启动页的服务器改成一个选择器：平时只显示当前服务器，点开才展开列表，切换、检测、硬链接、管理都在弹层里。
+- 侧栏去掉「服务器」，相关内容都收进启动页，界面更接近 Starward 的简洁布局。
+- 背景图去字更积极：检测阈值放宽，启发式没命中时兜底压掉底部标题条，避免官方标题和游戏名打架。
+
+### v1.5.7
+
+- 启动页：小播放器不再做成抽屉上方的悬浮小球，改成嵌在「选择游戏」标题右边的窄条（封面 + 歌名 + 播放/下一首）
+- 启动页：窄条跟着标题行走，抽屉收起 / 展开、窗口改变大小都会重新贴合
+- 主界面：小播放器仍停靠在侧栏底部，两边互不影响
+
+### v1.5.6
+
+- 主界面：小播放器默认停靠在侧栏底部，居中在侧栏那一列，不再和「收起侧栏」、个人资料挤在一起
+- 主界面：收起 / 展开侧栏、改变窗口大小时，小球会重新贴合侧栏，不会留在旧坐标
+- 主界面：停靠态的球体更小、阴影更浅，更像侧栏里的一枚唱片
+- 主界面：拖动后解除停靠并记住新位置；停靠时展开面板朝侧栏右侧弹出，不遮挡侧栏
+
+### v1.5.5
+
+- 启动页：小播放器改为贴在「选择游戏」抽屉上沿，抽屉展开时跟着上移，不再缩在左下角
+- 启动页：游戏选择改成卡片式，封面、名称、运行状态一眼看清
+- 启动页：动态背景的暂停按钮改为纯图标圆键，只留暂停 / 播放一个动作
+- 启动页：游戏公告折叠箭头换成图标，公告区改成圆角卡片
+
+### v1.5.4
+
+- 异环：从官方启动器日志自动识别当前账号（区服、角色名、等级、UID），导入的记录按账号归档
+- 异环：新增导出目录 `data/nte-gacha/`，把导出 JSON 丢进去即自动导入，每 30 秒检查一次
+- 异环抽卡页新增状态栏：显示识别到的账号，可直接打开导出目录或手动检查
+
+### v1.5.3
+
+- 启动页只用官方最新版本图，不再混用卡池与宣传图
+- 原神版本图运镜改为 84 秒四段呼吸式推拉，暗角同步明暗呼吸
+- 换版本才换图，同一张图不重复下载
+- 背景去字范围放宽到左侧 55% 与底部四行
+
+### v1.5.2
+
+- 新增「界面缩放」：设置里可选 80%–130%，字号、间距、图标一起等比缩放
+- 缩放时窗口同步调整尺寸，可见内容不会因为放大而被挤掉
+- 缩放比例保存在本机，下次启动自动套用
+
+### v1.5.1
+
+- 星铁、绝区零接入官方动态背景；原神无官方视频，用缓动镜头
+- 手动配置的服务器路径带 confirmed 标记，检测失败不再清空
+- 启动页移除「上次游玩」标签
+
+### v1.5.0
+
+- 启动页顶栏与底部操作区统一风格
+- 小球在启动页吸附左下、主界面吸附导航列
+- 播放进度跨启动记忆，点播放即续听
+- 修复启动页动图切回时无故暂停
+
+### v1.4.1
+
+- 三家榜单合并去重，标注来源
+- 曲目自动匹配网易云免费音源，无需会员
+- 音效扩展到 14 种
+- 默认音质 Hi-Res，手动选择会记住
+- 新增打开时自动续播开关
+
+### v1.4.0
+
+- QQ 音乐与酷狗支持内置窗口登录（扫码 / QQ / 微信 / 验证码）
+- 登录凭证使用系统加密保存在本机
+- 榜单面板顶部显示登录状态
+
+### v1.3.3
+
+- 迷你播放器默认收成小球，带旋转封面与环形进度
+- 点击展开完整控制，形态可记忆，整球可拖动
+
+### v1.3.2
+
+- 终末地同步优先读游戏日志凭据，只有确实没有才提示网页登录
+- 设置与抽卡页不再显示数据源路径
+- 同步文案统一为「获取抽卡数据中」
+
+### v1.3.1
+
+- 抽卡页固定显示五款游戏标签，缺数据时给针对性导入引导
+- 修复无数据时读取空用户对象导致的渲染问题
+
+### v1.3.0
+
+- 直播间支持 B站 / 斗鱼 / 虎牙 / 抖音 链接识别（仅 B站 可自动收弹幕）
+- 新增 QQ 音乐与酷狗公开榜单，可一键转成网易云曲目
+- 说明：这两家的扫码登录需要客户端私有签名，暂未接入
+
+### v1.2.0
+
+- 官方公告并入动态页底部，移除独立的公告导航
+- 直播点歌支持 B站 / 斗鱼 / 虎牙 / 抖音 房间识别（仅 B站 可收弹幕）
+- 四套强调色的通道变量补齐，光晕与阴影跟随配色
+- 发布包构建脚本化，自动排除并自检个人数据
+- 修复 B服被识别成官服（cps 与 channel 配置）
+- 渠道包与 Starward 库改为全自动探测
+
+### v1.1.0
+
+- 启动页重构：服务器胶囊一键切换、管理面板收纳全部操作、右下角浮动操作区、窗口按钮
+- 背景动图：静态图自动去文字、视频遮罩带、暂停与导出
+- 抽卡：五款游戏界面统一，终末地/异环补全角色名与立绘，图鉴按日缓存自动更新，终末地武器池接入
+- 点歌台：三段式重排，3D 音效与弹幕点歌进入侧栏
+- 界面字号整体抬高，控件尺寸同步适配
+- 彻底便携：数据、缓存、下载与更新临时文件全部放进启动器文件夹
+- 渠道包与 Starward 库改为全自动探测
+- 修复 B 服客户端被识别成官服（`cps` 与 `channel` 配置错误）
+
+### v1.0.0
+
+首个完整版本：游戏库、多服务器与硬链接去重、下载管理器、外观与音效、官方公告。
+
+## 许可与致谢
+
+- 代码：MIT，见 [LICENSE](LICENSE)。
+- 角色插画由项目所有者提供，不在 MIT 许可范围内，未经授权请勿再分发。
+
+### 特别感谢
+
+- **[Starward](https://github.com/Scighost/Starward)** —— 主要感谢对象。这个启动器的服务器切换、硬链接去重、多客户端共存这些核心思路，以及界面上的许多交互设计，都是跟着 Starward 学的。没有它作为参照，这套切换器做不出来。
+- **XelLauncher** —— 渠道包的整理方式与 `load` 目录的组织方式参考了它，终末地渠道包同步的入口也是照着它的做法接的。
+
+Starward 与 XelLauncher 都是开源软件，这里致谢是因为确实受益于它们的设计与实现，与许可条款无关。
+
+### 其它参考
+
+- 终末地图鉴数据参考 [bhaoo/endfield-gacha](https://github.com/bhaoo/endfield-gacha)；异环名称表与素材索引参考 [Anong0u0/NTE_Gacha_Exporter](https://github.com/Anong0u0/NTE_Gacha_Exporter)。
+- [sql.js](https://github.com/sql-js/sql.js)（MIT）用于读取 Starward 本地 SQLite 数据库。
+- 游戏名称、商标与官方素材归各自权利人所有。

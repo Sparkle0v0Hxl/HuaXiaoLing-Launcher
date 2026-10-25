@@ -291,7 +291,7 @@
             <span>花筱灵启动器</span>
           </div>
           <div class="titlebar-right">
-            <span id="tb-version">v2.0.0</span>
+            <span id="tb-version">v2.0.4</span>
             <div class="window-controls">
               <button class="window-control" data-action="window-minimize" title="最小化"><svg class="icon"><use href="#i-minus"></use></svg></button>
               <button class="window-control" data-action="window-maximize" title="最大化"><svg class="icon"><use href="#i-maximize"></use></svg></button>
@@ -354,6 +354,8 @@
     </div>
 
     <script src="song-ui.js"></script>
+    <!-- 战绩数据归一化：必须早于 app.js，app.js 渲染时会直接读 window.HXLRecord -->
+    <script src="record-model.js"></script>
 <script src="app.js"></script>
   </body>
 </html>

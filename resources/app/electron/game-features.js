@@ -152,16 +152,6 @@ const FEATURES = [
     site: 'game-record',
   },
   {
-    // 阈限模拟：绝区零的高难关卡，接口为 /zzz/void_front_battle_*
-    key: 'threshold-simulation',
-    name: '阈限模拟',
-    eyebrow: 'THRESHOLD',
-    desc: '阈限模拟主挑战与子挑战记录',
-    category: 'record',
-    needsLogin: true,
-    site: 'game-record',
-  },
-  {
     key: 'play-time',
     name: '游玩时长',
     eyebrow: 'PLAY TIME',
@@ -330,11 +320,24 @@ const GAME_MAP = new Map(GAMES.map((item) => [item.key, item]));
  */
 const TRAITS = {
   genshin: {
-    'daily-note': { kind: 'game-record', api: '/game_record/genshin/api/dailyNote' },
+    'daily-note': {
+      kind: 'game-record',
+      api: '/game_record/app/genshin/api/dailyNote?server={server}&role_id={role_id}',
+    },
     gacha: { kind: 'db', table: 'GenshinGachaItem' },
-    abyss: { kind: 'game-record', api: '/game_record/genshin/api/spiralAbyss' },
-    theater: { kind: 'game-record', api: '/game_record/genshin/api/role_combat' },
-    stygian: { kind: 'game-record', api: '/game_record/genshin/api/stygian_onslaught' },
+    abyss: {
+      kind: 'game-record',
+      api: '/game_record/app/genshin/api/spiralAbyss?schedule_type={schedule}&server={server}&role_id={role_id}',
+    },
+    theater: {
+      kind: 'game-record',
+      api: '/game_record/app/genshin/api/role_combat?server={server}&role_id={role_id}&active=1&need_detail=true',
+    },
+    // 幽境危战在接口里叫 hard_challenge（Starward 的 StygianOnslaught 走的就是它）
+    stygian: {
+      kind: 'game-record',
+      api: '/game_record/app/genshin/api/hard_challenge?server={server}&role_id={role_id}&need_detail=true',
+    },
     'play-time': { kind: 'local' },
     screenshot: { kind: 'local' },
     graphics: { kind: 'registry', key: 'HKCU\\Software\\miHoYo\\原神' },
@@ -342,12 +345,27 @@ const TRAITS = {
     notice: { kind: 'notice', api: 'genshin' },
   },
   starrail: {
-    'daily-note': { kind: 'game-record', api: '/game_record/starrail/api/dailyNote' },
+    'daily-note': {
+      kind: 'game-record',
+      api: '/game_record/app/hkrpg/api/note?server={server}&role_id={role_id}',
+    },
     gacha: { kind: 'db', table: 'StarRailGachaItem' },
-    'forgotten-hall': { kind: 'game-record', api: '/game_record/starrail/api/challenge' },
-    'pure-fiction': { kind: 'game-record', api: '/game_record/starrail/api/challenge_story' },
-    'apocalyptic-shadow': { kind: 'game-record', api: '/game_record/starrail/api/challenge_boss' },
-    'simulated-universe': { kind: 'game-record', api: '/game_record/starrail/api/rogue' },
+    'forgotten-hall': {
+      kind: 'game-record',
+      api: '/game_record/app/hkrpg/api/challenge?schedule_type={schedule}&server={server}&role_id={role_id}&need_all=true',
+    },
+    'pure-fiction': {
+      kind: 'game-record',
+      api: '/game_record/app/hkrpg/api/challenge_story?schedule_type={schedule}&server={server}&role_id={role_id}&isPrev=1&need_all=true',
+    },
+    'apocalyptic-shadow': {
+      kind: 'game-record',
+      api: '/game_record/app/hkrpg/api/challenge_boss?schedule_type={schedule}&server={server}&role_id={role_id}&isPrev=1&need_all=true',
+    },
+    'simulated-universe': {
+      kind: 'game-record',
+      api: '/game_record/app/hkrpg/api/rogue?server={server}&role_id={role_id}&schedule_type=3&need_detail=true',
+    },
     'play-time': { kind: 'local' },
     screenshot: { kind: 'local' },
     graphics: { kind: 'registry', key: 'HKCU\\Software\\miHoYo\\崩坏：星穹铁道' },
@@ -355,11 +373,30 @@ const TRAITS = {
     notice: { kind: 'notice', api: 'starrail' },
   },
   zzz: {
-    'daily-note': { kind: 'game-record', api: '/game_record/zzz/api/dailyNote' },
+    /*
+     * 绝区零的战绩接口不在 /game_record/app 下，而是 /event/game_record_zzz/api/zzz/。
+     * 且参数名不统一：便笺和式舆用 server+role_id，危局用 region+uid。
+     *
+     * 请求头也不统一（照 Starward HyperionClient 逐条对齐）：
+     *   便笺 —— Referer 是 act.mihoyo.com，且**不带 DS**
+     *   式舆防卫战 / 危局强袭战 —— Referer 是 webstatic，且带 DS
+     * 便笺多带一个 DS 会被判 10041（参数错误），所以这条的 ds 显式关掉。
+     */
+    'daily-note': {
+      kind: 'game-record',
+      referer: 'act',
+      ds: false,
+      api: '/event/game_record_zzz/api/zzz/note?server={server}&role_id={role_id}',
+    },
     gacha: { kind: 'db', table: 'ZZZGachaItem' },
-    'shiyu-defense': { kind: 'game-record', api: '/game_record/zzz/api/challenge' },
-    'deadly-assault': { kind: 'game-record', api: '/game_record/zzz/api/deadly_assault' },
-    'threshold-simulation': { kind: 'game-record', api: '/game_record/zzz/api/void_front_battle_abstract_info' },
+    'shiyu-defense': {
+      kind: 'game-record',
+      api: '/event/game_record_zzz/api/zzz/hadal_info_v2?schedule_type={schedule}&server={server}&role_id={role_id}&need_all=true',
+    },
+    'deadly-assault': {
+      kind: 'game-record',
+      api: '/event/game_record_zzz/api/zzz/hadal_mem_detail_v2?schedule_type={schedule}&region={region}&uid={uid}',
+    },
     'play-time': { kind: 'local' },
     screenshot: { kind: 'local' },
     graphics: { kind: 'registry', key: 'HKCU\\Software\\miHoYo\\绝区零' },
@@ -367,9 +404,32 @@ const TRAITS = {
     notice: { kind: 'notice', api: 'zzz' },
   },
   bh3: {
-    'daily-note': { kind: 'game-record', api: '/game_record/bh3/api/note' },
-    'ultra-endless': { kind: 'game-record', api: '/game_record/bh3/api/super_abyss' },
-    'battle-field': { kind: 'game-record', api: '/game_record/bh3/api/battle_field' },
+    /*
+     * 崩坏3 的实时便笺宿主是 act-api-takumi（不是 api-takumi-record），
+     * 路径前缀是 /game_record/appv2/honkai3rd/api/（appv2 + honkai3rd）。
+     *
+     * 超弦空间、记忆战场没有独立端点 —— 它们就是便笺返回里的
+     * ultra_endless / battle_field 两个子对象，所以三条功能指向同一个 URL，
+     * 前端按 feature 取不同字段（后端只请求一次即可）。
+     */
+    'daily-note': {
+      kind: 'game-record',
+      host: 'act',
+      referer: 'act',
+      api: '/game_record/appv2/honkai3rd/api/note?server={server}&role_id={role_id}',
+    },
+    'ultra-endless': {
+      kind: 'game-record',
+      host: 'act',
+      referer: 'act',
+      api: '/game_record/appv2/honkai3rd/api/note?server={server}&role_id={role_id}',
+    },
+    'battle-field': {
+      kind: 'game-record',
+      host: 'act',
+      referer: 'act',
+      api: '/game_record/appv2/honkai3rd/api/note?server={server}&role_id={role_id}',
+    },
     'play-time': { kind: 'local' },
     screenshot: { kind: 'local' },
     graphics: { kind: 'registry', key: 'HKCU\\Software\\miHoYo\\崩坏3' },
@@ -453,6 +513,8 @@ const LOGIN_PROVIDERS = {
     api: {
       roleList: 'https://passport-api.mihoyo.com/binding/api/getUserGameRolesByCookieToken',
       record: 'https://api-takumi-record.mihoyo.com',
+      // 崩坏3 的战绩宿主；其它三家都在 record 上
+      act: 'https://act-api-takumi.mihoyo.com',
       salt2: 'xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs',
       refererRecord: 'https://webstatic.mihoyo.com/',
       refererAct: 'https://act.mihoyo.com/',
@@ -478,7 +540,12 @@ const LOGIN_PROVIDERS = {
     api: {
       roleList: 'https://sg-public-api.hoyolab.com/binding/api/getUserGameRolesByCookieToken',
       record: 'https://sg-public-api.hoyolab.com',
-      salt2: 'okr4obncj8bw5a65hbnn5oo6ixjc3l9w',
+      /*
+       * 注意：以前这里填的是 okr4obncj8bw5a65hbnn5oo6ixjc3l9w，
+       * 那是 Starward 的 ApiSalt（DS1 用的），不是 salt2，签名一定过不了。
+       * DS2 的 salt 见 Starward HoyolabClient.ApiSalt2。
+       */
+      salt2: 'h4c1d6ywfq5bsbnbhm1bzq7bxzzv6srt',
       refererRecord: 'https://act.hoyolab.com/',
       refererAct: 'https://act.hoyolab.com/',
     },

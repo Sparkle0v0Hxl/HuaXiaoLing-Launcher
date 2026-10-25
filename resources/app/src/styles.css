@@ -7332,6 +7332,61 @@ body.sidebar-collapsed .sidebar-toggle {
   padding: 11px 0;
 }
 
+/* 折叠设置块：默认只露出标题行，点开才显示内部设置，让页面更短 */
+.settings-collapse {
+  padding-block: 0;
+}
+.settings-collapse summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 20px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  list-style: none;
+  user-select: none;
+}
+.settings-collapse summary::-webkit-details-marker {
+  display: none;
+}
+.settings-collapse summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  flex: none;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.18s ease;
+}
+.settings-collapse[open] summary::after {
+  transform: rotate(45deg);
+}
+.settings-collapse summary .settings-summary-title {
+  font-size: 15px;
+  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-collapse summary .settings-summary-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-collapse[open] summary {
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.settings-collapse .setting-row {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
 @media (max-width: 1100px) {
   .view {
     padding-left: 22px;
@@ -12157,6 +12212,16 @@ select {
   border-top: 1px solid var(--line);
 }
 
+/* 动态页上的「这一版改了什么」：和公告区一致的分隔与留白 */
+.news-update {
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+.news-update .update-notes {
+  margin-top: 12px;
+}
+
 .news-notice-actions {
   display: inline-flex;
   align-items: center;
@@ -15431,10 +15496,9 @@ body.start-mode .start-games {
   z-index: 1;
   background: linear-gradient(
     0deg,
-    rgba(4, 3, 7, 0.94) 2%,
-    rgba(4, 3, 7, 0.62) 34%,
-    rgba(4, 3, 7, 0.12) 62%,
-    transparent 84%
+    rgba(4, 3, 7, 0.55) 2%,
+    rgba(4, 3, 7, 0.28) 30%,
+    transparent 58%
   );
   pointer-events: none;
 }
@@ -16386,6 +16450,16 @@ body.start-mode .start-games {
   width: 6px;
   height: 6px;
   box-shadow: 0 0 0 3px rgba(4, 3, 7, 0.5);
+}
+
+/* 去掉盖住封面的厚重压暗：只留底部一条很淡的过渡，标题仍然可读，封面不再被挡 */
+.start-screen .start-games .start-game-thumb::after {
+  background: linear-gradient(
+    0deg,
+    rgba(4, 3, 7, 0.55) 0%,
+    rgba(4, 3, 7, 0.28) 34%,
+    transparent 64%
+  );
 }
 
 @media (max-width: 1100px) {
@@ -17734,4 +17808,843 @@ body.has-backdrop .gfx-card {
   .material-panel {
     grid-column: 1 / -1;
   }
+}
+
+/* ============================ 战绩页 ============================ */
+/*
+ * 战绩页的所有颜色都走主题变量（--accent / --panel / --line / --muted），
+ * 这样切主题时不用单独给这里写覆盖；只有「危险/完成」这类语义色用固定值，
+ * 因为语义色不应该跟着主题变红变绿。
+ */
+
+.record-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* --------------------------- 游戏 / 功能标签 --------------------------- */
+
+.record-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.record-tabs-schedule {
+  margin-top: -2px;
+  margin-bottom: 14px;
+}
+
+.record-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.record-tab:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.record-tab.is-active {
+  color: var(--text);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/* 小圆点：表示这个游戏/功能已经有数据可看，避免用户逐项点过去找 */
+.record-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  flex: none;
+}
+
+.record-tab-dot.is-on {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+/* --------------------------- 角色信息条 --------------------------- */
+
+.record-role-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  font-size: 12.5px;
+}
+
+.record-role-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.record-role-meta {
+  color: var(--muted);
+}
+
+/* 实际请求路径：平时不显眼，排查时一眼能看到打的是哪个接口 */
+.record-role-url {
+  margin-left: auto;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+/* --------------------------- 主数字（体力 / 星数） --------------------------- */
+
+.record-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--accent-line);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 16%, var(--surface)),
+    color-mix(in srgb, var(--accent) 4%, var(--surface))
+  );
+}
+
+.record-hero-label {
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.record-hero-value {
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-hero-note {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* --------------------------- 进度条 --------------------------- */
+
+.record-bars {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.record-bar {
+  padding: 11px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.record-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.record-bar-head strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-bar-track {
+  height: 7px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  overflow: hidden;
+}
+
+.record-bar-track i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.35s ease;
+}
+
+.record-bar-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* 快满了（体力满）用暖色提示，已开放/已完成用语义绿 */
+.record-bar.is-warn .record-bar-track i {
+  background: #f0a35e;
+}
+
+.record-bar.is-ok .record-bar-track i {
+  background: #6fd6b0;
+}
+
+/* --------------------------- 指标网格 --------------------------- */
+
+.record-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.record-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.record-metric-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.record-metric-value {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.record-metric-value em {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 3px;
+}
+
+.record-metric-note {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.record-metric.is-muted {
+  opacity: 0.65;
+}
+
+.record-metric.is-ok .record-metric-value {
+  color: #6fd6b0;
+}
+
+.record-metric.is-warn .record-metric-value {
+  color: #f0a35e;
+}
+
+/* --------------------------- 分区 --------------------------- */
+
+.record-section {
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.record-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.record-section-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.record-section-head span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.record-section-body.is-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 角色队列：换行铺开，比一行一个省高度 */
+.record-section-body.is-avatars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* --------------------------- 行条目 --------------------------- */
+
+.record-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  min-width: 0;
+}
+
+.record-item.is-ok {
+  border-color: color-mix(in srgb, #6fd6b0 32%, transparent);
+}
+
+.record-item.is-warn {
+  border-color: color-mix(in srgb, #f0a35e 34%, transparent);
+}
+
+.record-item.is-muted {
+  opacity: 0.62;
+}
+
+.record-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.record-item-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.record-item-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.record-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.record-item-meta span {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.record-item-avatars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: none;
+  max-width: 58%;
+}
+
+/* --------------------------- 头像 --------------------------- */
+
+.record-avatar {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  flex: none;
+}
+
+.record-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 图片拿不到（外链 403/断网）时收成一个空槽，不显示破图标 */
+.record-avatar img.is-broken {
+  display: none;
+}
+
+.record-avatar-blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 右下角的数值（星级 / 伤害占比），用半透明底保证任何头像上都看得清 */
+.record-avatar em {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------- 星级 --------------------------- */
+
+.record-stars {
+  font-size: 12px;
+  color: #f0c674;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.record-stars em {
+  font-style: normal;
+  color: var(--muted);
+  opacity: 0.45;
+}
+
+/* --------------------------- 提示 / 原始数据 --------------------------- */
+
+.record-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.record-hint p {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  line-height: 1.62;
+}
+
+.record-url {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.6;
+  word-break: break-all;
+}
+
+.record-raw {
+  margin-top: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.record-raw summary {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.record-raw[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.record-raw pre {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .record-hero-value {
+    font-size: 32px;
+  }
+
+  .record-role-url {
+    display: none;
+  }
+
+  .record-item-avatars {
+    max-width: 100%;
+  }
+}
+
+/* ============================ 米游社多账号 ============================ */
+
+.miyo-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.miyo-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* 正在使用的那个账号：和工具页、战绩页的选中态同一个视觉语言 */
+.miyo-account.is-active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.miyo-account-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.miyo-account-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.miyo-account-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.miyo-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* ============================ 战绩页：账号 / 角色切换 ============================ */
+
+/*
+ * 账号条只在挂了两个以上通行证时出现（见 recordAccountLineHtml），
+ * 排列沿用角色行那套胶囊，避免同一页出现两种选择器样式。
+ */
+.record-account-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: var(--radius);
+  border: 1px dashed var(--line);
+}
+
+.record-account-caption,
+.record-role-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+}
+
+.record-account-chip,
+.record-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.record-account-chip:hover,
+.record-role-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.record-account-chip.is-active,
+.record-role-chip.is-active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+
+.record-role-chip em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* ==================================================================
+ * 启动页抽屉卡片：改成「封面在上 + 标题条在下」，对齐主页卡片。
+ * 不再把标题叠在图片上、也不再盖压暗幕——封面完整露出来。
+ * ================================================================== */
+.start-screen .start-games .start-game-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
+  text-align: left;
+}
+
+/* 去掉压在封面上的暗幕：封面干净露出 */
+.start-screen .start-games .start-game-thumb::after {
+  content: none;
+}
+
+/* 封面区域：占满标题条以上，等比裁切 */
+.start-screen .start-games .start-game-media {
+  position: static;
+  inset: auto;
+  width: 100%;
+  height: 76px;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+
+.start-screen .start-games .start-game-media img {
+  position: static;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 25%;
+  transform: none;
+}
+
+.start-screen .start-games .start-game-thumb:hover .start-game-media img,
+.start-screen .start-games .start-game-thumb.active .start-game-media img {
+  transform: scale(1.06);
+}
+
+/* 标题条：固定在卡片下沿，自带深色底，字可读且不盖图 */
+.start-screen .start-games .start-game-copy {
+  position: static;
+  inset: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  width: 100%;
+  padding: 7px 10px 8px;
+  gap: 1px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: linear-gradient(0deg, rgba(7, 6, 9, 0.96), rgba(7, 6, 9, 0.82));
+}
+
+.start-screen .start-games .start-game-copy strong {
+  position: static;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.25;
+  color: #fff;
+  text-shadow: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-screen .start-games .start-game-copy small {
+  position: static;
+  font-size: 10px;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态点：仍浮在封面右上角，不被标题条遮挡 */
+.start-screen .start-games .start-game-state {
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+}
+
+@media (max-width: 1100px) {
+  .start-screen .start-games .start-game-thumb {
+    width: 164px;
+    height: 100px;
+  }
+  .start-screen .start-games .start-game-media {
+    height: 66px;
+  }
+}
+
+@media (max-width: 860px) {
+  .start-screen .start-games .start-game-thumb {
+    width: 142px;
+    height: 88px;
+  }
+  .start-screen .start-games .start-game-media {
+    height: 58px;
+  }
+}
+
+.record-role-chip.is-active em {
+  color: var(--accent);
+}
+
+@media (max-width: 900px) {
+  .record-account-line {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .record-role-line {
+    align-items: flex-start;
+  }
+}
+
+/* ==================================================================
+ * 更新弹窗置顶美图 / 动态详情配图
+ *
+ * 每次发版在 news.json 里给这一版挂一张「游戏库里的游戏」的图，
+ * 弹窗打开时先把图铺在顶部（max-height 撑住，不把按钮挤出屏幕），
+ * 右下角标一行图片来源，点开就是当初找到这张图的页面。
+ * ================================================================== */
+.update-modal .news-figure.update-hero {
+  margin: 0;
+  position: relative;
+  display: block;
+  width: 100%;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.update-modal .news-figure.update-hero img {
+  display: block;
+  width: 100%;
+  height: 236px;
+  object-fit: cover;
+  object-position: center 32%;
+}
+
+.news-figure {
+  margin: 0 0 18px;
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.news-figure img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 8;
+  object-fit: cover;
+  object-position: center 30%;
+}
+
+.figure-credit {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  max-width: calc(100% - 20px);
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(6, 5, 9, 0.62);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 10.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.figure-credit:hover {
+  color: #fff;
+  background: rgba(6, 5, 9, 0.82);
+}
+
+@media (max-width: 860px) {
+  .update-modal .news-figure.update-hero img {
+    height: 168px;
+  }
+}
+
+/* 动态页头条右侧：有版本美图就铺图，没有就退回原来的几何花 */
+.news-feature-art img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 30%;
 }
