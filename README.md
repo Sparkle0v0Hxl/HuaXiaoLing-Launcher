@@ -1,5 +1,14 @@
 # 花筱灵启动器
 
+[![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
+[![版本](https://img.shields.io/badge/版本-v2.0.4-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+
+> **作者：[Sparkle0v0Hxl](https://github.com/Sparkle0v0Hxl)** —— 独立开发与维护。
+> 问题反馈请开 [Issue](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/issues)，作者与贡献者名单见 [AUTHORS.md](AUTHORS.md)。
+
 **当前版本：v2.0.4**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
@@ -63,7 +72,7 @@
 - 网易云扫码登录、歌单导入、关键词搜索、歌词同步、音质切换（标准 / 较高 / 极高 / 无损 / Hi-Res）；
 - 四种播放模式：顺序、列表循环、单曲循环、随机；
 - **3D 音效**：原声 / 宽阔声场 / 音乐厅 / 耳机 HRTF / 低音增强 / 人声清晰，强度可调；跨域音源会自动回退原声并提示；
-- **B 站弹幕点歌**：连上直播间后，弹幕发「点歌 歌名」自动搜索入队；
+- **弹幕点歌**：连上直播间后，弹幕发「点歌 歌名」自动搜索入队。B 站走官方 WebSocket；斗鱼、虎牙、抖音、快手、YY、网易CC、花椒、酷狗直播、小红书、淘宝直播、Twitch、YouTube 走后台隐藏窗口抓聊天区（视频流会被拦掉，不占带宽）；没适配过的站点还能用通用抓取试一把；
 - 可拖动的迷你播放器，跨页面不中断播放。
 
 ### 官方公告
@@ -142,7 +151,7 @@
 - **异环抽卡**没有公开接口，只能导入 Exporter 导出的 JSON。
 - **异环图鉴**只能匹配官网已公布的角色（约 19 位），未公布的会用首字兜底。
 - **终末地武器池**已接入同步，但界面暂未按武器类型分组。
-- **弹幕点歌**只支持 B 站，其他平台未接。
+- **弹幕点歌**：B 站最稳（官方协议）；斗鱼 / 虎牙 / 抖音 / 快手 等平台靠后台隐藏窗口读页面聊天区，平台改版或需要登录时可能抓不到，状态栏会如实说明。
 - **无损音质**需要网易云会员，未登录通常返回 320kbps。
 - **动态背景去文字**是基于亮度方差与边缘密度的启发式检测，不是 OCR，文字压在复杂背景上可能擦不干净。
 
@@ -358,7 +367,7 @@ pnpm pack
 ## 许可与致谢
 
 - 代码：MIT，见 [LICENSE](LICENSE)。
-- 角色插画（`src/assets/character.png`、`src/assets/character-face.png`）由本项目作者本人提供，随项目一起分发，不纳入 MIT 许可范围。
+- 角色插画与头像（`src/assets/character.png`、`src/assets/character-face.png`）是本项目作者本人原创的「花筱灵」形象，版权归作者所有，随项目一起分发，不纳入 MIT 许可范围。
 
 ### 特别感谢
 
