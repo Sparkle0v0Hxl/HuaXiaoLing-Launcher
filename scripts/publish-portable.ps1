@@ -116,7 +116,10 @@ foreach ($name in @('resources\app', 'resources\updater', 'resources\netease-api
 }
 
 # 排除清单：用户数据、缓存、日志、备份、本地清单、node_modules
-$excludePattern = '(^|\\)(data|downloads)(\\|$)|\.log$|\.bak(-\S+)?$|^latest(-\d+\.\d+\.\d+)?\.json$|\\node_modules\\|\\\.git\\'
+# 只排除「根目录」下的 data / downloads（用户数据与下载缓存）；
+# 不能写成 (^|\\)(data|downloads)，那会把 resources\app\src\data\news.json 一起踢掉，
+# 装出来的启动器动态页就是空的。
+$excludePattern = '^(data|downloads)(\\|$)|\.log$|\.bak(-\S+)?$|^latest(-\d+\.\d+\.\d+)?\.json$|\\node_modules\\|\\\.git\\'
 
 $files = New-Object System.Collections.Generic.List[object]
 foreach ($item in $include) {
