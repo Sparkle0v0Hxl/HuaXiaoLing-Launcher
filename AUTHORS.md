@@ -12,14 +12,9 @@
 
 ## 贡献者
 
-欢迎通过 Issue 与 Pull Request 参与。提交被合并后，你的名字可以出现在这里。
+- **susgsudvgshghg**（[@susgsudvgshghg](https://github.com/susgsudvgshghg)）—— 参与了部分开发工作。
 
-<!--
-格式：
-- **昵称**（[@github](https://github.com/github)）—— 贡献内容
--->
-
-_暂无外部贡献者。_
+欢迎通过 Issue 与 Pull Request 参与；提交被合并后，名字会出现在这里。
 
 ## 致谢
 
