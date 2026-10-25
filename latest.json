@@ -1,14 +1,14 @@
 {
-  "version": "2.0.2",
+  "version": "2.0.3",
   "channel": "stable",
   "date": "2026-10-25",
-  "title": "花筱灵启动器 2.0.2",
-  "notes": "修复米游社扫码登录：登录框不再反复弹出、扫码后能正确识别已登录\n米游社/HoYoLab 登录支持 v2 cookie，账号没角色的情况不再误判为未登录\n登录失败时会显示具体原因，不再是干巴巴的超时\n工具页的登录状态提示区分「正在读取 / 已登录 / 未登录」",
-  "url": "HuaXiaoLing-2.0.2-Portable.zip",
-  "sha256": "8645378ad6f4965c4df79e2ee11f7074c1877dab2b5110988a852f217f191338",
-  "size": 299164495,
-  "portable": true,
-  "downloadUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.0.2/HuaXiaoLing-2.0.2-Portable.zip",
-  "releaseUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/tag/v2.0.2",
-  "repoUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher"
+  "title": "花筱灵启动器 2.0.3",
+  "notes": "绝区零战绩查询：输入 UID 即可查看式舆防卫战、虚构叙事、危局强袭战等战绩，含总分、评级与阵容详情，数据来源与米游社一致。\n新增角色昵称映射，搜索、抽卡与歌单里的角色名支持常用简称。\n战绩查询接入云端缓存与本地索引，重复查询更快。\n修复若干界面细节。",
+  "url": "HuaXiaoLing-2.0.3-Portable.zip",
+  "downloadUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.0.3/HuaXiaoLing-2.0.3-Portable.zip",
+  "releaseUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/tag/v2.0.3",
+  "repoUrl": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher",
+  "sha256": "fc58f1fb802e81ffb3000d802923426b8405b4b70459d4505873eeeea23eef5b",
+  "size": 299202057,
+  "portable": true
 }
