@@ -98,6 +98,8 @@ npm start
 
 > 版本号不能重复发布。已装 2.0.2 的用户，只有看到 2.0.3 才会收到更新。
 
+> 发版后别忘了改本页顶部的「当前版本」、正文里的包名，以及下面的版本历史。
+
 ### 数据存放在哪
 
 | 模式 | 位置 |
@@ -215,6 +217,8 @@ The script automatically excludes `data/` (user data), `downloads/` (cache), `.b
 5. Push `latest.json`
 
 > Version numbers cannot be reused. Users already on 2.0.2 will only receive an update when they see 2.0.3.
+
+> After a release, remember to update the "Current version" line at the top of this page, the package name in the text, and the changelog below.
 
 ### Where data is stored
 
