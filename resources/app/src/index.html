@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-accent="spark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src wss://broadcastlv.chat.bilibili.com wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>花筱灵启动器</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <symbol id="i-maximize" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.4" /></symbol>
+      <symbol id="i-restore" viewBox="0 0 24 24"><path d="M8 8h10v10H8z" /><path d="M5 5h9v3M5 5v9h3" /></symbol>
+      <symbol id="i-home" viewBox="0 0 24 24">
+        <path d="M3.5 10.6 12 3.5l8.5 7.1V20a1 1 0 0 1-1 1h-5.2v-6.6H9.7V21H4.5a1 1 0 0 1-1-1z" />
+      </symbol>
+      <symbol id="i-library" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="7" height="7" rx="1.6" />
+        <rect x="13.5" y="3.5" width="7" height="7" rx="1.6" />
+        <rect x="3.5" y="13.5" width="7" height="7" rx="1.6" />
+        <rect x="13.5" y="13.5" width="7" height="7" rx="1.6" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3v11.2" />
+        <path d="m7.7 10.4 4.3 4.3 4.3-4.3" />
+        <path d="M4 16.8v2.4a1.8 1.8 0 0 0 1.8 1.8h12.4a1.8 1.8 0 0 0 1.8-1.8v-2.4" />
+      </symbol>
+      <symbol id="i-news" viewBox="0 0 24 24">
+        <path d="M5 4.5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Z" />
+        <path d="M8 8.5h8M8 12h8M8 15.5h5" />
+      </symbol>
+      <symbol id="i-music" viewBox="0 0 24 24">
+        <path d="M9 18V6.5l10-2v11" />
+        <circle cx="6.5" cy="18" r="2.5" />
+        <circle cx="16.5" cy="15.5" r="2.5" />
+      </symbol>
+      <symbol id="i-login" viewBox="0 0 24 24">
+        <path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" />
+        <path d="M10 8l4 4-4 4M14 12H4" />
+      </symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24">
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5.8 11.5a6.2 6.2 0 0 0 12.4 0M12 17.7V21M8.5 21h7" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+        <circle cx="15" cy="7" r="2.2" />
+        <circle cx="9" cy="17" r="2.2" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24">
+        <path d="M8.5 5.8v12.4c0 .8.9 1.3 1.6.9l9.3-6.2c.6-.4.6-1.4 0-1.8L10.1 4.9c-.7-.4-1.6.1-1.6.9Z" />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="10.8" cy="10.8" r="6.3" />
+        <path d="m15.5 15.5 4.3 4.3" />
+      </symbol>
+      <symbol id="i-star" viewBox="0 0 24 24">
+        <path d="m12 3.6 2.6 5.3 5.9.9-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.8l5.9-.9Z" />
+      </symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24">
+        <path d="m14.8 5.2 4 4L8.4 19.6l-4.6.7.7-4.6Z" />
+        <path d="m13.3 6.7 4 4" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M4.5 6.5h15M9 6.5V4.8c0-.7.5-1.3 1.2-1.3h3.6c.7 0 1.2.6 1.2 1.3v1.7M6.5 6.5l.8 12.1c.1.9.8 1.6 1.7 1.6h6c.9 0 1.6-.7 1.7-1.6l.8-12.1" />
+        <path d="M10 10.5v5.5M14 10.5v5.5" />
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M18 6 6 18" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3.5 7.2V6a1.5 1.5 0 0 1 1.5-1.5h4l2 2.4h8A1.5 1.5 0 0 1 20.5 8.4v10.1a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5Z" />
+      </symbol>
+      <symbol id="i-folder-open" viewBox="0 0 24 24">
+        <path d="M3.5 8V6.2c0-.9.7-1.6 1.6-1.6h3.8l1.9 2.2h7.1c.9 0 1.6.7 1.6 1.6v1.2" />
+        <path d="M4.2 9.6h16.1l-1.9 8.7c-.2.8-.8 1.3-1.6 1.3H5.2c-.8 0-1.4-.5-1.6-1.3Z" />
+      </symbol>
+      <symbol id="i-external" viewBox="0 0 24 24">
+        <path d="M13.5 4.5h6v6M19.5 4.5 11 13" />
+        <path d="M18.5 14.2v4.3a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1h4.2" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12.5 4.4 4.4L19 6.7" />
+      </symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24">
+        <path d="M9 5.5v13M15 5.5v13" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M20 12a8 8 0 1 1-2.3-5.7" />
+        <path d="M20 4.5V10h-5.5" />
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24">
+        <rect x="6.5" y="6.5" width="11" height="11" rx="1.4" />
+      </symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24">
+        <path d="m9 5.5 6.5 6.5L9 18.5" />
+      </symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24">
+        <path d="M15 5.5 8.5 12 15 18.5" />
+      </symbol>
+      <symbol id="i-repeat" viewBox="0 0 24 24">
+        <path d="M5 8h11l-2.5-2.5M19 16H8l2.5 2.5" /><path d="M16 5v4h4M8 19v-4H4" />
+      </symbol>
+      <symbol id="i-repeat-one" viewBox="0 0 24 24">
+        <path d="M5 8h11l-2.5-2.5M19 16H8l2.5 2.5" /><path d="M16 5v4h4M8 19v-4H4" /><path d="M12 10.5v3" />
+      </symbol>
+      <symbol id="i-shuffle" viewBox="0 0 24 24">
+        <path d="M4 7h3.5c4 0 5 10 9 10H20M17.5 14.5 20 17l-2.5 2.5" /><path d="M4 17h3.5c1.4 0 2.4-1.2 3.3-2.7M20 7h-3.5c-1.4 0-2.4 1.2-3.3 2.7M17.5 4.5 20 7l-2.5 2.5" />
+      </symbol>
+      <symbol id="i-order" viewBox="0 0 24 24">
+        <path d="M5 7h14M5 12h14M5 17h8" /><path d="m16 15 3 2-3 2" />
+      </symbol>
+      <symbol id="i-volume" viewBox="0 0 24 24">
+        <path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M16 9a4 4 0 0 1 0 6" /><path d="M18.5 6.5a8 8 0 0 1 0 11" />
+      </symbol>
+      <symbol id="i-volume-x" viewBox="0 0 24 24">
+        <path d="M4 9h4l5-4v14l-5-4H4z" /><path d="m16 9 5 6M21 9l-5 6" />
+      </symbol>
+      <symbol id="i-headphones" viewBox="0 0 24 24">
+        <path d="M4.5 15v-2.5a7.5 7.5 0 0 1 15 0V15" />
+        <rect x="2.6" y="14.4" width="4.4" height="6" rx="2.2" />
+        <rect x="17" y="14.4" width="4.4" height="6" rx="2.2" />
+      </symbol>
+      <symbol id="i-grip" viewBox="0 0 24 24">
+        <circle cx="9" cy="7" r="1.2" /><circle cx="15" cy="7" r="1.2" /><circle cx="9" cy="12" r="1.2" /><circle cx="15" cy="12" r="1.2" /><circle cx="9" cy="17" r="1.2" /><circle cx="15" cy="17" r="1.2" />
+      </symbol>
+      <symbol id="i-pin" viewBox="0 0 24 24">
+        <path d="M9 3.5h6l-1 5.5 3.5 2.5v2H6.5v-2L10 9 9 3.5Z" />
+        <path d="M12 13.5v7" />
+      </symbol>
+      <symbol id="i-chevron-down" viewBox="0 0 24 24">
+        <path d="m5.5 9 6.5 6.5L18.5 9" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 11v5M12 7.8v.3" />
+      </symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24">
+        <path d="M12 3.8 21 20H3Z" />
+        <path d="M12 9.5v4.2M12 16.7v.3" />
+      </symbol>
+      <symbol id="i-image" viewBox="0 0 24 24">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="1.6" />
+        <circle cx="8.7" cy="9.5" r="1.6" />
+        <path d="m4 17 5-5 3.4 3.4 2.6-2.6 5 5" />
+      </symbol>
+      <symbol id="i-gamepad" viewBox="0 0 24 24">
+        <path d="M7.6 7.5h8.8c2.5 0 4.1 2 4.6 4.6l.5 3c.3 1.7-1 3.2-2.7 3.2-.9 0-1.8-.5-2.3-1.3l-1-1.5H8.5l-1 1.5c-.5.8-1.4 1.3-2.3 1.3-1.7 0-3-1.5-2.7-3.2l.5-3c.5-2.6 2.1-4.6 4.6-4.6Z" />
+        <path d="M7.2 10.4v3.2M5.6 12h3.2M16.3 11.2h.1M18.2 13.1h.1" />
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8.5" />
+        <path d="M12 7.5V12l3 2" />
+      </symbol>
+      <symbol id="i-monitor" viewBox="0 0 24 24">
+        <rect x="3.5" y="4.5" width="17" height="12" rx="1.6" />
+        <path d="M9 20h6M12 16.5V20" />
+      </symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24">
+        <path d="M12 3.5c.5 4.8 2.7 7 7.5 7.5-4.8.5-7 2.7-7.5 7.5-.5-4.8-2.7-7-7.5-7.5 4.8-.5 7-2.7 7.5-7.5Z" />
+      </symbol>
+      <symbol id="i-link" viewBox="0 0 24 24">
+        <path d="M9.6 14.4 14.4 9.6" />
+        <path d="M7.4 16.6 5.8 18.2a3.4 3.4 0 0 1-4.8-4.8l3.4-3.4a3.4 3.4 0 0 1 4.8 0" />
+        <path d="m16.6 7.4 1.6-1.6a3.4 3.4 0 0 1 4.8 4.8l-3.4 3.4a3.4 3.4 0 0 1-4.8 0" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M19.5 14.2A8 8 0 0 1 9.8 4.5a8 8 0 1 0 9.7 9.7Z" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3.7" />
+        <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" />
+      </symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24">
+        <path d="M12 3.5 19 6v5.7c0 4.2-2.8 7.2-7 8.8-4.2-1.6-7-4.6-7-8.8V6Z" />
+        <path d="m9 12 2.2 2.2 4-4" />
+      </symbol>
+      <symbol id="i-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5.8" rx="7.5" ry="2.8" />
+        <path d="M4.5 5.8v6.1c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V5.8" />
+        <path d="M4.5 12v6.1c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V12" />
+      </symbol>
+      <symbol id="i-server" viewBox="0 0 24 24">
+        <rect x="3.5" y="4" width="17" height="6.5" rx="1.5" />
+        <rect x="3.5" y="13.5" width="17" height="6.5" rx="1.5" />
+        <path d="M7 7.2h.1M7 16.8h.1" />
+      </symbol>
+      <symbol id="i-wrench" viewBox="0 0 24 24">
+        <path d="M14.6 6.4a4.5 4.5 0 0 0-5.8 5.8L4 17v3h3l4.8-4.8a4.5 4.5 0 0 0 5.8-5.8l-2.6 2.6-2.4-2.4Z" />
+      </symbol>
+      <symbol id="i-type" viewBox="0 0 24 24">
+        <path d="M4 7V5h16v2" />
+        <path d="M9 19h6" />
+        <path d="M12 5v14" />
+      </symbol>
+    </svg>
+
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <img src="assets/character-face.png" alt="" />
+          </div>
+          <div class="brand-text">
+            <span class="brand-name">花筱灵</span>
+            <span class="brand-en">HANABI STAGE</span>
+          </div>
+        </div>
+
+        <!-- 滚动容器：窗口矮 / 工具组展开时整块可上下滚，别把底部「设置」顶出去 -->
+        <div class="sidebar-scroll" id="sidebar-scroll">
+          <nav class="nav" id="nav">
+            <div class="nav-label">浏览</div>
+            <button class="nav-item" data-nav="home">
+              <svg class="icon"><use href="#i-home"></use></svg>
+              <span>主页</span>
+            </button>
+            <button class="nav-item" data-nav="start">
+              <svg class="icon"><use href="#i-play"></use></svg>
+              <span>启动页</span>
+            </button>
+            <button class="nav-item" data-nav="gacha">
+              <svg class="icon"><use href="#i-star"></use></svg>
+              <span>抽卡</span>
+            </button>
+            <button class="nav-item" data-nav="song">
+              <svg class="icon"><use href="#i-mic"></use></svg>
+              <span>点歌台</span>
+            </button>
+            <button class="nav-item" data-nav="downloads">
+              <svg class="icon"><use href="#i-download"></use></svg>
+              <span>下载</span>
+              <span class="nav-badge" id="badge-downloads" hidden>0</span>
+            </button>
+            <button class="nav-item" data-nav="news">
+              <svg class="icon"><use href="#i-news"></use></svg>
+              <span>动态</span>
+            </button>
+            <div class="nav-group" id="nav-tools-group">
+              <button class="nav-item nav-item-parent" data-nav="tools" data-action="nav-tools-toggle" aria-expanded="false">
+                <svg class="icon"><use href="#i-wrench"></use></svg>
+                <span>工具</span>
+                <svg class="icon nav-caret"><use href="#i-chevron-right"></use></svg>
+              </button>
+              <!-- 子项由 app.js 按 game-features 的分类动态填充 -->
+              <div class="nav-sub" id="nav-tools-sub" hidden></div>
+            </div>
+            <button class="nav-item" data-nav="screenshots" hidden>
+              <svg class="icon"><use href="#i-image"></use></svg>
+              <span>截图管理</span>
+            </button>
+            <button class="nav-item" data-nav="graphics" hidden>
+              <svg class="icon"><use href="#i-settings"></use></svg>
+              <span>画质配置</span>
+            </button>
+            <div class="nav-label" style="margin-top: 18px">应用</div>
+            <button class="nav-item" data-nav="settings">
+              <svg class="icon"><use href="#i-settings"></use></svg>
+              <span>设置</span>
+            </button>
+          </nav>
+        </div>
+
+        <button class="sidebar-toggle" data-action="toggle-sidebar" title="收起侧栏">
+          <svg class="icon"><use href="#i-chevron-left"></use></svg>
+          <span>收起侧栏</span>
+        </button>
+
+        <button class="profile" id="profile-btn" title="打开设置">
+          <span class="avatar" id="profile-avatar">大</span>
+          <span class="profile-text">
+            <span class="profile-name" id="profile-name">大小姐</span>
+          </span>
+          <svg class="icon"><use href="#i-chevron-right"></use></svg>
+        </button>
+      </aside>
+
+      <main class="main">
+        <header class="titlebar">
+          <div class="titlebar-left">
+            <span class="dot"></span>
+            <strong id="tb-section">主页</strong>
+            <span class="titlebar-sep"></span>
+            <span>花筱灵启动器</span>
+          </div>
+          <div class="titlebar-right">
+            <span id="tb-version">v2.0.0</span>
+            <div class="window-controls">
+              <button class="window-control" data-action="window-minimize" title="最小化"><svg class="icon"><use href="#i-minus"></use></svg></button>
+              <button class="window-control" data-action="window-maximize" title="最大化"><svg class="icon"><use href="#i-maximize"></use></svg></button>
+              <button class="window-control window-control-close" data-action="window-close" title="关闭"><svg class="icon"><use href="#i-x"></use></svg></button>
+            </div>
+          </div>
+        </header>
+        <div class="view" id="view"></div>
+      </main>
+    </div>
+
+    <div id="modal-root"></div>
+    <div class="toast-root" id="toast-root"></div>
+
+    <audio id="song-audio" preload="metadata"></audio>
+
+    <div class="mini-player is-chip" id="mini-player" hidden>
+      <!-- 启动页形态：嵌在「选择游戏」标题右边的窄条 -->
+      <div class="mini-chip" id="mini-chip" data-mini-drag>
+        <button class="mini-chip-cover" id="mini-chip-cover" data-action="mini-open" title="打开点歌台"><span>♪</span></button>
+        <button class="mini-chip-copy" data-action="mini-expand" title="展开播放器">
+          <strong id="mini-chip-title">未播放</strong>
+          <small id="mini-chip-artist">点歌台</small>
+        </button>
+        <button class="mini-chip-btn" data-action="mini-toggle" title="播放 / 暂停"><svg class="icon"><use id="mini-chip-play-use" href="#i-play"></use></svg></button>
+        <button class="mini-chip-btn" data-action="mini-next" title="下一首"><svg class="icon"><use href="#i-chevron-right"></use></svg></button>
+      </div>
+
+      <!-- 展开形态 -->
+      <div class="mini-panel">
+        <div class="mini-panel-head">
+          <button class="mini-grip" data-mini-drag title="按住拖动到任意位置" aria-label="拖动播放器"><svg class="icon"><use href="#i-grip"></use></svg></button>
+          <button class="mini-cover" data-action="mini-open" title="打开点歌台"><span>♪</span></button>
+          <button class="mini-copy" data-action="mini-open" title="打开点歌台">
+            <strong id="mini-title">未播放</strong>
+            <small id="mini-artist">点歌台</small>
+          </button>
+          <button class="mini-collapse" data-action="mini-collapse" title="收起"><svg class="icon"><use href="#i-chevron-down"></use></svg></button>
+          <button class="mini-close" data-action="mini-close" title="关闭播放器"><svg class="icon"><use href="#i-x"></use></svg></button>
+        </div>
+        <div class="mini-controls">
+          <button class="mini-btn" data-action="mini-prev" title="上一首"><svg class="icon"><use href="#i-chevron-left"></use></svg></button>
+          <button class="mini-btn mini-btn-play" data-action="mini-toggle" title="播放/暂停"><svg class="icon"><use id="mini-play-use" href="#i-play"></use></svg></button>
+          <button class="mini-btn" data-action="mini-next" title="下一首"><svg class="icon"><use href="#i-chevron-right"></use></svg></button>
+          <button class="mini-btn" data-action="cycle-play-mode" title="播放模式（点击切换）"><svg class="icon"><use id="mini-mode-use" href="#i-repeat"></use></svg></button>
+          <button class="mini-btn" data-action="mini-list" title="歌曲列表"><svg class="icon"><use href="#i-library"></use></svg></button>
+        </div>
+        <div class="mini-volume">
+          <button class="mini-btn" data-action="mini-mute" title="静音"><svg class="icon"><use id="mini-volume-use" href="#i-volume"></use></svg></button>
+          <input class="mini-range" id="mini-volume" type="range" min="0" max="100" step="1" aria-label="音量" data-no-sound />
+          <span class="mini-volume-value" id="mini-volume-value">80</span>
+          <button class="mini-btn" data-action="open-audio-fx" title="音效设置"><svg class="icon"><use href="#i-headphones"></use></svg></button>
+        </div>
+        <span class="mini-progress"><i id="mini-progress-fill"></i></span>
+      </div>
+    </div>
+
+    <div class="task-dock" id="task-dock" hidden>
+      <div class="task-dock-list" id="task-dock-list"></div>
+    </div>
+
+    <script src="song-ui.js"></script>
+<script src="app.js"></script>
+  </body>
+</html>

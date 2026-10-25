@@ -1,0 +1,65 @@
+{
+  "name": "huaxiaoling-launcher",
+  "version": "2.0.2",
+  "private": true,
+  "description": "花筱灵启动器 - 一个原创的桌面游戏启动器",
+  "author": "HuaXiaoLing Studio",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "pack": "electron-builder --dir",
+    "build:win": "electron-builder --win nsis",
+    "screenshot": "electron scripts/screenshot.js"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.huaxiaoling.launcher",
+    "productName": "花筱灵启动器",
+    "copyright": "Copyright © 2026 HuaXiaoLing Studio",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "build/icon.png",
+      "LICENSE",
+      "README.md",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signExecutable": false,
+      "artifactName": "HuaXiaoLing-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "花筱灵启动器",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "deleteAppDataOnUninstall": false
+    },
+    "artifactName": "HuaXiaoLing-${version}-Portable.${ext}"
+  }
+}

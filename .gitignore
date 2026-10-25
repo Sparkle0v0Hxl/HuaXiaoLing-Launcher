@@ -1,0 +1,24 @@
+# 用户数据
+data/
+downloads/
+*.log
+
+# 构建产物
+build/
+build/release/
+*.zip
+
+# 本地清单（每次发版生成）
+latest.json
+
+# 备份
+*.bak
+*.bak-*
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 超过 GitHub 100MB 限制，从 Release 获取
+resources/endfield-packs/EndBilibili/
