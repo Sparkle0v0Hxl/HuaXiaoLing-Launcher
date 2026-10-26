@@ -7,12 +7,12 @@
 - GitHub：<https://github.com/Sparkle0v0Hxl>
 - 仓库：<https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher>
 - 职责：整体设计、界面与交互、启动器内核（硬链接切换 / 官方更新 / 抽卡记录 / 音乐与点歌台 / 公告聚合）、便携化打包与发布维护
+- **susgsudvgshghg**（[@susgsudvgshghg](https://github.com/susgsudvgshghg)）—— 参与负责部分外观和使用体验优化和开发测试
 
 角色插画与头像（`src/assets/character.png`、`src/assets/character-face.png`）同为作者本人原创，版权归作者所有。
 
 ## 贡献者
 
-- **susgsudvgshghg**（[@susgsudvgshghg](https://github.com/susgsudvgshghg)）—— 参与了部分开发工作。
 
 欢迎通过 Issue 与 Pull Request 参与；提交被合并后，名字会出现在这里。
 
