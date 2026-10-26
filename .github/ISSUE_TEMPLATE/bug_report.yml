@@ -1,0 +1,115 @@
+name: 🐛 问题反馈
+description: 启动器闪退、卡死、功能异常、更新失败……按这个填，能省掉来回问的几轮。
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提之前先确认三件事
+
+        - **能复现吗？** 写清楚是偶尔一次，还是每次必现。
+        - **动过设置吗？** 换过更新源、改过运行时目录、开过便携模式，都算。
+        - **是不是刚更新过？** 如果是更新后出问题，把 `data\tmp\updater.log` 一起传上来。
+
+        > 一份能直接定位问题的反馈 = **版本号 + 系统版本 + 复现步骤 + 日志 + 截图/录屏**。
+        > 只写「打不开」「闪退」这种，没有日志也没截图，基本只能互相猜。
+
+  - type: input
+    id: launcher-version
+    attributes:
+      label: 启动器版本
+      description: 设置页最下面「关于 / 版本」里能看到，形如 `2.0.5`。也可以看启动器目录下 `resources\app\package.json` 里的 `version`。
+      placeholder: 例如 2.0.5
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本
+      description: 按 Win + R，输入 `winver` 回车，把弹窗里的「版本」和「操作系统内部版本」都抄下来。
+      placeholder: 例如 Windows 11 专业版 24H2 (26100.4061)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: 这个问题出现的频率
+      options:
+        - 每次必现
+        - 经常出现（一半以上）
+        - 偶尔出现
+        - 只出现过一次，之后没再遇到
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 你做了什么、本来期望发生什么、实际发生了什么。越具体越好。
+      placeholder: |
+        我点开「启动页」→ 选中「绝区零」→ 按启动，窗口闪一下就没了。
+        期望：正常打开游戏。
+        实际：启动器自己退出了，再点图标也打不开。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 一步一步写，别人照着做应该能复现。
+      placeholder: |
+        1. 打开启动器
+        2. 进入「设置」把更新源改成 xxx
+        3. 返回主页点「启动」
+        4. 启动器闪退
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志文件
+      description: |
+        把日志直接拖进这个输入框（GitHub 会自动上传），或者复制内容粘贴进来。
+
+        - 崩溃/报错日志：`<启动器目录>\data\crash.log`
+        - 更新相关日志：`<启动器目录>\data\tmp\updater.log`
+        - 如果启动器完全打不开：把整个 `data\tmp` 文件夹打包传上来
+
+        便携模式下 `<启动器目录>` 就是你解压的那个文件夹；安装模式下在 `%APPDATA%` 附近，报错弹窗里会写完整路径。
+      placeholder: 直接把 crash.log 拖进来
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图 / 录屏
+      description: |
+        把截图或录屏直接拖进这个输入框。**能拍到报错弹窗、异常界面、或闪退前最后一帧的最有用**。
+        录屏建议 10~30 秒，只保留出问题的那一段。
+      placeholder: 拖入截图或 mp4
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他补充
+      description: 装了什么杀毒/加速器、是不是管理员启动、有没有改过 hosts、之前装过哪个版本……想到什么写什么。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜过现有 issue，没有重复的问题
+          required: true
+        - label: 上面的版本号、系统版本、日志、截图我都填了（缺了会被要求补）
+          required: true
