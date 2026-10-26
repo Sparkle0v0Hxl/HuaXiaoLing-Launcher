@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📌 提问规范 · 反馈前必读
+    url: https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/issues/2
+    about: 版本号、系统版本、日志、截图怎么给，一次说清楚；缺材料的 issue 会被要求补齐
+  - name: 📖 使用说明（README）
+    url: https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher#readme
+    about: 安装、更新源、便携模式、常见问题
