@@ -9,6 +9,12 @@
 > **作者：[Sparkle0v0Hxl](https://github.com/Sparkle0v0Hxl)** —— 独立开发与维护。
 > 问题反馈请开 [Issue](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/issues)，作者与贡献者名单见 [AUTHORS.md](AUTHORS.md)。
 
+> [!IMPORTANT]
+> **提 issue 之前先看 [📌 提问规范 · 反馈前必读](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/issues/2)**
+>
+> 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
+> 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
+
 **当前版本：v2.0.4**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
