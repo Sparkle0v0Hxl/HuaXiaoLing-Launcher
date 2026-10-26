@@ -499,4 +499,6 @@ Starward 与 XelLauncher 都是开源软件，这里致谢是因为确实受益�
 
 - 终末地图鉴数据参考 [bhaoo/endfield-gacha](https://github.com/bhaoo/endfield-gacha)；异环名称表与素材索引参考 [Anong0u0/NTE_Gacha_Exporter](https://github.com/Anong0u0/NTE_Gacha_Exporter)。
 - [sql.js](https://github.com/sql-js/sql.js)（MIT）用于读取本地抽卡 SQLite 数据库。
+- [提瓦特指南](https://github.com/BTMuli/TeyvatGuide)（TeyvatGuide）—— 战绩查询功能的参考实现之一
+- [胡桃重制版](https://github.com/SnapHutaoRemasteringProject/Snap.Hutao.Remastered)（Snap Hutao Remastered）—— 战绩查询功能的参考实现之一
 - 游戏名称、商标与官方素材归各自权利人所有。
