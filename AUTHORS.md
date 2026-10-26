@@ -23,3 +23,5 @@
 - [Starward](https://github.com/Scighost/Starward) —— 主要参考对象，服务器切换、硬链接去重、多客户端共存的思路与大量交互设计来源
 - XelLauncher —— 渠道包整理方式与 `load` 目录组织方式的参考
 - [sql.js](https://github.com/sql-js/sql.js)（MIT）—— 读取本地抽卡 SQLite 数据库
+- [提瓦特指南](https://github.com/BTMuli/TeyvatGuide)（TeyvatGuide）—— 战绩查询功能的参考实现之一
+- [胡桃重制版](https://github.com/SnapHutaoRemasteringProject/Snap.Hutao.Remastered)（Snap Hutao Remastered）—— 战绩查询功能的参考实现之一
