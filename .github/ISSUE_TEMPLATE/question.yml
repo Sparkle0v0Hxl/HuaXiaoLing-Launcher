@@ -1,0 +1,66 @@
+name: ❓ 使用提问
+description: 用法、配置、报错看不懂……只要不是明确的 bug，用这个。
+title: "[提问] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提问前先花 30 秒
+
+        - 去 **设置 → 关于** 看一眼版本号，提问时写上。
+        - 搜一下现有 issue 和 README，很多问题已经有人问过。
+        - **一句话提问通常拿不到答案**——把版本、系统、你点了什么、看到什么写清楚。
+
+  - type: input
+    id: launcher-version
+    attributes:
+      label: 启动器版本
+      description: 设置页「关于」里能看到，形如 `2.0.5`。
+      placeholder: 例如 2.0.5
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本
+      description: Win + R → 输入 `winver` → 抄下「版本」和「操作系统内部版本」。
+      placeholder: 例如 Windows 10 专业版 22H2 (19045.5011)
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 你的问题
+      description: 写得越具体越好。附上你看到的现象、报错原文、或者你想实现的效果。
+      placeholder: |
+        我想把游戏装在 D 盘，但启动器的「运行时目录」一直默认到 E 盘，这个能改吗？
+        我在设置里改了路径，重启后又变回去了。
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图 / 录屏
+      description: 把相关界面截图拖进来。**涉及设置项、报错、界面异常的，必须带图**，不然很难判断你说的是哪一块。
+      placeholder: 拖入截图
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（如果涉及报错或异常）
+      description: 有报错就传 `<启动器目录>\data\crash.log`；和更新有关就传 `data\tmp\updater.log`。没有报错可以留空。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜过现有 issue 和 README
+          required: true
