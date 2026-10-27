@@ -94,12 +94,41 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
   const best = pickBest(songs, song);
   if (!best?.id) return null;
 
+  // 先试换源接口：会员曲目只有它会返回完整音源
+  let matchedUrl = '';
+  try {
+    const matchJson = await neteaseGet(apiBase, '/song/url/match', { id: best.id });
+    if (typeof matchJson?.data === 'string') matchedUrl = matchJson.data;
+  } catch {
+    matchedUrl = '';
+  }
+
   // /song/url/v1 内部会自动触发 unblock（fee 1/4 或没有 url 时）
   let urlJson = null;
   try {
     urlJson = await neteaseGet(apiBase, '/song/url/v1', { id: best.id, level });
   } catch {
     urlJson = null;
+  }
+  const trialOnly = Boolean(urlJson?.data?.[0]?.freeTrialInfo);
+  if (matchedUrl) {
+    return {
+      url: String(matchedUrl).replace(/^http:/i, 'https:'),
+      title: String(best.name || song.title || ''),
+      artist: (best.ar || best.artists || []).map((a) => a.name).filter(Boolean).join(' / '),
+      cover: String(best.al?.picUrl || best.album?.picUrl || song.cover || '').replace(/^http:/i, 'https:'),
+      neteaseId: best.id,
+      level: 'standard',
+      br: 0,
+      unblocked: true,
+    };
+  }
+  if (trialOnly) {
+    try {
+      urlJson = await neteaseGet(apiBase, '/song/url', { id: best.id });
+    } catch {
+      urlJson = null;
+    }
   }
   if (!urlJson?.data?.[0]?.url) {
     try {

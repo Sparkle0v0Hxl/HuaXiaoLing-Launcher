@@ -93,6 +93,9 @@ const state = {
   noticeBoardLoading: false,
   noticeBoardUpdatedAt: 0,
   noticeBoardError: '',
+  // 更新弹窗的配图：米游社画师同人图，key 是游戏的 builtinKey。
+  // 主进程抓不到就是空表，versionHero() 会退回官网美术图，弹窗不会开天窗。
+  postArt: {},
   route: 'home',
   filter: 'all',
   search: '',
@@ -205,6 +208,7 @@ const state = {
 };
 let liveSocket = null;
 let liveHeartbeat = null;
+let liveBridgeTimer = null;
 
 try {
   const savedSongs = JSON.parse(localStorage.getItem('vela:songs') || '[]');
@@ -970,6 +974,19 @@ function versionHero(version) {
   const games = (state.games || []).filter((game) => game.coverUrl || game.startCoverUrl);
   if (!games.length) return entry;
   const pick = games[versionHash(version) % games.length];
+  /*
+   * 米游社画师图优先：它是联网抓的，带作者和帖子地址，
+   * 比官网美术图更适合放更新弹窗。抓不到就往下走官网那套。
+   */
+  const artist = (state.postArt || {})[pick.builtinKey];
+  if (artist && artist.image) {
+    return {
+      ...(entry || {}),
+      image: artist.image,
+      imageSource: artist.source || '',
+      imageCredit: artist.credit || '',
+    };
+  }
   const art = HERO_ART[pick.builtinKey];
   if (art) {
     return {
@@ -985,6 +1002,25 @@ function versionHero(version) {
     imageSource: pick.officialSite || '',
     imageCredit: pick.officialSite ? `${pick.name} 官网` : '',
   };
+}
+
+/**
+ * 取更新弹窗的配图。
+ * 主进程那边：有缓存就直接给，超过一周才去米游社抓一次；
+ * 没登录米游社或抓不到，返回的 items 是空的，界面自动用官网美术图。
+ * 配图只是锦上添花，所以这里任何失败都咽下去。
+ */
+async function loadPostArt(force = false) {
+  if (typeof api.postArt !== 'function') return;
+  try {
+    const result = await api.postArt(force);
+    const items = (result && result.items) || {};
+    if (!Object.keys(items).length) return;
+    state.postArt = items;
+    render({ preserveScroll: true });
+  } catch {
+    /* 忽略：没有配图也照样能更新 */
+  }
 }
 
 function openUpdateModal(info) {
@@ -1725,6 +1761,194 @@ function restoreFocus(snapshot) {
   }
 }
 
+/*
+ * 启动页的动态背景是 <video>，每次整页重绘（切服务器、游戏状态刷新）都会
+ * 把元素重新创建一遍，画面直接跳回第 0 秒 —— 看起来就像「又打开了一次启动页」。
+ * 重绘前把播放位置和暂停状态记下来，重绘后原样还回去；
+ * 换了游戏（src 变了）就不还原，免得新视频从中间开始播。
+ */
+/*
+ * 重绘时 <video> 是全新节点，currentTime 从 0 开始、元数据也还没到，
+ * 所以「读旧节点 + 写新节点」这条路在连续两次重绘时会读到 0 ——
+ * 表现就是点服务器展开面板、切服务器时动态背景一直跳回开头。
+ * 这里额外用一个模块级记忆记录最近一次真实播放进度，作为兜底。
+ */
+let startVideoMemo = { src: '', time: 0, paused: false };
+
+/*
+ * 换游戏时旧画面会作为过渡层压在顶上，于是 DOM 里同时存在两个 .start-art。
+ * 所有「当前画面」的查找都必须跳过过渡层，否则 querySelector 会命中旧的
+ * 那一层 —— video-ready 加错节点，新视频一直是 opacity:0，用户看到的就是
+ * 「换游戏之后只剩静态图」。下面这个选择器是唯一入口，别再手写 .start-art。
+ */
+const START_ART_LIVE = '.start-art:not(.start-art-prev)';
+const START_VIDEO_LIVE = `${START_ART_LIVE} video[data-start-video]`;
+
+function liveStartArt(root = dom.view) {
+  return root.querySelector(START_ART_LIVE);
+}
+
+function liveStartVideo(root = dom.view) {
+  return root.querySelector(START_VIDEO_LIVE);
+}
+
+function memoStartVideo() {
+  const video = liveStartVideo();
+  if (!video) return null;
+  const src = video.getAttribute('src') || '';
+  const live = {
+    src,
+    time: Number(video.currentTime) || 0,
+    paused: video.paused,
+  };
+  // 旧节点已经有真实进度：直接用它
+  if (live.time > 0.05 || video.readyState >= 1) return live;
+  // 旧节点是刚建出来的（进度 0 且未就绪）：退回记忆值
+  if (startVideoMemo.src === src) {
+    return { src, time: startVideoMemo.time, paused: live.paused };
+  }
+  return live;
+}
+
+function restoreStartVideo(memo) {
+  if (!memo) return;
+  const video = liveStartVideo();
+  if (!video) return;
+  if ((video.getAttribute('src') || '') !== memo.src) return;
+  const seek = () => {
+    if (memo.time > 0.05 && Number.isFinite(video.duration) && memo.time < video.duration) {
+      try {
+        video.currentTime = memo.time;
+      } catch {
+        /* 元数据还没就绪，下一次重绘再还原 */
+      }
+    }
+    if (memo.paused) video.pause();
+    else video.play().catch(() => {});
+  };
+  if (video.readyState >= 1) seek();
+  else video.addEventListener('loadedmetadata', seek, { once: true });
+}
+
+/*
+ * 切游戏 / 切服务器时整块 DOM 会重建，<video> 也跟着换新，
+ * 新 video 在解出第一帧之前是空白，于是先露出下面的静态版本图 ——
+ * 用户看到的就是「先闪一下静态图再放视频」（终末地、异环最明显）。
+ * 做法：video 默认透明，真正有画面后再淡入；如果换的是同一个源，
+ * 直接把就绪状态接上，连这一下淡入都省掉。
+ */
+
+/*
+ * 重绘会把 .start-art 整块换掉，新 <video> 从零开始加载，
+ * 于是先露一下静态版本图，再跳成视频（终末地、异环最明显）。
+ * 这里做画面交接：
+ *   · 指纹相同（切服务器、开合面板）→ 直接复用旧节点，视频不动
+ *   · 指纹不同（换游戏）→ 旧画面盖在上面，新视频就绪后再淡出
+ */
+function handoffStartArt(prevArt) {
+  const screen = dom.view.querySelector('.start-screen');
+  if (!screen || !prevArt) return;
+  const nextArt = liveStartArt(screen);
+  if (!nextArt || nextArt === prevArt) return;
+
+  const prevKey = prevArt.dataset.artKey || '';
+  const nextKey = nextArt.dataset.artKey || '';
+
+  if (prevKey && prevKey === nextKey) {
+    // 同一画面：旧节点（含正在播放的视频）直接顶替新节点
+    nextArt.replaceWith(prevArt);
+    return;
+  }
+
+  // 换画面：旧画面当过渡层压在顶部
+  prevArt.classList.add('start-art-prev');
+  screen.insertBefore(prevArt, screen.firstChild);
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    prevArt.classList.add('start-art-prev-out');
+    setTimeout(() => prevArt.remove(), 340);
+  };
+
+  const video = nextArt.querySelector('video[data-start-video]');
+  if (!video) {
+    setTimeout(close, 260);
+    return;
+  }
+  if (video.readyState >= 2) {
+    setTimeout(close, 200);
+    return;
+  }
+  video.addEventListener('loadeddata', () => setTimeout(close, 200), { once: true });
+  setTimeout(close, 2600);
+}
+
+let startArtReadySrc = '';
+
+function bindStartArtVideo() {
+  const wrap = liveStartArt();
+  if (!wrap) return;
+  const video = wrap.querySelector('video[data-start-video]');
+  if (!video) return;
+  const src = video.getAttribute('src') || '';
+  const markReady = () => {
+    startArtReadySrc = src;
+    wrap.classList.add('video-ready');
+  };
+  // 同一个视频源：上一次播放过，直接接上，不再闪图
+  if (startArtReadySrc && startArtReadySrc === src) wrap.classList.add('video-ready');
+  if (video.readyState >= 2) markReady();
+  else video.addEventListener('loadeddata', markReady, { once: true });
+  video.addEventListener('playing', markReady, { once: true });
+  // 把真实播放进度记到模块里，下一次重绘即使新节点还没就绪也能接上
+  video.addEventListener('timeupdate', () => {
+    if (video.currentTime > 0.05) {
+      startVideoMemo = { src, time: video.currentTime, paused: video.paused };
+    }
+  });
+  video.addEventListener('pause', () => {
+    startVideoMemo = {
+      src,
+      time: Number(video.currentTime) || startVideoMemo.time,
+      paused: true,
+    };
+  });
+  video.addEventListener('play', () => {
+    startVideoMemo = { src, time: Number(video.currentTime) || 0, paused: false };
+  });
+  video.addEventListener('error', () => {
+    if (startArtReadySrc === src) startArtReadySrc = '';
+    wrap.classList.remove('video-ready');
+    video.remove();
+  });
+}
+
+/**
+ * 给顶栏小按钮挂上角色纹样：花火的笑脸面具 + 火花的兔子耳朵。
+ * 用真元素而不是伪元素 —— 这些按钮的 ::before 是光轨、::after 是底光，都占着。
+ * 关闭键用冷白红，别和粉金混在一起。
+ */
+function decorateCharacterMotifs() {
+  const selector = [
+    '.window-controls .window-control',
+    '.start-screen .start-top .chrome-btn',
+    '.start-screen .start-top .start-video-toggle',
+    '.page-head-actions .btn-ghost',
+  ].join(', ');
+  document.querySelectorAll(selector).forEach((btn) => {
+    if (btn.querySelector(':scope > .hx-orn')) return;
+    const orn = document.createElement('span');
+    orn.className = 'hx-orn';
+    orn.setAttribute('aria-hidden', 'true');
+    if (btn.classList.contains('window-control-close') || btn.classList.contains('chrome-close')) {
+      orn.classList.add('hx-orn-danger');
+    }
+    btn.appendChild(orn);
+  });
+}
+
 function render(options = {}) {
   if (!state.games.length && !state.app.version) return;
   document.body.classList.toggle('start-mode', state.route === 'start');
@@ -1759,15 +1983,21 @@ function render(options = {}) {
    */
   const lyricBox = dom.view.querySelector('#song-lyrics');
   const lyricScroll = lyricBox ? lyricBox.scrollTop : 0;
+  const videoMemo = memoStartVideo();
+  const prevArt = dom.view.querySelector(`.start-screen ${START_ART_LIVE}`);
   dom.view.innerHTML = view ? view() : homeView();
+  handoffStartArt(prevArt);
   if (options.preserveScroll) dom.view.scrollTop = scroll;
   else dom.view.scrollTop = 0;
   const nextLyricBox = dom.view.querySelector('#song-lyrics');
   if (nextLyricBox && lyricScroll) nextLyricBox.scrollTop = lyricScroll;
   bindView();
+  restoreStartVideo(videoMemo);
+  bindStartArtVideo();
   setupStartDrawerSync();
   updateSongChrome();
   renderQuickPanel();
+  decorateCharacterMotifs();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1801,6 +2031,7 @@ function stageHero(latest, mood) {
     <section class="hero">
       <div class="hero-bg" style="background-image:${esc(cssUrl('assets/character.png'))}"></div>
       <div class="hero-shade"></div>
+      <div class="hero-sparxie" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></div>
       <div class="hero-sparks" aria-hidden="true">
         <svg viewBox="0 0 260 260">
           <g fill="none" stroke="currentColor">
@@ -1928,11 +2159,15 @@ function startView() {
   // 优先用「去文字」版本作为背景，避免官方图上的标题和我们的游戏名打架
   const cover = selected.startCoverUrl || selected.coverUrl || cssUrl('assets/character.png');
   const coverSrc = cover.replace(/^url\("|"\)$/g, '');
+  // 画面指纹：切服务器 / 开合面板时画面没变，就能复用同一层 DOM，
+  // 视频既不重载也不跳进度，从根上消掉「先闪静态图」
+  const artKey = [selected.id, coverSrc, selected.backgroundVideo || ''].join('|');
+
   // 有背景视频时，视频里也可能烧录了文字，叠加一层文字遮罩带
   const hasVideo = Boolean(selected.backgroundVideo);
   return `
     <div class="start-screen${selected.builtinKey === 'endfield' ? ' start-screen-endfield' : ''}" style="--start-cover:${cover}">
-      <div class="start-art${selected.builtinKey === 'endfield' ? ' start-art-cinema' : ''}${selected.backgroundVideo ? '' : ' start-art-pan'}" style="background-image:${esc(cssUrl(coverSrc))}">
+      <div class="start-art${selected.builtinKey === 'endfield' ? ' start-art-cinema' : ''}${selected.backgroundVideo ? '' : ' start-art-pan'}" data-art-key="${esc(artKey)}" style="background-image:${esc(cssUrl(coverSrc))}">
         <img src="${esc(coverSrc)}" alt="" referrerpolicy="no-referrer" loading="eager" data-cover />
         ${
           selected.backgroundVideo
@@ -1948,6 +2183,14 @@ function startView() {
           <img class="start-brand-mark" src="assets/character-face.png" alt="" aria-hidden="true" />
           <span>花筱灵启动器</span>
         </div>
+        <div class="start-video-tools">
+          <button class="start-video-toggle" data-action="toggle-start-video" title="${hasVideo ? '暂停动态背景' : '这个游戏没有官方动态背景'}" aria-label="暂停或播放动态背景" ${hasVideo ? '' : 'disabled'}>
+            <svg class="icon" aria-hidden="true"><use id="start-video-use" href="#i-pause"></use></svg>
+          </button>
+          <button class="start-video-toggle" data-action="export-start-video" title="${hasVideo ? '把这个动态背景另存为视频文件' : '这个游戏没有官方动态背景'}" aria-label="保存动态背景" ${hasVideo ? '' : 'disabled'}>
+            ${icon('download')}
+          </button>
+        </div>
         <div class="start-window-controls">
           <button class="chrome-btn" data-action="window-minimize" title="最小化" aria-label="最小化">${icon('minus')}</button>
           <button class="chrome-btn" data-action="window-maximize" title="最大化 / 还原" aria-label="最大化">${icon('maximize')}</button>
@@ -1955,6 +2198,25 @@ function startView() {
         </div>
       </header>
       <div class="start-main">
+        <div class="start-sparks" aria-hidden="true">
+          <svg viewBox="0 0 260 260">
+            <g fill="none" stroke="currentColor">
+              <circle cx="130" cy="130" r="52" opacity=".5" />
+              <circle cx="130" cy="130" r="88" opacity=".22" />
+              <circle cx="130" cy="130" r="126" opacity=".1" />
+              <path d="M130 6v248M6 130h248M42 42l176 176M218 42 42 218" opacity=".12" />
+              <path d="M130 46c7 45 29 67 74 74-45 7-67 29-74 74-7-45-29-67-74-74 45-7 67-29 74-74Z" opacity=".32" />
+            </g>
+            <g fill="currentColor">
+              <circle cx="130" cy="18" r="2.2" opacity=".8" />
+              <circle cx="244" cy="130" r="1.6" opacity=".55" />
+              <circle cx="130" cy="244" r="1.4" opacity=".4" />
+              <circle cx="16" cy="130" r="1.8" opacity=".5" />
+              <circle cx="198" cy="58" r="2.6" opacity=".7" />
+              <circle cx="66" cy="198" r="1.8" opacity=".45" />
+            </g>
+          </svg>
+        </div>
         <div class="start-kicker"><span class="line"></span>${esc(activeServer?.name || '未配置服务器')}</div>
         <div class="start-titlebox"><h1>${esc(selected.name)}</h1></div>
         <p class="start-sub">${esc(selected.subtitle || selected.description || '准备好继续了吗？')}</p>
@@ -1988,20 +2250,6 @@ function startView() {
           </div>
         </details>
       </div>
-      ${state.startServerMenu ? '<button class="start-menu-scrim" data-action="start-server-menu" aria-label="关闭服务器选择"></button>' : ''}
-      ${startServerPanel(selected)}
-      ${
-        hasVideo
-          ? `<div class="start-video-tools">
-              <button class="start-video-toggle" data-action="toggle-start-video" title="暂停动态背景" aria-label="暂停或播放动态背景">
-                <svg class="icon" aria-hidden="true"><use id="start-video-use" href="#i-pause"></use></svg>
-              </button>
-              <button class="start-video-toggle" data-action="export-start-video" title="把这个动态背景另存为视频文件" aria-label="保存动态背景">
-                ${icon('download')}
-              </button>
-            </div>`
-          : ''
-      }
       <div class="start-games">
         <div class="start-games-head">
           <strong>${icon('chevron-down', 'start-games-chevron')}选择游戏</strong>
@@ -2018,7 +2266,7 @@ function startView() {
                 </span>
                 <span class="start-game-copy">
                   <strong>${esc(game.name)}</strong>
-                  <small>${game.running ? '运行中' : game.installed ? '已就绪' : '未配置'}</small>
+                  ${game.running ? '<small>运行中</small>' : ''}
                 </span>
                 <span class="start-game-state ${game.running ? 'is-running' : game.installed ? 'is-ready' : ''}"></span>
               </button>`
@@ -2026,6 +2274,8 @@ function startView() {
             .join('')}
         </div>
       </div>
+      <button class="start-menu-scrim" data-action="start-server-menu" aria-label="关闭服务器选择"></button>
+      ${startServerPanel(selected)}
     </div>`;
 }
 
@@ -2040,6 +2290,13 @@ function startView() {
  * 启动页的服务器选择器：参考 Starward 的做法，只保留「当前服务器」一行，
  * 点开才展开完整列表；切换、检测、硬链接、管理都在弹层里完成。
  */
+/* 服务器面板是纯 DOM 开合，离开/切换时要主动把类名摘掉，否则下次进来是展开态。 */
+function closeStartServerMenu() {
+  state.startServerMenu = false;
+  document.querySelector('.start-dock')?.classList.remove('is-menu-open');
+  document.querySelector('.start-screen')?.classList.remove('dock-open');
+}
+
 function startServerPanel(game) {
   const servers = game.servers || [];
   const active =
@@ -2082,18 +2339,14 @@ function startServerPanel(game) {
         </span>
         <span class="start-server-pick-caret">${icon('chevron-down')}</span>
       </button>
-      ${
-        open
-          ? `<div class="start-server-menu" role="listbox" aria-label="服务器列表">
+      <div class="start-server-menu" role="listbox" aria-label="服务器列表">
               ${items || '<p class="start-server-empty">还没有服务器</p>'}
               <div class="start-server-menu-foot">
                 <button class="start-server-foot-btn" data-action="start-detect" data-game="${esc(game.id)}">${icon('refresh')}检测</button>
                 <button class="start-server-foot-btn" data-action="start-link" data-game="${esc(game.id)}">${icon('link')}硬链接</button>
                 <button class="start-server-foot-btn" data-action="start-server-manage" data-game="${esc(game.id)}">${icon('settings')}管理</button>
               </div>
-            </div>`
-          : ''
-      }
+            </div>
       <button class="start-dock-play" data-action="${game.installed ? 'start-selected' : game.builtin ? 'detect-game' : 'edit-game'}" data-id="${esc(game.id)}">
         ${icon(game.installed ? 'play' : game.builtin ? 'refresh' : 'wrench')}
         <span>${game.installed ? '开始游戏' : game.builtin ? '检测安装' : '配置游戏'}</span>
@@ -2135,7 +2388,7 @@ function openStartServerManager(gameId) {
 
 /** 让暂停按钮的图标和文案跟着视频状态走。 */
 function restoreStartVideoState() {
-  const video = document.querySelector('video[data-start-video]');
+  const video = liveStartVideo();
   if (!video) return;
   const gameId = state.startGameId || (state.games[0] && state.games[0].id) || '';
   const paused = wasStartVideoPaused(gameId);
@@ -2199,6 +2452,67 @@ function wasStartVideoPaused(gameId) {
   } catch {
     return false;
   }
+}
+
+/**
+ * 花火 / 火花：官方透明立绘（1306 / 1501），摆在主页当后台双人卡。
+ *
+ * 这两张卡不是纯摆设：花火盯着游戏（最近在玩 + 累计时长，点一下直接开那个游戏），
+ * 火花盯着点歌台（正在播放 / 队列，点一下进点歌台）。数据都取自本机现有状态。
+ *
+ * 位置：homeView() 里放在最新动态之后（主页最底部），平时只露立绘，hover 才展开。
+ */
+function characterDuoMarkup() {
+  const recent =
+    [...state.games]
+      .filter((game) => game.lastPlayed)
+      .sort((a, b) => new Date(b.lastPlayed || 0) - new Date(a.lastPlayed || 0))[0] ||
+    state.games[0] ||
+    null;
+  const totalSeconds = state.games.reduce((sum, game) => sum + (game.playSeconds || 0), 0);
+  const song = currentSongEntry();
+  const songTitle = song ? String(song.title || song.name || '') : '';
+  const songArtist = song ? String(song.artist || song.singer || '') : '';
+  // 这里必须自己取一次 audio：它只是别处函数里的局部变量，
+  // 直接写 audio.src 会在渲染主页时抛 "audio is not defined"，整个主页都切不过去。
+  const audio = document.querySelector('#song-audio');
+  const playing = Boolean(song) && Boolean(audio && audio.src) && Boolean(audio && !audio.paused);
+  const queue = state.songs.length;
+
+  const gameStat = recent
+    ? `${recent.name}`
+    : '还没有开过场';
+  const gameSub = recent
+    ? `累计 ${formatPlaytime(totalSeconds)} · 点一下接着演`
+    : '在游戏库里挑一个开场吧';
+
+  const songStat = song ? songTitle || '未知曲目' : '点歌台空着';
+  const songSub = song
+    ? `${playing ? '正在播放' : '已暂停'}${songArtist ? ' · ' + songArtist : ''} · 队列 ${queue} 首`
+    : `队列 ${queue} 首 · 点一下去点歌`;
+
+  return `
+    <div class="char-duo">
+      <button type="button" class="char-duo-card is-sparkle" data-action="duo-game"${
+        recent ? ` data-game="${esc(recent.id)}"` : ''
+      }>
+        <img src="assets/sparkle.png" alt="花火" />
+        <div class="char-duo-copy">
+          <strong>花火</strong>
+          <em>假面愚者。把每一场演出都当成即兴，后台的灯从不为她熄灭。</em>
+          <span class="char-duo-stat"><b>${esc(gameStat)}</b><i>${esc(gameSub)}</i></span>
+        </div>
+      </button>
+      <button type="button" class="char-duo-card is-sparxie" data-action="duo-song">
+        <img src="assets/sparxie.png" alt="火花" />
+        <div class="char-duo-copy">
+          <strong>火花</strong>
+          <em>烟花一响，后台就热闹起来。花花兔和火火菇也跟着上场。</em>
+          <span class="char-duo-stat"><b>${esc(songStat)}</b><i>${esc(songSub)}</i></span>
+        </div>
+      </button>
+    </div>
+  `;
 }
 
 function homePlaytimeMarkup() {
@@ -2285,6 +2599,7 @@ function homeView() {
       <div class="page">
         ${head}
         <div class="empty">
+          <div class="empty-char" aria-hidden="true"><img src="assets/character-face.png" alt="" /></div>
           <div class="empty-icon">${icon('gamepad')}</div>
           <h3>把第一款游戏放进来</h3>
           <p>选择游戏的启动程序，挑一张封面，剩下的交给花筱灵。游戏资料、游玩时长和设置都只保存在这台电脑上。</p>
@@ -2322,6 +2637,7 @@ function homeView() {
         <button class="link-btn" data-nav="news">全部动态 ${icon('chevron-right')}</button>
       </div>
       <div class="news-grid">${state.news.slice(0, 3).map(newsCard).join('')}</div>
+      ${characterDuoMarkup()}
     </div>`;
 }
 
@@ -2706,11 +3022,88 @@ function playModeOptions(short = false) {
   ).join('');
 }
 
+/* 音质档位：和 electron 侧 /song/url/v1 的 level 参数一一对应 */
+const QUALITY_LEVELS = [
+  ['standard', '标准'],
+  ['higher', '较高'],
+  ['exhigh', '极高 320K'],
+  ['lossless', '无损'],
+  ['hires', 'Hi-Res'],
+];
+
+function qualityLabel(level) {
+  const hit = QUALITY_LEVELS.find(([key]) => key === level);
+  return hit ? hit[1] : QUALITY_LEVELS[0][1];
+}
+
+/**
+ * 底部工具条上的小下拉。
+ *
+ * 原生 <select> 的弹层方向由系统决定，播放器贴在窗口底边时只能往下弹，
+ * 会被窗口裁掉、点不到下面的选项，所以这里自己画一个向上展开的菜单。
+ */
+function songPopMarkup(id, options, { current, cls = '', title = '' } = {}) {
+  const active = options.find((item) => item[0] === current) || options[0];
+  return `
+    <div class="song-pop${cls ? ` ${cls}` : ''}" data-pop="${esc(id)}">
+      <button class="song-pop-trigger" data-action="song-pop-toggle" data-pop="${esc(id)}" title="${esc(title)}">
+        <span class="song-pop-label">${esc(active[1])}</span>
+        ${icon('chevron-up', 'xs')}
+      </button>
+      <div class="song-pop-menu" role="listbox" aria-label="${esc(title)}">
+        ${options
+          .map(
+            ([value, label]) =>
+              `<button class="song-pop-item${value === current ? ' is-active' : ''}" role="option" aria-selected="${value === current}" data-action="song-pop-pick" data-pop="${esc(id)}" data-value="${esc(value)}">${esc(label)}</button>`
+          )
+          .join('')}
+      </div>
+    </div>`;
+}
+
+function qualityPopMarkup(id, cls = '') {
+  return songPopMarkup(id, QUALITY_LEVELS, { current: state.songQuality, cls, title: '音质' });
+}
+
+function playModePopMarkup(id, cls = '') {
+  return songPopMarkup(id, PLAY_MODES.map((item) => [item.key, item.label]), {
+    current: state.playMode,
+    cls,
+    title: '播放模式',
+  });
+}
+
+/** 下拉被切换后同步按钮文案和高亮项（不重绘整页）。 */
+function refreshSongPops() {
+  document.querySelectorAll('.song-pop').forEach((wrap) => {
+    const id = wrap.dataset.pop || '';
+    const isMode = id.indexOf('mode') >= 0;
+    const current = isMode ? state.playMode : state.songQuality;
+    const options = isMode ? PLAY_MODES.map((item) => [item.key, item.label]) : QUALITY_LEVELS;
+    const label = wrap.querySelector('.song-pop-label');
+    if (label) {
+      const hit = options.find(([key]) => key === current) || options[0];
+      label.textContent = hit[1];
+    }
+    wrap.querySelectorAll('.song-pop-item').forEach((item) => {
+      const on = item.dataset.value === current;
+      item.classList.toggle('is-active', on);
+      item.setAttribute('aria-selected', String(on));
+    });
+  });
+}
+
+/** 点空白处把展开的下拉收起来。 */
+function closeSongPops() {
+  document.querySelectorAll('.song-pop.is-open').forEach((wrap) => wrap.classList.remove('is-open'));
+}
+
 function applyPlayModeUi() {
   const meta = playModeMeta();
   document.querySelectorAll('#song-mode, #dock-play-mode').forEach((select) => {
     select.value = state.playMode;
   });
+  refreshSongPops();
   const miniIcon = document.querySelector('#mini-mode-use');
   if (miniIcon) miniIcon.setAttribute('href', `#i-${meta.icon}`);
   const miniButton = document.querySelector('[data-action="cycle-play-mode"]');
@@ -3104,8 +3497,46 @@ function applyMiniPosition(mini = document.querySelector('#mini-player')) {
   mini.style.bottom = 'auto';
 }
 
+/**
+ * 小播放器总开关：关掉之后，即使还在放歌、即使来回切界面，都不再冒出来，
+ * 直到用户在设置或点歌台里重新打开。默认开着。
+ */
+const MINI_ENABLED_KEY = 'vela:mini-enabled';
+
+function isMiniEnabled() {
+  try {
+    return localStorage.getItem(MINI_ENABLED_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function setMiniEnabled(enabled) {
+  try {
+    localStorage.setItem(MINI_ENABLED_KEY, enabled ? '1' : '0');
+  } catch {
+    /* 可选记忆 */
+  }
+  const mini = document.querySelector('#mini-player');
+  if (!enabled && mini) {
+    mini.hidden = true;
+    mini.style.setProperty('display', 'none', 'important');
+  }
+  updateSongChrome();
+  if (enabled) requestAnimationFrame(() => applyMiniPosition(mini));
+}
+
 /** 窄条 / 展开卡片 的形态记忆，默认收成窄条。 */
 const MINI_EXPANDED_KEY = 'vela:mini-expanded';
+
+/**
+ * 展开前那一刻窄条所在的左上角坐标。
+ *
+ * 收起时回到这里，才是用户说的「按原位收缩」。
+ * 之前拿展开卡片的左上角当锚点，而卡片比窄条宽一圈、高一截，
+ * 收起后窄条就贴在卡片的左上角上 —— 看起来就是「往左上缩了一下」。
+ */
+let miniExpandOrigin = null;
 
 function isMiniExpanded() {
   try {
@@ -3118,6 +3549,13 @@ function isMiniExpanded() {
 function setMiniExpanded(expanded) {
   const mini = document.querySelector('#mini-player');
   if (!mini) return;
+  const before = mini.getBoundingClientRect();
+  const wasExpanded = !mini.classList.contains('is-chip');
+  if (expanded && !wasExpanded) {
+    // 记住窄条现在的位置，收起时原样回去（用户要的「按原位收缩」）
+    miniExpandOrigin = { x: before.left, y: before.top };
+    delete mini.dataset.draggedSinceExpand;
+  }
   mini.classList.toggle('is-chip', !expanded);
   try {
     localStorage.setItem(MINI_EXPANDED_KEY, expanded ? '1' : '0');
@@ -3126,6 +3564,75 @@ function setMiniExpanded(expanded) {
   }
   // 形态变化后尺寸不同，重新夹回可视区
   requestAnimationFrame(() => {
+    /*
+     * 从展开卡片收回窄条：优先回到展开前那个位置；
+     * 如果展开期间用户把卡片拖走了，就以卡片中心为锚点收，
+     * 这样视觉上也是「原地缩小」，而不是飘到某个角上。
+     */
+    if (!expanded && wasExpanded) {
+      // 启动页收起：直接嵌回抽屉标题行的槽里，别让窄条飘在固定定位上
+      if (state.route === 'start') {
+        miniExpandOrigin = null;
+        delete mini.dataset.draggedSinceExpand;
+        positionStartMini(mini);
+        return;
+      }
+      mini.classList.remove('is-docked');
+      const dragged = mini.dataset.draggedSinceExpand === '1';
+      const width = mini.offsetWidth || 214;
+      const height = mini.offsetHeight || 52;
+      const target =
+        miniExpandOrigin && !dragged
+          ? { x: miniExpandOrigin.x, y: miniExpandOrigin.y }
+          : {
+              x: before.left + before.width / 2 - width / 2,
+              y: before.top + before.height / 2 - height / 2,
+            };
+      const anchored = clampMiniPosition(mini, target.x, target.y);
+      mini.style.left = `${anchored.x}px`;
+      mini.style.top = `${anchored.y}px`;
+      mini.style.right = 'auto';
+      mini.style.bottom = 'auto';
+      miniExpandOrigin = null;
+      delete mini.dataset.draggedSinceExpand;
+      try {
+        localStorage.setItem(
+          miniPosKey(),
+          JSON.stringify({ x: Math.round(anchored.x), y: Math.round(anchored.y) })
+        );
+      } catch {
+        /* 位置持久化是可选的 */
+      }
+      return;
+    }
+    /*
+     * 启动页展开：chip 原本内嵌在抽屉标题行右侧的槽里（position: static !important），
+     * 直接去掉 is-chip 只会让卡片卡在槽内被 overflow 裁掉、看起来「没弹出来」。
+     * 这里把 mini 挪回 body，改成固定定位停在 chip 原位，卡片才能真正浮出来。
+     */
+    if (expanded && state.route === 'start') {
+      if (mini.parentElement !== document.body) document.body.appendChild(mini);
+      [
+        'position',
+        'left',
+        'right',
+        'top',
+        'bottom',
+        'width',
+        'max-width',
+        'margin',
+        'transform',
+        'display',
+      ].forEach((prop) => mini.style.removeProperty(prop));
+      const origin = miniExpandOrigin || { x: before.left, y: before.top };
+      const position = clampMiniPosition(mini, origin.x, origin.y);
+      mini.style.position = 'fixed';
+      mini.style.left = `${position.x}px`;
+      mini.style.top = `${position.y}px`;
+      mini.style.right = 'auto';
+      mini.style.bottom = 'auto';
+      return;
+    }
     const rect = mini.getBoundingClientRect();
     const position = clampMiniPosition(mini, rect.left, rect.top);
     mini.style.left = `${position.x}px`;
@@ -3148,7 +3655,8 @@ function setupStartDrawerSync() {
   const sync = () => {
     const open = drawer.matches(':hover') || drawer.matches(':focus-within');
     mini.classList.toggle('drawer-open', open);
-    if (mini.classList.contains('is-on-start')) positionStartMini(mini);
+    // 展开形态已挪到 body 固定定位，别在抽屉 hover 时把它拽回槽里
+    if (mini.classList.contains('is-on-start') && !isMiniExpanded()) positionStartMini(mini);
   };
   drawer.addEventListener('mouseenter', sync);
   drawer.addEventListener('mouseleave', sync);
@@ -3274,6 +3782,8 @@ function setupMiniPlayer() {
     window.removeEventListener('pointercancel', end);
     if (!wasMoved) return;
     mini.dataset.justDragged = '1';
+    // 展开状态下拖过：收起时就不能再回到展开前的老位置了，改按卡片中心收
+    if (!mini.classList.contains('is-chip')) mini.dataset.draggedSinceExpand = '1';
     window.setTimeout(() => delete mini.dataset.justDragged, 260);
     try {
       localStorage.setItem(
@@ -3326,11 +3836,13 @@ function setupMiniPlayer() {
   window.addEventListener('resize', () => {
     if (mini.hidden) return;
     if (mini.classList.contains('is-on-start')) {
-      positionStartMini(mini);
-      return;
-    }
-    // 停靠态跟着侧栏走，窗口变化后重新贴一次，别只是夹紧在旧坐标上
-    if (mini.classList.contains('is-docked')) {
+      // 启动页收起形态跟着抽屉标题行走；展开形态保持固定定位，窗口变了就重新夹紧
+      if (!isMiniExpanded()) {
+        positionStartMini(mini);
+        return;
+      }
+    } else if (mini.classList.contains('is-docked')) {
+      // 停靠态跟着侧栏走，窗口变化后重新贴一次，别只是夹紧在旧坐标上
       applyMiniPosition(mini);
       return;
     }
@@ -3352,7 +3864,8 @@ function updateSongChrome() {
   if (!audio || !mini) return;
   applyPlayModeUi();
   const playing = Boolean(audio.src && !audio.paused);
-  const visible = Boolean(audio.src) && state.route !== 'song';
+  // 总开关关掉时，就算是正在放歌也不显示（否则切一次界面它又自己冒出来）
+  const visible = isMiniEnabled() && Boolean(audio.src) && state.route !== 'song';
   mini.hidden = !visible;
   if (visible) mini.style.removeProperty('display');
   else mini.style.setProperty('display', 'none', 'important');
@@ -3366,15 +3879,23 @@ function updateSongChrome() {
     const onStart = state.route === 'start';
     // 收起形态统一成窄条：启动页嵌在「选择游戏」右边，其它页面停靠在侧栏上
     mini.classList.toggle('is-on-start', onStart);
-    mini.classList.toggle('is-start-chip', onStart);
+    // 启动页展开形态是 body 固定定位的浮卡，不能再挂 is-start-chip（其 CSS 是 position:static）
+    mini.classList.toggle('is-start-chip', onStart && !isMiniExpanded());
     mini.classList.toggle('is-chip', !isMiniExpanded());
     mini.classList.remove('is-chip');
     if (!isMiniExpanded()) mini.classList.add('is-chip');
 
     if (onStart) {
-      positionStartMini(mini);
+      // 启动页：收起形态由 positionStartMini 内嵌在抽屉标题行右侧的槽里；
+      // 展开形态已经由 setMiniExpanded 挪到 body 固定定位，别再用 positionStartMini 拽回去
+      if (!isMiniExpanded()) {
+        positionStartMini(mini);
+      }
     } else {
       unmountStartMini(mini);
+      // 离开启动页：之前记录的原位收起锚点是启动页槽里的坐标，不能再用于主页
+      miniExpandOrigin = null;
+      delete mini.dataset.draggedSinceExpand;
       if (!mini.hidden) {
         // 离开启动页：清掉启动页留下的内联定位，交回按场景记忆的位置
         ['position', 'left', 'right', 'top', 'bottom', 'width'].forEach((prop) =>
@@ -3656,6 +4177,13 @@ async function decodeBiliFrame(data) {
 function disconnectBiliLive() {
   if (liveHeartbeat) clearInterval(liveHeartbeat);
   liveHeartbeat = null;
+  if (liveBridgeTimer) clearInterval(liveBridgeTimer);
+  liveBridgeTimer = null;
+  try {
+    if (state.live?.danmaku === 'bridge') api.live.danmakuStop();
+  } catch {
+    /* 主进程没起来时忽略 */
+  }
   if (liveSocket) {
     try {
       liveSocket.close();
@@ -3676,7 +4204,8 @@ function disconnectBiliLive() {
  * 连接后会在界面里明确提示「仅显示状态」，不会假装能收弹幕。
  */
 async function connectLiveRoom(rawUrl) {
-  if (liveSocket) disconnectBiliLive();
+  // 换房间/重连前先把上一条链路（B站 WebSocket 或其它平台的隐藏窗口）关干净
+  disconnectBiliLive();
   state.live = {
     connected: false,
     connecting: true,
@@ -3701,13 +4230,9 @@ async function connectLiveRoom(rawUrl) {
     state.live.danmaku = room.danmaku || "";
     state.live.note = room.note || "";
 
-    // 只有 B站 能直接收弹幕
+    // B 站走官方 WebSocket（更准更省）；其它平台走隐藏窗口抓聊天区
     if (room.platform !== "bilibili") {
-      state.live.connected = true;
-      state.live.connecting = false;
-      state.live.status = room.liveStatus === 1 ? "直播中" : "未开播";
-      toast(`${room.platformLabel} 房间已识别；该平台弹幕暂需私有签名，只能查看状态`, "info");
-      if (state.route === "song") render({ preserveScroll: true });
+      await startBridgeLive(room, rawUrl);
       return;
     }
 
@@ -3755,33 +4280,104 @@ async function connectLiveRoom(rawUrl) {
   }
 }
 
+/**
+ * 斗鱼 / 虎牙 / 抖音 / 快手：后台隐藏窗口抓聊天区。
+ *
+ * 这几个平台没有公开弹幕协议（斗鱼 TCP、虎牙 Tars、抖音/快手要签名），
+ * 硬啃私有协议平台一改版就废。这里让主进程开一个隐藏窗口真的把直播间网页
+ * 加载出来，只读聊天区的文字；视频流在请求阶段就被拦掉，不会真的把流拉下来。
+ * 页面结构变了抓不到时，状态栏会如实说明，不会假装已连接。
+ */
+async function startBridgeLive(room, rawUrl) {
+  const label = room.platformLabel || '该平台';
+  try {
+    const started = await api.live.danmakuStart({ url: rawUrl, platform: room.platform });
+    state.live.connected = true;
+    state.live.connecting = false;
+    state.live.danmaku = 'bridge';
+    state.live.status = started?.status || '已连接';
+    if (started?.pageTitle && !room.title) state.live.roomTitle = started.pageTitle;
+    toast(`已连接${label}直播间：${state.live.roomTitle}`, 'success');
+    if (state.route === 'song') render({ preserveScroll: true });
+
+    if (liveBridgeTimer) clearInterval(liveBridgeTimer);
+    liveBridgeTimer = setInterval(async () => {
+      let payload = null;
+      try {
+        payload = await api.live.danmakuPoll();
+      } catch {
+        return;
+      }
+      if (!payload) return;
+      if (payload.status && payload.status !== state.live.status) {
+        state.live.status = payload.status;
+        if (state.route === 'song') render({ preserveScroll: true });
+      }
+      if (!payload.alive) {
+        if (liveBridgeTimer) clearInterval(liveBridgeTimer);
+        liveBridgeTimer = null;
+        state.live.connected = false;
+        state.live.status = payload.status || '已断开';
+        if (state.route === 'song') render({ preserveScroll: true });
+        return;
+      }
+      for (const item of payload.messages || []) {
+        handleLiveDanmaku(item.text, item.user);
+      }
+    }, 900);
+  } catch (error) {
+    state.live.connected = false;
+    state.live.connecting = false;
+    state.live.status = `${label}弹幕连接失败`;
+    // 起窗口过程中失败时别把隐藏窗口留成孤儿
+    try {
+      api.live.danmakuStop();
+    } catch {
+      /* ignore */
+    }
+    toast(`${label}弹幕连接失败：${error.message}`, 'error');
+    if (state.route === 'song') render({ preserveScroll: true });
+  }
+}
+
 let liveRequestBusy = false;
 /**
  * 把榜单曲目转成点歌台可以播放的网易云条目。
  * 找不到可播版本时返回 false，不打断批量导入。
  */
-/** 读取登录账号自己的歌单（登录成功后自动调用）。 */
-async function loadMyPlaylists(platform, force = false) {
-  if (!platform) return;
-  if (!force && state.myPlaylists.platform === platform && state.myPlaylists.list.length) return;
-  state.myPlaylists = { platform, loading: true, list: [], error: '', detail: null };
+/**
+ * 登录成功后统一同步歌单。
+ *
+ * 以前登录完只拉「当前选中平台」那一个列表，而且写的是 state.myPlaylists.list，
+ * 把分组结构 groups 整个冲掉，切到「我的歌单」还是空的，得手动点一次刷新。
+ * 现在改成：清缓存 → 三个平台一起读 → 用 toast 报一下各自读到多少。
+ */
+async function syncPlaylistsAfterLogin(platform) {
+  invalidateAllPlaylists();
   if (state.route === 'song') render({ preserveScroll: true });
-  try {
-    const result = await api.musicMyPlaylists(platform);
-    if (result?.ok) {
-      state.myPlaylists.list = Array.isArray(result.list) ? result.list : [];
-      if (!state.myPlaylists.list.length) {
-        state.myPlaylists.error = '这个账号下还没有自建歌单';
-      }
-    } else {
-      state.myPlaylists.error = result?.reason || '读取歌单失败';
-    }
-  } catch (error) {
-    state.myPlaylists.error = humanError(error);
-  } finally {
-    state.myPlaylists.loading = false;
-    if (state.route === 'song') render({ preserveScroll: true });
+  await loadAllPlaylists(true);
+  if (!platform) return;
+  const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : '酷狗';
+  const group = (state.myPlaylists.groups || []).find((item) => item.platform === platform);
+  const count = (group?.list || []).length;
+  if (group?.error) {
+    toast(`${label} 已登录，歌单没读到：${group.error}`, 'info');
+  } else {
+    toast(count ? `${label} 歌单已同步 · ${count} 个` : `${label} 账号下还没有歌单`, count ? 'success' : 'info');
   }
+}
+
+/**
+ * 某个平台是不是已登录。
+ *
+ * 网易云有两处状态（本地 API 的 neteaseLogin 和 musicStatus 里的 netease），
+ * 哪边先读到都算登录，不然「我的歌单」会因为读错那一处而漏掉网易云。
+ */
+function musicLoggedIn(platform) {
+  if (platform === 'netease') {
+    return Boolean(state.musicLogin?.netease?.loggedIn || state.neteaseLogin?.loggedIn);
+  }
+  return Boolean(state.musicLogin?.[platform]?.loggedIn);
 }
 
 /**
@@ -3789,13 +4385,30 @@ async function loadMyPlaylists(platform, force = false) {
  * 用 loadingAll 防重入，避免每帧 render 都触发请求。
  */
 async function loadAllPlaylists(force = false) {
-  const logged = ['netease', 'qq', 'kugou'].filter((key) => state.musicLogin?.[key]?.loggedIn);
+  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
   if (!logged.length) return;
   if (state.myPlaylists.loadingAll) return;
   if (!force && state.myPlaylists.groups?.length) return;
 
   state.myPlaylists.loadingAll = true;
   if (state.route === 'song') render({ preserveScroll: true });
+  /*
+   * 兜底：主进程那边每一步都有超时，但万一整条 IPC 卡死（比如内置窗口
+   * 被系统挂起），界面就会一直停在「正在读取」。这里放一个上限，
+   * 到点自己收尾，至少让用户看到「读取超时」而不是无限转圈。
+   */
+  const guard = setTimeout(() => {
+    if (!state.myPlaylists.loadingAll) return;
+    state.myPlaylists.loadingAll = false;
+    state.myPlaylists.groups = logged.map((key) => ({
+      platform: key,
+      label: key === 'netease' ? '网易云' : key === 'qq' ? 'QQ 音乐' : '酷狗',
+      ok: false,
+      list: [],
+      error: '读取超时了，稍后再点一次刷新',
+    }));
+    if (state.route === 'song') render({ preserveScroll: true });
+  }, 75000);
   try {
     const result = await api.musicAllPlaylists();
     state.myPlaylists.groups = Array.isArray(result?.groups) ? result.groups : [];
@@ -3809,6 +4422,7 @@ async function loadAllPlaylists(force = false) {
       error: humanError(error),
     }));
   } finally {
+    clearTimeout(guard);
     state.myPlaylists.loadingAll = false;
     if (state.route === 'song') render({ preserveScroll: true });
   }
@@ -3818,7 +4432,7 @@ async function loadAllPlaylists(force = false) {
  * 渲染期间确保所有平台的歌单已经有着落。
  */
 function ensureAllPlaylistsLoaded() {
-  const logged = ['netease', 'qq', 'kugou'].filter((key) => state.musicLogin?.[key]?.loggedIn);
+  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
   if (!logged.length) return;
   if (state.myPlaylists.loadingAll) return;
   if (state.myPlaylists.groups?.length) return;
@@ -3833,28 +4447,20 @@ function invalidateAllPlaylists() {
   state.myPlaylists.loadingAll = false;
 }
 
-/**
- * 渲染期间确保歌单数据已经有着落：没读过就触发一次。
- * 用 loading 标记防重入，避免每帧都发请求。
- */
-function ensureMyPlaylistsLoaded(platform) {
-  if (!platform) return;
-  const data = state.myPlaylists;
-  if (data.platform === platform && (data.loading || data.list.length || data.error)) return;
-  loadMyPlaylists(platform);
-}
-
 /** 打开某个自建歌单的曲目。 */
 async function openMyPlaylist(platform, playlistId) {
   if (!platform || !playlistId) return;
   state.myPlaylists.loading = true;
+  state.myPlaylists.detail = { id: playlistId, platform, loading: true };
   render({ preserveScroll: true });
   try {
     const result = await api.musicPlaylistSongs({ platform, playlistId });
     if (result?.ok) {
-      state.myPlaylists.detail = { id: playlistId, ...result.detail };
+      // platform 放在展开之后，保证分区高亮一定认得出来是哪个平台的歌单
+      state.myPlaylists.detail = { ...result.detail, id: playlistId, platform };
       state.myPlaylists.error = '';
     } else {
+      state.myPlaylists.detail = null;
       state.myPlaylists.error = result?.reason || '读取歌单失败';
     }
   } catch (error) {
@@ -3862,6 +4468,14 @@ async function openMyPlaylist(platform, playlistId) {
   } finally {
     state.myPlaylists.loading = false;
     if (state.route === 'song') render({ preserveScroll: true });
+    /*
+     * 失败要让人看见。
+     * 之前这个 reason 只写进 state.myPlaylists.error，没有任何地方读它，
+     * 于是「点歌单没反应」变成了完全静默的失败。
+     */
+    if (state.myPlaylists.error) {
+      toast(state.myPlaylists.error, 'error');
+    }
   }
 }
 
@@ -4010,6 +4624,7 @@ async function changeSongQuality(level) {
   document.querySelectorAll('#song-quality, #dock-quality').forEach((select) => {
     select.value = level;
   });
+  refreshSongPops();
   const song = currentSongEntry();
   if (!song?.neteaseId) {
     toast('本地歌曲和直链没有可切换的网易云音质', 'info');
@@ -4020,6 +4635,8 @@ async function changeSongQuality(level) {
       apiBase: localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100',
       id: song.neteaseId,
       level,
+      title: song.title,
+      artist: song.artist,
     });
     const audio = document.querySelector('#song-audio');
     const time = audio?.currentTime || 0;
@@ -4047,6 +4664,8 @@ async function ensureSongQuality(song) {
       apiBase: localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100',
       id: song.neteaseId,
       level: state.songQuality,
+      title: song.title,
+      artist: song.artist,
     });
     song.url = info.url;
     song.quality = info.level;
@@ -4060,221 +4679,173 @@ function songView() {
   return songViewMarkup();
 }
 
-/**
- * 榜单面板：QQ 音乐 / 酷狗的公开榜单。
- *
- * 这两家没有可用的登录与取音频接口（都需要私有签名），
- * 所以这里只做「看榜单 + 一键转成网易云搜索」：
- * 用户选中曲目后，用歌名+歌手去网易云找同名曲，能放的才入队。
- */
-/** 平台登录状态卡片：登录后换成「已登录 · 退出」。 */
-/** 登录账号的自建歌单：只在已登录且切到该平台时显示。 */
-/** 登录账号的自建歌单：调用方负责传入平台，避免依赖榜单平台的默认值 all。 */
-function myPlaylistsMarkup(platform = state.charts.platform) {
-  if (!platform || platform === 'all') return '';
-  const login = state.musicLogin?.[platform];
-  if (!login?.loggedIn) return '';
+/* ── 我的歌单：按平台分区，登录统一走「音乐账号」面板 ─────────────── */
 
-  const data = state.myPlaylists;
-  const samePlatform = data.platform === platform;
-  const list = samePlatform ? data.list : [];
-  const detail = samePlatform ? data.detail : null;
-  const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : '酷狗';
+const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kugou: '酷狗' };
 
-  if (!samePlatform || (data.loading && !list.length)) {
-    return `<div class="my-playlists"><div class="my-playlists-head"><strong>我的歌单</strong><span>读取中…</span></div>
-      <p class="gacha-empty-line">正在读取 ${esc(label)} 账号里的歌单</p></div>`;
-  }
-  if (data.error && !list.length) {
-    const restricted = platform === 'qq' || platform === 'kugou';
-    return `<div class="my-playlists">
-      <div class="my-playlists-head"><strong>我的歌单</strong><span>${esc(data.error)}</span></div>
-      <p class="gacha-empty-line">${esc(label)} 账号的歌单没有读取成功，点「我的歌单」可以重试。</p>
-      ${
-        restricted
-          ? `<p class="music-restricted-note">腾讯 / 酷狗对第三方客户端的登录态有限制：扫码能登进去，但歌单接口常常只给空列表。想让歌单稳定可用，请改用<b>网易云</b>（本地服务登录，能完整读歌单）。榜单和搜索不受影响。</p>`
-          : ''
-      }
-    </div>`;
-  }
-  if (!list.length) {
-    return `<div class="my-playlists">
-      <div class="my-playlists-head"><strong>我的歌单</strong><span>${esc(label)} · 0 个</span></div>
-      <p class="gacha-empty-line">这个账号下还没有自建歌单。</p>
-    </div>`;
-  }
+function musicPlatformLabel(platform) {
+  return MUSIC_PLATFORM_LABELS[platform] || '音乐';
+}
 
+/** 一张歌单卡片：封面 + 名字 + 曲目数。 */
+function playlistCardMarkup(item, platform, active) {
+  const cover = item.cover
+    ? `<img src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+    : icon('music');
   return `
-    <div class="my-playlists">
-      <div class="my-playlists-head">
-        <strong>我的歌单</strong>
-        <span>${esc(label)} · ${list.length} 个</span>
-      </div>
-      <div class="my-playlist-list">
-        ${list
-          .map(
-            (item) => `
-          <button class="my-playlist-row ${detail?.id === item.id ? 'active' : ''}"
-            data-action="my-playlist-open" data-platform="${esc(platform)}" data-id="${esc(item.id)}">
-            <span class="my-playlist-cover">${item.cover ? `<img src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
-            <span class="my-playlist-copy">
-              <strong>${esc(item.name)}</strong>
-              <small>${item.count ? `${item.count} 首` : '歌单'}</small>
-            </span>
-            ${icon('chevron-right', 'xs')}
-          </button>`
-          )
-          .join('')}
+    <button class="playlist-card ${active ? 'is-open' : ''}"
+      data-action="my-playlist-open" data-platform="${esc(platform)}" data-id="${esc(item.id)}"
+      title="${esc(item.name)}">
+      <span class="playlist-card-cover">${cover}
+        <span class="playlist-card-count">${item.count ? `${item.count} 首` : '歌单'}</span>
+      </span>
+      <span class="playlist-card-name">${esc(item.name)}</span>
+      <span class="playlist-card-sub">${item.subscribed ? '收藏歌单' : '自建歌单'}</span>
+    </button>`;
+}
+
+/** 展开的某张歌单：曲目列表 + 一键入队。 */
+function playlistDetailMarkup(detail, platform) {
+  if (!detail) return '';
+  if (detail.loading) {
+    return `<div class="playlist-detail"><p class="playlists-group-note">正在读取曲目…</p></div>`;
+  }
+  const songs = detail.songs || [];
+  return `
+    <div class="playlist-detail">
+      <div class="playlist-detail-head">
+        <div class="playlist-detail-title">
+          <strong>${esc(detail.name || '歌单')}</strong>
+          <small>${songs.length} 首 · ${esc(musicPlatformLabel(platform))}</small>
+        </div>
+        <div class="playlist-detail-actions">
+          <button class="playlists-chip is-primary" data-action="my-playlist-import" data-platform="${esc(platform)}" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}加入点歌队列</button>
+          <button class="playlists-chip" data-action="my-playlist-close">${icon('x', 'xs')}收起</button>
+        </div>
       </div>
       ${
-        detail && detail.songs && detail.songs.length
-          ? `<div class="my-playlist-songs">
-              <div class="my-playlist-songs-head">
-                <strong>${esc(detail.name || '歌单')}</strong>
-                <button class="link-btn" data-action="chart-import" data-platform="${esc(platform)}">${icon('plus', 'xs')}全部转到网易云</button>
-              </div>
-              ${detail.songs
-                .slice(0, 20)
+        songs.length
+          ? `<div class="playlist-songs">
+              ${songs
+                .slice(0, 30)
                 .map(
                   (song, index) => `
-                <button class="song-chart-song" data-action="chart-to-netease" data-platform="${esc(platform)}" data-index="${index}">
+                <button class="song-chart-song" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="加入点歌队列">
                   <span class="song-chart-index">${index + 1}</span>
                   <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
                   <span class="song-chart-copy">
                     <strong>${esc(song.title)}</strong>
                     <small>${esc(song.artist || '未知歌手')}</small>
                   </span>
-                  ${icon('search', 'xs')}
+                  ${icon('plus', 'xs')}
                 </button>`
                 )
                 .join('')}
             </div>`
-          : ''
+          : `<p class="playlists-group-note">这个歌单里没有读到曲目。</p>`
       }
     </div>`;
 }
 
-/**
- * 渲染「我的歌单」的单个平台分区。
- *
- * 和原来 myPlaylistsMarkup 的区别：这里不再假设只有「当前选中的平台」，
- * 三个平台各自一个 group，能一起显示各自账号下的歌单。
- */
+/** 单个平台分区。 */
 function myPlaylistGroupMarkup(group) {
-  const { platform, label, list = [], error = '', loading = false } = group;
+  const { platform, list = [], error = '', loading = false } = group;
+  const label = group.label || musicPlatformLabel(platform);
   const detail = state.myPlaylists.detail;
+  const openDetail = detail && detail.platform === platform ? detail : null;
 
-  const head = `<div class="my-playlists-head">
-      <strong><span class="mp-dot" data-platform="${esc(platform)}"></span>${esc(label)}</strong>
-      <span>${loading ? '读取中…' : error ? '读取失败' : `${list.length} 个`}</span>
+  const head = `<div class="playlists-group-head">
+      <span class="playlists-group-name"><span class="mp-dot" data-platform="${esc(platform)}"></span>${esc(label)}</span>
+      <span class="playlists-group-meta">${loading ? '同步中…' : error ? (group.expired ? '登录失效' : '读取失败') : `${list.length} 个歌单`}</span>
     </div>`;
 
   if (loading) {
-    return `<div class="my-playlists-group">${head}<p class="gacha-empty-line">正在读取 ${esc(label)} 账号里的歌单</p></div>`;
+    return `<section class="playlists-group">${head}<p class="playlists-group-note">正在读取 ${esc(label)} 账号里的歌单…</p></section>`;
   }
-
   if (error) {
-    return `<div class="my-playlists-group">${head}
-      <p class="gacha-empty-line">${esc(error)}</p>
-      <button class="link-btn" data-action="my-playlists-reload" data-platform="${esc(platform)}">${icon('refresh-cw', 'xs')}重新读取</button>
-    </div>`;
+    /*
+     * 分类处理：登录态过期（QQ 音乐 500003、酷狗 Access Deny）时，
+     * 用户真正要做的是重新登录，不是「再读一次」。
+     * 所以这种情况直接把登录按钮递到手上，别让他反复刷新对着报错看。
+     */
+    const expired = Boolean(group.expired);
+    const reloginAction = platform === 'netease' ? 'netease-login' : 'music-account-login';
+    return `<section class="playlists-group is-expired">${head}
+      <p class="playlists-group-note">${expired ? `${esc(label)} 的登录已经失效了，重新登录一次就能读歌单。` : esc(error)}</p>
+      ${
+        expired
+          ? `<div class="playlists-group-actions">
+              <button class="btn btn-primary btn-sm" data-action="${reloginAction}" data-platform="${esc(platform)}">${icon('login')}重新登录</button>
+              <button class="playlists-chip" data-action="my-playlists-reload" data-platform="${esc(platform)}">${icon('refresh', 'xs')}再试一次</button>
+            </div>`
+          : `<button class="playlists-chip" data-action="my-playlists-reload" data-platform="${esc(platform)}">${icon('refresh', 'xs')}重新读取</button>`
+      }
+      ${expired ? `<details class="playlists-group-detail"><summary>看看具体原因</summary><p>${esc(error)}</p></details>` : ''}
+    </section>`;
   }
-
   if (!list.length) {
-    return `<div class="my-playlists-group">${head}<p class="gacha-empty-line">这个账号下还没有歌单。</p></div>`;
+    return `<section class="playlists-group">${head}<p class="playlists-group-note">这个账号下还没有歌单。</p></section>`;
   }
 
-  return `<div class="my-playlists-group">${head}
-    <div class="my-playlist-list">
-      ${list
-        .map(
-          (item) => `
-        <button class="my-playlist-row ${detail?.id === item.id && detail?.platform === platform ? 'active' : ''}"
-          data-action="my-playlist-open" data-platform="${esc(platform)}" data-id="${esc(item.id)}">
-          <span class="my-playlist-cover">${item.cover ? `<img src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
-          <span class="my-playlist-copy">
-            <strong>${esc(item.name)}</strong>
-            <small>${item.count ? `${item.count} 首` : '歌单'}${item.subscribed ? ' · 收藏' : ''}</small>
-          </span>
-          ${icon('chevron-right', 'xs')}
-        </button>`
-        )
-        .join('')}
+  return `<section class="playlists-group">${head}
+    <div class="playlist-cards">
+      ${list.map((item) => playlistCardMarkup(item, platform, openDetail?.id === item.id)).join('')}
     </div>
-    ${
-      detail && detail.platform === platform && detail.songs && detail.songs.length
-        ? `<div class="my-playlist-songs">
-            <div class="my-playlist-songs-head">
-              <strong>${esc(detail.name || '歌单')}</strong>
-              <button class="link-btn" data-action="chart-import" data-platform="${esc(platform)}">${icon('plus', 'xs')}加入点歌队列</button>
-            </div>
-            ${detail.songs
-              .slice(0, 20)
-              .map(
-                (song, index) => `
-              <button class="song-chart-song" data-action="chart-to-netease" data-platform="${esc(platform)}" data-index="${index}">
-                <span class="song-chart-index">${index + 1}</span>
-                <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
-                <span class="song-chart-copy">
-                  <strong>${esc(song.title)}</strong>
-                  <small>${esc(song.artist || '未知歌手')}</small>
-                </span>
-                ${icon('search', 'xs')}
-              </button>`
-              )
-              .join('')}
-          </div>`
-        : ''
-    }
-  </div>`;
+    ${playlistDetailMarkup(openDetail, platform)}
+  </section>`;
 }
 
 /**
- * 「我的歌单」：把【所有已登录平台】的歌单一起列出来。
+ * 「我的歌单」总面板：三个已登录平台的歌单一起列。
  *
- * 之前只显示 state.charts.platform 指向的那一个平台，登了 QQ 音乐就看不到网易云，
- * 而且网易云根本不在候选列表里（只列了 qq / kugou）。
+ * 登录入口只在右上角「账号」这一处（和「音乐账号」弹窗是同一个），
+ * 不再在每个平台旁边各放一套「扫码登录」，避免和账号面板重复。
  */
 function allPlaylistsMarkup() {
   const groups = state.myPlaylists.groups || [];
-  const logged = ['netease', 'qq', 'kugou'].filter((key) => state.musicLogin?.[key]?.loggedIn);
+  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
 
   if (!logged.length) {
-    return `<div class="song-empty">${icon('login')}<strong>先登录一个平台</strong><span>网易云 / QQ 音乐 / 酷狗 登录后，这里会按平台列出你账号里的歌单。</span>
-      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}去登录</button></div>`;
+    return `<div class="song-empty">${icon('login')}<strong>还没有登录音乐账号</strong><span>登录后这里会按平台列出你账号里的歌单，整张歌单也能一键加入点歌队列。</span>
+      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}打开音乐账号</button></div>`;
   }
 
-  // 已登录但还没拿到数据的平台，先占位显示「读取中」
   const shown = logged.map((key) => {
     const found = groups.find((group) => group.platform === key);
     if (found) return found;
-    const label = key === 'netease' ? '网易云' : key === 'qq' ? 'QQ 音乐' : '酷狗';
-    return { platform: key, label, list: [], error: '', loading: true };
+    return { platform: key, label: musicPlatformLabel(key), list: [], error: '', loading: true };
   });
+  const total = shown.reduce((sum, group) => sum + (group.list || []).length, 0);
+  const syncing = Boolean(state.myPlaylists.loadingAll) || shown.some((group) => group.loading);
+  const idle = ['netease', 'qq', 'kugou'].filter((key) => !logged.includes(key));
 
-  return `<div class="my-playlists">
-    <div class="my-playlists-head"><strong>我的歌单</strong><span>${shown.length} 个平台</span></div>
-    ${shown.map(myPlaylistGroupMarkup).join('')}
+  return `<div class="playlists-panel">
+    <div class="playlists-bar">
+      <div class="playlists-bar-title">
+        <strong>我的歌单</strong>
+        <span>${shown.length} 个平台 · ${syncing ? '同步中…' : `${total} 个歌单`}</span>
+      </div>
+      <div class="playlists-bar-actions">
+        <button class="playlists-chip" data-action="my-playlists-reload" ${syncing ? 'disabled' : ''}>${icon('refresh', 'xs')}${syncing ? '同步中' : '刷新'}</button>
+        <button class="playlists-chip" data-action="music-accounts">${icon('settings', 'xs')}账号</button>
+      </div>
+    </div>
+    ${
+      state.myPlaylists.error
+        ? `<div class="playlists-error">${icon('alert', 'xs')}<span>${esc(state.myPlaylists.error)}</span>
+            <button class="link-btn" data-action="my-playlists-reload">重试</button>
+          </div>`
+        : ''
+    }
+    <div class="playlists-groups">
+      ${shown.map(myPlaylistGroupMarkup).join('')}
+    </div>
+    ${
+      idle.length
+        ? `<p class="playlists-foot">${idle.map((key) => esc(musicPlatformLabel(key))).join(' / ')} 还没登录 · <button class="link-btn" data-action="music-accounts">去音乐账号里登录</button></p>`
+        : ''
+    }
   </div>`;
-}
-
-function chartLoginMarkup(platform, label) {
-  const info = state.musicLogin?.[platform];
-  const loggedIn = Boolean(info?.loggedIn);
-  const restricted = platform === 'qq' || platform === 'kugou';
-  const note = restricted
-    ? `<span class="song-chart-restricted" title="腾讯 / 酷狗官方的扫码登录对第三方客户端有限制，登录后歌单接口可能只返回空列表；榜单不受影响">${icon('info', 'xs')}受限</span>`
-    : '';
-  return `
-    <span class="song-chart-login">
-      ${note}
-      ${
-        loggedIn
-          ? `<span class="song-chart-login-ok">${icon('check', 'xs')}已登录</span>
-             <button class="song-chart-login-btn" data-action="chart-logout" data-platform="${platform}">退出</button>`
-          : `<button class="song-chart-login-btn is-primary" data-action="chart-login" data-platform="${platform}" title="打开官网扫码登录；登录后歌单接口受腾讯风控限制，可能读不到">${icon('music', 'xs')}扫码登录 ${label}</button>`
-      }
-    </span>`;
 }
 
 function chartPanelMarkup() {
@@ -4301,7 +4872,6 @@ function chartPanelMarkup() {
                 `<button class="song-chart-tab ${c.platform === key ? 'active' : ''}" data-action="chart-platform" data-value="${key}">${label}</button>`
             )
             .join('')}
-          ${c.platform ? chartLoginMarkup(c.platform, c.platform === 'qq' ? 'QQ 音乐' : '酷狗') : ''}
         </span>
       </div>
       ${
@@ -4309,17 +4879,6 @@ function chartPanelMarkup() {
           ? `<div class="notice-error">${icon('info', 'xs')} ${esc(c.error)}</div>`
           : ''
       }
-      ${myPlaylistsMarkup()}
-      ${(() => {
-        // 榜单页也给一份「全部平台歌单」的入口：登了网易云但当前看的是 QQ 榜单时，
-        // 不至于在自己的歌单里一个都看不到。
-        const others = ['netease', 'qq', 'kugou'].filter(
-          (key) => key !== c.platform && state.musicLogin?.[key]?.loggedIn
-        );
-        return others.length ? `<div class="chart-other-playlists">
-            <button class="link-btn" data-action="song-tab" data-value="mine">${icon('music', 'xs')}还有 ${others.length} 个平台的歌单，去「我的歌单」看</button>
-          </div>` : '';
-      })()}
       ${
         c.loading
           ? `<p class="gacha-empty-line">正在读取榜单…</p>`
@@ -4372,7 +4931,7 @@ function chartPanelMarkup() {
             </div>`
           : ''
       }
-      <p class="song-chart-note">登录会在内置窗口里打开官网页面，扫码、QQ、微信、手机验证码都可以用；登录成功后只在本机保存凭证。榜单曲目可以转到网易云播放。</p>
+      <p class="song-chart-note">榜单是公开数据，不用登录也能看。要读自己账号里的歌单，去右上角「账号」里的音乐账号面板登录一次就够了，登录后会一直记着。</p>
     </section>`;
 }
 
@@ -7265,13 +7824,41 @@ const ACCENT_OPTIONS = [
   ['amber', '琥珀', '#f5a35c'],
 ];
 
+/* 设置页分组：左侧导航 + 右侧只渲染当前分组，避免一长条往下翻 */
+const SETTINGS_TABS = [
+  ['appearance', '外观', 'sparkle', '主题、强调色、称呼、头像和界面缩放'],
+  ['window', '窗口', 'image', '窗口材质、自定义背景与透明度'],
+  ['sound', '音效', 'volume', '界面反馈音、试听与音乐行为'],
+  ['behavior', '行为', 'settings', '托盘、开机自启、帧率与自动同步'],
+  ['storage', '存储', 'folder-open', '下载目录、运行时与终末地渠道包'],
+  ['update', '更新', 'download', '更新源、自动检查与手动更新'],
+  ['about', '关于', 'info', '版本信息与相关链接'],
+];
+
+function settingsTab() {
+  let key = state.settingsTab;
+  if (!key) {
+    try {
+      key = localStorage.getItem('vela:settings-tab') || '';
+    } catch (error) {
+      key = '';
+    }
+  }
+  return SETTINGS_TABS.some((tab) => tab[0] === key) ? key : 'appearance';
+}
+
 function settingsView() {
   const settings = state.settings;
   const demos = state.games.filter((g) => g.demo).length;
   const themeOptions = THEME_OPTIONS;
   const accents = ACCENT_OPTIONS;
+  const tab = settingsTab();
+  const group = (key, span) =>
+    `settings-panel${key === tab ? ' is-active' : ''}${span ? ' settings-span' : ''}`;
+  const groupAttr = (key) => `data-settings-group="${key}"`;
+  const activeMeta = SETTINGS_TABS.find((item) => item[0] === tab) || SETTINGS_TABS[0];
   return `
-    <div class="page">
+    <div class="page page-settings">
       <div class="page-head">
         <div>
           <div class="eyebrow">${PAGE_META.settings.eyebrow}</div>
@@ -7279,8 +7866,18 @@ function settingsView() {
           <p class="sub">常用设置集中在这里，修改后立即保存。</p>
         </div>
       </div>
-      <div class="settings-grid">
-        <section class="settings-panel">
+      <div class="settings-shell">
+        <nav class="settings-nav" aria-label="设置分组">
+          ${SETTINGS_TABS.map(
+            ([key, label, ico]) =>
+              `<button class="settings-nav-item ${key === tab ? 'active' : ''}" data-action="settings-tab" data-value="${key}" title="${label}">
+                 ${icon(ico)}<span>${label}</span>
+               </button>`
+          ).join('')}
+          <p class="settings-nav-hint">${activeMeta[3]}</p>
+        </nav>
+        <div class="settings-grid">
+        <section class="${group('appearance')}" ${groupAttr('appearance')}>
           <h2>${icon('sparkle')}外观</h2>
           <p class="desc">主题、强调色和个人称呼。</p>
           <div class="setting-row">
@@ -7330,11 +7927,11 @@ function settingsView() {
           </div>
         </section>
 
-        <section class="settings-panel material-panel">
+        <section class="${group('window', true)} material-panel" ${groupAttr('window')}>
           <h2>${icon('sparkle')}窗口材质与背景</h2>
-          <p class="desc">让窗口透出系统合成层（亚克力 / 云母），或铺一张自己的背景图。</p>
+          <p class="desc">复用系统合成层，或铺一张自己的背景图。</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>窗口材质</strong><span>复用系统的合成效果，需要 Windows 11 且开启「透明效果」。云母要求窗口不透明，所以会自动关掉半透明底色。</span></div>
+            <div class="setting-copy"><strong>窗口材质</strong><span>亚克力 / 云母需要 Windows 11 并开启「透明效果」；云母会自动关掉半透明底色。</span></div>
             <div class="setting-control">
               <div class="segmented">
                 ${MATERIAL_OPTIONS.map(
@@ -7345,7 +7942,7 @@ function settingsView() {
             </div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>自定义背景</strong><span>PNG / JPG / WebP / GIF，最大 40 MB。铺在内容下面，不会挡住按钮。</span></div>
+            <div class="setting-copy"><strong>自定义背景</strong><span>PNG / JPG / WebP / GIF，最大 40 MB，铺在内容下面。</span></div>
             <div class="setting-control">
               ${
                 settings.customBackground
@@ -7356,24 +7953,26 @@ function settingsView() {
               ${settings.customBackground ? `<button class="btn btn-quiet" data-action="reset-background">移除</button>` : ''}
             </div>
           </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>背景不透明度</strong><span>100% 完全不透明；调低后背景变淡，能看见更多窗口材质（云母的纹理、亚克力的磨砂）。</span></div>
-            <div class="setting-control volume-control">
-              <input class="volume-range" id="bg-opacity" type="range" min="0" max="100" step="1" value="${Number(settings.backgroundOpacity ?? 100)}" aria-label="背景不透明度" ${settings.customBackground ? '' : 'disabled'} />
-              <span class="volume-value" id="bg-opacity-value">${Number(settings.backgroundOpacity ?? 100)}%</span>
+          <div class="setting-row-pair">
+            <div class="setting-row">
+              <div class="setting-copy"><strong>背景不透明度</strong><span>调低后背景变淡，能看见更多窗口材质。</span></div>
+              <div class="setting-control volume-control">
+                <input class="volume-range" id="bg-opacity" type="range" min="0" max="100" step="1" value="${Number(settings.backgroundOpacity ?? 100)}" aria-label="背景不透明度" ${settings.customBackground ? '' : 'disabled'} />
+                <span class="volume-value" id="bg-opacity-value">${Number(settings.backgroundOpacity ?? 100)}%</span>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>背景清晰度</strong><span>往左越模糊，画面花的时候文字更好读。</span></div>
+              <div class="setting-control volume-control">
+                <input class="volume-range" id="bg-blur" type="range" min="0" max="60" step="1" value="${100 - Number(settings.backgroundBlur ?? 0)}" aria-label="背景清晰度" ${settings.customBackground ? '' : 'disabled'} />
+                <span class="volume-value" id="bg-blur-value">${Number(settings.backgroundBlur ?? 0) ? `模糊 ${Number(settings.backgroundBlur)}` : '原图'}</span>
+              </div>
             </div>
           </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>背景清晰度</strong><span>100 是原图。往左调越模糊——糊了之后文字更好读，适合画面很花的截图。</span></div>
-            <div class="setting-control volume-control">
-              <input class="volume-range" id="bg-blur" type="range" min="0" max="60" step="1" value="${100 - Number(settings.backgroundBlur ?? 0)}" aria-label="背景清晰度" ${settings.customBackground ? '' : 'disabled'} />
-              <span class="volume-value" id="bg-blur-value">${Number(settings.backgroundBlur ?? 0) ? `模糊 ${Number(settings.backgroundBlur)}` : '原图'}</span>
-            </div>
-          </div>
-          <p class="material-note">${icon('alert', 'xs')}系统的「透明效果」在 设置 → 个性化 → 颜色 里。关掉之后所有材质都会失效，只留下纯色窗口。</p>
+          <p class="material-note">${icon('alert', 'xs')}「透明效果」在 设置 → 个性化 → 颜色；关掉后所有材质失效。</p>
         </section>
 
-        <section class="settings-panel ui-scale-panel">
+        <section class="${group('appearance')} ui-scale-panel" ${groupAttr('appearance')}>
           <h2>${icon('type')}界面缩放</h2>
           <p class="desc">调整整个启动器的字号和布局大小，适配不同分辨率的屏幕。</p>
           <div class="setting-row">
@@ -7396,7 +7995,7 @@ function settingsView() {
           </div>
         </section>
 
-        <section class="settings-panel sound-settings-panel">
+        <section class="${group('sound')} sound-settings-panel" ${groupAttr('sound')}>
           <h2>${icon('volume')}界面音效</h2>
           <p class="desc">按钮、导航和通知的反馈音，独立于歌曲音量；歌曲音量与 3D 音效在点歌台里调整。</p>
           <div class="setting-row">
@@ -7432,17 +8031,25 @@ function settingsView() {
           </div>
         </section>
 
-        <section class="settings-panel">
+        <section class="${group('sound')}" ${groupAttr('sound')}>
           <h2>${icon('music')}音乐</h2>
           <p class="desc">决定启动器打开后音乐的行为。</p>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>打开时继续上次的音乐</strong><span>开启后启动器一打开就自动播放上次听到的那首歌；关闭时需要手动点播放器或迷你播放器上的播放键。</span></div>
-            <div class="setting-control"><button class="switch ${state.autoResumeSong ? 'on' : ''}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume" title="${state.autoResumeSong ? '关闭' : '开启'}"></button></div>
+          <div class="setting-row setting-row-split">
+            <div class="setting-pair">
+              <strong>打开时继续上次的音乐</strong>
+              <button class="switch ${state.autoResumeSong ? 'on' : ''}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume" title="${state.autoResumeSong ? '关闭' : '开启'}"></button>
+            </div>
+            <div class="setting-pair">
+              <strong>显示小播放器</strong>
+              <button class="switch ${isMiniEnabled() ? 'on' : ''}" role="switch" aria-checked="${Boolean(isMiniEnabled())}" data-action="toggle-mini-player" title="${isMiniEnabled() ? '关闭' : '开启'}"></button>
+            </div>
           </div>
+          <p class="setting-hint">继续播放：启动器一打开就自动播放上次听到的那首歌，关掉后要手动点播放键。小播放器：放歌时在侧栏旁挂一个可拖动的小窗，关掉后即使还在放歌、来回切界面也不再出现。</p>
         </section>
 
-        <details class="settings-panel settings-collapse">
-          <summary><span class="settings-summary-title">${icon('settings')}行为</span><span class="settings-summary-desc">托盘、开机自启、帧率、自动同步等，点开查看</span></summary>
+        <section class="${group('behavior', true)}" ${groupAttr('behavior')}>
+          <h2>${icon('settings')}行为</h2>
+          <p class="desc">托盘、开机自启、帧率、自动同步等。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>关闭时收进托盘</strong><span>点击关闭按钮后继续在后台运行，双击托盘图标可以回来。</span></div>
             <div class="setting-control">${switchMarkup('closeToTray', settings.closeToTray)}</div>
@@ -7484,10 +8091,11 @@ function settingsView() {
             <div class="setting-copy"><strong>自动获取终末地抽卡记录</strong><span>打开游戏内抽卡记录后，自动读取 HGWebview 日志并同步；异环仍需其导出工具生成 JSON。</span></div>
             <div class="setting-control">${switchMarkup('autoGacha', settings.autoGacha !== false)}</div>
           </div>
-        </details>
+        </section>
 
-        <details class="settings-panel settings-collapse">
-          <summary><span class="settings-summary-title">${icon('folder-open')}存储</span><span class="settings-summary-desc">下载、运行时、终末地渠道包与管理员，点开查看</span></summary>
+        <section class="${group('storage', true)}" ${groupAttr('storage')}>
+          <h2>${icon('folder-open')}存储</h2>
+          <p class="desc">下载、运行时、终末地渠道包与管理员权限。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
             <div class="setting-control">
@@ -7545,15 +8153,15 @@ function settingsView() {
                 </div>`
               : ''
           }
-        </details>
+        </section>
 
-        <section class="settings-panel">
+        <section class="${group('update', true)}" ${groupAttr('update')}>
           <h2>${icon('download')}软件更新</h2>
-          <p class="desc">启动器和 exe 同级的文件夹里已经带了一份 <code>latest.json</code>。把新版 ZIP 放到同一个目录，别的电脑上的旧版本就会自己发现并升级；也可以把清单放到网站或局域网共享，在下面填地址。</p>
+          <p class="desc">更新源已经内置：启动器会先看启动器目录里那份 <code>latest.json</code>，没有就自动去官方 Release 取。所以装完就能自己升级，不用手动填地址。</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>更新源</strong><span>留空就用启动器目录里那份 <code>latest.json</code>；也可以填 https、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。</span></div>
+            <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。</span></div>
             <div class="setting-control update-source-control">
-              <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="https://example.com/vela/latest.json" spellcheck="false" />
+              <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="留空 = 内置官方源" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
               <button class="btn btn-ghost" data-action="pick-update-source">${icon('folder')}选择文件</button>
             </div>
@@ -7571,6 +8179,16 @@ function settingsView() {
           </div>
           <div class="setting-row">
             <div class="setting-copy">
+              <strong>更新日志</strong>
+              <span>覆盖脚本在后台单独运行，界面看不到它的输出。更新卡住或没重启时，把这里的日志发回来就能定位是哪一步出的问题。</span>
+            </div>
+            <div class="setting-control update-action-control">
+              <button class="btn btn-ghost" data-action="view-update-log">${icon('file-text')}查看日志</button>
+              <button class="btn btn-ghost" data-action="open-update-log">${icon('folder')}打开文件</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
               <strong>手动更新</strong>
               <span>不想等弹窗时，可以到 GitHub 自己下新版 ZIP。解压后覆盖程序文件即可，<code>data</code> 文件夹里的游戏、账号、抽卡记录和设置都不会被覆盖。</span>
             </div>
@@ -7582,7 +8200,7 @@ function settingsView() {
           ${state.update && state.update.downloading ? `<div class="update-progress"><div class="update-progress-bar"><span style="width:${Number(state.update.percent) || 0}%"></span></div><small>正在下载 ${Number(state.update.percent) || 0}%</small></div>` : ''}
         </section>
 
-        <section class="settings-panel">
+        <section class="${group('about', true)}" ${groupAttr('about')}>
           <h2>${icon('info')}关于</h2>
           <p class="desc">一个本地优先的桌面游戏书架。</p>
           <div class="setting-row" style="border-bottom:0;padding-bottom:0">
@@ -7604,6 +8222,7 @@ function settingsView() {
             </div>
           </div>
         </section>
+        </div>
       </div>
     </div>`;
 }
@@ -7864,6 +8483,22 @@ async function handleAction(action, id, element, event = null) {
     case 'music-accounts':
       openMusicAccountsModal(element.dataset.platform || '');
       break;
+    case 'song-pop-toggle': {
+      const id = element.dataset.pop || '';
+      const wrap = element.closest('.song-pop');
+      const wasOpen = wrap ? wrap.classList.contains('is-open') : false;
+      closeSongPops();
+      if (wrap && !wasOpen) wrap.classList.add('is-open');
+      break;
+    }
+    case 'song-pop-pick': {
+      const id = element.dataset.pop || '';
+      const value = element.dataset.value || '';
+      closeSongPops();
+      if (id.indexOf('mode') >= 0) setPlayMode(value);
+      else changeSongQuality(value);
+      break;
+    }
     case 'song-tab': {
       const next = element.dataset.value || 'queue';
       state.songTab = next;
@@ -7873,9 +8508,10 @@ async function handleAction(action, id, element, event = null) {
         handleAction('chart-platform', { dataset: { value: state.charts.platform || 'all' } });
       }
       if (next === 'mine') {
-        // 「我的歌单」按平台分区显示所有已登录平台的歌单，不再只挑一个平台
-        invalidateAllPlaylists();
-        loadAllPlaylists(true);
+        // 「我的歌单」按平台分区显示所有已登录平台的歌单，不再只挑一个平台。
+        // 已经有缓存就别重新拉：切走再切回还触发一次全量读取，卡顿又浪费。
+        // 登录成功或手动点刷新会自己清缓存（见 syncPlaylistsAfterLogin / my-playlists-reload）。
+        if (!state.myPlaylists.groups?.length) loadAllPlaylists();
       }
       break;
     }
@@ -7897,7 +8533,7 @@ async function handleAction(action, id, element, event = null) {
         await refreshMusicLogin();
         toast(`${label} 登录成功`, 'success');
         if (state.route === 'song') render({ preserveScroll: true });
-        await loadMyPlaylists(platform, true);
+        await syncPlaylistsAfterLogin(platform);
       } catch (error) {
         toast(`${label} 登录失败：${humanError(error)}`, 'error');
       }
@@ -7905,7 +8541,7 @@ async function handleAction(action, id, element, event = null) {
     }
     case 'music-account-logout': {
       const platform = element.dataset.platform || 'qq';
-      const label = platform === 'qq' ? 'QQ 音乐' : '酷狗';
+      const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : '酷狗';
       try {
         await api.musicLogout(platform);
         await refreshMusicLogin();
@@ -7995,12 +8631,35 @@ async function handleAction(action, id, element, event = null) {
       });
       break;
     }
-    case 'my-playlists': {
-      await loadMyPlaylists(element.dataset.platform || state.charts.platform || 'qq', true);
-      break;
-    }
     case 'my-playlist-open': {
       await openMyPlaylist(element.dataset.platform || '', element.dataset.id || '');
+      break;
+    }
+    case 'my-playlist-close': {
+      state.myPlaylists.detail = null;
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'my-playlist-song': {
+      const index = Number(element.dataset.index) || 0;
+      const song = (state.myPlaylists.detail?.songs || [])[index];
+      if (!song) break;
+      const ok = await addChartSongToQueue(song, { silent: true });
+      toast(ok ? `已加入：${song.title}` : `「${song.title}」暂时找不到可播放版本`, ok ? 'success' : 'info');
+      break;
+    }
+    case 'my-playlist-import': {
+      const songs = (state.myPlaylists.detail?.songs || []).slice(0, 10);
+      if (!songs.length) break;
+      toast(`正在把 ${songs.length} 首加进点歌队列…`, 'info');
+      let added = 0;
+      for (const song of songs) {
+        if (await addChartSongToQueue(song, { silent: true })) added += 1;
+      }
+      toast(
+        added ? `已加入 ${added} 首（其余在网易云没有可播版本）` : '这些曲目在网易云没有可播版本',
+        added ? 'success' : 'info'
+      );
       break;
     }
     case 'toggle-auto-resume': {
@@ -8017,40 +8676,6 @@ async function handleAction(action, id, element, event = null) {
           : '已关闭：需要手动点播放才会继续',
         'success'
       );
-      break;
-    }
-    case 'chart-login': {
-      const platform = element.dataset.platform || state.charts.platform || 'qq';
-      const label = platform === 'qq' ? 'QQ 音乐' : '酷狗';
-      toast(`${label} 登录窗口已打开，扫码或验证码登录后会自动保存`,'info');
-      try {
-        const result = await api.musicLogin(platform);
-        if (!result || result.cancelled) break;
-        if (!result.ok) {
-          toast(
-            result.error ? `${label} 登录没有完成：${result.error}` : `${label} 登录没有完成`,
-            result.error ? 'error' : 'info'
-          );
-          break;
-        }
-        await refreshMusicLogin();
-        toast(`${label} 登录成功，正在读取你的歌单…`, 'success');
-        await loadMyPlaylists(platform, true);
-      } catch (error) {
-        toast(`${label} 登录失败：${humanError(error)}`, 'error');
-      }
-      break;
-    }
-    case 'chart-logout': {
-      const platform = element.dataset.platform || 'qq';
-      try {
-        await api.musicLogout(platform);
-        await refreshMusicLogin();
-        invalidateAllPlaylists();
-        toast('已退出登录', 'success');
-      } catch (error) {
-        toast(humanError(error), 'error');
-      }
       break;
     }
     case 'my-playlists-reload': {
@@ -8107,9 +8732,30 @@ async function handleAction(action, id, element, event = null) {
     }
     case 'chart-to-netease': {
       const index = Number(element.dataset.index) || 0;
-      const song = (state.charts.detail?.songs || [])[index];
+      const chartSongs = state.charts.detail?.songs || [];
+      const song = chartSongs[index];
       if (!song) break;
-      await addChartSongToQueue(song);
+      // 点榜单里的一首 = 从这首开始，把榜单剩下的歌一起排进队列：
+      // 这样播完一首会自动接下一首（原来只加被点的那一首，播完就停）。
+      const rest = chartSongs.slice(index);
+      const base = state.songs.length;
+      let added = 0;
+      for (const item of rest) {
+        if (await addChartSongToQueue(item, { silent: true })) added += 1;
+      }
+      if (added) {
+        state.songIndex = base;
+        render({ preserveScroll: true });
+        playCurrentSong();
+        toast(
+          added > 1
+            ? `已从「${song.title || '这首'}」开始连播 ${added} 首`
+            : `已加入：${song.title || '这首'}`,
+          'success'
+        );
+      } else {
+        toast(`「${song.title || '这首'}」暂时找不到可播放版本`, 'info');
+      }
       break;
     }
     case 'chart-import': {
@@ -8126,7 +8772,7 @@ async function handleAction(action, id, element, event = null) {
     case 'live-connect': {
       const url = document.querySelector('#live-room-input')?.value?.trim() || '';
       if (!url) {
-        toast('先粘贴 B 站直播间链接或房间号', 'info');
+        toast('先粘贴直播间链接或房间号（B站 / 斗鱼 / 虎牙 / 抖音 / 快手等）', 'info');
         break;
       }
       await connectLiveRoom(url);
@@ -8184,6 +8830,16 @@ async function handleAction(action, id, element, event = null) {
         audio.dataset.songKey = '';
         updateSongChrome();
       }
+      // 关掉就等于关掉总开关：不然切一趟点歌台再回来，它又会自己冒出来
+      setMiniEnabled(false);
+      toast('小播放器已关闭，可在「设置 → 声音」或点歌台重新打开', 'info');
+      break;
+    }
+    case 'toggle-mini-player': {
+      const next = !isMiniEnabled();
+      setMiniEnabled(next);
+      if (state.route === 'settings' || state.route === 'song') render({ preserveScroll: true });
+      toast(next ? '小播放器已打开' : '小播放器已关闭', next ? 'success' : 'info');
       break;
     }
     case 'mini-list':
@@ -8311,16 +8967,30 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
-    case 'start-server-menu':
-      state.startServerMenu = !state.startServerMenu;
-      render({ preserveScroll: true });
+    case 'start-server-menu': {
+      /*
+       * 面板开合只切 DOM 类名，不再整页重绘：
+       * 之前每展开一次就重建 .start-art，<video> 从零加载，
+       * 于是先闪一下静态版本图，看起来像重新打开启动页。
+       */
+      const dock = document.querySelector('.start-dock');
+      if (!dock) break;
+      const screen = document.querySelector('.start-screen');
+      const next = !dock.classList.contains('is-menu-open');
+      state.startServerMenu = next;
+      dock.classList.toggle('is-menu-open', next);
+      screen?.classList.toggle('dock-open', next);
+      dock
+        .querySelector('.start-server-pick')
+        ?.setAttribute('aria-expanded', next ? 'true' : 'false');
       break;
+    }
     case 'start-server-pick': {
       const gameId = element.dataset.game;
       const serverId = element.dataset.server;
       const game = state.games.find((item) => item.id === gameId);
       const server = game && (game.servers || []).find((item) => item.id === serverId);
-      state.startServerMenu = false;
+      closeStartServerMenu();
       if (!game || !server) {
         render({ preserveScroll: true });
         break;
@@ -8338,7 +9008,7 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'start-server-manage':
-      state.startServerMenu = false;
+      closeStartServerMenu();
       openStartServerManager(element.dataset.game);
       break;
     case 'export-start-video': {
@@ -8365,7 +9035,7 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'toggle-start-video': {
-      const video = document.querySelector('video[data-start-video]');
+      const video = liveStartVideo();
       if (!video) break;
       if (video.paused) {
         // 用户主动恢复播放
@@ -8724,6 +9394,29 @@ async function handleAction(action, id, element, event = null) {
     case 'toggle-fav':
       await toggleFavorite(id);
       break;
+    case 'duo-game': {
+      // 花火卡：直接开「最近在玩」那一场
+      const target = state.games.find((item) => item.id === element.dataset.game);
+      if (!target) {
+        toast('还没有开场记录，先在游戏库里挑一个吧', 'info');
+        navigate('home');
+        break;
+      }
+      const started = await api.games.launch(target.id);
+      if (started.ok) {
+        playUiSound('launch');
+        if (!target.demo) toast(`正在启动 ${target.name}`, 'info');
+      } else if (started.elevationRequired) {
+        toast('需要管理员权限，请到游戏卡片上用启动按钮', 'error');
+      } else {
+        toast(started.error, 'error');
+      }
+      break;
+    }
+    case 'duo-song':
+      // 火花卡：去点歌台
+      navigate('song');
+      break;
     case 'launch-game': {
       const game = state.games.find((g) => g.id === id);
       const result = await api.games.launch(id);
@@ -8939,13 +9632,20 @@ async function handleAction(action, id, element, event = null) {
       const input = document.querySelector('#update-manifest');
       const value = (input ? input.value : '').trim();
       await api.updateSettings({ updateManifest: value });
-      toast(value ? '更新源已保存，正在检查…' : '已清空更新源', 'success');
+      toast(value ? '更新源已保存，正在检查…' : '已改回内置的官方源', 'success');
       if (value) {
         try {
           const result = await api.checkUpdate();
           if (result && result.hasUpdate) openUpdateModal(result);
         } catch (error) {
           toast(`检查失败：${humanError(error)}`, 'error');
+        }
+      } else {
+        try {
+          const result = await api.checkUpdate();
+          if (result && result.hasUpdate) openUpdateModal(result);
+        } catch {
+          /* 内置源读不到时不打扰用户 */
         }
       }
       state.settings.updateManifest = value;
@@ -9081,6 +9781,19 @@ async function handleAction(action, id, element, event = null) {
         await api.updateSettings({ runtimeRoot: dir });
         toast('运行时目录已更新', 'success');
       }
+      break;
+    }
+    case 'settings-tab': {
+      const key = element.dataset.value;
+      if (!key || !SETTINGS_TABS.some(([id]) => id === key)) break;
+      if (key === settingsTab()) break;
+      state.settingsTab = key;
+      try {
+        localStorage.setItem('vela:settings-tab', key);
+      } catch (error) {
+        /* 本地存储不可用时只在本次会话生效 */
+      }
+      render();
       break;
     }
     case 'set-theme': {
@@ -9957,6 +10670,10 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
             <code id="sophon-target-dir">${esc(server.root || '自动：游戏盘\\VelaRuntimes')}</code>
             <button type="button" class="btn btn-ghost btn-sm" id="sophon-pick-dir">选择目录</button>
           </div>
+          <div class="sophon-estimate" id="sophon-estimate">
+            <span class="sophon-estimate-label">${icon('database', 'xs')}空间预估</span>
+            <span class="sophon-estimate-body" id="sophon-estimate-body">正在结算磁盘和客户端体积…</span>
+          </div>
           <div class="link-progress" id="sophon-progress" style="display:none">
             <div class="link-progress-head">
               <strong id="sophon-phase">准备中…</strong>
@@ -10049,6 +10766,45 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   };
 
   minimize.addEventListener('click', minimizeTask);
+
+  /*
+   * 空间预估：安装前先让用户看到「目标盘还剩多少、要装的东西有多大」，
+   * 而不是等跑到一半才发现盘满了。只读本地信息，不走网络，不阻塞界面。
+   */
+  const estimateBody = document.querySelector('#sophon-estimate-body');
+  const refreshEstimate = async () => {
+    if (!estimateBody) return;
+    estimateBody.textContent = '正在结算磁盘和客户端体积…';
+    try {
+      const result = await api.servers.prepareSophon({
+        gameId,
+        serverId,
+        estimate: true,
+        runtimeRoot: selectedRuntimeRoot || undefined,
+      });
+      if (!result || !result.ok) {
+        estimateBody.textContent = (result && result.error) || '拿不到空间信息，直接开始也可以。';
+        return;
+      }
+      const free = Number(result.freeBytes) || 0;
+      const base = Number(result.baseBytes) || 0;
+      const parts = [];
+      if (free) parts.push(`目标盘（${result.drive || '未知'}）剩余 ${formatSize(free)}`);
+      if (base) {
+        parts.push(`官服客户端约 ${formatSize(base)}${result.partial ? '（还在继续统计）' : ''}`);
+      }
+      if (free && base && base > free) {
+        parts.push('⚠ 客户端比剩余空间大，硬链接通常能省掉大部分，但仍建议先腾点空间');
+      } else if (base) {
+        parts.push('相同的文件会直接硬链接复用，实际新增占用通常远小于这个数');
+      }
+      estimateBody.textContent = parts.join(' · ') || '拿不到空间信息，直接开始也可以。';
+    } catch (error) {
+      estimateBody.textContent = '拿不到空间信息，直接开始也可以。';
+    }
+  };
+  refreshEstimate();
+
   const closeX = document.querySelector('.modal-head [data-close]');
   if (closeX) {
     closeX.addEventListener(
@@ -10071,6 +10827,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       selectedRuntimeRoot = dir;
       const label = document.querySelector('#sophon-target-dir');
       if (label) label.textContent = `${dir}（直接作为目标目录）`;
+      // 换了目标盘，剩余空间就变了，预估得跟着重算
+      refreshEstimate();
     });
   }
   pause.addEventListener('click', async () => {
@@ -10649,6 +11407,9 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
+  /* 点在下拉外面就把它收起来 */
+  if (!event.target.closest('.song-pop')) closeSongPops();
+
   const nav = event.target.closest('[data-nav]');
   if (nav) {
     /*
@@ -10743,7 +11504,78 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+/* 侧栏底部「头像 + 名字」还是回设置页；左上角品牌图标才进启动页（走 data-nav）。 */
 document.querySelector('#profile-btn').addEventListener('click', () => navigate('settings'));
+
+/* 左上角品牌那块是 <div>，键盘也要能触发，补一下回车 / 空格 */
+document.querySelector('.brand[data-nav]')?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  navigate(event.currentTarget.dataset.nav);
+});
+
+/*
+ * 品牌图标两种行为共存：
+ *   按住拖动 → 移动窗口（它已经从 app-region: drag 改成 no-drag）
+ *   单击     → 进启动页
+ * 位移超过 5px 就算拖动，并吃掉紧随其后的那次 click，拖完不会顺带跳页。
+ */
+function setupBrandDrag() {
+  const brand = document.querySelector('.brand[data-nav]');
+  if (!brand) return;
+  let drag = null;
+  brand.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    drag = {
+      x: event.screenX,
+      y: event.screenY,
+      lx: event.screenX,
+      ly: event.screenY,
+      moved: false,
+    };
+    try {
+      brand.setPointerCapture(event.pointerId);
+    } catch {
+      /* 指针捕获失败不影响拖动 */
+    }
+  });
+  brand.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    const totalX = event.screenX - drag.x;
+    const totalY = event.screenY - drag.y;
+    if (!drag.moved && Math.abs(totalX) < 5 && Math.abs(totalY) < 5) return;
+    drag.moved = true;
+    const dx = event.screenX - drag.lx;
+    const dy = event.screenY - drag.ly;
+    drag.lx = event.screenX;
+    drag.ly = event.screenY;
+    if (dx || dy) api.moveWindowBy(dx, dy);
+  });
+  const finish = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null;
+    if (moved) {
+      brand.dataset.justDragged = '1';
+      setTimeout(() => {
+        delete brand.dataset.justDragged;
+      }, 80);
+    }
+  };
+  brand.addEventListener('pointerup', finish);
+  brand.addEventListener('pointercancel', finish);
+  brand.addEventListener(
+    'click',
+    (event) => {
+      if (!brand.dataset.justDragged) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true,
+  );
+}
+
+setupBrandDrag();
 
 const media = window.matchMedia('(prefers-color-scheme: light)');
 media.addEventListener('change', () => {
@@ -10795,6 +11627,12 @@ async function boot() {
 
     api.onState(onState);
     /*
+     * 更新弹窗的配图（米游社画师同人图）。主进程先读本地缓存，
+     * 超过一周才真去抓；抓不到就保持空表，versionHero() 会用官网图。
+     * 慢一点也无所谓，所以不 await。
+     */
+    loadPostArt().catch(() => {});
+    /*
      * 侧栏「工具」分组的内容来自 game-features，启动时就预取一份，
      * 用户第一次点开工具组不至于看到「读取中…」。
      * 失败了也无所谓，renderNavToolsSub 会显示错误提示，工具页自己还会重试。
@@ -10824,13 +11662,13 @@ async function boot() {
     api.onUpdateProgress((progress) => {
       if (!progress) return;
       state.update = { ...state.update, downloading: true, percent: Number(progress.percent) || 0 };
-      setUpdateProgress(state.update.percent);
+      setUpdateProgress(state.update.percent, progress.label);
       if (state.route === 'settings') {
         const bar = document.querySelector('.update-progress-bar span');
         if (bar) {
           bar.style.width = state.update.percent + '%';
           const label = document.querySelector('.update-progress small');
-          if (label) label.textContent = '正在下载 ' + state.update.percent + '%';
+          if (label) label.textContent = progress.label || '正在下载 ' + state.update.percent + '%';
         }
       }
     });
@@ -10875,6 +11713,7 @@ async function boot() {
 
     window.__navigate = (route) => navigate(route, { silent: true });
     window.__state = () => state;
+    window.__render = () => render({ preserveScroll: true });
     window.__startGame = (id) => {
       state.startGameId = id;
       navigate('start', { silent: true });

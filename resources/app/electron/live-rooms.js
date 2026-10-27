@@ -90,6 +90,11 @@ function platformFromUrl(url) {
   if (host.endsWith('cc.163.com')) return 'cc';
   if (host.endsWith('zhanqi.tv')) return 'zhanqi';
   if (host.endsWith('huajiao.com')) return 'huajiao';
+  if (host.endsWith('kugou.com')) return 'kugou';
+  if (host.endsWith('xiaohongshu.com')) return 'xiaohongshu';
+  if (host.endsWith('taobao.com')) return 'taobao';
+  if (host.endsWith('twitch.tv')) return 'twitch';
+  if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) return 'youtube';
   return null;
 }
 
@@ -103,6 +108,12 @@ const PLATFORM_LABELS = {
   cc: '网易CC',
   zhanqi: '战旗',
   huajiao: '花椒',
+  kugou: '酷狗直播',
+  xiaohongshu: '小红书',
+  taobao: '淘宝直播',
+  twitch: 'Twitch',
+  youtube: 'YouTube',
+  generic: '通用抓取',
 };
 
 /* ------------------------------------------------------------------ */
@@ -142,8 +153,7 @@ async function resolveDouyu(url) {
     roomId: String(data.room_id || roomId),
     title: data.room_name || '',
     liveStatus: data.room_status === '1' ? 1 : 0,
-    danmaku: 'unsupported',
-    note: '斗鱼的弹幕走 TCP 私有协议，浏览器无法直连；这里只显示房间状态。',
+    danmaku: 'bridge',
   };
 }
 
@@ -160,8 +170,7 @@ async function resolveHuya(url) {
     roomId: String(roomId),
     title: title.replace(/-\s*虎牙直播.*$/i, '').trim(),
     liveStatus: live,
-    danmaku: 'unsupported',
-    note: '虎牙弹幕需要签名连接，当前只显示房间状态。',
+    danmaku: 'bridge',
   };
 }
 
@@ -177,8 +186,7 @@ async function resolveDouyin(url) {
     roomId: String(roomId),
     title: title.replace(/-\s*抖音.*$/i, '').trim(),
     liveStatus: /直播中/.test(html) ? 1 : 0,
-    danmaku: 'unsupported',
-    note: '抖音弹幕需要 ttwid 签名，当前只显示房间状态。',
+    danmaku: 'bridge',
   };
 }
 
@@ -186,13 +194,80 @@ async function resolveDouyin(url) {
  * 统一入口：识别链接 → 拉房间信息。
  * 不支持弹幕的平台会带上 note，由界面提示用户。
  */
+async function resolveKuaishou(url) {
+  const match = url.match(/kuaishou\.com\/(?:u\/)?([\w-]+)/i);
+  const roomId = match?.[1];
+  if (!roomId) throw new Error('没有识别出快手直播间号');
+  let title = '';
+  let live = 0;
+  try {
+    const html = await getText(`https://live.kuaishou.com/u/${roomId}`);
+    title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
+    live = /直播中|正在直播/.test(html) ? 1 : 0;
+  } catch {
+    /* 页面拿不到也让用户试，抓取窗口会再加载一次 */
+  }
+  return {
+    platform: 'kuaishou',
+    platformLabel: '快手',
+    roomId: String(roomId),
+    title: title.replace(/-\s*快手.*$/i, '').trim(),
+    liveStatus: live,
+    danmaku: 'bridge',
+  };
+}
+
+function decodeEntities(text) {
+  return String(text || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
+/**
+ * 兜底解析：这类平台没有稳定的公开房间接口，
+ * 只尽力读一下页面标题和「是否在直播」，弹幕由隐藏窗口去抓。
+ */
+async function resolveByPage(url, platform, label) {
+  let title = '';
+  let live = 0;
+  try {
+    const html = await getText(url);
+    title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
+    live = /直播中|正在直播|LIVE NOW|isLive/i.test(html) ? 1 : 0;
+  } catch {
+    /* 拿不到页面不让用户卡住，抓取窗口会自己再加载一次 */
+  }
+  return {
+    platform,
+    platformLabel: label,
+    roomId: url,
+    title: decodeEntities(title).trim(),
+    liveStatus: live,
+    danmaku: 'bridge',
+  };
+}
+
 async function resolveLiveRoom(raw) {
   const detected = detectPlatform(raw);
   const url = detected.text;
   const platform = detected.platform || platformFromUrl(url);
 
   if (!platform) {
-    throw new Error('暂不支持这个直播间链接；目前支持 B站、斗鱼、虎牙、抖音');
+    // 没适配过的直播站：只要是个 http(s) 链接，就用通用抓取试一试
+    if (!/^https?:\/\//i.test(url)) {
+      throw new Error('这个链接识别不出直播间，粘贴完整网址试试');
+    }
+    let host = '';
+    try {
+      host = new URL(url).hostname.replace(/^www\./i, '');
+    } catch {
+      host = '未知站点';
+    }
+    return resolveByPage(url, 'generic', host);
   }
 
   switch (platform) {
@@ -204,9 +279,21 @@ async function resolveLiveRoom(raw) {
       return resolveHuya(url);
     case 'douyin':
       return resolveDouyin(url);
+    case 'kuaishou':
+      return resolveKuaishou(url);
+    case 'yy':
+    case 'cc':
+    case 'huajiao':
+    case 'kugou':
+    case 'xiaohongshu':
+    case 'taobao':
+    case 'twitch':
+    case 'youtube':
+    case 'zhanqi':
+      return resolveByPage(url, platform, PLATFORM_LABELS[platform] || platform);
     default: {
       const label = PLATFORM_LABELS[platform] || platform;
-      throw new Error(`${label} 的弹幕接口需要额外签名，暂未接入；可以先使用 B站直播点歌`);
+      return resolveByPage(url, 'generic', label);
     }
   }
 }

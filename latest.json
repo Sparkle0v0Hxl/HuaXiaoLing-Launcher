@@ -1,11 +1,11 @@
 {
-  "version": "2.0.4",
+  "version": "2.1.9",
   "channel": "stable",
-  "date": "2026-10-26",
-  "title": "花筱灵启动器 2.0.4",
-  "notes": "更新弹窗每次发版配一张官方美术图，五款游戏全覆盖，并标注图片来源\n设置页「行为」「存储」两组收起为折叠面板，页面显著变短\n动态页恢复「这一版改了什么」，从设置页搬回\n启动页抽屉卡片改成封面在上、标题条在下，不再压字\n修复游戏路径识别、酷狗歌单、截图指向游戏目录等问题\n修复打包脚本误排 src\\data\news.json 导致动态页空白",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.0.4/HuaXiaoLing-2.0.4-Portable.zip",
-  "sha256": "51ea9fe698e156ba82677d20bdf963f1a46a2b86ba3664ab0da092de5b0205dd",
-  "size": 299223400,
+  "date": "2026-10-27",
+  "title": "花筱灵启动器 2.1.9",
+  "notes": "· 官方更新源内置进包，装好就能自己检查更新，不用再手填地址。\n· 启动器根目录自带 latest.json（指针式），跟着 ZIP 一起发出去。\n· 检查更新改成取版本最高的那一份：以前目录里留着上个版本的清单，会一直显示「已是最新」。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.1.9/HuaXiaoLing-2.1.9-Portable.zip",
+  "sha256": "3cb55ba693a3f07ca72789121205c2b284d55ad1a2bc22c4a7ae2c3a131a3408",
+  "size": 300635703,
   "portable": true
 }

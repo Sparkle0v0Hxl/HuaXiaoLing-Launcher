@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('launcher', {
   getInfo: () => ipcRenderer.invoke('app:info'),
   gameNotices: (gameId) => ipcRenderer.invoke('game:notices', gameId),
   allGameNotices: (force = false) => ipcRenderer.invoke('games:notices', force),
+  // 更新弹窗的配图（米游社同人图，取不到时前端退回官网美术图）
+  postArt: (force = false) => ipcRenderer.invoke('postart:list', force),
   installUpdate: () => ipcRenderer.invoke('app:install-update'),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   applyUpdate: () => ipcRenderer.invoke('update:apply'),
@@ -78,6 +80,7 @@ contextBridge.exposeInMainWorld('launcher', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  moveWindowBy: (dx, dy) => ipcRenderer.invoke('window:move-by', { dx, dy }),
 
   onState: (callback) => subscribe('state:changed', callback),
   onToast: (callback) => subscribe('toast', callback),
@@ -166,6 +169,9 @@ contextBridge.exposeInMainWorld('launcher', {
   live: {
     biliRoom: (input) => ipcRenderer.invoke('live:bili-room', input),
     room: (input) => ipcRenderer.invoke('live:bili-room', input),
+    danmakuStart: (input) => ipcRenderer.invoke('live:danmaku-start', input),
+    danmakuPoll: () => ipcRenderer.invoke('live:danmaku-poll'),
+    danmakuStop: () => ipcRenderer.invoke('live:danmaku-stop'),
   },
 
   importCover: (path) => ipcRenderer.invoke('cover:import', path),
@@ -174,6 +180,8 @@ contextBridge.exposeInMainWorld('launcher', {
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   openDataFolder: () => ipcRenderer.invoke('app:open-data-folder'),
   openDownloadFolder: () => ipcRenderer.invoke('app:open-download-folder'),
+  openUpdateLog: () => ipcRenderer.invoke('app:open-update-log'),
+  readUpdateLog: () => ipcRenderer.invoke('app:read-update-log'),
   createDesktopShortcut: () => ipcRenderer.invoke('app:create-desktop-shortcut'),
   setUiScale: (value) => ipcRenderer.invoke('app:ui-scale', value),
   exportStartVideo: (gameId) => ipcRenderer.invoke('start:export-video', gameId),

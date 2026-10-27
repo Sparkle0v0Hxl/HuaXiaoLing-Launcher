@@ -2053,12 +2053,17 @@ button.recent-row {
   border: 1.5px solid var(--swatch);
   border-radius: 50%;
 }
+/*
+ * 开关：圆点必须四边等距，否则一眼就能看出歪。
+ * 尺寸按 border-box 算，内区 42×22，圆点 16，四周各留 3，行程正好 20。
+ */
 .switch {
   position: relative;
-  width: 46px;
-  height: 26px;
+  box-sizing: border-box;
+  width: 44px;
+  height: 24px;
   flex: none;
-  border-radius: 20px;
+  border-radius: 999px;
   background: var(--surface-3);
   border: 1px solid var(--line);
   transition: background 0.18s ease, border-color 0.18s ease;
@@ -2068,8 +2073,8 @@ button.recent-row {
   position: absolute;
   width: 16px;
   height: 16px;
-  left: 2px;
-  top: 2px;
+  left: 3px;
+  top: 3px;
   border-radius: 50%;
   background: var(--muted);
   transition: transform 0.2s cubic-bezier(0.22, 0.8, 0.3, 1), background 0.18s ease;
@@ -2079,7 +2084,7 @@ button.recent-row {
   border-color: var(--accent-line);
 }
 .switch.on::after {
-  transform: translateX(18px);
+  transform: translateX(20px);
   background: var(--accent);
 }
 .path-box {
@@ -4753,12 +4758,17 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   border: 1.5px solid var(--swatch);
   border-radius: 50%;
 }
+/*
+ * 开关：圆点必须四边等距，否则一眼就能看出歪。
+ * 尺寸按 border-box 算，内区 42×22，圆点 16，四周各留 3，行程正好 20。
+ */
 .switch {
   position: relative;
-  width: 46px;
-  height: 26px;
+  box-sizing: border-box;
+  width: 44px;
+  height: 24px;
   flex: none;
-  border-radius: 20px;
+  border-radius: 999px;
   background: var(--surface-3);
   border: 1px solid var(--line);
   transition: background 0.18s ease, border-color 0.18s ease;
@@ -4768,8 +4778,8 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   position: absolute;
   width: 16px;
   height: 16px;
-  left: 2px;
-  top: 2px;
+  left: 3px;
+  top: 3px;
   border-radius: 50%;
   background: var(--muted);
   transition: transform 0.2s cubic-bezier(0.22, 0.8, 0.3, 1), background 0.18s ease;
@@ -4779,7 +4789,7 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   border-color: var(--accent-line);
 }
 .switch.on::after {
-  transform: translateX(18px);
+  transform: translateX(20px);
   background: var(--accent);
 }
 .path-box {
@@ -12321,6 +12331,15 @@ select {
   min-width: 0;
 }
 
+/* 抓取类平台的实时状态（例如「已连接斗鱼（弹幕抓取中）」） */
+.song-live-status {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  word-break: break-all;
+}
+
 /* 输入框放宽一点，方便贴长链接 */
 .song-live-input {
   font-size: 12px;
@@ -16848,18 +16867,161 @@ body.start-mode .start-games {
   }
 }
 
-/* ── 我的歌单：按平台分区 ───────────────────────────────────────── */
-.my-playlists-group {
-  padding: 12px 0;
-  border-top: 1px solid var(--line);
+/* ── 我的歌单：按平台分区的卡片墙 ───────────────────────────────── */
+.playlists-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.my-playlists-group:first-of-type {
-  border-top: none;
-  padding-top: 4px;
+.playlists-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
 }
 
-.my-playlists-head .mp-dot {
+.playlists-bar-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
+.playlists-bar-title strong {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.playlists-bar-title span {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.playlists-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.playlists-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.playlists-chip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+}
+
+.playlists-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.playlists-chip.is-primary {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.playlists-chip .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.playlists-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 读取歌单失败时的横幅：以前失败是静默的，用户完全看不到原因 */
+.playlists-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 138, 138, 0.34);
+  border-radius: 10px;
+  background: rgba(255, 120, 120, 0.1);
+  color: #ffb3b3;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.playlists-error .icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.playlists-error span {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.playlists-error .link-btn {
+  flex: none;
+  color: #ffb3b3;
+  font-size: 12px;
+}
+
+.playlists-group {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.playlists-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.playlists-group-name {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.playlists-group-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.playlists-group-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.mp-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -16869,21 +17031,158 @@ body.start-mode .start-games {
   background: var(--muted);
 }
 
-.my-playlists-head .mp-dot[data-platform="netease"] {
+.mp-dot[data-platform="netease"] {
   background: #e2402c;
 }
 
-.my-playlists-head .mp-dot[data-platform="qq"] {
+.mp-dot[data-platform="qq"] {
   background: #31c27c;
 }
 
-.my-playlists-head .mp-dot[data-platform="kugou"] {
+.mp-dot[data-platform="kugou"] {
   background: #1a9dfb;
 }
 
-.chart-other-playlists {
-  margin: 10px 0 2px;
-  font-size: 12.5px;
+.playlist-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+  gap: 12px;
+}
+
+.playlist-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: none;
+  cursor: pointer;
+}
+
+.playlist-card-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--surface-3);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.playlist-card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.playlist-card-cover .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.playlist-card-count {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.playlist-card:hover .playlist-card-cover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+
+.playlist-card.is-open .playlist-card-cover {
+  border-color: var(--accent-line);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.playlist-card-name {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.playlist-card-sub {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.playlist-detail {
+  margin-top: 2px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.playlist-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.playlist-detail-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.playlist-detail-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-detail-title small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.playlist-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.playlist-songs {
+  max-height: clamp(200px, 38vh, 420px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.playlists-foot {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.playlists-foot .link-btn {
+  font-size: 11.5px;
 }
 
 /* ── 截图管理 ─────────────────────────────────────────────────────── */
@@ -18647,4 +18946,2551 @@ body.has-backdrop .gfx-card {
   height: 100%;
   object-fit: cover;
   object-position: center 30%;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 启动页收尾 v2
+ *  1) 顶栏 [返回][品牌] …… [动图工具][窗口按钮] 与主页 titlebar 同一套按钮语言
+ *  2) 抽屉展开时抬起右下服务器面板 —— 兄弟选择器，彻底不用 :has()
+ *  3) 抽屉卡片：封面吃满，名字条压成一行 26px
+ *  4) 公告保留可收缩的 <details>，但去掉外框，只留清单
+ * ═══════════════════════════════════════════════════════════════ */
+.start-screen {
+  --hx-dock-bottom: clamp(90px, 11vh, 126px);
+  --hx-top-btn-h: 30px;
+  --hx-top-btn-r: 8px;
+}
+
+/* ── 1）顶栏按钮：统一成主页 titlebar 的 36×30 / 圆角 8 ────────── */
+.start-screen .start-top {
+  gap: 8px;
+  padding: 0 clamp(14px, 2vw, 28px);
+}
+
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  position: static;
+  right: auto;
+  bottom: auto;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: var(--hx-top-btn-h);
+  padding: 0;
+  border: 0;
+  border-radius: var(--hx-top-btn-r);
+  color: rgba(255, 255, 255, 0.7);
+  background: transparent;
+  transition: color 0.14s ease, background 0.14s ease;
+}
+
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.start-screen .start-top .chrome-btn.chrome-close:hover {
+  color: #fff;
+  background: #c94b5d;
+}
+
+.start-screen .start-top .chrome-btn .icon,
+.start-screen .start-top .start-video-toggle .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 返回键不再比品牌图标还大：和窗口键同高、窄一档 */
+.start-screen .start-top .chrome-back {
+  width: 30px;
+}
+
+.start-screen .start-top .start-brand {
+  margin-left: 4px;
+  margin-right: auto;
+  padding-left: 0;
+  gap: 9px;
+  opacity: 1;
+}
+
+.start-screen .start-top .start-brand-mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+.start-screen .start-top .start-brand span {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.start-screen .start-top .start-video-tools {
+  position: static;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  margin: 0 6px 0 0;
+  gap: 2px;
+}
+
+.start-screen .start-top .start-window-controls {
+  margin-left: 0;
+  gap: 2px;
+}
+
+/* ── 2）抽屉抬起右下服务器面板：只用兄弟选择器 ─────────────────── */
+.start-screen .start-dock {
+  bottom: var(--hx-dock-bottom);
+  transition: bottom 0.24s cubic-bezier(0.22, 0.85, 0.3, 1);
+}
+
+.start-screen .start-games:hover ~ .start-dock,
+.start-screen .start-games:focus-within ~ .start-dock {
+  bottom: calc(var(--hx-dock-bottom) + 108px);
+}
+
+@media (max-height: 780px) {
+  .start-screen .start-games:hover ~ .start-dock,
+  .start-screen .start-games:focus-within ~ .start-dock {
+    bottom: calc(var(--hx-dock-bottom) + 92px);
+  }
+}
+
+/* ── 3）抽屉卡片：封面吃满，名字条只占一行 ─────────────────────── */
+.start-screen .start-games .start-game-thumb {
+  height: 132px;
+}
+
+.start-screen .start-games .start-game-media {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 98px;
+}
+
+.start-screen .start-games .start-game-copy {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 9px 6px;
+}
+
+.start-screen .start-games .start-game-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.start-screen .start-games .start-game-copy small {
+  flex: none;
+  font-size: 9.5px;
+  line-height: 1.3;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+/* 4）抽屉底色向主页卡片靠拢 */
+.start-screen .start-games {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  background: linear-gradient(0deg, rgba(9, 8, 13, 0.97), rgba(9, 8, 13, 0.72));
+  backdrop-filter: blur(22px);
+}
+
+/* ── 5）公告：保留可展开的 details，去掉整块外框 ───────────────── */
+.start-screen .start-notices,
+.start-screen .start-notices[open] {
+  width: min(420px, 100%);
+  margin-top: 16px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  overflow: visible;
+}
+
+.start-screen .start-notices summary {
+  padding: 0 0 8px;
+  border: 0;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+.start-screen .start-notices summary:hover {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.start-screen .start-notice-list {
+  max-height: 152px;
+  padding: 0;
+  overscroll-behavior: contain;
+}
+
+.start-screen .start-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.76);
+  cursor: pointer;
+}
+
+.start-screen .start-notice:last-child {
+  border-bottom: 0;
+}
+
+.start-screen .start-notice:hover {
+  color: #fff;
+}
+
+/* 公告行是 <button><span>标题</span><small>时间</small></button> */
+.start-screen .start-notice > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.start-screen .start-notice > small {
+  flex: none;
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.start-screen .start-notice-empty {
+  margin: 0;
+  padding: 6px 0;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+}
+
+/* ── 6）窄屏：卡片整体缩一档，封面比例保持不变 ─────────────────── */
+@media (max-width: 1100px) {
+  .start-screen .start-games .start-game-thumb {
+    width: 164px;
+    height: 118px;
+  }
+
+  .start-screen .start-games .start-game-media {
+    min-height: 84px;
+  }
+}
+
+@media (max-width: 860px) {
+  .start-screen .start-games .start-game-thumb {
+    width: 146px;
+    height: 104px;
+  }
+
+  .start-screen .start-games .start-game-media {
+    min-height: 72px;
+  }
+}
+
+/* 公告去框后：去掉行首强调点、去掉块状 hover 底色、展开时不再有分隔线 */
+.start-screen .start-notices[open] summary {
+  border-bottom: 0;
+}
+
+.start-screen .start-notice::before {
+  content: none;
+}
+
+.start-screen .start-notice:hover {
+  background: none;
+}
+
+/* ── 启动页装饰层 v3：把主页 hero 背后那套「光轨 + 花字水印」搬到启动页 ─────── */
+.start-screen .start-main {
+  /* 原来的 left 因为静态定位是失效的；这里显式归零，
+     免得改成 relative 之后文字整块被右移 24–64px */
+  left: 0;
+  position: relative;
+  isolation: isolate;
+}
+
+.start-screen .start-sparks {
+  position: absolute;
+  left: clamp(-120px, -6vw, -64px);
+  top: -88px;
+  width: min(460px, 42vw);
+  aspect-ratio: 1 / 1;
+  color: var(--gold);
+  opacity: 0.3;
+  z-index: 0;
+  pointer-events: none;
+  transform: rotate(-8deg);
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 40%, transparent 72%);
+  mask-image: radial-gradient(circle at 50% 50%, #000 40%, transparent 72%);
+  animation: hx-sparks-drift 46s linear infinite;
+}
+
+.start-screen .start-sparks svg {
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes hx-sparks-drift {
+  from { transform: rotate(-8deg); }
+  to { transform: rotate(352deg); }
+}
+
+
+/* 标题后面垫一层跟随强调色的柔光，和主页 hero 的层次一致 */
+.start-screen .start-titlebox {
+  position: relative;
+}
+
+.start-screen .start-titlebox::before {
+  content: "";
+  position: absolute;
+  left: -18%;
+  top: 50%;
+  width: 128%;
+  height: 220%;
+  transform: translateY(-50%);
+  background: radial-gradient(
+    60% 60% at 30% 50%,
+    rgba(var(--accent-rgb), 0.16),
+    transparent 72%
+  );
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* 文字层压在装饰之上 */
+.start-screen .start-main > :not(.start-sparks):not(.start-index) {
+  position: relative;
+  z-index: 1;
+}
+
+/* 名字条去掉「已就绪」后：只留名字，运行中才补状态字 */
+.start-screen .start-games .start-game-copy {
+  justify-content: flex-start;
+  padding: 6px 10px 7px;
+}
+
+.start-screen .start-games .start-game-copy strong {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+
+.start-screen .start-games .start-game-copy small {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* 窄屏：装饰层整体收一档，避免压住标题 */
+@media (max-width: 1100px) {
+  .start-screen .start-sparks {
+    width: min(340px, 46vw);
+    top: -60px;
+  }
+
+  }
+
+@media (max-width: 860px) {
+  .start-screen .start-sparks {
+    opacity: 0.2;
+  }
+
+  }
+
+@media (prefers-reduced-motion: reduce) {
+  .start-screen .start-sparks {
+    animation: none;
+  }
+}
+
+/* ── 启动页按钮与花字 v4：花字收小、右下按钮整体放大并统一成主页按钮的规格 ────── */
+
+/* 面板整体放宽一档，按钮才有呼吸空间 */
+.start-screen .start-dock {
+  min-width: min(296px, calc(100vw - 48px));
+  max-width: min(424px, 43vw);
+  padding: 16px 17px 17px;
+  gap: 10px;
+}
+
+.start-screen .start-dock-label {
+  font-size: 11.5px;
+}
+
+.start-screen .start-dock-server-head {
+  margin-bottom: 2px;
+}
+
+/* 齿轮：32 见方，图标 15 */
+.start-screen .start-dock-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.start-screen .start-dock-icon .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 服务器选择行：52 高，标题 13.5 / 文件名 11.5 */
+.start-screen .start-server-pick {
+  min-height: 52px;
+  padding: 10px 13px;
+  border-radius: 12px;
+}
+
+.start-screen .start-server-pick-copy strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.start-screen .start-server-pick-copy small {
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.start-screen .start-server-pick-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.start-screen .start-server-pick-caret .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* 主按钮：46 高，字 14.5，和主页 .btn-primary 一个体量 */
+.start-screen .start-dock-play {
+  height: 46px;
+  border-radius: 12px;
+  gap: 9px;
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.start-screen .start-dock-play .icon {
+  width: 17px;
+  height: 17px;
+}
+
+/* 弹层里的服务器项与底部三键 */
+.start-screen .start-server-item {
+  min-height: 46px;
+  padding: 9px 11px;
+  border-radius: 11px;
+}
+
+.start-screen .start-server-item-copy strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.start-screen .start-server-item-copy small {
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.start-screen .start-server-item-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.start-screen .start-server-menu-foot {
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.start-screen .start-server-foot-btn {
+  height: 32px;
+  gap: 6px;
+  padding: 0 11px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+.start-screen .start-server-foot-btn .icon {
+  width: 13.5px;
+  height: 13.5px;
+}
+
+/* 窄屏：按钮小一档，但仍不回到原来那种小字节 */
+@media (max-width: 1100px) {
+  .start-screen .start-dock {
+    min-width: min(272px, calc(100vw - 40px));
+    max-width: min(392px, 46vw);
+    padding: 14px 15px 15px;
+  }
+
+  .start-screen .start-server-pick {
+    min-height: 48px;
+    padding: 9px 12px;
+  }
+
+  .start-screen .start-dock-play {
+    height: 44px;
+    font-size: 14px;
+  }
+}
+
+/* 矮窗口保留紧凑版：窗口高度不够时按钮收一档，避免右下角整块顶到公告 */
+@media (max-height: 760px) {
+  .start-screen .start-dock {
+    padding: 12px 13px 13px;
+    gap: 8px;
+  }
+
+  .start-screen .start-server-pick {
+    min-height: 46px;
+    padding: 8px 12px;
+  }
+
+  .start-screen .start-dock-play {
+    height: 42px;
+    font-size: 14px;
+  }
+
+  .start-screen .start-server-item {
+    min-height: 42px;
+  }
+}
+
+/* ── 侧栏品牌图标可点 v6：左上角「花筱灵 / HANABI STAGE」单击进启动页 ─────────
+ * .brand 原本带 -webkit-app-region: drag，是窗口拖拽区，
+ * 拖拽区会把鼠标事件吞掉，所以这里必须改成 no-drag 才能点。 */
+.brand[data-nav] {
+  cursor: grab;
+  -webkit-app-region: no-drag;
+  border-radius: 14px;
+  transition: background 0.16s ease;
+}
+
+.brand[data-nav]:active {
+  cursor: grabbing;
+}
+
+.brand[data-nav]:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.brand[data-nav]:hover .brand-mark {
+  filter: brightness(1.06);
+  box-shadow: 0 12px 30px rgba(232, 67, 90, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+.brand[data-nav]:hover .brand-name {
+  color: var(--text);
+}
+
+.brand[data-nav]:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.55);
+  outline-offset: 3px;
+}
+
+.brand[data-nav]:active .brand-mark {
+  transform: translateY(1px);
+}
+
+/* ── 小按钮幽灵化 v7：去掉「花」字后，改用左上角一道舞台光做装饰锚点；
+ *    顶部与面板里的小图标键统一改成无边框幽灵键，悬停才浮出底色 ── */
+.start-screen .start-main::before {
+  content: "";
+  position: absolute;
+  left: clamp(-160px, -10vw, -80px);
+  top: clamp(-140px, -14vh, -70px);
+  width: clamp(420px, 46vw, 720px);
+  aspect-ratio: 1 / 1;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(240, 198, 116, 0.16),
+    rgba(240, 198, 116, 0.05) 44%,
+    transparent 70%
+  );
+  filter: blur(2px);
+}
+
+/* 顶部：返回 / 动图 / 最小化 / 最大化 / 关闭 —— 无边框，悬停才亮 */
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.start-screen .start-top .chrome-btn.chrome-close:hover {
+  color: #fff;
+  background: #c94b5d;
+}
+
+.start-screen .start-top .chrome-back {
+  width: 34px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* 面板里的齿轮：同样无边框 */
+.start-screen .start-dock-icon {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--hero-muted);
+}
+
+.start-screen .start-dock-icon:hover {
+  color: #fff;
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 弹层底部三键：等宽、浅底、无描边，像主页的次级按钮 */
+.start-screen .start-server-menu-foot {
+  gap: 6px;
+}
+
+.start-screen .start-server-foot-btn {
+  flex: 1 1 0;
+  height: 34px;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--hero-ink);
+  font-size: 12.5px;
+}
+
+.start-screen .start-server-foot-btn:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: #fff;
+}
+
+.start-screen .start-server-foot-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 服务器选择行的箭头收成淡色，不再像第三个按钮 */
+.start-screen .start-server-pick-caret {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+@media (max-width: 860px) {
+  .start-screen .start-main::before {
+    opacity: 0.6;
+  }
+}
+
+/* ── 动态背景淡入 + 主页窗口键统一 v8 ─────────────────────────────────────────────
+ * 1) 启动页动态背景：视频没解出第一帧前先透明，就绪后淡入，
+ *    静态版本图压在下面 —— 终末地 / 异环切游戏、切服务器不再闪图。
+ * 2) 主页右上角窗口键向启动页靠拢：34×34、圆角 9、无描边。 */
+.start-screen .start-art > video[data-start-video] {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.start-screen .start-art.video-ready > video[data-start-video] {
+  opacity: 1;
+}
+
+.start-screen .start-art > img[data-cover] {
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+
+.start-screen .start-art.video-ready > img[data-cover] {
+  opacity: 0;
+}
+
+/* 主页 window-controls：和启动页同一套幽灵键 */
+.window-controls {
+  gap: 4px;
+  margin-left: 12px;
+}
+
+.window-control {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: rgba(255, 255, 255, 0.58);
+  background: transparent;
+  transition: color 0.14s ease, background 0.14s ease, transform 0.14s ease;
+}
+
+.window-control .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.window-control:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.window-control:active {
+  transform: translateY(1px);
+}
+
+.window-control-close:hover {
+  color: #fff;
+  background: #c94b5d;
+}
+
+/* ── 画面交接层 v9：换游戏时旧画面先顶着，新视频就绪再淡出 ───────────── */
+.start-screen .start-art.start-art-prev {
+  z-index: 3;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.start-screen .start-art.start-art-prev.start-art-prev-out {
+  opacity: 0;
+}
+
+/* ── 服务器面板纯 CSS 开合 v10：不重绘，动态背景不会被重置 ─────────────────────── */
+.start-screen .start-dock .start-server-menu {
+  display: none;
+}
+
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  display: block;
+}
+
+.start-screen .start-menu-scrim {
+  display: none;
+}
+
+.start-screen.dock-open .start-menu-scrim {
+  display: block;
+}
+
+/* ── 服务器列表去框 v11：和公告一样不再单做一个框，只留行分隔 ─────────────── */
+.start-screen .start-dock .start-server-menu {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.start-screen .start-dock .start-server-item {
+  border-radius: 8px;
+  padding: 7px 8px;
+}
+
+.start-screen .start-dock .start-server-item + .start-server-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.start-screen .start-dock .start-server-menu-foot {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ── 小按钮光轨 v12：图标键做成「光轨」质感 —— 静止时线条带一点冷光，
+ *    悬停时一道暖金色光弧绕键一圈，功能照旧看得出来 ─────────── */
+@property --hx-orbit {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle,
+.start-screen .start-dock-icon,
+.window-control {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/* 静止态：极淡的一圈内描边 + 图标轻微外发光，像灯带的底光 */
+.start-screen .start-top .chrome-btn::after,
+.start-screen .start-top .start-video-toggle::after,
+.start-screen .start-dock-icon::after,
+.window-control::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: radial-gradient(
+      120% 120% at 50% 0%,
+      rgba(255, 255, 255, 0.09),
+      transparent 62%
+    ),
+    radial-gradient(
+      100% 100% at 50% 120%,
+      rgba(var(--accent-rgb), 0.10),
+      transparent 66%
+    );
+  opacity: 0.75;
+  transition: opacity 0.18s ease;
+}
+
+.start-screen .start-top .chrome-btn .icon,
+.start-screen .start-top .start-video-toggle .icon,
+.start-screen .start-dock-icon .icon,
+.window-control .icon {
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.18));
+  transition: filter 0.18s ease, color 0.14s ease;
+}
+
+/* 悬停态：一道暖金光弧沿边框绕行，图标亮起 */
+.start-screen .start-top .chrome-btn::before,
+.start-screen .start-top .start-video-toggle::before,
+.start-screen .start-dock-icon::before,
+.window-control::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--hx-orbit),
+    transparent 0deg,
+    transparent 228deg,
+    rgba(240, 198, 116, 0.55) 292deg,
+    rgba(255, 244, 214, 0.95) 334deg,
+    rgba(240, 198, 116, 0.35) 352deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+
+.start-screen .start-top .chrome-btn:hover::before,
+.start-screen .start-top .chrome-btn:focus-visible::before,
+.start-screen .start-top .start-video-toggle:hover::before,
+.start-screen .start-top .start-video-toggle:focus-visible::before,
+.start-screen .start-dock-icon:hover::before,
+.start-screen .start-dock-icon:focus-visible::before,
+.window-control:hover::before,
+.window-control:focus-visible::before {
+  opacity: 1;
+  animation: hx-orbit-run 2.6s linear infinite;
+}
+
+.start-screen .start-top .chrome-btn:hover::after,
+.start-screen .start-top .start-video-toggle:hover::after,
+.start-screen .start-dock-icon:hover::after,
+.window-control:hover::after {
+  opacity: 1;
+}
+
+.start-screen .start-top .chrome-btn:hover .icon,
+.start-screen .start-top .start-video-toggle:hover .icon,
+.start-screen .start-dock-icon:hover .icon,
+.window-control:hover .icon {
+  color: #fff;
+  filter: drop-shadow(0 0 7px rgba(240, 198, 116, 0.55));
+}
+
+/* 关闭键保留红色语义，但同样走光弧 */
+.start-screen .start-top .chrome-btn.chrome-close::before,
+.window-control.window-control-close::before {
+  background: conic-gradient(
+    from var(--hx-orbit),
+    transparent 0deg,
+    transparent 228deg,
+    rgba(201, 75, 93, 0.6) 292deg,
+    rgba(255, 214, 220, 0.95) 334deg,
+    rgba(201, 75, 93, 0.4) 352deg,
+    transparent 360deg
+  );
+}
+
+.start-screen .start-top .chrome-btn.chrome-close:hover .icon,
+.window-control.window-control-close:hover .icon {
+  filter: drop-shadow(0 0 7px rgba(201, 75, 93, 0.7));
+}
+
+@keyframes hx-orbit-run {
+  to {
+    --hx-orbit: 360deg;
+  }
+}
+
+/* 不支持 @property 的旧内核：退回静态金色描边，功能不受影响 */
+@supports not (background: paint(x)) {
+  .start-screen .start-top .chrome-btn:hover,
+  .start-screen .start-top .start-video-toggle:hover,
+  .start-screen .start-dock-icon:hover,
+  .window-control:hover {
+    box-shadow: inset 0 0 0 1px rgba(240, 198, 116, 0.45);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .start-screen .start-top .chrome-btn:hover::before,
+  .start-screen .start-top .start-video-toggle:hover::before,
+  .start-screen .start-dock-icon:hover::before,
+  .window-control:hover::before {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置页：左侧分组导航 + 只渲染当前分组（v2.1.1）                      */
+/* ------------------------------------------------------------------ */
+.settings-shell {
+  display: grid;
+  grid-template-columns: 178px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.settings-nav-item .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.settings-nav-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-nav-hint {
+  margin: 7px 4px 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  opacity: 0.72;
+}
+
+/* 只有当前分组的面板参与布局，其余彻底不占位，页面因此不再需要长滚动 */
+.settings-grid > [data-settings-group] {
+  display: none;
+}
+
+.settings-grid > [data-settings-group].is-active {
+  display: block;
+}
+
+/* 单独一个面板的分组铺满整行 */
+.settings-grid > [data-settings-group].settings-span.is-active {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1080px) {
+  .settings-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 7px;
+  }
+
+  .settings-nav-item {
+    width: auto;
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .settings-nav-hint {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 启动页 v13：服务器列表可读性                                        */
+/*                                                                     */
+/* v11 为了「不要框」把服务器列表的底色、描边、模糊全摘了，结果列表直接  */
+/* 压在动态图上，深色游戏画面里字和图标全糊在一起。这里不重新加硬框，而是  */
+/* 用「一层会呼吸的雾」把列表下面的画面压下去：                            */
+/*   · 展开时整页压暗一档（聚焦列表，也顺便让其它区域退后）                */
+/*   · 列表本身铺一层半透明磨砂 + 上下渐隐，看起来是光晕不是卡片            */
+/*   · 文字加一层柔和外阴影，任何画面下都咬得住                            */
+/* ------------------------------------------------------------------ */
+
+/* 展开时的整页压暗层：从列表所在的下方往上渐隐，越靠近列表越暗 */
+.start-screen.dock-open .start-menu-scrim {
+  background:
+    radial-gradient(
+      130% 78% at 50% 104%,
+      rgba(6, 5, 9, 0.78) 0%,
+      rgba(6, 5, 9, 0.52) 38%,
+      rgba(6, 5, 9, 0.12) 68%,
+      transparent 86%
+    );
+  backdrop-filter: blur(2px) saturate(1.05);
+  -webkit-backdrop-filter: blur(2px) saturate(1.05);
+  transition: opacity 0.2s ease;
+}
+
+/* 列表底衬：没有描边、没有硬边，靠磨砂和上下渐隐托住文字 */
+.start-screen .start-dock .start-server-menu {
+  position: relative;
+  margin-top: 8px;
+  padding: 6px;
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(16, 13, 20, 0.62) 0%,
+      rgba(16, 13, 20, 0.72) 52%,
+      rgba(16, 13, 20, 0.58) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 18px 40px -22px rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(20px) saturate(1.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+}
+
+/* 上下两条渐隐，让这块「雾」和背景融在一起，看着不像一个方框 */
+.start-screen .start-dock .start-server-menu::before {
+  content: "";
+  position: absolute;
+  inset: -10px 0;
+  z-index: -1;
+  border-radius: 22px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(10, 8, 13, 0.32) 22%,
+    rgba(10, 8, 13, 0.34) 78%,
+    transparent 100%
+  );
+  filter: blur(6px);
+  pointer-events: none;
+}
+
+/* 行：悬停时才浮起一块底色，静止状态只有极淡的分隔 */
+.start-screen .start-dock .start-server-item {
+  position: relative;
+  border-radius: 10px;
+  padding: 8px 10px;
+  transition: background 0.14s ease;
+}
+
+.start-screen .start-dock .start-server-item + .start-server-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.start-screen .start-dock .start-server-item.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+/* 文字在任何画面下都咬得住 */
+.start-screen .start-dock .start-server-item-copy strong {
+  color: #fff;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.72);
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  color: rgba(255, 255, 255, 0.68);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+}
+
+.start-screen .start-dock .start-server-pick-copy strong {
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+}
+
+.start-screen .start-dock .start-server-pick-copy small {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+}
+
+.start-screen .start-dock .start-dock-label,
+.start-screen .start-dock .start-dock-label em {
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+/* 底部三个按钮：同一层雾里的一排小键 */
+.start-screen .start-dock .start-server-menu-foot {
+  margin-top: 6px;
+  padding: 8px 2px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.start-screen .start-dock .start-server-foot-btn {
+  color: rgba(255, 255, 255, 0.82);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+.start-screen .start-dock .start-server-foot-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+/* ── 播放器底部工具条的自定义下拉（向上展开） ─────────────────
+   原生 <select> 的弹层只能往下弹，播放器贴底时会被窗口裁掉，
+   所以音质和播放模式改成自己画的菜单，锚在按钮上方。 */
+.song-bar-pop {
+  position: relative;
+  display: inline-flex;
+}
+.song-bar-pop .song-pop-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+.song-bar-pop .song-pop-trigger:hover,
+.song-bar-pop.is-open .song-pop-trigger {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.song-bar-pop .song-pop-trigger .icon {
+  width: 11px;
+  height: 11px;
+  opacity: 0.7;
+  transition: transform 0.2s ease;
+}
+.song-bar-pop.is-open .song-pop-trigger .icon {
+  transform: rotate(180deg);
+}
+.song-pop-menu {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translate(-50%, 6px);
+  min-width: 116px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(30, 24, 38, 0.96), rgba(18, 14, 24, 0.97));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  backdrop-filter: blur(18px) saturate(1.2);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 60;
+  transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
+}
+.song-pop.is-open .song-pop-menu {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+.song-pop-item {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.song-pop-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+.song-pop-item.is-active {
+  color: var(--accent-soft, var(--accent));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* 侧栏里的音质下拉在页面中部，仍然可以往下弹 */
+.song-rail-row .song-pop-menu {
+  bottom: auto;
+  top: calc(100% + 8px);
+  transform: translate(-50%, -6px);
+}
+.song-rail-row .song-pop.is-open .song-pop-menu {
+  transform: translate(-50%, 0);
+}
+
+/* ── 小按钮光轨 v13：花火·火花 ───────────────────────────────────────────────
+ * 参考「流光描边」的做法：一圈 conic-gradient 光沿按钮边缘巡游，
+ * 再用 mask 只留 1px 边，所以不会盖住图标、也不影响点击区域。
+ * 配色只取花火的三色 —— 樱粉 / 紫藤 / 鎏金，静止态保留一圈淡描边，
+ * 保证「这是个能点的按钮」一眼看得出来。 */
+@property --hx-trail {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+:root {
+  --trail-pink: 255, 138, 196;
+  --trail-violet: 178, 148, 255;
+  --trail-gold: 240, 198, 116;
+}
+
+/* 统一底座：浅底 + 淡描边 + 图标常亮 */
+.window-controls .window-control,
+.page-head-actions .btn-ghost,
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle,
+.start-screen .start-dock-icon {
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  border: 0;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.82);
+  transition: color 0.16s ease, background 0.16s ease, box-shadow 0.22s ease,
+    transform 0.16s ease;
+}
+
+/* 光轨环：只占最外 1px，靠 mask 挖空中间 */
+.window-controls .window-control::before,
+.page-head-actions .btn-ghost::before,
+.start-screen .start-top .chrome-btn::before,
+.start-screen .start-top .start-video-toggle::before,
+.start-screen .start-dock-icon::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 3;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--hx-trail),
+    rgba(var(--trail-pink), 0) 0deg,
+    rgba(var(--trail-pink), 0.95) 28deg,
+    rgba(var(--trail-violet), 0.95) 92deg,
+    rgba(var(--trail-gold), 0.9) 150deg,
+    rgba(var(--trail-pink), 0) 214deg,
+    rgba(var(--trail-pink), 0) 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  opacity: 0.32;
+  transition: opacity 0.22s ease;
+}
+
+/* 启动页顶部只有五个键，可以一直慢慢转，像后台没关的灯 */
+.start-screen .start-top .chrome-btn::before,
+.start-screen .start-top .start-video-toggle::before {
+  animation: hx-trail-spin 9s linear infinite;
+}
+
+/* 悬停：环亮起来、转速提上去，外加一层极淡的粉光 */
+.window-controls .window-control:hover,
+.page-head-actions .btn-ghost:hover,
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover,
+.start-screen .start-dock-icon:hover {
+  color: #fff;
+  background: rgba(var(--trail-pink), 0.14);
+  box-shadow: inset 0 0 0 1px rgba(var(--trail-pink), 0.28),
+    0 0 16px rgba(var(--trail-pink), 0.2);
+}
+
+.window-controls .window-control:hover::before,
+.page-head-actions .btn-ghost:hover::before,
+.start-screen .start-top .chrome-btn:hover::before,
+.start-screen .start-top .start-video-toggle:hover::before,
+.start-screen .start-dock-icon:hover::before {
+  opacity: 1;
+  animation-duration: 2.6s;
+}
+
+/* 键盘聚焦也要看得见 */
+.window-controls .window-control:focus-visible,
+.page-head-actions .btn-ghost:focus-visible,
+.start-screen .start-top .chrome-btn:focus-visible,
+.start-screen .start-top .start-video-toggle:focus-visible,
+.start-screen .start-dock-icon:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px rgba(var(--trail-violet), 0.75),
+    0 0 0 2px rgba(var(--trail-violet), 0.28);
+}
+
+/* 关闭键保持红色语义，不跟粉色走 */
+.window-controls .window-control-close:hover,
+.start-screen .start-top .chrome-btn.chrome-close:hover {
+  color: #fff;
+  background: #c94b5d;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 0 16px rgba(201, 75, 93, 0.42);
+}
+
+.window-controls .window-control-close:hover::before,
+.start-screen .start-top .chrome-btn.chrome-close:hover::before {
+  background: conic-gradient(
+    from var(--hx-trail),
+    rgba(255, 255, 255, 0) 0deg,
+    rgba(255, 255, 255, 0.85) 40deg,
+    rgba(255, 190, 200, 0.9) 110deg,
+    rgba(255, 255, 255, 0) 190deg,
+    rgba(255, 255, 255, 0) 360deg
+  );
+  opacity: 1;
+}
+
+/* 浅色主题：底色换成一层极淡的墨，描边压深一点 */
+:root[data-theme="light"] .window-controls .window-control,
+:root[data-theme="light"] .page-head-actions .btn-ghost {
+  background: rgba(24, 16, 40, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(24, 16, 40, 0.1);
+  color: rgba(28, 20, 44, 0.78);
+}
+
+:root[data-theme="light"] .window-controls .window-control:hover,
+:root[data-theme="light"] .page-head-actions .btn-ghost:hover {
+  color: #1c142c;
+  background: rgba(var(--trail-pink), 0.16);
+}
+
+:root[data-theme="light"] .window-controls .window-control-close:hover {
+  color: #fff;
+}
+
+@keyframes hx-trail-spin {
+  to {
+    --hx-trail: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .start-screen .start-top .chrome-btn::before,
+  .start-screen .start-top .start-video-toggle::before {
+    animation: none;
+  }
+}
+/* ── 窗口设置面板压缩 v14 ────────────────────────────────────────────────────
+ * 之前这里每行都是「说明在上、控件在下」的竖排，四行叠起来比一屏还高。
+ * 面板本来就独占一整行（约 1000px），所以改成「说明左、控件右」，
+ * 两个滑块并成两列，长说明也一并收短。 */
+.material-panel {
+  padding: 16px 18px;
+}
+
+.material-panel h2 {
+  margin-bottom: 4px;
+}
+
+.material-panel > .desc {
+  margin-bottom: 4px;
+  font-size: 12.5px;
+}
+
+.material-panel .setting-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  min-height: 0;
+  padding: 9px 0;
+}
+
+.material-panel .setting-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.material-panel .setting-copy strong {
+  font-size: 13.5px;
+}
+
+.material-panel .setting-copy span {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.material-panel .setting-control {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.material-panel .segmented {
+  flex-wrap: nowrap;
+}
+
+.material-panel .volume-control {
+  width: 240px;
+  max-width: 48%;
+}
+
+.material-panel .volume-range {
+  flex: 1 1 auto;
+  min-width: 90px;
+}
+
+/* 不透明度 / 清晰度：并排两列，各自竖排一次 */
+.material-panel .setting-row-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+  margin-top: 2px;
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+}
+
+.material-panel .setting-row-pair .setting-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-height: 0;
+  padding: 9px 0 4px;
+  border-top: 0;
+}
+
+.material-panel .setting-row-pair .volume-control {
+  width: 100%;
+  max-width: 100%;
+}
+
+.material-panel .material-note {
+  margin-top: 10px;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+@media (max-width: 1100px) {
+  .material-panel .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 7px;
+  }
+
+  .material-panel .setting-control {
+    justify-content: flex-start;
+  }
+
+  .material-panel .volume-control {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .material-panel .setting-row-pair {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+
+/* ── 顶栏留白 + 火花·花火纹样 v18 ────────────────────────────────────────────
+ * 设定来源：BWIKI「火花 / Sparxie」，4.0 五星，假面愚者·欢愉·火属性，
+ *           本体名花火 —— 所以两位共用一张脸，区别在「道具」：
+ *   花火 → 面具（谒者的面具 / 假面）、烟花筒、游鱼、扑克
+ *   火花 → 直播间（点赞·关注·热搜·弹幕）、烟花大会、表情 ( ✿＞◡•)、
+ *           身边两只小家伙：花花兔（兔）与火火菇（菇）
+ * 于是纹样体系：
+ *   小按钮 / 侧栏 / 页头 → 面具与星芒（花火的假面 + 火花的烟花）
+ *   空状态、提示          → 花花兔 + 火火菇 双宠（火花的伴生）
+ * 全部走 mask 上色，粉 → 金渐变；静止淡、悬停亮，功能图标的辨识度优先。 */
+
+:root {
+  /* 兔耳面具：花火的脸 + 火花的兔子（花花兔） */
+  --hx-orn-maskrabbit: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='%23000'><ellipse cx='8.3' cy='6.1' rx='1.85' ry='4.5' transform='rotate(-9 8.3 6.1)'/><ellipse cx='15.7' cy='6.1' rx='1.85' ry='4.5' transform='rotate(9 15.7 6.1)'/><path d='M12 8.3c3.1 0 5.5 1.2 6.3 3-.6 3.9-3.1 7.1-6.3 7.1s-5.7-3.2-6.3-7.1c.8-1.8 3.2-3 6.3-3z'/></g></svg>");
+
+  /* 谒者的面具（花火本体的假面） */
+  --hx-orn-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='%23000'><path d='M3.2 8.2c2.7-2 5.7-3 8.8-3s6.1 1 8.8 3c-.8 6-4.1 10.4-8.8 10.4S4 14.2 3.2 8.2z'/><path d='M12 1.9l1.15 3.3-1.15 1.2-1.15-1.2z'/></g></svg>");
+
+  /* 烟花星芒：火花的「火花大会」 */
+  --hx-orn-spark: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23000' d='M12 1.4l1.8 8.8 8.8 1.8-8.8 1.8-1.8 8.8-1.8-8.8L1.4 12l8.8-1.8z'/></svg>");
+
+  /* 花花兔（火花的宠物之一） */
+  --hx-orn-rabbit: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='%23000'><circle cx='12' cy='16.4' r='5'/><ellipse cx='9.2' cy='6.6' rx='1.9' ry='5.2' transform='rotate(-11 9.2 6.6)'/><ellipse cx='14.8' cy='6.6' rx='1.9' ry='5.2' transform='rotate(11 14.8 6.6)'/></g></svg>");
+
+  /* 火火菇（火花的宠物之二） */
+  --hx-orn-mushroom: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='%23000'><path d='M12 2.6c4.9 0 8.9 3.6 8.9 7.2 0 .9-.7 1.4-1.7 1.4H4.8c-1 0-1.7-.5-1.7-1.4 0-3.6 4-7.2 8.9-7.2z'/><path d='M8.6 12.6h6.8v5.1c0 2-1.5 3.5-3.4 3.5s-3.4-1.5-3.4-3.5z'/></g></svg>");
+
+  /* 点赞爱心：火花的直播间 */
+  --hx-orn-heart: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23000' d='M12 21.2 4.1 13.5A4.9 4.9 0 0 1 12 6.9a4.9 4.9 0 0 1 7.9 6.6z'/></svg>");
+
+  /* 游鱼：火花故事里「像一尾游鱼跃出水面」 */
+  --hx-orn-fish: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='%23000'><path d='M2.4 12c3.4-3.9 7-5.9 10.9-5.9 3 0 5.7 1.2 8.3 3.6-.6 1.6-1.6 2.9-2.9 4-2.4 2.2-5 3.3-8 3.3-3.6 0-6.7-1.9-8.3-5z'/><path d='M17.6 8.1 22 5.4l-1 6.6 1 6.6-4.4-2.7z'/></g></svg>");
+
+  /* 想换主题纹样只改这一行 */
+  --hx-char-mask: var(--hx-orn-maskrabbit);
+  --hx-char-spark: var(--hx-orn-spark);
+}
+
+/* 1) 留白：窗口键不再贴着窗口上沿 */
+.titlebar {
+  align-items: flex-start;
+  padding-top: 10px;
+}
+
+/* 启动页顶栏：上留白 18px
+   （height 必须放开：早前那条写了 height: var(--titlebar-h)，会把留白吃掉半个按钮） */
+.start-screen .start-top {
+  height: auto;
+  min-height: calc(var(--titlebar-h) + 22px);
+  padding: 18px 28px 12px;
+}
+
+/* 2) 品牌行与按钮同高，图标和文字走同一条中心线 */
+.start-screen .start-brand {
+  height: 34px;
+  margin-left: 2px;
+}
+
+.start-screen .start-brand-mark {
+  width: 26px;
+  height: 26px;
+}
+
+/* 3) 小按钮左上角的兔耳面具
+   用真元素而不是伪元素：这些按钮的 ::before 是光轨、::after 是底光，都被占着 */
+.hx-orn {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  width: 11px;
+  height: 11px;
+  z-index: 5;
+  pointer-events: none;
+  background: linear-gradient(148deg, rgba(var(--trail-pink), 0.96), rgba(var(--trail-gold), 0.9));
+  -webkit-mask: var(--hx-char-mask) center / contain no-repeat;
+  mask: var(--hx-char-mask) center / contain no-repeat;
+  opacity: 0.5;
+  filter: drop-shadow(0 0 3px rgba(var(--trail-pink), 0.45));
+  transition: opacity 0.2s ease, transform 0.4s ease;
+}
+
+.window-control:hover .hx-orn,
+.page-head-actions .btn-ghost:hover .hx-orn,
+.start-screen .start-top .chrome-btn:hover .hx-orn,
+.start-screen .start-top .start-video-toggle:hover .hx-orn,
+.window-control:focus-visible .hx-orn,
+.page-head-actions .btn-ghost:focus-visible .hx-orn,
+.start-screen .start-top .chrome-btn:focus-visible .hx-orn,
+.start-screen .start-top .start-video-toggle:focus-visible .hx-orn {
+  opacity: 1;
+  transform: rotate(72deg) scale(1.1);
+}
+
+/* 关闭键是危险语义，纹样跟着走冷白红，别混进粉金 */
+.hx-orn-danger {
+  background: linear-gradient(148deg, rgba(255, 176, 186, 0.95), rgba(255, 232, 236, 0.9));
+  filter: drop-shadow(0 0 3px rgba(201, 75, 93, 0.4));
+}
+
+/* 4) 页头：眉题前一枚烟花星芒，标题后一枚小火星 */
+.page-head .eyebrow::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  background: linear-gradient(142deg, rgba(var(--trail-gold), 0.95), rgba(var(--trail-pink), 0.85));
+  -webkit-mask: var(--hx-char-spark) center / contain no-repeat;
+  mask: var(--hx-char-spark) center / contain no-repeat;
+}
+
+.page-head h1::after {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 9px;
+  vertical-align: 3px;
+  background: linear-gradient(142deg, rgba(var(--trail-gold), 0.9), rgba(var(--trail-pink), 0.7));
+  -webkit-mask: var(--hx-char-spark) center / contain no-repeat;
+  mask: var(--hx-char-spark) center / contain no-repeat;
+  opacity: 0.5;
+  transition: opacity 0.2s ease, transform 0.4s ease;
+}
+
+.page-head h1:hover::after {
+  opacity: 0.95;
+  transform: rotate(45deg);
+}
+
+/* 5) 侧栏选中项右侧一枚面具水印（收起时隐藏，别挤图标） */
+.nav-item {
+  position: relative;
+}
+
+body:not(.sidebar-collapsed) .nav-item.active::after {
+  content: "";
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateY(-50%);
+  background: linear-gradient(142deg, rgba(var(--trail-pink), 0.9), rgba(var(--trail-gold), 0.8));
+  -webkit-mask: var(--hx-char-mask) center / contain no-repeat;
+  mask: var(--hx-char-mask) center / contain no-repeat;
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge)::after {
+  right: 30px;
+}
+
+/* 6) 空状态：花花兔 + 火火菇 两只小家伙并排站岗 */
+.song-empty::before,
+.empty-state::before {
+  content: "";
+  display: block;
+  width: 46px;
+  height: 22px;
+  margin: 0 auto 10px;
+  background:
+    linear-gradient(148deg, rgba(var(--trail-pink), 0.85), rgba(var(--trail-gold), 0.75)) left center / 20px 22px no-repeat,
+    linear-gradient(148deg, rgba(var(--trail-gold), 0.8), rgba(var(--trail-pink), 0.7)) right center / 20px 22px no-repeat;
+  -webkit-mask: var(--hx-orn-rabbit) left center / 20px 22px no-repeat, var(--hx-orn-mushroom) right center / 20px 22px no-repeat;
+  mask: var(--hx-orn-rabbit) left center / 20px 22px no-repeat, var(--hx-orn-mushroom) right center / 20px 22px no-repeat;
+  opacity: 0.55;
+}
+
+/* 浅色主题：纹样压深一点，免得糊在白底上 */
+:root[data-theme="light"] .hx-orn {
+  opacity: 0.62;
+  background: linear-gradient(148deg, rgba(222, 92, 152, 0.95), rgba(190, 142, 48, 0.9));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-control:hover .hx-orn,
+  .page-head-actions .btn-ghost:hover .hx-orn,
+  .start-screen .start-top .chrome-btn:hover .hx-orn,
+  .start-screen .start-top .start-video-toggle:hover .hx-orn {
+    transform: none;
+  }
+
+  .page-head h1:hover::after {
+    transform: none;
+  }
+}
+
+/* ── 星空层 v18 ──────────────────────────────────────────────────────────────
+ * 星穹铁道的底色就是星海：侧栏铺一层极淡的星尘，页头标题周围散一层星屑，
+ * 都只做“隐约可见”，不参与布局（absolute + pointer-events:none），
+ * 也不加无限动画 —— 只在悬停时轻轻呼吸，避免长时间挂机烧 GPU。 */
+
+.sidebar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1.2px 1.2px at 18% 12%, rgba(255, 246, 226, 0.5), transparent 62%),
+    radial-gradient(1px 1px at 72% 22%, rgba(255, 236, 214, 0.42), transparent 62%),
+    radial-gradient(1.4px 1.4px at 44% 38%, rgba(255, 226, 240, 0.4), transparent 62%),
+    radial-gradient(1px 1px at 84% 52%, rgba(255, 246, 226, 0.34), transparent 62%),
+    radial-gradient(1.2px 1.2px at 26% 66%, rgba(255, 236, 214, 0.38), transparent 62%),
+    radial-gradient(1px 1px at 62% 78%, rgba(255, 226, 240, 0.3), transparent 62%),
+    radial-gradient(1.3px 1.3px at 38% 90%, rgba(255, 246, 226, 0.34), transparent 62%);
+  opacity: 0.7;
+  mask: linear-gradient(180deg, transparent, #000 12%, #000 84%, transparent);
+  -webkit-mask: linear-gradient(180deg, transparent, #000 12%, #000 84%, transparent);
+}
+
+/* 侧栏里所有实体内容压在星尘之上 */
+.sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* 页头：标题周围散一层星屑，像舞台顶灯下的浮尘 */
+.page-head {
+  position: relative;
+}
+
+.page-head::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  right: -10px;
+  top: -16px;
+  height: 84px;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1.5px 1.5px at 6% 44%, rgba(255, 248, 232, 0.55), transparent 62%),
+    radial-gradient(1px 1px at 21% 24%, rgba(255, 226, 240, 0.42), transparent 62%),
+    radial-gradient(1.2px 1.2px at 47% 66%, rgba(255, 236, 214, 0.36), transparent 62%),
+    radial-gradient(1px 1px at 66% 30%, rgba(255, 248, 232, 0.4), transparent 62%),
+    radial-gradient(1.6px 1.6px at 88% 58%, rgba(255, 230, 190, 0.45), transparent 62%);
+  opacity: 0.5;
+  mask: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+  -webkit-mask: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent);
+  transition: opacity 0.4s ease;
+}
+
+.page-head:hover::before {
+  opacity: 0.8;
+}
+
+.page-head > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* 启动页抽屉：游戏名一行上下居中（原先贴着底部，视觉上偏低） */
+.start-screen .start-dock .start-game-name,
+.start-screen .start-dock .start-game-label {
+  align-self: center;
+}
+
+.start-screen .start-dock .start-game {
+  align-items: center;
+}
+
+/* ── 侧栏对齐修正 v19 ────────────────────────────────────────────────────────
+ * 症状：左上角品牌图标（40px）的左边缘比下面导航图标（18px）靠左 6px，
+ *       上下两列图标没站在同一条竖线上，眼睛一看就歪。
+ * 做法：品牌行的左内边距补到和 .nav-item 的 14px 一致，左边缘对齐；
+ *       图标略收小一档（38px），高度和 48px 的导航行也更协调。 */
+
+.sidebar .brand {
+  padding: 0 0 0 14px;
+}
+
+.sidebar .brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+}
+
+.sidebar .brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.sidebar .brand-mark svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* ── 启动页抽屉标题行 v19 ────────────────────────────────────────────────────
+ * 「选择游戏」那行字原来贴着行底，视觉偏低；改成整行上下居中，
+ * 并把小箭头和文字一起按基线居中。 */
+
+.start-screen .start-games-head {
+  align-items: center;
+}
+
+.start-screen .start-games-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+/* 歌单登录失效提示 v20 */
+/*
+ * 歌单「登录失效」这一态：不是普通报错，得让人一眼看到「重新登录」。
+ * 用偏暖的警示色，但保持花火的粉紫基调，不跳出整体观感。
+ */
+.playlists-group.is-expired {
+  border-color: rgba(240, 198, 116, 0.34);
+  background:
+    radial-gradient(120% 100% at 0% 0%, rgba(240, 198, 116, 0.10), transparent 62%),
+    rgba(24, 16, 22, 0.55);
+}
+.playlists-group.is-expired .playlists-group-meta {
+  color: #f0c674;
+}
+.playlists-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.playlists-group-detail {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--hx-ink-3, #a89aa6);
+}
+.playlists-group-detail > summary {
+  cursor: pointer;
+  color: var(--hx-ink-2, #c8bcc6);
+  list-style: none;
+}
+.playlists-group-detail > summary::-webkit-details-marker {
+  display: none;
+}
+.playlists-group-detail > summary::before {
+  content: '▸ ';
+  color: rgba(240, 198, 116, 0.8);
+}
+.playlists-group-detail[open] > summary::before {
+  content: '▾ ';
+}
+.playlists-group-detail > p {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 硬链接空间预估 v21 */
+.sophon-estimate {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sophon-estimate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--accent-soft, var(--accent));
+}
+.sophon-estimate-label .icon {
+  width: 12px;
+  height: 12px;
+}
+.sophon-estimate-body {
+  color: var(--muted);
+  word-break: break-word;
+}
+
+/* ------------------------------------------------------------------ */
+/* 开关对齐 v22                                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * 之前的问题：
+ *   1. 设置页的行是 align-items:center，开关对着「标题+整段说明」的中心，
+ *      说明有两三行时就飘到段落中间，看着跟标题不对齐；
+ *   2. 点歌台那两行 switch 是 flex:none，紧贴标签往左缩，
+ *      和音量条、音质选择（都是 flex:1 顶到右边界）对不上，右边空一大截；
+ *   3. 两个开关各占一行，纵向多出 60px。
+ * 现在统一成：有开关的行，开关按标题行高度对齐；两个开关并排时左右各占一半，
+ * 各自贴着自己那一半的右边界，视觉上左右对称。
+ */
+.material-panel .setting-row:has(.switch) {
+  align-items: flex-start;
+}
+.material-panel .setting-row:has(.switch) > .setting-copy strong {
+  line-height: 24px;
+}
+.material-panel .setting-row:has(.switch) > .setting-control {
+  align-self: flex-start;
+}
+
+/* 两个开关并排一行：左右各一半，各自右对齐，开关高度一致 */
+.material-panel .setting-row-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 0;
+  align-items: center;
+  padding-bottom: 10px;
+}
+.material-panel .setting-pair {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.material-panel .setting-pair strong {
+  font-size: 14.5px;
+  font-weight: 550;
+  line-height: 24px;
+  min-width: 0;
+}
+.material-panel .setting-pair + .setting-pair {
+  border-left: 1px solid var(--line);
+  padding-left: 30px;
+}
+.material-panel .setting-hint {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+/* 点歌台：单个开关的行走右边界，和音量条/音质选择对齐 */
+.song-rail-row > .switch {
+  margin-left: auto;
+}
+
+/* 点歌台：两个开关并排一行 */
+.song-rail-row.is-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 18px;
+  align-items: center;
+}
+.song-rail-row.is-split > span {
+  min-width: 0;
+}
+.song-rail-pair {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.song-rail-pair > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.song-rail-row.is-split > .switch {
+  margin-left: 0;
+}
+
+/* 开关改版 v23：光轨烟火开关（无边框 + transform 居中，杜绝小圆看起来不居中） */
+.switch {
+  position: relative;
+  box-sizing: border-box;
+  width: 46px;
+  height: 24px;
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #1e1a27, #15121c);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  transition: background 0.22s ease, box-shadow 0.22s ease;
+  cursor: pointer;
+}
+/* 光轨：开着的时候轨道里亮起一道细光 */
+.switch::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(240, 198, 116, 0) 0%, rgba(255, 236, 190, 0.55) 58%, rgba(232, 67, 90, 0.5) 100%);
+  opacity: 0;
+  transition: opacity 0.22s ease;
+  pointer-events: none;
+}
+/* 小圆：left 定位 + translate 居中，纵向不靠固定像素去凑 */
+.switch::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 28%, #7a7389, #4b4557 62%, #3a3546);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  transform: translate(0, -50%);
+  transition: transform 0.24s cubic-bezier(0.22, 0.8, 0.3, 1), background 0.22s ease, box-shadow 0.22s ease;
+}
+.switch.on {
+  background: linear-gradient(120deg, rgba(232, 67, 90, 0.5), rgba(138, 60, 120, 0.42) 52%, rgba(240, 198, 116, 0.44));
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 198, 116, 0.5),
+    inset 0 1px 2px rgba(0, 0, 0, 0.35),
+    0 0 12px rgba(232, 67, 90, 0.24);
+}
+.switch.on::before {
+  opacity: 1;
+}
+.switch.on::after {
+  transform: translate(22px, -50%);
+  background: radial-gradient(circle at 34% 28%, #fffdf6, #ffe8bc 46%, #f0c674);
+  box-shadow: 0 0 10px rgba(240, 198, 116, 0.75), 0 0 18px rgba(232, 67, 90, 0.35);
+}
+.switch:focus-visible {
+  outline: 2px solid rgba(240, 198, 116, 0.6);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::before,
+  .switch::after {
+    transition: none;
+  }
+}
+
+/* 角色元素 v24：花火 / 火花 官方透明立绘 + 小纹样换成烟花火星 */
+:root {
+  --hx-char-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 0l2.6 9.4L24 12l-9.4 2.6L12 24l-2.6-9.4L0 12l9.4-2.6z' fill='%23fff'/%3E%3C/svg%3E");
+  --hx-orn-spark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 0l2.6 9.4L24 12l-9.4 2.6L12 24l-2.6-9.4L0 12l9.4-2.6z' fill='%23fff'/%3E%3C/svg%3E");
+}
+.hx-orn {
+  width: 12px;
+  height: 12px;
+  opacity: 0.62;
+}
+.hx-orn:hover {
+  opacity: 0.9;
+}
+.char-duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin: 20px 0 8px;
+}
+.char-duo-card {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  min-height: 176px;
+  padding: 18px 22px;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background:
+    radial-gradient(120% 140% at 86% 12%, rgba(232, 67, 90, 0.22), transparent 58%),
+    linear-gradient(160deg, rgba(30, 26, 39, 0.94), rgba(20, 17, 28, 0.97));
+  /* 这张卡能点：给足手型、焦点环和悬停反馈，别让人以为是张纯装饰图 */
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.char-duo-card:hover,
+.char-duo-card:focus-visible {
+  transform: translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.42);
+  outline: none;
+}
+.char-duo-card.is-sparkle:hover,
+.char-duo-card.is-sparkle:focus-visible {
+  border-color: rgba(232, 67, 90, 0.5);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(232, 67, 90, 0.28);
+}
+.char-duo-card.is-sparxie:hover,
+.char-duo-card.is-sparxie:focus-visible {
+  border-color: rgba(240, 198, 116, 0.5);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(240, 198, 116, 0.28);
+}
+.char-duo-card:hover img {
+  transform: translateY(-4px) scale(1.03);
+}
+.char-duo-card.is-sparxie {
+  background:
+    radial-gradient(120% 140% at 86% 12%, rgba(240, 198, 116, 0.2), transparent 58%),
+    linear-gradient(160deg, rgba(33, 27, 22, 0.94), rgba(20, 17, 28, 0.97));
+}
+.char-duo-card img {
+  width: 132px;
+  height: auto;
+  max-height: 168px;
+  object-fit: contain;
+  filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.55));
+  flex: none;
+  transition: transform 0.22s ease;
+}
+.char-duo-copy {
+  min-width: 0;
+  padding-bottom: 8px;
+}
+.char-duo-copy strong {
+  display: block;
+  font-size: 17px;
+  letter-spacing: 0.08em;
+}
+.char-duo-copy em {
+  display: block;
+  margin-top: 8px;
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+/* 卡片底部的实时数据条：让这张卡有内容，而不是只有立绘 */
+.char-duo-stat {
+  display: block;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 0;
+}
+.char-duo-stat b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.char-duo-stat i {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.char-duo-card.is-sparkle .char-duo-stat b {
+  color: #ffb3c0;
+}
+.char-duo-card.is-sparxie .char-duo-stat b {
+  color: #f6d79a;
+}
+@media (max-width: 980px) {
+  .char-duo {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 角色元素 v25：双人卡收到主页底部 + 主视觉火花 + 侧栏立绘 + 空状态脸  */
+/* 花火（假面 / 星芒）与火花（烟花 / 花花兔 + 火火菇）的真实立绘与纹样   */
+/* ------------------------------------------------------------------ */
+
+/* 双人卡：平时矮一截，只露立绘和名字；鼠标移上去或键盘聚焦才展开文案与数据 */
+.char-duo {
+  margin: 28px 0 6px;
+  align-items: end;
+}
+.char-duo-card {
+  height: 116px;
+  min-height: 0;
+  padding: 14px 20px;
+  transition: height 0.3s cubic-bezier(0.22, 0.61, 0.36, 1), transform 0.22s ease,
+    border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.char-duo-card img {
+  width: 92px;
+  max-height: 104px;
+  transition: transform 0.22s ease, width 0.3s ease, max-height 0.3s ease;
+}
+.char-duo-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100%;
+  padding-bottom: 2px;
+}
+.char-duo-copy strong {
+  font-size: 15px;
+  line-height: 1.2;
+}
+.char-duo-copy em,
+.char-duo-stat {
+  max-height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  border-top-color: transparent;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.32s ease, opacity 0.24s ease, margin-top 0.32s ease,
+    padding-top 0.32s ease, border-top-color 0.32s ease;
+}
+.char-duo-card:hover,
+.char-duo-card:focus-visible {
+  height: 206px;
+}
+.char-duo-card:hover img,
+.char-duo-card:focus-visible img {
+  width: 132px;
+  max-height: 168px;
+}
+.char-duo-card:hover .char-duo-copy em,
+.char-duo-card:focus-visible .char-duo-copy em {
+  max-height: 64px;
+  margin-top: 8px;
+  opacity: 1;
+}
+.char-duo-card:hover .char-duo-stat,
+.char-duo-card:focus-visible .char-duo-stat {
+  max-height: 48px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top-color: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+}
+/* 卡片右上角：花火用假面、火花用星芒 */
+.char-duo-card::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  opacity: 0.42;
+  background: linear-gradient(140deg, #ffb3c0, #f6d79a);
+  -webkit-mask: var(--hx-orn-mask) center / contain no-repeat;
+  mask: var(--hx-orn-mask) center / contain no-repeat;
+  transition: opacity 0.22s ease, transform 0.3s ease;
+}
+.char-duo-card.is-sparxie::after {
+  -webkit-mask-image: var(--hx-orn-spark);
+  mask-image: var(--hx-orn-spark);
+}
+.char-duo-card:hover::after,
+.char-duo-card:focus-visible::after {
+  opacity: 0.9;
+  transform: rotate(-10deg) scale(1.08);
+}
+
+/* 主视觉左侧：火花立在花火身边，淡一层，只当氛围 */
+.hero {
+  position: relative;
+}
+.hero-sparxie {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 92%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.2;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 1) 6%,
+    rgba(0, 0, 0, 0.55) 44%,
+    transparent 80%
+  );
+  mask-image: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 1) 6%,
+    rgba(0, 0, 0, 0.55) 44%,
+    transparent 80%
+  );
+  animation: hero-sparxie-float 16s ease-in-out infinite;
+}
+.hero-sparxie img {
+  display: block;
+  height: 100%;
+  width: auto;
+  filter: drop-shadow(0 18px 36px rgba(0, 0, 0, 0.5));
+}
+@keyframes hero-sparxie-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+/* 侧栏底部：火花的立绘水印，收在角落不抢导航 */
+.sidebar {
+  position: relative;
+}
+.sidebar-char {
+  position: absolute;
+  right: -6px;
+  bottom: 56px;
+  width: 116px;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.14;
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95) 8%, transparent 88%);
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95) 8%, transparent 88%);
+}
+.sidebar-char img {
+  display: block;
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 12px 26px rgba(0, 0, 0, 0.55));
+}
+body.sidebar-collapsed .sidebar-char {
+  display: none;
+}
+
+/* 空状态：花火的脸做底 */
+.empty {
+  position: relative;
+  overflow: hidden;
+}
+.empty-char {
+  position: absolute;
+  right: 4px;
+  bottom: -12px;
+  width: 196px;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.13;
+}
+.empty-char img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.empty > *:not(.empty-char) {
+  position: relative;
+  z-index: 1;
+}
+
+/* 小标题前的星芒：让分区标题也带一点烟花味 */
+.section-head h3::before {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  opacity: 0.8;
+  background: linear-gradient(140deg, #ffb3c0, #f6d79a);
+  -webkit-mask: var(--hx-orn-spark) center / contain no-repeat;
+  mask: var(--hx-orn-spark) center / contain no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-sparxie {
+    animation: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 小件统一 v26
+ *  1) 启动页「暂停/存取动图」按钮常驻：没有官方动态背景的游戏（原神等）
+ *     按钮也显示，只是禁用 + 提示，不再凭空消失
+ *  2) 品牌 logo 三处统一 30px：启动页品牌、主页侧栏品牌、侧栏收起态
+ *  3) 侧栏收起后顶部留白收敛：不再 38px(padding) + 22px(margin) 叠出 60px
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* 1) 动图工具按钮：禁用态只降透明度，鼠标手势改默认，hover 无背景 */
+.start-screen .start-top .start-video-toggle:disabled {
+  opacity: 0.36;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: default;
+}
+.start-screen .start-top .start-video-toggle:disabled:hover {
+  color: rgba(255, 255, 255, 0.5);
+  background: transparent;
+}
+
+/* 2) 品牌 logo 统一 30px：启动页顶栏、主页侧栏、侧栏收起态三处一致 */
+.start-screen .start-top .start-brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+}
+.sidebar .brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+}
+body.sidebar-collapsed .brand-mark,
+body.sidebar-collapsed .brand img {
+  width: 30px;
+  height: 30px;
+}
+
+/* 3) 侧栏收起：顶部留白收敛（38px 容器上边距 + 22px 导航上边距叠太大） */
+body.sidebar-collapsed .sidebar-scroll > .nav {
+  padding-top: 0;
+}
+body.sidebar-collapsed .nav {
+  margin-top: 8px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 启动页收尾 v27
+ *  顶栏动图按钮被旧 base 规则的 absolute/right/bottom 推出屏幕
+ *  （量到 y=-27）：这里在文件最末尾显式复位，确定性赢过一切旧规则。
+ *  保留 position:relative 供 .hx-orn 兔耳面具锚定，偏移全部清零；
+ *  尺寸统一成与窗口键一致的 36×30（19506 的 34×34 也一并覆盖）。
+ * ═══════════════════════════════════════════════════════════════ */
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  width: 36px;
+  height: 30px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+
+.start-screen .start-top .chrome-back {
+  width: 34px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 品牌与顶栏放大 v28
+ *  用户：logo 还能大一点，和主页侧栏「收缩」按钮一样大（38px）；
+ *        启动页 logo 放大后，顶栏小按钮也跟着放大保持对称；
+ *        侧栏展开态 / 收起态两处 logo 一起适配。
+ *  做法：三处品牌 logo 统一 38px（回到 20713 的原始设计尺寸），
+ *        顶栏按钮 36×30 → 38×32，返回键 34×32，
+ *        窗口键在启动页同步 38×32，全部仍由 align-items:center 走同一中线。
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* 1) 三处品牌 logo 统一 38px */
+.start-screen .start-top .start-brand-mark,
+.sidebar .brand-mark,
+body.sidebar-collapsed .brand-mark,
+body.sidebar-collapsed .brand img {
+  width: 38px;
+  height: 38px;
+}
+
+.start-screen .start-top .start-brand-mark {
+  border-radius: 11px;
+}
+
+.sidebar .brand-mark {
+  border-radius: 12px;
+}
+
+.sidebar .brand-mark svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* 2) 品牌行跟着 logo 一起长高，文字仍居中 */
+.start-screen .start-top .start-brand {
+  height: 38px;
+}
+
+.start-screen .start-top .start-brand span {
+  font-size: 14px;
+}
+
+/* 3) 顶栏小按钮同步放大：与 38px 的 logo 配平，保持一条中线 */
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  width: 38px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.start-screen .start-top .chrome-back {
+  width: 34px;
+  height: 32px;
+}
+
+.start-screen .start-top .chrome-btn .icon,
+.start-screen .start-top .start-video-toggle .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 4) 启动页右上窗口键同尺寸，和左侧品牌视觉配平 */
+.start-screen .window-controls .window-control {
+  width: 38px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.start-screen .window-controls .window-control .icon {
+  width: 15px;
+  height: 15px;
 }

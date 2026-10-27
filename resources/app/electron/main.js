@@ -37,10 +37,27 @@ const updater = require('./updater');
 const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
 const { resolveLiveRoom } = require('./live-rooms');
-const { musicCharts, chartSongs, mergedCharts, mergedChartSongs, searchSongs } = require('./music-platforms');
-const { accountPlaylists, accountPlaylistSongs, webMyPlaylists } = require('./music-playlists');
+const { startDanmaku, pollDanmaku, stopDanmaku } = require('./live-danmaku');
+const {
+  musicCharts,
+  chartSongs,
+  mergedCharts,
+  mergedChartSongs,
+  searchSongs,
+  resolveFallbackUrl,
+} = require('./music-platforms');
+const {
+  accountPlaylists,
+  accountPlaylistSongs,
+  webMyPlaylists,
+  webLikedSongs,
+  withLikedPlaylist,
+  LIKED_ID,
+  looksExpired: musicLooksExpired,
+} = require('./music-playlists');
 const gameFeatures = require('./game-features');
 const miyoushe = require('./miyoushe-login');
+const postArt = require('./post-art');
 const passport = require('./passport-login');
 const screenshotLib = require('./screenshots');
 const graphicsConfig = require('./graphics-config');
@@ -2300,6 +2317,17 @@ function updateTempBase() {
 }
 
 /**
+ * 覆盖脚本写日志的位置，按优先级排列。
+ * 脚本用的是 <exe 所在目录>\data\tmp，和 updateTempBase() 在便携模式下是同一个地方；
+ * 便携目录不可写时会退回系统临时目录，所以两个都试一遍。
+ */
+function updateLogDirs() {
+  const exeDir = path.dirname(process.execPath);
+  const dirs = [path.join(exeDir, 'data', 'tmp'), updateTempBase()];
+  return [...new Set(dirs)];
+}
+
+/**
  * 启动时收拾上一次升级留下的现场。
  *
  * - 包成功应用后，覆盖脚本会写一个 .update-done 标记，下次启动核对到
@@ -2361,6 +2389,35 @@ function localUpdateManifest() {
 }
 
 /**
+ * 内置的官方更新源。
+ *
+ * 随包的 latest.json 里只写了一个「指针」（manifest 字段），指回 GitHub 上的正式清单——
+ * 因为打进包里的时候，这个包自己的 sha256 还没算出来，没法把自己写进清单。
+ * 真正带下载地址和 sha256 的清单放在官方 Release 里，启动器启动时会自己去取。
+ *
+ * 顺序：用户填的更新源 → 启动器目录里那份 → 官方 Release。
+ */
+const OFFICIAL_UPDATE_MANIFEST =
+  'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest/download/latest.json';
+
+/** 更新源候选：一次给全，挨个试，第一个读得通的算数。 */
+function updateSourceList() {
+  const configured = String(store?.data?.settings?.updateManifest || '').trim();
+  const list = [];
+  const push = (value) => {
+    const text = String(value || '').trim();
+    if (text && !list.includes(text)) list.push(text);
+  };
+  if (configured) {
+    push(configured);
+    for (const candidate of updateSourceCandidates(configured)) push(candidate);
+  }
+  push(localUpdateManifest());
+  push(OFFICIAL_UPDATE_MANIFEST);
+  return list;
+}
+
+/**
  * 把用户填的更新源整理成一个「清单地址」。
  *
  * 设置页写的是「填 https 地址、局域网共享或本地路径」，用户很自然会直接填
@@ -2403,15 +2460,14 @@ function updateSourceCandidates(input) {
   return list.slice(0, 6);
 }
 
-/** 更新源：设置里填的优先，否则用启动器目录里那份。 */
+/** 更新源候选：设置里填的优先，其次启动器目录里那份，最后官方源。 */
 function resolveUpdateSource() {
-  const configured = String(store.data.settings?.updateManifest || '').trim();
-  return configured || localUpdateManifest();
+  return updateSourceList();
 }
 
 async function performUpdateCheck(options = {}) {
-  const location = resolveUpdateSource();
-  if (!location) {
+  const locations = resolveUpdateSource();
+  if (!locations.length) {
     updateStatus = {
       ...updateStatus,
       checkedAt: Date.now(),
@@ -2425,7 +2481,7 @@ async function performUpdateCheck(options = {}) {
     return updateStatus;
   }
   const result = await updater.checkForUpdate({
-    location,
+    location: locations,
     currentVersion: APP_VERSION,
   });
   updateStatus = { ...updateStatus, ...result, checkedAt: Date.now(), percent: 0, downloading: false };
@@ -2468,12 +2524,15 @@ function describeRunningProcesses(paths) {
 
 async function startUpdate(options = {}) {
   if (updateStatus.downloading) throw new Error('已经在下载更新了');
-  const location = resolveUpdateSource();
-  if (!location) throw new Error('还没有设置更新源');
+  const locations = resolveUpdateSource();
+  if (!locations.length) throw new Error('还没有设置更新源');
   updateStatus = { ...updateStatus, downloading: true, percent: 0, error: '' };
   pushState(true);
   try {
-    const manifest = await updater.readManifest(location);
+    // 挨个候选找一份读得通的清单：用户填的 → 目录里那份 → 官方源
+    const resolved = await updater.resolveManifest(locations);
+    if (!resolved.ok) throw new Error(resolved.error || '读不到更新清单');
+    const manifest = resolved.manifest;
     if (updater.compareVersions(manifest.version, APP_VERSION) <= 0) {
       const info = await performUpdateCheck({ push: false });
       updateStatus = { ...info, downloading: false, percent: 0, error: '' };
@@ -2517,8 +2576,12 @@ async function startUpdate(options = {}) {
       throw new Error('更新包校验没通过（sha256 对不上），可能没下载完整，请重试');
     }
 
+    // 100% 之后还有解压、覆盖两大步，界面必须继续给反馈，否则用户以为卡死了
+    send('update:progress', { percent: 100, phase: 'verify', label: '正在校验更新包…' });
+
     // 解压、检查包结构，同时算出被占用的程序文件。
     // 版本号以清单为准：package.json 只在发版时才改，清单是随时能改的。
+    send('update:progress', { percent: 100, phase: 'extract', label: '正在解压更新包…' });
     const staged = await updater.stage({ zipPath, tempBase, version: manifest.version });
     const conflict = updater.describeApplyProblem({ staged, currentVersion: APP_VERSION });
     if (conflict) throw new Error(conflict);
@@ -2534,7 +2597,7 @@ async function startUpdate(options = {}) {
     }
 
     updateStatus = { ...updateStatus, percent: 100 };
-    send('update:progress', { percent: 100, phase: 'apply' });
+    send('update:progress', { percent: 100, phase: 'apply', label: '正在覆盖程序文件，马上重启…' });
     await updater.apply({
       staged,
       onReadyToQuit: () => {
@@ -2812,6 +2875,8 @@ function createWindow() {
       }
       if (process.env.HX_CAPTURE === '1') {
         setTimeout(runCapture, 700);
+      } else if (process.env.HX_PROBE === '1') {
+        setTimeout(runLayoutProbe, 700);
       } else if (process.env.HX_SMOKE === '1') {
         setTimeout(() => {
           console.log('SMOKE_OK');
@@ -3570,6 +3635,32 @@ function installIpc() {
     return fetchGameNotices(game.builtinKey);
   });
   ipcMain.handle('games:notices', async (_event, force = false) => fetchAllGameNotices(Boolean(force)));
+  /*
+   * 更新弹窗的配图：读缓存，需要时刷新。
+   * 登录态和战绩共用一份，没登录米游社就返回空表，前端退回官网美术图。
+   */
+  ipcMain.handle('postart:list', async (_event, force = false) => {
+    const cached = postArt.readCache(app.getPath('userData'));
+    const fresh = cached && Date.now() - Number(cached.updatedAt || 0) < 7 * 24 * 60 * 60 * 1000;
+    if (!force && fresh) return { ok: true, cached: true, items: cached.items, updatedAt: cached.updatedAt };
+    let cookie = '';
+    try {
+      const store2 = await readHoyolabStore('miyoushe');
+      const account = pickHoyolabAccount(store2, '') || (store2.accounts && store2.accounts[0]);
+      cookie = (account && account.cookie) || '';
+    } catch {
+      cookie = '';
+    }
+    try {
+      return await postArt.refresh({ userDataDir: app.getPath('userData'), cookie, force: Boolean(force) });
+    } catch (error) {
+      return {
+        ok: false,
+        items: (cached && cached.items) || {},
+        error: (error && error.message) || String(error),
+      };
+    }
+  });
   ipcMain.handle('window:minimize', () => {
     if (win && !win.isDestroyed()) win.minimize();
   });
@@ -3581,6 +3672,22 @@ function installIpc() {
   });
   ipcMain.handle('window:close', () => {
     if (win && !win.isDestroyed()) win.close();
+  });
+
+  /*
+   * 侧栏品牌图标既是设置页入口，也要能拖动窗口。
+   * 它原本靠 -webkit-app-region: drag 拖，但拖拽区会吞掉鼠标事件，
+   * 点不了；改成 no-drag + 这里按位移移动窗口，两种行为就能共存。
+   */
+  ipcMain.handle('window:move-by', (event, payload = {}) => {
+    if (!win || win.isDestroyed()) return false;
+    if (win.isMaximized() || win.isFullScreen()) return false;
+    const dx = Math.round(Number(payload.dx) || 0);
+    const dy = Math.round(Number(payload.dy) || 0);
+    if (!dx && !dy) return false;
+    const [x, y] = win.getPosition();
+    win.setPosition(x + dx, y + dy);
+    return true;
   });
 
   ipcMain.handle('starrail:fps:get', async () => {
@@ -4201,8 +4308,20 @@ function normalizeNeteaseBase(value) {
 async function neteaseGet(apiBase, route, params = {}) {
   const base = normalizeNeteaseBase(apiBase);
   const query = new URLSearchParams({ ...params, timestamp: String(Date.now()) });
-  if (neteaseSession.cookie && neteaseSession.apiBase === base) {
-    query.set('cookie', neteaseSession.cookie);
+  /*
+   * 把登录 cookie 带上，否则 /login/status 会返回未登录，
+   * /user/playlist 就会是空列表。
+   *
+   * neteaseSession.apiBase 可能是空的（比如从二维码登录后没记下地址，
+   * 或者地址是从 localStorage 默认值推出来的），这时只要有 cookie
+   * 就应该带上 —— 之前这里要求两个地址完全相等，
+   * 结果地址对不上时 cookie 被丢掉，表现就是「歌单是空的」。
+   */
+  if (neteaseSession.cookie) {
+    const saved = normalizeNeteaseBase(neteaseSession.apiBase);
+    if (!neteaseSession.apiBase || saved === base) {
+      query.set('cookie', neteaseSession.cookie);
+    }
   }
   const response = await fetch(`${base}${route}?${query.toString()}`, {
     headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
@@ -4372,26 +4491,127 @@ async function startNeteaseService(apiBase) {
 
   ipcMain.handle('netease:service-start', async (_event, apiBase) => startNeteaseService(apiBase));
 
-async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
-  const allowed = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
-  const quality = allowed.has(String(level)) ? String(level) : 'exhigh';
-  let json = null;
+/**
+ * 内置 API 自带的换源：`/song/url/match` 会用 unblockmusic-utils
+ * 去别的平台匹配同一首歌的完整音源（会员曲目也能拿到全长）。
+ * 拿不到就返回空串，交给上层继续降级。
+ */
+async function neteaseMatchUrl(apiBase, id) {
   try {
-    json = await neteaseGet(apiBase, '/song/url/v1', { id, level: quality });
+    const json = await neteaseGet(apiBase, '/song/url/match', { id });
+    const url = typeof json?.data === 'string' ? json.data : '';
+    return url ? String(url).replace(/^http:/i, 'https:') : '';
   } catch {
-    json = await neteaseGet(apiBase, '/song/url', { id });
+    return '';
   }
-  const item = json?.data?.[0];
-  if (!item?.url) {
-    throw new Error(`${quality === 'lossless' ? '无损' : quality === 'hires' ? 'Hi-Res' : '当前'}音质不可用，可能需要网易云会员`);
+}
+
+/**
+ * 取一首歌的播放地址，会员曲目也尽量让它能放。
+ *
+ * 顺序：
+ *   1. 用户选的音质，拿不到就逐级往下降；
+ *   2. 只给到试听片段（会员曲目）时，走内置 API 的换源接口取完整音源；
+ *   3. 网易云上同一个歌名的其它版本（重制、现场、翻唱），这些通常免费；
+ *   4. 酷狗 / QQ 音乐上同名同歌手的免费那一份；
+ *   5. 都不行才报错，并把原因说清楚。
+ */
+async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
+  const allowed = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
+  const wanted = allowed.has(String(level)) ? String(level) : 'exhigh';
+  const ladder = [...new Set([wanted, 'exhigh', 'higher', 'standard'])];
+  let trial = null;
+
+  for (const quality of ladder) {
+    let json = null;
+    try {
+      json = await neteaseGet(apiBase, '/song/url/v1', { id, level: quality });
+    } catch {
+      try {
+        json = await neteaseGet(apiBase, '/song/url', { id });
+      } catch {
+        json = null;
+      }
+    }
+    const item = json?.data?.[0];
+    if (!item?.url) continue;
+    const payload = {
+      url: String(item.url),
+      level: String(item.level || quality),
+      br: Number(item.br) || 0,
+      size: Number(item.size) || 0,
+      type: String(item.type || ''),
+    };
+    // 会员曲目在非会员账号下只会给一段试听，先留着当兜底
+    if (item.freeTrialInfo) {
+      if (!trial) trial = { ...payload, trial: true };
+      continue;
+    }
+    return payload;
   }
-  return {
-    url: String(item.url),
-    level: String(item.level || quality),
-    br: Number(item.br) || 0,
-    size: Number(item.size) || 0,
-    type: String(item.type || ''),
-  };
+
+  // 2) 换源：拿到完整音源就不必再降级
+  const matched = await neteaseMatchUrl(apiBase, id);
+  if (matched) {
+    return { url: matched, level: 'standard', br: 0, size: 0, type: 'flac', unblocked: true };
+  }
+
+  const title = String(meta.title || '').trim();
+  const artist = String(meta.artist || '').trim();
+
+  // 3) 同一个歌名的其它版本（重制 / 现场 / 翻唱）通常没有版权限制
+  if (title) {
+    try {
+      const search = await neteaseGet(apiBase, '/search', { keywords: `${title} ${artist}`.trim(), limit: 8, type: 1 });
+      const list = search?.result?.songs || [];
+      for (const song of list) {
+        if (!song?.id || String(song.id) === String(id)) continue;
+        try {
+          const alt = await neteaseGet(apiBase, '/song/url/v1', { id: song.id, level: 'standard' });
+          const item = alt?.data?.[0];
+          if (!item?.url || item.freeTrialInfo) continue;
+          return {
+            url: String(item.url),
+            level: String(item.level || 'standard'),
+            br: Number(item.br) || 0,
+            size: Number(item.size) || 0,
+            type: String(item.type || ''),
+            altOf: {
+              id: song.id,
+              title: String(song.name || ''),
+              artist: (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / '),
+            },
+          };
+        } catch {
+          /* 换下一个版本 */
+        }
+      }
+    } catch {
+      /* 搜索失败就走跨平台 */
+    }
+  }
+
+  // 4) 酷狗 / QQ 音乐上免费的那一份
+  if (title) {
+    try {
+      const alt = await resolveFallbackUrl({ title, artist });
+      return {
+        url: alt.url,
+        level: 'standard',
+        br: alt.br || 0,
+        size: 0,
+        type: '',
+        otherSource: { source: alt.source, matched: alt.matched || '' },
+      };
+    } catch {
+      /* 两家都要付费，落到最后统一报错 */
+    }
+  }
+
+  // 5) 实在没有完整音源，就把 30 秒试听给他，别让播放器干站着
+  if (trial) return trial;
+
+  throw new Error('这首歌是会员专享，暂时没有可播放的音源；登录有会员的账号后即可完整播放');
 }
 
   ipcMain.handle('netease:search-song', async (_event, input) => {
@@ -4403,7 +4623,10 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
     if (!list.length) throw new Error(`没有搜到「${keyword}」`);
     for (const song of list) {
       try {
-        const urlInfo = await fetchNeteaseSongUrl(apiBase, song.id, input?.level || 'exhigh');
+        const urlInfo = await fetchNeteaseSongUrl(apiBase, song.id, input?.level || 'exhigh', {
+          title: song.name,
+          artist: (song.ar || song.artists || []).map((item) => item.name).filter(Boolean).join(' / '),
+        });
         return {
           title: song.name,
           artist: (song.ar || song.artists || []).map((item) => item.name).filter(Boolean).join(' / '),
@@ -4421,12 +4644,34 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
 
   ipcMain.handle('netease:song-url', async (_event, input) => {
     const apiBase = normalizeNeteaseBase(input?.apiBase);
-    return fetchNeteaseSongUrl(apiBase, String(input?.id || ''), input?.level || 'exhigh');
+    return fetchNeteaseSongUrl(apiBase, String(input?.id || ''), input?.level || 'exhigh', {
+      title: input?.title,
+      artist: input?.artist,
+    });
   });
 
   ipcMain.handle('live:bili-room', async (_event, input) => {
     const raw = String(input?.url || input || '');
     return resolveLiveRoom(raw);
+  });
+
+  /*
+   * 斗鱼 / 虎牙 / 抖音 / 快手 的弹幕抓取。
+   *
+   * 用一个隐藏窗口加载直播间网页，只读聊天区文字（见 electron/live-danmaku.js）。
+   * 渲染层每 900ms 拉一次新弹幕，断开时调 stop 关掉窗口。
+   */
+  ipcMain.handle('live:danmaku-start', async (_event, input) => startDanmaku(input));
+  ipcMain.handle('live:danmaku-poll', async () => pollDanmaku());
+  ipcMain.handle('live:danmaku-stop', async () => stopDanmaku());
+
+  // 应用退出时别把隐藏窗口留成孤儿进程
+  app.on('before-quit', () => {
+    try {
+      stopDanmaku();
+    } catch {
+      /* ignore */
+    }
   });
 
   /**
@@ -4506,6 +4751,9 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
 
       let settled = false;
       let pollTimer = null;
+      // 是否已经用登录接口验过这一袋 cookie（见 check() 里的说明）
+      let verified = false;
+      let lastVerifyAt = 0;
 
       const cleanup = () => {
         if (pollTimer) clearInterval(pollTimer);
@@ -4562,7 +4810,23 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
           }
           musicLoginDebug = { at: Date.now(), platform: key, cookieCount: cookies.length, matched: Object.keys(bag) };
           const checked = checkMusicLogin(config, bag);
-          if (checked.ok) await finish(bag);
+          if (checked.ok) {
+            /*
+             * 只凭 cookie 名齐了就存盘是不行的：QQ 音乐扫码过程中
+             * p_uin / p_tk 这类 QQ 互联的 cookie 会先落地，y.qq.com 自己的
+             * 会话还没写完，这时候存下来的是一袋半截凭证 —— 之后取歌单
+             * 一律 500003（服务端当未登录）。所以这里再用最轻的登录接口验一次，
+             * 验过才存；验不过就接着轮询。验证限流 3 秒一次，别把接口打爆。
+             */
+            const now = Date.now();
+            if (!verified && now - lastVerifyAt > 3000) {
+              lastVerifyAt = now;
+              const result = await verifyMusicSession(key, bag).catch(() => ({ ok: false }));
+              verified = Boolean(result && result.ok);
+              musicLoginDebug.verify = { ok: verified, error: (result && result.error) || '' };
+            }
+            if (verified) await finish(bag);
+          }
         } catch {
           /* 窗口还在加载时忽略 */
         }
@@ -4586,8 +4850,19 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
             if (!Object.keys(bag).length) {
               return { ok: false, error: '还没有读到任何登录 cookie，请先在窗口里完成扫码' };
             }
+            /*
+             * 「我已登录」是用户的断言，所以这里不拦着他存盘：
+             * 只是顺手验一次，验不过就把话说明白，让他知道还要再等一下。
+             */
+            const probe = await verifyMusicSession(key, bag).catch(() => ({ ok: false, error: '验证没跑通' }));
             await finish(bag);
-            return { ok: true, platform: key, cookies: bag };
+            return {
+              ok: true,
+              platform: key,
+              cookies: bag,
+              verified: Boolean(probe && probe.ok),
+              warning: probe && probe.ok ? '' : `已经存下来了，但还查不到账号信息（${(probe && probe.error) || '验证失败'}），歌单可能还读不出来`,
+            };
           } catch (error) {
             return { ok: false, error: error.message || '保存登录状态失败' };
           }
@@ -4709,39 +4984,103 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
   ipcMain.handle('music:login-debug', async () => musicLoginDebug);
 
   /** 当前已保存哪些平台的登录。 */
-  /** 收集一个 QQ 音乐 / 酷狗账号的歌单：先走网页，失败回退 OpenAPI。 */
+  /**
+   * 把登录窗口分区里现存的 cookie 合并进已保存的凭据。
+   *
+   * 为什么要这一步：登录成功时我们是把「当时的整袋 cookie」存下来的，
+   * 但酷狗 / QQ 音乐会在登录后再陆续补写几条关键 cookie（比如酷狗的
+   * userid、QQ 的 refreshing 票据）。只吃存盘那一份，就会出现
+   * 「明明登录了，服务端却说没登录」的情况。
+   */
+  async function mergePartitionCookies(key, creds) {
+    const bag = { ...creds };
+    try {
+      const part = session.fromPartition(`persist:music-${key}-login`);
+      const cookies = await part.cookies.get({});
+      for (const cookie of cookies || []) {
+        if (cookie && cookie.name) bag[cookie.name] = cookie.value;
+      }
+    } catch {
+      /* 分区可能没建过，用已保存的即可 */
+    }
+    // QQ 号在不同版本落在不同 cookie 名上，这里统一补一次
+    if (!bag.uin) bag.uin = bag.p_uin || bag.ptui_loginuin || bag.luin || bag.wxuin || '';
+    const pairs = [];
+    for (const [name, value] of Object.entries(bag)) {
+      if (name === '__cookieHeader' || name === 'savedAt') continue;
+      if (!/^[A-Za-z0-9_.$-]+$/.test(name)) continue;
+      if (value == null) continue;
+      pairs.push(`${name}=${String(value).replace(/;/g, '')}`);
+    }
+    bag.__cookieHeader = pairs.join('; ');
+    return bag;
+  }
+
+  /** 给任意 Promise 套硬上限，任何一步卡住都不能让界面一直转圈。 */
+  function playlistDeadline(promise, ms, label) {
+    let timer = null;
+    const guard = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label || '读取'}超时（${Math.round(ms / 1000)} 秒没有响应）`));
+      }, ms);
+    });
+    return Promise.race([promise, guard]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  /** 打开一个带登录态的内置窗口（分区就是登录时用的那个）。 */
+function musicLoginWindow(target) {
+  return new BrowserWindow({
+    width: 1100,
+    height: 780,
+    show: false,
+    webPreferences: {
+      session: session.fromPartition(`persist:music-${target}-login`),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+}
+
+/** 收集一个 QQ 音乐 / 酷狗账号的歌单：先走网页，失败回退 OpenAPI。 */
   async function collectPlatformPlaylists(key) {
-    const session = await loadMusicSession(key, loadSecret);
-    if (!session) throw new Error('还没有登录');
+    /*
+     * 注意：这里的变量名不能叫 session。
+     * 早前写成 `const session = await loadMusicSession(...)`，把 electron 的
+     * session 模块整个遮住了，下面 `session.fromPartition` 直接抛
+     * 「fromPartition is not a function」——网页这条路从来没跑通过一次，
+     * 于是每次都默默回退到 OpenAPI，QQ 音乐 / 酷狗 的歌单也就一直是空的。
+     */
+    const saved = await loadMusicSession(key, loadSecret);
+    if (!saved) throw new Error('还没有登录');
+    const creds = await mergePartitionCookies(key, saved);
     const webErrors = [];
     try {
-      const list = await webMyPlaylists(key, session, {
-        getWindow: async (target) => {
-          const win = new BrowserWindow({
-            width: 1100,
-            height: 780,
-            show: false,
-            webPreferences: {
-              session: session.fromPartition(`persist:music-${target}-login`),
-              contextIsolation: true,
-              nodeIntegration: false,
-              sandbox: true,
-            },
-          });
-          return { win, ownWindow: true };
-        },
-      });
-      if (Array.isArray(list) && list.length) return { list, source: 'web' };
+      const list = await playlistDeadline(
+        webMyPlaylists(key, creds, {
+          getWindow: async (target) => {
+            return { win: musicLoginWindow(target), ownWindow: true };
+          },
+        }),
+        45000,
+        '网页读取歌单'
+      );
+      if (Array.isArray(list) && list.length) return { list: withLikedPlaylist(key, list), source: 'web' };
       webErrors.push('网页返回空列表');
     } catch (error) {
       webErrors.push(String(error.message || error));
     }
     try {
-      const list = await accountPlaylists(key, session);
-      if (Array.isArray(list) && list.length) return { list, source: 'api' };
+      const list = await playlistDeadline(accountPlaylists(key, creds), 18000, '接口读取歌单');
+      if (Array.isArray(list) && list.length) return { list: withLikedPlaylist(key, list), source: 'api' };
       throw new Error(webErrors[0] || '账号里没有可读的歌单');
     } catch (error) {
-      throw new Error(String(error.message || webErrors[0] || '读取歌单失败'));
+      // 网页和接口都没拿到：把两条路的原因一起抛给界面，方便一眼定位
+      const apiError = String(error.message || '接口没返回歌单');
+      const webError = webErrors[0] || '网页方式没有返回歌单';
+      throw new Error(`网页：${webError}；接口：${apiError}`);
     }
   }
 
@@ -4849,7 +5188,14 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
       const result = await collectPlatformPlaylists(key);
       return { ok: true, list: result.list, source: result.source };
     } catch (error) {
-      return { ok: false, reason: String(error.message || '读取歌单失败') };
+      const reason = String(error.message || '读取歌单失败');
+      /*
+       * 500003 / Access Deny / 页面里找不到歌单链接，本质都是同一件事：
+       * 对方不认这次请求的登录态。标成 expired，界面就能直接给一个
+       * 「重新登录」的按钮，而不是让用户对着一串代码发呆。
+       */
+      const expired = musicLooksExpired(reason);
+      return { ok: false, reason, expired };
     }
   });
 
@@ -4908,22 +5254,34 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
     if (status?.netease?.loggedIn) {
       try {
         const list = await neteaseMyPlaylists(neteaseSession.apiBase || 'http://127.0.0.1:3100');
-        groups.push({ platform: 'netease', label: '网易云', ok: true, list, error: '' });
+        groups.push({ platform: 'netease', label: '网易云', ok: true, list, error: '', expired: false });
       } catch (error) {
         groups.push({ platform: 'netease', label: '网易云', ok: false, list: [], error: String(error.message || '读取失败') });
       }
     }
 
-    for (const key of ['qq', 'kugou']) {
-      if (!status?.[key]?.loggedIn) continue;
-      const label = key === 'qq' ? 'QQ 音乐' : '酷狗';
-      try {
-        const result = await collectPlatformPlaylists(key);
-        groups.push({ platform: key, label, ok: true, list: result.list, error: '' });
-      } catch (error) {
-        groups.push({ platform: key, label, ok: false, list: [], error: String(error.message || '读取失败') });
-      }
-    }
+    const pending = ['qq', 'kugou'].filter((key) => status?.[key]?.loggedIn);
+    // 两个平台并发去取：串行时一个卡住会把另一个也一起拖死，用户看到的就是一直「读取中」
+    const settled = await Promise.all(
+      pending.map(async (key) => {
+        const label = key === 'qq' ? 'QQ 音乐' : '酷狗';
+        try {
+          const result = await collectPlatformPlaylists(key);
+          return { platform: key, label, ok: true, list: result.list, error: '', expired: false };
+        } catch (error) {
+          const message = String(error.message || '读取失败');
+          return {
+            platform: key,
+            label,
+            ok: false,
+            list: [],
+            error: message,
+            expired: musicLooksExpired(message),
+          };
+        }
+      })
+    );
+    groups.push(...settled);
 
     return { ok: true, groups };
   });
@@ -4931,12 +5289,80 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
   ipcMain.handle('music:playlist-songs', async (_event, input) => {
     const key = String(input?.platform || '');
     const playlistId = String(input?.playlistId || '');
-    musicPlatformConfig(key);
     if (!playlistId) return { ok: false, reason: '缺少歌单 ID' };
     try {
+      /*
+       * 网易云的歌单走本地 API：它没有存盘会话，loadMusicSession 读不到，
+       * 而 accountPlaylistSongs 也只支持 qq/kugou。
+       *
+       * 注意这里必须在 musicPlatformConfig(key) 之前处理：
+       * PLATFORM_CONFIG 里只有 qq / kugou，没有 netease，
+       * 之前那句校验会直接抛「不支持的平台：netease」，
+       * 被 catch 吞成 {ok:false}，界面上又没地方显示这个 reason，
+       * 于是用户看到的就是「歌单列表出来了，点进去毫无反应」。
+       */
+      if (key === 'netease') {
+        const apiBase = neteaseSession.apiBase || 'http://127.0.0.1:3100';
+        // 本地服务没起来就先把它拉起来，否则读取必然失败
+        await startNeteaseService(apiBase).catch((error) => {
+          console.error('[netease] 本地服务启动失败:', error);
+        });
+        /*
+         * /playlist/detail 自带完整曲目（本地 API 的 module/playlist_detail.js
+         * 用的是 n=100000），所以一次请求就够；
+         * 万一拿到的是空列表，再走 /playlist/track/all 补一次。
+         */
+        let json = null;
+        let playlist = null;
+        try {
+          json = await neteaseGet(apiBase, '/playlist/detail', { id: playlistId });
+          playlist = json?.playlist || null;
+        } catch (error) {
+          console.error('[netease] 读取歌单详情失败:', error);
+        }
+        let tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+        if (!tracks.length && playlist) {
+          const all = await neteaseGet(apiBase, '/playlist/track/all', {
+            id: playlistId,
+            limit: '200',
+          }).catch(() => null);
+          tracks = Array.isArray(all?.songs) ? all.songs : [];
+        }
+        if (!playlist && !tracks.length) {
+          return { ok: false, reason: '读取网易云歌单失败（本地网易云服务可能没启动，或歌单 ID 无效）' };
+        }
+        const songs = tracks.map((song) => ({
+          title: String(song.name || ''),
+          artist: String(
+            (song.ar || song.artists || []).map((a) => a.name || '').filter(Boolean).join(' / ')
+          ),
+          cover: String(song.al?.picUrl || song.album?.picUrl || '').replace(/^http:/i, 'https:'),
+          neteaseId: String(song.id || ''),
+          mid: String(song.id || ''),
+          hash: '',
+        }));
+        return {
+          ok: true,
+          detail: {
+            id: playlistId,
+            name: String(playlist?.name || '歌单'),
+            songs,
+          },
+        };
+      }
+      musicPlatformConfig(key);
       const session = await loadMusicSession(key, loadSecret);
       if (!session) return { ok: false, reason: '还没有登录' };
-      const detail = await accountPlaylistSongs(key, session, playlistId);
+      const detail =
+        playlistId === LIKED_ID
+          ? await playlistDeadline(
+              webLikedSongs(key, session, {
+                getWindow: async (target) => ({ win: musicLoginWindow(target), ownWindow: true }),
+              }),
+              34000,
+              '读取我喜欢的音乐'
+            )
+          : await accountPlaylistSongs(key, session, playlistId);
       return { ok: true, detail };
     } catch (error) {
       return { ok: false, reason: String(error.message || '读取歌单失败') };
@@ -4956,7 +5382,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
     if (!platform || platform === 'all') {
       return mergedCharts(apiBase);
     }
-    return { charts: await musicCharts(platform), counts: { [platform]: 0, merged: 0 } };
+    return { charts: await musicCharts(platform, apiBase), counts: { [platform]: 0, merged: 0 } };
   });
 
   ipcMain.handle('music:chart-songs', async (_event, input) => {
@@ -4973,7 +5399,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
     const platform = String(input?.platform || '');
     const chartId = String(input?.chartId || '');
     if (!chartId) throw new Error('缺少榜单 ID');
-    return chartSongs(platform, chartId, limit);
+    return chartSongs(platform, chartId, limit, apiBase);
   });
 
   /**
@@ -5492,6 +5918,62 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
     }
   });
 
+  /**
+   * 估算生成差异客户端要占多少空间。
+   *
+   * 生成时会把官服客户端里内容相同的文件直接硬链接过去，那部分不额外占空间，
+   * 所以这里只给两个确定的事实：目标盘还剩多少、官服客户端有多大。
+   * 客户端体积靠遍历目录算，给了 4 秒上限 —— 超大客户端算不完就先报可用空间，
+   * 不能让「看个数字」把界面卡住。
+   */
+  async function estimateRuntimeSpace(baseRoot, targetRoot) {
+    const drive = path.parse(path.resolve(targetRoot || baseRoot || '.')).root;
+    let freeBytes = 0;
+    try {
+      const stats = await fsp.statfs(drive);
+      freeBytes = Number(stats.bavail) * Number(stats.bsize);
+    } catch {
+      freeBytes = 0;
+    }
+
+    let baseBytes = 0;
+    let baseFiles = 0;
+    let partial = false;
+    if (baseRoot) {
+      const deadline = Date.now() + 4000;
+      const stack = [baseRoot];
+      while (stack.length) {
+        if (Date.now() > deadline) {
+          partial = true;
+          break;
+        }
+        const dir = stack.pop();
+        let entries = [];
+        try {
+          entries = await fsp.readdir(dir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            stack.push(full);
+          } else if (entry.isFile()) {
+            try {
+              const info = await fsp.stat(full);
+              baseBytes += Number(info.size) || 0;
+              baseFiles += 1;
+            } catch {
+              /* 读不到就跳过，不影响其它文件 */
+            }
+          }
+        }
+      }
+    }
+
+    return { ok: true, estimate: true, drive, freeBytes, baseBytes, baseFiles, partial, targetRoot };
+  }
+
   ipcMain.handle('servers:prepare-sophon', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
     if (!game || !['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
@@ -5517,6 +5999,15 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
       throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
     }
     const targetRoot = runtime.target;
+
+    /*
+     * 只做预估，不真跑：界面里先告诉用户目标盘还剩多少、官服客户端有多大，
+     * 免得跑到一半才发现空间不够。只读本地信息，不走网络。
+     */
+    if (input?.estimate) {
+      return estimateRuntimeSpace(base.root, targetRoot);
+    }
+
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
     sophonJobs.set(jobId, signal);
@@ -5997,6 +6488,50 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh') {
   ipcMain.handle('app:open-download-folder', async () => {
     const dir = await ensureDownloadsDir();
     await shell.openPath(dir);
+  });
+
+  /*
+   * 打开覆盖脚本留下的日志。
+   * 更新是在 detached 的 PowerShell 里做的，控制台没人看得到；
+   * 用户报「更新没完成」时，让他把这个文件发回来就能定位到底卡在哪一步。
+   */
+  ipcMain.handle('app:open-update-log', async () => {
+    const candidates = ['update-log.txt', 'self-heal.log', 'last-update.json', 'update-error.json'];
+    for (const dir of updateLogDirs()) {
+      for (const name of candidates) {
+        const target = path.join(dir, name);
+        if (fs.existsSync(target)) {
+          await shell.openPath(target);
+          return { ok: true, path: target, opened: true };
+        }
+      }
+    }
+    const dir = updateLogDirs()[0];
+    await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+    await shell.openPath(dir);
+    return { ok: true, path: dir, opened: false };
+  });
+
+  /** 直接把日志内容读回渲染层，省得用户还要去找文件。 */
+  ipcMain.handle('app:read-update-log', async () => {
+    const dirs = updateLogDirs();
+    const read = async (name) => {
+      for (const dir of dirs) {
+        try {
+          const text = await fsp.readFile(path.join(dir, name), 'utf8');
+          return text.replace(/^\uFEFF/, '').trim();
+        } catch {
+          /* 换下一个目录 */
+        }
+      }
+      return '';
+    };
+    return {
+      dir: dirs[0],
+      log: await read('update-log.txt'),
+      selfHeal: await read('self-heal.log'),
+      error: await read('update-error.json'),
+    };
   });
 
   ipcMain.handle('start:export-video', async (_event, gameId) => {
@@ -6641,6 +7176,307 @@ async function killGame(id) {
   pushState(true);
 }
 
+async function runLayoutProbe() {
+  // [PROBE] 发布前删除：HX_PROBE=1 时打印关键元素的实际位置，代替肉眼看截图。
+  const rect = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      cy: Math.round(r.y + r.height / 2),
+    };
+  };
+  const script = `(async () => {
+    const rect = ${rect.toString()};
+    const out = { viewport: { w: innerWidth, h: innerHeight } };
+    window.__navigate && window.__navigate('home');
+    const head = document.querySelector('.page-head');
+    const actions = document.querySelector('.page-head-actions');
+    out.home = {
+      head: rect(head),
+      actions: rect(actions),
+      firstBtn: rect(actions && actions.querySelector('.btn')),
+      view: rect(document.querySelector('.view')),
+    };
+    window.__navigate && window.__navigate('start');
+    const top = document.querySelector('.start-screen .start-top');
+    const brand = document.querySelector('.start-screen .start-brand');
+    const mark = document.querySelector('.start-screen .start-brand-mark');
+    const back = document.querySelector('.start-screen .chrome-back');
+    const closeBtn = document.querySelector('.start-screen .chrome-close');
+    out.start = {
+      top: rect(top),
+      brand: rect(brand),
+      mark: rect(mark),
+      back: rect(back),
+      close: rect(closeBtn),
+      topPadding: top ? getComputedStyle(top).padding : '',
+    };
+    window.__navigate && window.__navigate('home');
+    document.body.classList.remove('sidebar-collapsed');
+    const sidebar = document.querySelector('.sidebar');
+    const brandRow = document.querySelector('.sidebar .brand');
+    const brandMark = document.querySelector('.sidebar .brand-mark');
+    const brandName = document.querySelector('.sidebar .brand-name');
+    const navFirst = document.querySelector('.sidebar .nav-item');
+    const navFirstIcon = navFirst && navFirst.querySelector('.icon');
+    const navFirstSpan = navFirst && navFirst.querySelector('span');
+    const cs = (el) => (el ? getComputedStyle(el) : null);
+    out.sidebar = {
+      sidebar: rect(sidebar),
+      brand: rect(brandRow),
+      brandMark: rect(brandMark),
+      brandName: rect(brandName),
+      navFirst: rect(navFirst),
+      navIcon: rect(navFirstIcon),
+      navSpan: rect(navFirstSpan),
+      brandPad: brandRow ? cs(brandRow).padding : '',
+      brandGap: brandRow ? cs(brandRow).gap : '',
+      navItemPad: navFirst ? cs(navFirst).padding : '',
+      navGap: navFirst ? cs(navFirst).gap : '',
+      sidebarPad: sidebar ? cs(sidebar).padding : '',
+      markRadius: brandMark ? cs(brandMark).borderRadius : '',
+    };
+    window.__navigate && window.__navigate('start');
+    const gamesHead = document.querySelector('.start-screen .start-games-head');
+    const gamesStrong = gamesHead && gamesHead.querySelector('strong');
+    out.dock = {
+      head: rect(gamesHead),
+      strong: rect(gamesStrong),
+      headAlign: gamesHead ? cs(gamesHead).alignItems : '',
+    };
+    window.__navigate && window.__navigate('home');
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+    const duo = document.querySelector('.char-duo');
+    const duoCards = [...document.querySelectorAll('.char-duo-card')];
+    out.duo = {
+      wrap: rect(duo),
+      cardHeight: duoCards[0] ? cs(duoCards[0]).height : '',
+      emMaxHeight: duoCards[0] ? cs(duoCards[0].querySelector('.char-duo-copy em')).maxHeight : '',
+      statMaxHeight: duoCards[0] ? cs(duoCards[0].querySelector('.char-duo-stat')).maxHeight : '',
+      cards: duoCards.map((card) => {
+        const statB = card.querySelector('.char-duo-stat b');
+        const statI = card.querySelector('.char-duo-stat i');
+        const img = card.querySelector('img');
+        return {
+          cls: card.className,
+          action: card.dataset.action || '',
+          game: card.dataset.game || '',
+          rect: rect(card),
+          stat: statB ? statB.textContent.trim() : '',
+          sub: statI ? statI.textContent.trim() : '',
+          imgLoaded: Boolean(img && img.complete && img.naturalWidth),
+          cursor: cs(card) ? cs(card).cursor : '',
+        };
+      }),
+    };
+    const sparxie = document.querySelector('.hero-sparxie');
+    const sparxieImg = sparxie ? sparxie.querySelector('img') : null;
+    out.hero = {
+      rect: rect(document.querySelector('.hero')),
+      sparxie: rect(sparxie),
+      sparxieOpacity: sparxie ? cs(sparxie).opacity : '',
+      sparxieLoaded: Boolean(sparxieImg && sparxieImg.complete && sparxieImg.naturalWidth),
+      contentRect: rect(document.querySelector('.hero-content')),
+    };
+    const sideChar = document.querySelector('.sidebar-char');
+    const sideCharImg = sideChar ? sideChar.querySelector('img') : null;
+    out.sideChar = {
+      rect: rect(sideChar),
+      opacity: sideChar ? cs(sideChar).opacity : '',
+      loaded: Boolean(sideCharImg && sideCharImg.complete && sideCharImg.naturalWidth),
+      display: sideChar ? cs(sideChar).display : '',
+      position: sideChar ? cs(sideChar).position : '',
+      width: sideChar ? cs(sideChar).width : '',
+      parent: sideChar && sideChar.parentElement ? sideChar.parentElement.className : '',
+      parentDisplay: sideChar && sideChar.parentElement ? cs(sideChar.parentElement).display : '',
+      parentPosition: sideChar && sideChar.parentElement ? cs(sideChar.parentElement).position : '',
+      bodyClass: document.body.className,
+    };
+    const order = [...document.querySelectorAll('.page > *')].map((el) => el.className || el.tagName);
+    out.homeOrder = order;
+    // ── 启动页小按钮与品牌 ──
+    window.__navigate && window.__navigate('start');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // 只量「最后一个 .start-screen」：换游戏做动图过渡时会残留旧屏幕，
+    // 全量 querySelectorAll 会把过渡中 translate 到屏幕外的旧按钮也算进来
+    const liveScreen = [...document.querySelectorAll('.start-screen')].at(-1);
+    const stTop = liveScreen && liveScreen.querySelector('.start-top');
+    const stTools = liveScreen && liveScreen.querySelector('.start-video-tools');
+    const stToggles = liveScreen ? [...liveScreen.querySelectorAll('.start-video-toggle')] : [];
+    const stVideo = liveScreen && liveScreen.querySelector('video[data-start-video]');
+    const stBrand = liveScreen && liveScreen.querySelector('.start-brand');
+    const stMark = liveScreen && liveScreen.querySelector('.start-brand-mark');
+    const stSpan = stBrand && stBrand.querySelector('span');
+    const cs2 = (el) => (el ? getComputedStyle(el) : null);
+    out.startTools = {
+      top: rect(stTop),
+      tools: rect(stTools),
+      toolsDisplay: stTools ? cs2(stTools).display : '',
+      toolsPosition: stTools ? cs2(stTools).position : '',
+      toolsCount: stToggles.length,
+      toggles: stToggles.map((b) => ({ action: b.dataset.action || '', rect: rect(b), w: cs2(b).width, h: cs2(b).height, disabled: b.disabled, pos: cs2(b).position, parentCls: b.parentElement ? b.parentElement.className : '' })),
+      videoPresent: Boolean(stVideo),
+      videoSrc: stVideo ? String(stVideo.src).slice(0, 80) : '',
+      videoHidden: stVideo ? cs2(stVideo).display : '',
+      liveScreenCount: document.querySelectorAll('.start-screen').length,
+      toolsHtml: stTools ? String(stTools.outerHTML).slice(0, 300) : '',
+      allTools: [...document.querySelectorAll('.start-video-tools')].map((t) => ({
+        rect: rect(t),
+        pos: cs2(t).position,
+        transform: cs2(t).transform,
+        children: t.children.length,
+        childRects: [...t.children].map((c) => ({
+          rect: rect(c),
+          transform: cs2(c).transform,
+          offsetParent: c.offsetParent ? (c.offsetParent.className || c.offsetParent.tagName) : '',
+          inline: c.getAttribute('style') || '',
+          offsetTop: c.offsetTop,
+          offsetLeft: c.offsetLeft,
+          margin: cs2(c).margin,
+          top: cs2(c).top,
+          left: cs2(c).left,
+          position: cs2(c).position,
+        })),
+        parent: t.parentElement ? (t.parentElement.className || t.parentElement.tagName) : '',
+      })),
+    };
+    out.startBrand2 = {
+      brand: rect(stBrand),
+      mark: rect(stMark),
+      markSize: stMark ? cs2(stMark).width + 'x' + cs2(stMark).height : '',
+      spanFont: stSpan ? cs2(stSpan).fontSize : '',
+      spanRect: rect(stSpan),
+    };
+    // ── 启动页背景视频：为什么终末地/异环只剩静态图 ──
+    // 视频元素是透明的（opacity:0），只有 .video-ready 才淡入；
+    // 只要这个类没加上，用户看到的就是下面那张静态图。
+    const videoArt = liveScreen && liveScreen.querySelector('.start-art:not(.start-art-prev)');
+    const bgVideo = videoArt && videoArt.querySelector('video[data-start-video]');
+    const bgImg = videoArt && videoArt.querySelector('img[data-cover]');
+    out.startVideo = {
+      artCls: videoArt ? videoArt.className : '',
+      artKey: videoArt ? videoArt.dataset.artKey || '' : '',
+      videoPresent: Boolean(bgVideo),
+      videoSrc: bgVideo ? String(bgVideo.src || '').slice(0, 120) : '',
+      videoReadyState: bgVideo ? bgVideo.readyState : -1,
+      videoNetworkState: bgVideo ? bgVideo.networkState : -1,
+      videoPaused: bgVideo ? bgVideo.paused : null,
+      videoError: bgVideo && bgVideo.error ? bgVideo.error.code : 0,
+      videoOpacity: bgVideo ? cs2(bgVideo).opacity : '',
+      videoW: bgVideo ? cs2(bgVideo).width : '',
+      videoH: bgVideo ? cs2(bgVideo).height : '',
+      imgOpacity: bgImg ? cs2(bgImg).opacity : '',
+      imgLoaded: Boolean(bgImg && bgImg.complete && bgImg.naturalWidth),
+      imgSrc: bgImg ? String(bgImg.src || '').slice(0, 120) : '',
+      liveScreenCount: document.querySelectorAll('.start-screen').length,
+      artCount: document.querySelectorAll('.start-art').length,
+    };
+    // ── 换游戏场景：逐个点游戏缩略图，记录每次切换后的视频状态 ──
+    // 现象是「换过游戏之后只剩静态图」，所以必须真的点一次切换。
+    // 注意：每次点击都会触发 render()，整个 view 的 innerHTML 被换掉，
+    // 之前拿到的缩略图节点会脱离文档 —— 必须在循环里重新查询，
+    // 否则点的是已分离的节点，事件不会冒泡到 document，等于什么都没发生。
+    out.switchScenario = [];
+    const ids = [...document.querySelectorAll('.start-game-thumb')].map((b) => b.dataset.id || '');
+    for (const gid of ids) {
+      // 注意：这段脚本整体是一段模板字符串，里面不能再用反引号和模板占位符
+      const thumb = document.querySelector('.start-game-thumb[data-id="' + gid + '"]');
+      if (!thumb) {
+        out.switchScenario.push({ id: gid, step: 'thumb-missing' });
+        continue;
+      }
+      thumb.click();
+      await new Promise((resolve) => setTimeout(resolve, 2400));
+      const screen2 = [...document.querySelectorAll('.start-screen')].at(-1);
+      const art2 = screen2 && screen2.querySelector('.start-art:not(.start-art-prev)');
+      const v2 = art2 && art2.querySelector('video[data-start-video]');
+      const i2 = art2 && art2.querySelector('img[data-cover]');
+      out.switchScenario.push({
+        id: gid,
+        artCls: art2 ? art2.className : '',
+        videoPresent: Boolean(v2),
+        videoReadyState: v2 ? v2.readyState : -1,
+        videoError: v2 && v2.error ? v2.error.code : 0,
+        videoPaused: v2 ? v2.paused : null,
+        videoOpacity: v2 ? cs2(v2).opacity : '',
+        videoSrc: v2 ? String(v2.src || '').slice(-40) : '',
+        imgOpacity: i2 ? cs2(i2).opacity : '',
+        imgLoaded: Boolean(i2 && i2.complete && i2.naturalWidth),
+        artCount: document.querySelectorAll('.start-art').length,
+        liveScreenCount: document.querySelectorAll('.start-screen').length,
+        prevArtCount: document.querySelectorAll('.start-art-prev').length,
+      });
+    }
+    // ── 启动页 mini 播放器：位置与可点性 ──
+    const mini = document.querySelector('#mini-player');
+    const chipCopy = document.querySelector('#mini-player .mini-chip-copy');
+    const chipCover = document.querySelector('#mini-player .mini-chip-cover');
+    const atChip = chipCopy ? document.elementFromPoint(
+      chipCopy.getBoundingClientRect().left + chipCopy.getBoundingClientRect().width / 2,
+      chipCopy.getBoundingClientRect().top + chipCopy.getBoundingClientRect().height / 2
+    ) : null;
+    out.miniStart = {
+      exists: Boolean(mini),
+      hidden: mini ? mini.hidden : null,
+      cls: mini ? mini.className : '',
+      display: mini ? cs2(mini).display : '',
+      zIndex: mini ? cs2(mini).zIndex : '',
+      chipCopy: rect(chipCopy),
+      chipCover: rect(chipCover),
+      chipCopyAction: chipCopy ? chipCopy.dataset.action : '',
+      chipCoverAction: chipCover ? chipCover.dataset.action : '',
+      topAtChip: atChip ? atChip.tagName + '.' + atChip.className + '[' + (atChip.dataset.action || '') + ']' : '',
+    };
+    // ── 侧栏展开与收起几何 ──
+    window.__navigate && window.__navigate('home');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const side = document.querySelector('.sidebar');
+    const navs = [...document.querySelectorAll('.sidebar .nav-item')];
+    const navsInfo = () => navs.map((n) => {
+      const r = n.getBoundingClientRect();
+      const icon = n.querySelector('.icon');
+      return {
+        cls: n.className,
+        text: (n.textContent || '').trim().slice(0, 8),
+        y: Math.round(r.y),
+        h: Math.round(r.height),
+        cy: Math.round(r.y + r.height / 2),
+        iconCy: icon ? Math.round(icon.getBoundingClientRect().y + icon.getBoundingClientRect().height / 2) : -1,
+        gap: cs2(n).gap,
+        pad: cs2(n).padding,
+      };
+    });
+    out.sideExpanded = {
+      sidebar: rect(side),
+      navCount: navs.length,
+      navs: navsInfo(),
+      navGap: navs[0] ? cs2(navs[0]).gap : '',
+    };
+    document.body.classList.add('sidebar-collapsed');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    out.sideCollapsed = {
+      sidebar: rect(side),
+      navs: navsInfo(),
+      navGap: navs[0] ? cs2(navs[0]).gap : '',
+      bodyClass: document.body.className,
+    };
+    document.body.classList.remove('sidebar-collapsed');
+    return out;
+  })()`;
+  try {
+    const result = await win.webContents.executeJavaScript(script, true);
+    console.log('PROBE ' + JSON.stringify(result, null, 2));
+  } catch (error) {
+    console.error('probe failed:', error);
+  }
+  quitting = true;
+  app.quit();
+}
+
 async function runCapture() {
   const shotsDir = path.join(ROOT, 'shots');
   await fsp.mkdir(shotsDir, { recursive: true });
@@ -6883,6 +7719,7 @@ async function runCapture() {
     await fsp.writeFile(path.join(shotsDir, 'chart-shot.png'), chartShot.toPNG());
     console.log('captured song-charts');
 
+
     // 动态页底部的官方公告区
     await win.webContents.executeJavaScript(`window.__navigate('news')`);
     await new Promise((resolve) => setTimeout(resolve, 3200));
@@ -7096,6 +7933,8 @@ app.whenReady().then(async () => {
       /* ignore */
     }
   }
+  // 全新安装判定：数据文件还不存在时不吵醒任何旧值，用来决定默认称呼
+  const freshStore = !fs.existsSync(dataFile());
   store = createStore();
   await store.load();
   await ensureSeedData(store, app.getPath('userData'));
@@ -7134,6 +7973,10 @@ app.whenReady().then(async () => {
   }
   if (!store.data.settings.profileName || store.data.settings.profileName === '旅行者') {
     store.data.settings.profileName = '大小姐';
+  }
+  // 新用户第一次打开：主页称呼默认「主人」；已有数据的老用户保持自己原来的称呼
+  if (freshStore && store.data.settings.profileName === '大小姐') {
+    store.data.settings.profileName = '主人';
   }
   if (
     store.data.settings.alwaysAdmin &&

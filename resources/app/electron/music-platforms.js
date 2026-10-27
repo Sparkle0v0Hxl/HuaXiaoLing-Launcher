@@ -291,15 +291,18 @@ async function searchSongs(platform, keyword, apiBase, limit = 30) {
 /* 统一入口                                                            */
 /* ------------------------------------------------------------------ */
 
-async function musicCharts(platform) {
+async function musicCharts(platform, apiBase) {
   if (platform === 'qq') return qqToplists();
   if (platform === 'kugou') return kugouRankList();
+  // 网易云榜单一直走内置 API 服务，之前漏了这一支，界面选「网易云」就报「未知平台」
+  if (platform === 'netease') return neteaseToplists(apiBase);
   throw new Error('未知平台');
 }
 
-async function chartSongs(platform, chartId, limit) {
+async function chartSongs(platform, chartId, limit, apiBase) {
   if (platform === 'qq') return qqToplistSongs(chartId, limit);
   if (platform === 'kugou') return kugouRankSongs(chartId, limit);
+  if (platform === 'netease') return neteaseChartSongs(apiBase, chartId, limit);
   throw new Error('未知平台');
 }
 
@@ -410,6 +413,107 @@ async function mergedChartSongs(chart, apiBase, limit = 30) {
   throw new Error('这个榜单暂时读取不到');
 }
 
+/* ------------------------------------------------------------------ */
+/* 播放地址回退                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 酷狗：拿 hash 换播放地址。
+ *
+ * 免费曲目直接给完整 http 地址；会员曲目会返回 `error: 需要付费`，
+ * 这时只能换一家再试，不能硬来。
+ */
+async function kugouSongUrl(hash) {
+  const key = String(hash || '').trim();
+  if (!key) throw new Error('酷狗没有 hash');
+  const data = await getJson(`https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=${key}`, {
+    referer: 'https://m.kugou.com/',
+  });
+  const url = String(data?.url || '');
+  if (!url) throw new Error(String(data?.error || '酷狗没有给播放地址'));
+  return { url: httpsify(url), br: Number(data?.bitRate) * 1000 || 0, source: 'kugou' };
+}
+
+/**
+ * QQ 音乐：songmid 换 vkey 播放地址。
+ *
+ * uin 传 0（游客）时只有免费曲目会拿到 purl，会员曲目 purl 为空、result 104003。
+ */
+async function qqSongUrl(mid) {
+  const key = String(mid || '').trim();
+  if (!key) throw new Error('QQ 音乐没有 songmid');
+  const payload = {
+    req_0: {
+      module: 'vkey.GetVkeyServer',
+      method: 'CgiGetVkey',
+      param: { guid: '10000', songmid: [key], songtype: [0], uin: '0', loginflag: 1, platform: '20' },
+    },
+    comm: { uin: 0, format: 'json', ct: 24, cv: 0 },
+  };
+  const { signal, done } = withTimeout(15000);
+  let json = null;
+  try {
+    const response = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg?format=json', {
+      method: 'POST',
+      headers: {
+        'user-agent': BROWSER_UA,
+        'content-type': 'application/json',
+        referer: 'https://y.qq.com/',
+        origin: 'https://y.qq.com',
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    json = await response.json();
+  } finally {
+    done();
+  }
+  const info = json?.req_0?.data?.midurlinfo?.[0];
+  const purl = String(info?.purl || '');
+  if (!purl) throw new Error('QQ 音乐没有给播放地址（多半是会员曲目）');
+  const sip = String(json?.req_0?.data?.sip?.[0] || 'https://dl.stream.qqmusic.qq.com/');
+  return { url: `${sip}${purl}`, br: 0, source: 'qq' };
+}
+
+/**
+ * 网易云拿不到地址时的兜底：用「歌名 + 歌手」去酷狗和 QQ 音乐找同一首。
+ *
+ * 只找**免费**的那一份。两家都要求付费时如实报错，
+ * 不绕会员、不接第三方音源。
+ */
+async function resolveFallbackUrl({ title, artist } = {}) {
+  const name = String(title || '').trim();
+  if (!name) throw new Error('没有歌名，无法换源');
+  const keyword = `${name} ${String(artist || '').split('/')[0].trim()}`.trim();
+  const tried = [];
+
+  try {
+    const list = await kugouSearch(keyword, 5);
+    const hit = list[0];
+    if (hit?.hash) {
+      const info = await kugouSongUrl(hit.hash);
+      return { ...info, matched: `${hit.title} - ${hit.artist}`, keyword };
+    }
+    tried.push('酷狗无结果');
+  } catch (error) {
+    tried.push(`酷狗：${error.message}`);
+  }
+
+  try {
+    const list = await qqSearch(keyword, 5);
+    const hit = list[0];
+    if (hit?.mid) {
+      const info = await qqSongUrl(hit.mid);
+      return { ...info, matched: `${hit.title} - ${hit.artist}`, keyword };
+    }
+    tried.push('QQ 音乐无结果');
+  } catch (error) {
+    tried.push(`QQ 音乐：${error.message}`);
+  }
+
+  throw new Error(tried.join('；') || '没有可用的替代音源');
+}
+
 module.exports = {
   musicCharts,
   chartSongs,
@@ -420,4 +524,7 @@ module.exports = {
   mergedCharts,
   mergedChartSongs,
   mergeSongs,
+  kugouSongUrl,
+  qqSongUrl,
+  resolveFallbackUrl,
 };

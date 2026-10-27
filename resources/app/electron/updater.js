@@ -151,6 +151,11 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
 
 /**
  * 读取并校验 manifest。
+ *
+ * 随包分发的那份 latest.json 只写「真正的清单在哪」（manifest 指针），
+ * 因为打进包里的时候还没算出这个包自己的 sha256——自己算自己的哈希是不可能的。
+ * 遇到这种清单就顺着指针再取一次真正的清单：下载地址和 sha256 都在那一份里。
+ *
  * @returns {Promise<{version:string,notes:string,url:string,sha256:string,size:number,mandatory:boolean,source:string,title:string,date:string}>}
  */
 async function readManifest(location) {
@@ -164,6 +169,14 @@ async function readManifest(location) {
     throw new Error('更新源不是有效的 JSON');
   }
   if (!data || typeof data !== 'object') throw new Error('更新源内容无效');
+
+  // 指针式清单：自己没有下载地址，就去它指的地方拿真正的那份
+  const pointer = String(data.manifest || data.redirect || '').trim();
+  if (pointer && !data.url) {
+    const real = await readManifest(resolveAgainst(raw, pointer));
+    return { ...real, source: raw };
+  }
+
   const version = String(data.version || '').trim().replace(/^v/i, '');
   if (!version) throw new Error('更新源里没有版本号');
   return {
@@ -180,8 +193,39 @@ async function readManifest(location) {
 }
 
 /**
+ * 把若干候选地址挨个读一遍，挑版本最高的那份算数。
+ *
+ * 为什么不是「第一个读得通就用」：启动器目录里那份 latest.json 可能是上个版本留下的、
+ * 版本号和当前一样，第一个就用它的话，永远只会得到「已是最新」，官网上更新的版本就再也
+ * 看不见了。所以这里全部读一遍，谁能给出更高的版本号就用谁；都不比当前新时，返回版本
+ * 最高的那份，让调用方照常判断「已是最新」。
+ *
+ * @returns {Promise<{ok:boolean,manifest?:object,source?:string,error?:string}>}
+ */
+async function resolveManifest(candidates) {
+  const list = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean);
+  let best = null;
+  let lastError = null;
+  for (const candidate of list) {
+    try {
+      const manifest = await readManifest(candidate);
+      if (!best || compareVersions(manifest.version, best.manifest.version) > 0) {
+        best = { manifest, source: candidate };
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (best) return { ok: true, manifest: best.manifest, source: best.source };
+  return {
+    ok: false,
+    error: lastError && lastError.message ? lastError.message : String(lastError || '读不到更新源'),
+  };
+}
+
+/**
  * 比较本地版本与更新源。
- * 传入的 location 可以是数组（多个候选地址），按顺序试，第一个能读出清单的算数。
+ * 传入的 location 可以是数组（多个候选地址）：全部读一遍，取版本最高的那份。
  * @returns {Promise<{ok:boolean, hasUpdate:boolean, current:string, latest:string|null, notes:string, url:string, sha256:string, size:number, mandatory:boolean, source?:string, error?:string}>}
  */
 async function checkForUpdate({ location, currentVersion }) {
@@ -201,43 +245,37 @@ async function checkForUpdate({ location, currentVersion }) {
       error: '还没有设置更新源',
     };
   }
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      const manifest = await readManifest(candidate);
-      const hasUpdate = compareVersions(manifest.version, current) > 0;
-      return {
-        ok: true,
-        hasUpdate,
-        current,
-        latest: manifest.version,
-        title: manifest.title,
-        date: manifest.date,
-        notes: manifest.notes,
-        url: manifest.url,
-        sha256: manifest.sha256,
-        size: manifest.size,
-        mandatory: manifest.mandatory,
-        source: candidate,
-      };
-    } catch (error) {
-      lastError = error;
-    }
+  const resolved = await resolveManifest(candidates);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      hasUpdate: false,
+      current,
+      latest: null,
+      notes: '',
+      url: '',
+      sha256: '',
+      size: 0,
+      mandatory: false,
+      error: resolved.error || '读不到更新源',
+    };
   }
+  const manifest = resolved.manifest;
   return {
-    ok: false,
-    hasUpdate: false,
+    ok: true,
+    hasUpdate: compareVersions(manifest.version, current) > 0,
     current,
-    latest: null,
-    notes: '',
-    url: '',
-    sha256: '',
-    size: 0,
-    mandatory: false,
-    error: lastError && lastError.message ? lastError.message : String(lastError),
+    latest: manifest.version,
+    title: manifest.title,
+    date: manifest.date,
+    notes: manifest.notes,
+    url: manifest.url,
+    sha256: manifest.sha256,
+    size: manifest.size,
+    mandatory: manifest.mandatory,
+    source: resolved.source,
   };
 }
-
 /* ---------------------------------------------------------------- */
 /* 下载                                                               */
 /* ---------------------------------------------------------------- */
@@ -516,8 +554,24 @@ async function apply({ staged, onReadyToQuit }) {
   await fsp.mkdir(path.dirname(metaPath), { recursive: true });
   await fsp.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
 
+  /*
+   * 退出前先跟覆盖脚本握手。
+   *
+   * 老版本是「spawn 完立刻 app.quit()」：脚本要是压根没起来（PowerShell 被策略拦住、
+   * 被杀软拦下、脚本自己一上来就报错），启动器已经关了，用户看到的就是
+   * 「下载到 100% 之后窗口消失，再也没回来」。
+   * 现在脚本一进来就写 apply-started.json，等不到这个文件就不退出，把错误抛给界面。
+   */
+  const statusDir = updateStatusDir(meta.target);
+  const startedPath = path.join(statusDir, 'apply-started.json');
+  const errorPath = path.join(statusDir, 'update-error.json');
+  for (const stale of [startedPath, errorPath]) {
+    await fsp.rm(stale, { force: true }).catch(() => {});
+  }
+
+  let spawnError = null;
   const child = spawn(
-    'powershell.exe',
+    powershellCommand(),
     [
       '-NoProfile',
       '-NonInteractive',
@@ -532,9 +586,97 @@ async function apply({ staged, onReadyToQuit }) {
     ],
     { detached: true, windowsHide: true, stdio: 'ignore' }
   );
-  child.unref();
+  child.on('error', (error) => {
+    spawnError = error;
+  });
+  try {
+    child.unref();
+  } catch {
+    /* ignore */
+  }
+
+  const started = await waitForFile(startedPath, APPLY_HANDSHAKE_TIMEOUT, () => spawnError);
+  if (!started) {
+    const detail = await readUpdateError(errorPath);
+    if (spawnError) {
+      throw new Error(
+        `系统没能启动覆盖脚本（${spawnError.message}），更新已取消，启动器没有被关闭`
+      );
+    }
+    if (detail) {
+      throw new Error(`覆盖脚本一启动就出错了：${detail}\n日志：${path.join(statusDir, 'update-log.txt')}`);
+    }
+    throw new Error(
+      `覆盖脚本 ${Math.round(APPLY_HANDSHAKE_TIMEOUT / 1000)} 秒内没有响应，更新已取消，启动器没有被关闭`
+    );
+  }
+
+  // 握手成功但脚本随即失败（比如解压目录被删）：别急着退出，先看一眼错误文件
+  const early = await readUpdateError(errorPath);
+  if (early) {
+    throw new Error(`覆盖脚本准备阶段失败：${early}\n日志：${path.join(statusDir, 'update-log.txt')}`);
+  }
+
   if (typeof onReadyToQuit === 'function') onReadyToQuit();
   return { ok: true, restarting: true, version: meta.targetVersion, target: meta.target };
+}
+
+/** 覆盖脚本报到的等待上限。脚本起来后要先建目录、写日志，给它留够时间。 */
+const APPLY_HANDSHAKE_TIMEOUT = 25000;
+
+/**
+ * 等一个文件出现，期间每 250ms 看一眼。
+ * probe 返回真值表示「别等了，已经失败」，用于 spawn 报错这类外部信号。
+ */
+function waitForFile(target, timeoutMs, probe) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (typeof probe === 'function' && probe()) {
+        resolve(false);
+        return;
+      }
+      if (fs.existsSync(target)) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(tick, 250);
+    };
+    tick();
+  });
+}
+
+/** 读覆盖脚本留下的错误说明，没有就返回空串。 */
+async function readUpdateError(file) {
+  try {
+    const text = await fsp.readFile(file, 'utf8');
+    const parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
+    return String(parsed.message || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 用绝对路径找 PowerShell。
+ * 走 PATH 的 'powershell.exe' 在某些机器上会失败（PATH 被改过、只装了 pwsh），
+ * 这类失败在 detached + stdio:'ignore' 下完全静默，正是更新「卡在 100%」的来源之一。
+ */
+function powershellCommand() {
+  if (process.platform !== 'win32') return 'powershell.exe';
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const candidates = [
+    path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    path.join(root, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'powershell.exe';
 }
 
 /**
@@ -570,11 +712,23 @@ function buildApplyMeta(staged) {
     files: staged.files && staged.files.length ? staged.files : staged.backupMeta?.files || [],
     protectedExisting: staged.protectedExisting || staged.backupMeta?.protectedExisting || [],
     relaunch: relaunchPath(),
+    selfHeal: selfHealPath(staged),
     statusDir: path.join(updateStatusDir(staged.target), ''),
     backupDir: staged.backupDir || '',
     staging: staged.tempRoot || '',
     installer,
   };
+}
+
+/**
+ * 监护人脚本的路径：优先用更新包里那份（跟着版本走），
+ * 包里没有就退回程序目录里现有的那份。
+ */
+function selfHealPath(staged) {
+  const fromPackage = staged.tempRoot ? path.join(staged.tempRoot, 'resources', 'updater', 'self-heal.ps1') : '';
+  if (fromPackage && fs.existsSync(fromPackage)) return fromPackage;
+  const local = path.join(path.dirname(process.execPath), 'resources', 'updater', 'self-heal.ps1');
+  return fs.existsSync(local) ? local : '';
 }
 
 /** 状态目录：放在程序目录旁边，跨版本保留。 */
@@ -660,6 +814,7 @@ module.exports = {
   compareVersions,
   isHttpLocation,
   readManifest,
+  resolveManifest,
   checkForUpdate,
   downloadToFile,
   sha256File,

@@ -9,7 +9,8 @@
  *
  * 依赖 app.js 里的全局：state / icon / esc / songCover / parseLrc /
  * playModeOptions / audioFxLabel / AUDIO_FX_PRESETS / chartPanelMarkup /
- * myPlaylistsMarkup / toast / openModal / closeModal / api。
+ * allPlaylistsMarkup / ensureAllPlaylistsLoaded / invalidateAllPlaylists /
+ * syncPlaylistsAfterLogin / refreshNeteaseLogin / toast / openModal / closeModal / api。
  */
 
 const SONG_TABS = [
@@ -228,12 +229,15 @@ function bindNeteaseQr() {
       if (result.loggedIn) {
         stop();
         status.textContent = '登录成功';
-        hint.textContent = '可以直接去导入歌单了。';
+        hint.textContent = '歌单会自己同步过来，可以直接去「我的歌单」看。';
         toast('网易云登录成功', 'success');
         await refreshNeteaseLogin();
+        await refreshMusicLogin();
         const chip = document.querySelector('#net-acc-state');
         if (chip) chip.textContent = '已登录';
         if (state.route === 'song') render({ preserveScroll: true });
+        // 三个平台的歌单统一在这一处刷新，登录完不用再手动点一次
+        await syncPlaylistsAfterLogin('netease');
       } else if (result.code === 802) {
         status.textContent = '已扫码，请在手机上确认';
         hint.textContent = result.message || '确认后会自动完成登录。';
@@ -298,6 +302,7 @@ function bindNeteaseQr() {
     try {
       await api.netease.logout();
       await refreshNeteaseLogin();
+      invalidateAllPlaylists();
       stop();
       status.textContent = '已退出登录';
       hint.textContent = '需要时重新获取二维码。';
@@ -357,12 +362,12 @@ function songQueueList() {
 }
 
 function songMineMarkup() {
-  // 「我的歌单」现在按平台分区，所有已登录平台的歌单一起列出来。
-  // 之前只显示当前选中的那一个平台，登了 QQ 音乐就看不到网易云的。
-  const anyLogged = ["netease", "qq", "kugou"].some((key) => state.musicLogin?.[key]?.loggedIn);
+  // 「我的歌单」按平台分区，所有已登录平台的歌单一起列出来。
+  // 登录入口只有页头那排账号按钮（打开统一的「音乐账号」面板），这里不再放登录按钮。
+  const anyLogged = ['netease', 'qq', 'kugou'].some((key) => musicAccountLoggedIn(key));
   if (!anyLogged) {
-    return `<div class="song-empty">${icon('login')}<strong>先登录一个平台</strong><span>网易云 / QQ 音乐 / 酷狗 登录后，这里会按平台列出你账号里的歌单。</span>
-      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}去登录</button></div>`;
+    return `<div class="song-empty">${icon('login')}<strong>还没有登录音乐账号</strong><span>网易云 / QQ 音乐 / 酷狗 登录后，这里会按平台列出你账号里的歌单，整张歌单也能一键加入点歌队列。</span>
+      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}打开音乐账号</button></div>`;
   }
   ensureAllPlaylistsLoaded();
   return allPlaylistsMarkup();
@@ -462,9 +467,15 @@ function songViewMarkup() {
               <span>默认音质</span>
               ${qualitySelect("song-quality", "song-rail-select")}
             </div>
-            <div class="song-rail-row">
-              <span>开机继续播放</span>
-              <button class="switch ${state.autoResumeSong ? "on" : ""}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume"></button>
+            <div class="song-rail-row is-split">
+              <span class="song-rail-pair">
+                <span>开机继续播放</span>
+                <button class="switch ${state.autoResumeSong ? "on" : ""}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume"></button>
+              </span>
+              <span class="song-rail-pair">
+                <span>小播放器</span>
+                <button class="switch ${isMiniEnabled() ? "on" : ""}" role="switch" aria-checked="${Boolean(isMiniEnabled())}" data-action="toggle-mini-player"></button>
+              </span>
             </div>
           </section>
 
@@ -475,12 +486,20 @@ function songViewMarkup() {
             </div>
             ${
               state.live.connected
-                ? `<div class="song-live-on ${state.live.danmaku === "native" ? "is-native" : "is-status"}">
-                    ${icon(state.live.danmaku === "native" ? "check" : "info")}
-                    <span>${state.live.danmaku === "native" ? `${esc(state.live.platformLabel || "B站")} · 等待「点歌 歌名」` : `${esc(state.live.platformLabel || "")} · 仅显示状态`}</span>
-                  </div>`
+                ? (() => {
+                    const getting = state.live.danmaku === "native" || state.live.danmaku === "bridge";
+                    const label = esc(state.live.platformLabel || "直播间");
+                    const bridgeStatus =
+                      state.live.danmaku === "bridge" && state.live.status
+                        ? `<p class="song-live-status">${esc(state.live.status)}</p>`
+                        : "";
+                    return `<div class="song-live-on ${getting ? "is-native" : "is-status"}">
+                      ${icon(getting ? "check" : "info")}
+                      <span>${label} · ${getting ? "等待「点歌 歌名」" : "仅显示状态"}</span>
+                    </div>${bridgeStatus}`;
+                  })()
                 : `<div class="song-live-form">
-                    <input class="song-live-input" id="live-room-input" placeholder="B站 / 斗鱼 / 虎牙 / 抖音 直播间链接" value="${esc(state.live.roomUrl || "")}" spellcheck="false" />
+                    <input class="song-live-input" id="live-room-input" placeholder="B站 / 斗鱼 / 虎牙 / 抖音 / 快手 / YY 等直播间链接" title="支持 B站、斗鱼、虎牙、抖音、快手、YY、网易CC、花椒、酷狗直播、小红书、淘宝直播、Twitch、YouTube，其它站点会尝试通用抓取" value="${esc(state.live.roomUrl || "")}" spellcheck="false" />
                     <button class="song-live-btn" data-action="live-connect" ${state.live.connecting ? "disabled" : ""}>${state.live.connecting ? "连接中" : "连接"}</button>
                   </div>`
             }
@@ -513,8 +532,8 @@ function songViewMarkup() {
         </div>
 
         <div class="song-bar-right">
-          <select class="song-bar-mode" id="dock-play-mode" title="播放模式">${playModeOptions(true)}</select>
-          ${qualitySelect("dock-quality", "song-bar-select")}
+          ${playModePopMarkup("dock-play-mode", "song-bar-pop")}
+          ${qualityPopMarkup("dock-quality", "song-bar-pop")}
           <button class="song-bar-btn" data-action="song-mute" title="静音">
             <svg class="icon"><use id="dock-volume-use" href="${state.songMuted ? "#i-volume-x" : "#i-volume"}"></use></svg>
           </button>

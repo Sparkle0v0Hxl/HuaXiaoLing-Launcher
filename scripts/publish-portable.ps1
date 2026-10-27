@@ -10,11 +10,12 @@
          主程序、Chromium 资源、resources\app、resources\updater、内置服务、渠道包。
          明确排除 data（账号/抽卡/歌单）、downloads（下载缓存）和日志、备份文件。
 
-      2. 算出 sha256，写 build\latest.json：
+      2. 在包根目录写一份「指针式」latest.json，跟着 ZIP 一起发出去：
+           { "version": "...", "manifest": "<官方清单地址>" }
+         装好就有更新源，不用用户自己填。指向的那份真正清单里有下载地址和 sha256。
+
+      3. 算出 sha256，写 build\latest.json（真正的清单，用来上传/分发）：
            { "version": "...", "url": "...", "sha256": "...", "size": ..., "notes": "..." }
-         把 latest.json 和 ZIP 一起丢到任意静态位置（CDN、对象存储、局域网共享、
-         D 盘目录都行），在启动器「设置 → 启动器更新 → 更新源」里填 latest.json
-         的地址（或其所在目录）即可。
 
 .PARAMETER Version
     版本号，必须和 resources\app\package.json 里的一致，否则启动器会认为更新无效。
@@ -54,7 +55,10 @@ param(
     [switch]$SkipPrune,
 
     # 瘦身时除当前版本外额外保留几个历史 zip
-    [int]$KeepPrev = 1
+    [int]$KeepPrev = 1,
+
+    # 包里那份指针清单指向哪里（正式清单的地址）。默认官方 Release。
+    [string]$ManifestUrl = 'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest/download/latest.json'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -155,6 +159,22 @@ if (-not $SkipZip) {
         }
         # 包根目录放一个空标记文件，保证 zip 里是「文件夹内容」而不是「文件夹本身」——
         # 启动器解压后直接找 resources\app，多一层目录会找不到。
+        # 顺手写一份「指针式」清单：装好就自带更新源，用户不用再填地址。
+        # 只写版本号和指向，不写 url/sha256 —— 打包这一刻还算不出这个包自己的哈希。
+        $pointer = [ordered]@{
+            version  = $Version
+            channel  = $Channel
+            date     = (Get-Date).ToString('yyyy-MM-dd')
+            title    = "花筱灵启动器 $Version"
+            manifest = $ManifestUrl
+            portable = $true
+        }
+        $pointerJson = $pointer | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText(
+            (Join-Path $staging 'latest.json'),
+            $pointerJson,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
         if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
         Write-Step "压缩到 $zipPath"
         Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force

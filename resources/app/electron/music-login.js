@@ -16,6 +16,8 @@
  * 这条路的好处是：登录界面永远和官网一致，腾讯/酷狗改版也不需要我们适配。
  */
 
+const { canonicalCookieHeader } = require('./music-playlists');
+
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -224,38 +226,74 @@ function cookieHeader(bag) {
  */
 async function verifyMusicSession(platform, session, timeoutMs = 12000) {
   const config = platformConfig(platform);
+  /*
+   * 用补齐别名后的 cookie 头去验：登录窗口存下来的名字经常和接口认的不一样
+   * （qqmusic_key vs qm_keyst、KgUserToken vs token），
+   * 名字不补齐的话，明明登录成功也会被接口当成未登录。
+   */
   const headers = {
     'user-agent': BROWSER_UA,
     referer: config.referer,
-    cookie: cookieHeader(session),
+    cookie: canonicalCookieHeader(platform, session),
   };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     if (platform === 'qq') {
-      // 需要登录的接口：拿自己的歌单，未登录会返回 code -1
+      /*
+       * 只认真正要用的那个接口：musicu 的 get_mine_playlist。
+       * 以前用 c.y.qq.com 的 fcg_user_created_diss 验证，它连未登录都能返回歌单，
+       * 于是「验证通过」之后一取歌单就 500003。
+       */
+      const uin = String(
+        session.uin || session.p_uin || session.ptui_loginuin || session.luin || ''
+      )
+        .trim()
+        .replace(/^o/i, '')
+        .replace(/\D/g, '');
+      if (!uin) return { ok: false, error: '登录信息里没有 QQ 号' };
+      const keyst = String(session.qm_keyst || session.qqmusic_key || '').trim();
+      const payload = {
+        comm: {
+          ct: 24,
+          cv: 0,
+          uin: Number(uin) || 0,
+          format: 'json',
+          ...(keyst ? { qm_keyst: keyst } : {}),
+        },
+        req_1: {
+          module: 'music.mine.PlaylistAssembleServer',
+          method: 'get_mine_playlist',
+          param: { uin, offset: 0, limit: 1, only_self: 1 },
+        },
+      };
       const response = await fetch(
-        'https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss?hostuin=' +
-          encodeURIComponent(session.uin || '') +
-          '&format=json',
+        'https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=' + encodeURIComponent(JSON.stringify(payload)),
         { headers, signal: controller.signal }
       );
       if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
-      const text = await response.text();
-      if (/login":"on\*\*"|"code":-1|"code":-100/.test(text)) {
-        return { ok: false, error: '登录已失效' };
-      }
+      const json = await response.json().catch(() => null);
+      const code = json?.req_1?.code ?? json?.code ?? 0;
+      if (String(code) === '500003') return { ok: false, error: '登录已失效（服务端不认这份凭证）' };
+      if (String(code) !== '0') return { ok: false, error: `接口返回 code ${code}` };
       return { ok: true };
     }
 
-    // 酷狗：用户信息接口
-    const response = await fetch('https://www.kugou.com/yy/index.php?r=user/info', {
-      headers,
+    /*
+     * 酷狗：老的 www.kugou.com/yy/index.php?r=user/info 现在一律回
+     * "Access Deny !!!"，已经不能用。改打移动站「我的歌单」接口：
+     * 登录态下回 JSON，未登录回 "Access Deny ! No Actions !"。
+     */
+    const mobileUa =
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
+    const response = await fetch('https://m.kugou.com/plist/mylist?json=true', {
+      headers: { ...headers, 'user-agent': mobileUa, referer: 'https://m.kugou.com/' },
       signal: controller.signal,
     });
     if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
-    const json = await response.json().catch(() => null);
-    if (!json || json.status !== 1) return { ok: false, error: '登录已失效' };
+    const text = await response.text();
+    if (/Access Deny/i.test(text)) return { ok: false, error: '登录已失效（对方不认这份凭证）' };
+    if (!/[{[][\s\S]*/.test(text)) return { ok: false, error: '对方返回的不是有效数据' };
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message || '网络错误' };

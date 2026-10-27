@@ -42,6 +42,10 @@
         <path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" />
         <path d="M10 8l4 4-4 4M14 12H4" />
       </symbol>
+      <symbol id="i-file-text" viewBox="0 0 24 24">
+        <path d="M7 3.5h6.5L18 8v12.5H7z" />
+        <path d="M13.5 3.5V8H18M10 12.5h5M10 16h5" />
+      </symbol>
       <symbol id="i-mic" viewBox="0 0 24 24">
         <rect x="9" y="3" width="6" height="11" rx="3" />
         <path d="M5.8 11.5a6.2 6.2 0 0 0 12.4 0M12 17.7V21M8.5 21h7" />
@@ -138,6 +142,9 @@
       <symbol id="i-chevron-down" viewBox="0 0 24 24">
         <path d="m5.5 9 6.5 6.5L18.5 9" />
       </symbol>
+      <symbol id="i-chevron-up" viewBox="0 0 24 24">
+        <path d="m5.5 15 6.5-6.5L18.5 15" />
+      </symbol>
       <symbol id="i-info" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="8.5" />
         <path d="M12 11v5M12 7.8v.3" />
@@ -204,7 +211,7 @@
 
     <div class="app">
       <aside class="sidebar">
-        <div class="brand">
+        <div class="brand" data-nav="start" role="button" tabindex="0" title="进入启动页" aria-label="进入启动页">
           <div class="brand-mark" aria-hidden="true">
             <img src="assets/character-face.png" alt="" />
           </div>
@@ -273,7 +280,11 @@
           <span>收起侧栏</span>
         </button>
 
-        <button class="profile" id="profile-btn" title="打开设置">
+        <div class="sidebar-char" aria-hidden="true">
+          <img src="assets/sparxie.png" alt="" />
+        </div>
+
+        <button class="profile" id="profile-btn" title="打开设置" aria-label="打开设置">
           <span class="avatar" id="profile-avatar">大</span>
           <span class="profile-text">
             <span class="profile-name" id="profile-name">大小姐</span>
@@ -291,7 +302,7 @@
             <span>花筱灵启动器</span>
           </div>
           <div class="titlebar-right">
-            <span id="tb-version">v2.0.4</span>
+            <span id="tb-version">v2.1.9</span>
             <div class="window-controls">
               <button class="window-control" data-action="window-minimize" title="最小化"><svg class="icon"><use href="#i-minus"></use></svg></button>
               <button class="window-control" data-action="window-maximize" title="最大化"><svg class="icon"><use href="#i-maximize"></use></svg></button>
