@@ -1,11 +1,11 @@
 {
-  "version": "2.1.9",
+  "version": "2.2.0",
   "channel": "stable",
   "date": "2026-10-27",
-  "title": "花筱灵启动器 2.1.9",
-  "notes": "· 官方更新源内置进包，装好就能自己检查更新，不用再手填地址。\n· 启动器根目录自带 latest.json（指针式），跟着 ZIP 一起发出去。\n· 检查更新改成取版本最高的那一份：以前目录里留着上个版本的清单，会一直显示「已是最新」。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.1.9/HuaXiaoLing-2.1.9-Portable.zip",
-  "sha256": "3384f5044192cd8f77b27cf74611211e1fbea19bc412d7ca4373557c3e7bd6a1",
-  "size": 300635833,
+  "title": "花筱灵启动器 2.2.0",
+  "notes": "· 用户自定义插件上线：把 .hxl 单文件丢进 data\\plugins，重启就能用。\n· 插件跑在独立 Worker 沙箱里，权限写在 manifest 里，用之前逐项确认。\n· 插件界面只给文字、列表、表格、进度条四种标准视图。\n· 插件出错只记在插件卡片上，不会让启动器白屏。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.2.0/HuaXiaoLing-2.2.0-Portable.zip",
+  "sha256": "d006f044a7887fde8a7cf98868ef6dcd6858244988cf31b6897e1fdadbe43d0e",
+  "size": 306609837,
   "portable": true
 }
