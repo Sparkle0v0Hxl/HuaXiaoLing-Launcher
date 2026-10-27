@@ -120,7 +120,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-1.0.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.1.9-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -180,7 +180,7 @@ pnpm pack
 
 ### 技术栈
 
-- Electron 45，主进程 `electron/main.js`（约 4700 行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
+- Electron 45，主进程 `electron/main.js`（约 7800 行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
 - 渲染层通过 `preload.js` 暴露的 `window.launcher` 调用 IPC，开启 `contextIsolation` 与 `sandbox`；
 - 领域模块：`link.js`（硬链接）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
 
