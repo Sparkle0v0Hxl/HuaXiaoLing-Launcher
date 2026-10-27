@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.1.9-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.3.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -15,7 +15,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.2.0**
+**当前版本：v2.3.0**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -193,7 +193,21 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.2.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.3.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.3.0</b></summary>
+
+**画质配置重做**
+
+- **画质配置页全部中文化**：页面上不再出现注册表原始串。
+- **每一项都能改**：开关两个按钮、档位下拉、数值输入框，改前备份旧值。
+- **下拉和提示不再露原始数字**：只说「高」「已设为 DLSS」。
+- **修掉三个卡死的问题**：画质选项全部不可用、下拉一点开就关掉、帧率只有「切换成功」没有可选档位。
+- **终末地画质从 1.2 秒降到 4 毫秒**：配置全部缓存、后台静默刷新。
+- **自动识别非米哈游游戏的画质位置**：找不到就明说，绝不猜。
+
+</details>
 
 <details>
 <summary><b>v2.2.0</b></summary>
