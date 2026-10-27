@@ -1,11 +1,11 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "channel": "stable",
   "date": "2026-10-27",
-  "title": "花筱灵启动器 2.2.0",
-  "notes": "· 用户自定义插件上线：把 .hxl 单文件丢进 data\\plugins，重启就能用。\n· 插件跑在独立 Worker 沙箱里，权限写在 manifest 里，用之前逐项确认。\n· 插件界面只给文字、列表、表格、进度条四种标准视图。\n· 插件出错只记在插件卡片上，不会让启动器白屏。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.2.0/HuaXiaoLing-2.2.0-Portable.zip",
-  "sha256": "d006f044a7887fde8a7cf98868ef6dcd6858244988cf31b6897e1fdadbe43d0e",
-  "size": 306609837,
+  "title": "花筱灵启动器 2.3.0",
+  "notes": "· 画质配置页全部中文化，页面上不再出现注册表原始串。\n· 每一项都能改：开关两个按钮、档位下拉、数值输入框，改前备份旧值。\n· 下拉和提示不再露原始数字，只说「高」「已设为 DLSS」。\n· 修掉画质选项全部不可用、下拉一点开就关掉、帧率没有可选档位。\n· 终末地画质从 1.2 秒降到 4 毫秒，配置全部缓存、后台静默刷新。\n· 自动识别非米哈游游戏的画质位置，找不到就明说，绝不猜。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.3.0/HuaXiaoLing-2.3.0-Portable.zip",
+  "sha256": "860b891f282980de3977ad5131db492fb7bf815ddf4fc0566aedf08ea8bb497e",
+  "size": 306654437,
   "portable": true
 }
