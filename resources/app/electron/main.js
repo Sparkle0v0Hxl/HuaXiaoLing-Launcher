@@ -2391,14 +2391,19 @@ function localUpdateManifest() {
 /**
  * 内置的官方更新源。
  *
- * 随包的 latest.json 里只写了一个「指针」（manifest 字段），指回 GitHub 上的正式清单——
+ * 随包的 latest.json 里只写了一个「指针」（manifest 字段），指回 GitHub 仓库里的正式清单——
  * 因为打进包里的时候，这个包自己的 sha256 还没算出来，没法把自己写进清单。
- * 真正带下载地址和 sha256 的清单放在官方 Release 里，启动器启动时会自己去取。
+ * 正式清单跟着源码一起提交在仓库根目录，启动器启动时会自己去取。
  *
- * 顺序：用户填的更新源 → 启动器目录里那份 → 官方 Release。
+ * 两条路指向同一份文件：raw.githubusercontent 是源头，jsDelivr 是镜像
+ * （国内直连 raw 经常被卡，镜像还能读到）。
+ *
+ * 顺序：用户填的更新源 → 启动器目录里那份 → 官方清单（源站 → 镜像）。
  */
-const OFFICIAL_UPDATE_MANIFEST =
-  'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest/download/latest.json';
+const OFFICIAL_UPDATE_MANIFESTS = [
+  'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
+  'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
+];
 
 /** 更新源候选：一次给全，挨个试，第一个读得通的算数。 */
 function updateSourceList() {
@@ -2413,7 +2418,7 @@ function updateSourceList() {
     for (const candidate of updateSourceCandidates(configured)) push(candidate);
   }
   push(localUpdateManifest());
-  push(OFFICIAL_UPDATE_MANIFEST);
+  for (const url of OFFICIAL_UPDATE_MANIFESTS) push(url);
   return list;
 }
 

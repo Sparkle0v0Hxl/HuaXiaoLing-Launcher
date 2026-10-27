@@ -57,8 +57,8 @@ param(
     # 瘦身时除当前版本外额外保留几个历史 zip
     [int]$KeepPrev = 1,
 
-    # 包里那份指针清单指向哪里（正式清单的地址）。默认官方 Release。
-    [string]$ManifestUrl = 'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest/download/latest.json'
+    # 包里那份指针清单指向哪里（正式清单的地址）。默认仓库里那份（跟着源码一起提交）。
+    [string]$ManifestUrl = 'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json'
 )
 
 $ErrorActionPreference = 'Stop'
