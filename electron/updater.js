@@ -38,10 +38,98 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 
+/*
+ * 网络请求入口：优先走 Electron 的 Chromium 网络栈（net.fetch）。
+ *
+ * 为什么不用 Node 的 fetch：Node 只认自己内置的 CA 列表，不读系统证书库——
+ * Steam++（Watt Toolkit）这类 GitHub 加速器的原理就是本地中间人代理 +
+ * 把自己的根证书装进系统证书库，Node fetch 对它伪造的证书一律校验失败；
+ * 不开加速器国内又直连不上 GitHub，两头堵死（10-29 用户反馈：开了 Steam++
+ * 检查更新失败，关了直连也失败）。Chromium 网络栈两个问题都没有：
+ *   - 证书走系统证书库，用户装了什么根证书就认什么；
+ *   - 代理走系统设置，系统代理和 Steam++ 的本地端口自动生效。
+ * 自测环境（selftest-update.js）没有 Electron，降级回 Node fetch。
+ */
+let electronNetFetch = null;
+try {
+  const electron = require('electron');
+  const net = electron && electron.net;
+  if (net && typeof net.fetch === 'function') electronNetFetch = net.fetch.bind(net);
+} catch {
+  /* 非 Electron 环境：require('electron') 拿到的是 exe 路径字符串或直接抛错 */
+}
+
+async function httpFetch(url, options = {}) {
+  const { dispatcher, ...rest } = options; // dispatcher 是 undici 专属参数，Chromium 栈不认
+  if (electronNetFetch) {
+    try {
+      return await electronNetFetch(url, rest);
+    } catch (error) {
+      // Chromium 栈连不上时退回 Node fetch 再试一把：两边各自的可达性盲区
+      // （系统代理配置异常、证书库被改）不同，互为兜底。
+      if (typeof fetch === 'function') return fetch(url, options);
+      throw error;
+    }
+  }
+  return fetch(url, options);
+}
+
 const EXE_NAME = '花筱灵启动器.exe';
 const DEFAULT_TIMEOUT = 15000;
 /** 下载断线时最多重试几次（不含第一次）。 */
 const DOWNLOAD_RETRIES = 2;
+
+/*
+ * 内置下载镜像：GitHub 直连失败时（国内裸连很常见）挨个试加速代理。
+ *
+ * 形式是「前缀」：拼在官方下载地址前面，即 ghproxy 系代理的通用用法
+ * （https://ghfast.top/https://github.com/...）。第三方代理理论上可以篡改
+ * 文件，但下载完有 sha256 校验兜底——篡改的包进不了安装流程，最多浪费一次
+ * 下载。清单里的 mirrors 字段（发布方维护，支持 {url} 占位符模板，比如自建
+ * Cloudflare Worker）会排在这些内置兜底前面。
+ */
+const DEFAULT_MIRROR_PREFIXES = [
+  'https://ghfast.top/',
+  'https://ghproxy.net/',
+  'https://gh-proxy.com/',
+  'https://mirror.ghproxy.com/',
+];
+
+function isGithubHostUrl(url) {
+  try {
+    const host = new URL(String(url)).hostname.toLowerCase();
+    return host === 'github.com' || host.endsWith('.githubusercontent.com');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 官方地址 + 镜像候选，按优先级排好。
+ * @param {string} url 清单里的官方下载地址
+ * @param {string[]} [mirrors] 清单 mirrors 字段：完整地址、前缀，或含 {url} 占位符的模板
+ */
+function buildDownloadCandidates(url, mirrors) {
+  const official = String(url || '').trim();
+  const list = official ? [official] : [];
+  const push = (value) => {
+    const text = String(value || '').trim();
+    if (text && !list.includes(text)) list.push(text);
+  };
+  if (official) {
+    // 清单自带的镜像（发布方可随时热更，比如自建 Worker）优先于内置兜底
+    const declared = Array.isArray(mirrors) ? mirrors : [];
+    for (const item of declared) {
+      const text = String(item || '').trim();
+      if (!text) continue;
+      push(text.includes('{url}') ? text.replace('{url}', official) : text + official);
+    }
+    if (isGithubHostUrl(official)) {
+      for (const prefix of DEFAULT_MIRROR_PREFIXES) push(prefix + official);
+    }
+  }
+  return list;
+}
 
 /** 覆盖时永远不碰的东西：用户数据、内置服务、游戏渠道包。 */
 const PROTECTED_ROOT = new Set(['data', 'downloads']);
@@ -128,7 +216,7 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await fetch(location, {
+      const response = await httpFetch(location, {
         signal: controller.signal,
         // 有的静态站点（对象存储、CDN）不认 Electron 的 UA，直接 403
         headers: {
@@ -185,6 +273,7 @@ async function readManifest(location) {
     date: String(data.date || '').trim(),
     notes: String(data.notes || '').trim(),
     url: resolveAgainst(raw, data.url),
+    mirrors: Array.isArray(data.mirrors) ? data.mirrors.map((m) => String(m || '').trim()).filter(Boolean) : [],
     sha256: String(data.sha256 || '').trim().toLowerCase(),
     size: Number(data.size) || 0,
     mandatory: Boolean(data.mandatory),
@@ -270,6 +359,7 @@ async function checkForUpdate({ location, currentVersion }) {
     date: manifest.date,
     notes: manifest.notes,
     url: manifest.url,
+    mirrors: manifest.mirrors || [],
     sha256: manifest.sha256,
     size: manifest.size,
     mandatory: manifest.mandatory,
@@ -280,13 +370,17 @@ async function checkForUpdate({ location, currentVersion }) {
 /* 下载                                                               */
 /* ---------------------------------------------------------------- */
 
-async function downloadHttp({ url, dest, expectedSize, report }) {
+/**
+ * 下载一个候选地址:内部按 DOWNLOAD_RETRIES 重试(瞬时错误),
+ * 4xx 这类「地址本身有问题」的错误不重试、直接换下一个候选。
+ */
+async function downloadOne({ url, dest, expectedSize, report }) {
   let lastError = null;
   for (let attempt = 0; attempt <= DOWNLOAD_RETRIES; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
-      const response = await fetch(url, {
+      const response = await httpFetch(url, {
         signal: controller.signal,
         headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
       });
@@ -323,7 +417,30 @@ async function downloadHttp({ url, dest, expectedSize, report }) {
   throw lastError || new Error('下载失败');
 }
 
-async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
+/**
+ * 下载更新包:官方地址下载失败(连不上/超时,典型是国内裸连 GitHub)时,
+ * 挨个尝试镜像候选(清单 mirrors + 内置加速代理前缀),谁先成功用谁。
+ * 换候选时进度回调重置;下载完成后有 sha256 校验,镜像内容不可信也进不了安装。
+ */
+async function downloadHttp({ url, mirrors, dest, expectedSize, report }) {
+  const candidates = buildDownloadCandidates(url, mirrors);
+  if (!candidates.length) throw new Error('没有可用的下载地址');
+  let lastError = null;
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (i > 0) {
+      // 换候选:进度归零,让用户看到下载从头开始而不是卡在半截
+      report(0, 0, expectedSize || 0);
+    }
+    try {
+      return await downloadOne({ url: candidates[i], dest, expectedSize, report });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error('下载失败');
+}
+
+async function downloadToFile({ url, mirrors, dest, expectedSize = 0, onProgress }) {
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   const report = (percent, received, total) => {
     if (typeof onProgress !== 'function') return;
@@ -335,7 +452,7 @@ async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
   };
 
   if (isHttpLocation(url)) {
-    return await downloadHttp({ url, dest, expectedSize, report });
+    return await downloadHttp({ url, mirrors, dest, expectedSize, report });
   }
 
   const source = toLocalPath(url);
@@ -816,6 +933,7 @@ module.exports = {
   readManifest,
   resolveManifest,
   checkForUpdate,
+  buildDownloadCandidates,
   downloadToFile,
   sha256File,
   extractZip,

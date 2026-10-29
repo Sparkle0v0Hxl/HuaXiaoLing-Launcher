@@ -3872,6 +3872,7 @@ async function startUpdate(options = {}) {
     try {
       await updater.downloadToFile({
         url: manifest.url,
+        mirrors: manifest.mirrors,
         dest: zipPath,
         expectedSize: manifest.size,
         onProgress: (progress) => {

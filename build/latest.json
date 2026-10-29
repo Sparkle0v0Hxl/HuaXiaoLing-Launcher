@@ -1,7 +1,7 @@
 {
-  "version": "2.4.3",
-  "title": "花筱灵启动器 2.4.3",
+  "version": "2.4.4",
+  "title": "花筱灵启动器 2.4.4",
   "date": "2026-10-29",
-  "notes": "· 修复开启「始终管理员启动」后启动器双击无反应的问题：提权链三重加固，提权失败自动回退普通权限继续运行，崩溃兜底日志提前注册。\n· 终末地官服改为直接从官方安装目录启动，不再克隆链接运行时；B服链接运行时自动补齐 PlatformProcess.exe 等官方关键文件，避免被清理后无法启动。\n· 修复 UAC 提权启动在带空格的安装路径（如 G:\\Arknights Endfield）下参数被撕碎、卡三分钟超时的问题。\n· 终末地完整性校验清单不再误删全渠道通用的官方文件（webviewsdk.dll / hgsdk.dll 等），老用户切服后不再连环弹「资源完整性异常」。",
+  "notes": "· 修复开启 Steam++（Watt Toolkit）等 GitHub 加速后检查更新失败的问题：更新请求改走系统证书库与系统代理，不再只认启动器内置的证书列表。\n· 更新包下载失败自动切换国内加速镜像重试（带 sha256 校验兜底），裸连用户也能自动下载更新，不用再手动找包。\n· 走系统代理的用户（V2N/Clash 类）更新检查同步受益。",
   "manifest": "https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json"
 }
