@@ -179,5 +179,23 @@ function walk(dir, out) {
     const txt = Buffer.from(pkg.json.content, 'base64').toString('utf8');
     console.log('校验 package.json version:', JSON.parse(txt).version);
   }
+
+  // 9. 刷新 jsDelivr 镜像缓存：清单刚推上 main，镜像可能还留着旧版本缓存
+  //    （jsDelivr 对 @main 的缓存窗口最长 12 小时），不主动刷的话老用户会
+  //    迟迟收不到更新。GET 一次 purge 接口即失效重取；失败不阻断（镜像自己
+  //    到期也会刷，只是慢）。
+  try {
+    const pr = await fetch('https://purge.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json');
+    const pj = await pr.json().catch(() => null);
+    if (pj && pj.status === 'finished') console.log('jsDelivr 缓存已刷新:', pj.timestamp);
+    else console.log('jsDelivr purge 响应异常:', JSON.stringify(pj).slice(0, 120));
+    const vr = await fetch('https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json', { headers: { 'user-agent': 'hx-push' } });
+    const vt = await vr.text();
+    const vm = JSON.parse(vt);
+    console.log('jsDelivr 现返回版本:', vm.version);
+  } catch (e) {
+    console.log('jsDelivr 刷新失败（不阻断）:', e.message);
+  }
+
   console.log('\nDONE');
 })();
