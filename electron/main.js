@@ -3720,6 +3720,8 @@ function localUpdateManifest() {
 const OFFICIAL_UPDATE_MANIFESTS = [
   'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
   'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
+  // Gitee 镜像仓库（裸连可达，国内兜底）。每次发版后把正式清单同步过去一份。
+  'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json',
 ];
 
 /** 更新源候选：一次给全，挨个试，第一个读得通的算数。 */
