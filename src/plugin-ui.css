@@ -1,0 +1,467 @@
+/* ==================================================================== */
+/* 插件页（.hxl 单文件插件）                                            */
+/*                                                                      */
+/*   .hxl-*   —— plugin-runtime.js 的 Render 产出的视图，插件内容只能     */
+/*              通过这些类名落样式，插件自己写不了 CSS                     */
+/*   .plugin-* —— app.js 里插件页自己的骨架（卡片、面板、权限弹窗）        */
+/* ==================================================================== */
+
+.plugin-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plugin-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plugin-detail {
+  min-width: 0;
+}
+
+/* ---------- 插件卡片 ---------- */
+.plugin-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-soft, transparent);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.plugin-card:hover {
+  border-color: var(--accent-line, rgba(var(--accent-rgb), 0.42));
+  background: var(--accent-tint, rgba(var(--accent-rgb), 0.12));
+}
+
+.plugin-card.is-active {
+  border-color: var(--accent);
+  background: var(--accent-tint, rgba(var(--accent-rgb), 0.12));
+  box-shadow: 0 2px 12px rgba(var(--accent-rgb), 0.18);
+}
+
+.plugin-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.plugin-card-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-card-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-card-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.5;
+}
+
+.plugin-card-dot.is-running {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.plugin-card-dot.is-failed {
+  background: #e2564f;
+  opacity: 1;
+}
+
+/* ---------- 面板 ---------- */
+.plugin-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel, transparent);
+}
+
+.plugin-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.plugin-panel-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.plugin-panel-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plugin-panel-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.plugin-panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.plugin-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ---------- 状态与提示 ---------- */
+.plugin-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.plugin-state.is-running {
+  color: var(--text);
+  border-color: var(--accent-line, rgba(var(--accent-rgb), 0.42));
+  background: var(--accent-tint, rgba(var(--accent-rgb), 0.12));
+}
+
+.plugin-state.is-failed {
+  color: #e2564f;
+  border-color: rgba(226, 86, 79, 0.42);
+  background: rgba(226, 86, 79, 0.1);
+}
+
+.plugin-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.plugin-dir-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* ---------- 损坏插件 ---------- */
+.plugin-broken {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(226, 86, 79, 0.42);
+  border-radius: var(--radius);
+  background: rgba(226, 86, 79, 0.08);
+}
+
+.plugin-broken-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2564f;
+}
+
+.plugin-broken-reason {
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* ---------- 空状态：怎么做一个插件 ---------- */
+.plugin-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.plugin-empty strong {
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.plugin-empty pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.16);
+  overflow-x: auto;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+/* ---------- 权限确认弹窗 ---------- */
+.plugin-perm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-perm-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.plugin-perm-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plugin-perm-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.plugin-perm-file {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* ---------- 视图：text ---------- */
+.hxl-text-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.hxl-text-body {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+/* ---------- 视图：list ---------- */
+.hxl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hxl-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.hxl-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.hxl-list-title {
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hxl-list-desc {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hxl-list-value {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-list-value.is-tone-good {
+  color: #4fae7c;
+}
+
+.hxl-list-value.is-tone-warn {
+  color: #d08a2c;
+}
+
+.hxl-list-value.is-tone-bad {
+  color: #e2564f;
+}
+
+/* ---------- 视图：table ---------- */
+.hxl-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.hxl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.hxl-table th,
+.hxl-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.hxl-table th {
+  font-weight: 600;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.hxl-table td {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.hxl-table .is-tone-good {
+  color: #4fae7c;
+}
+
+.hxl-table .is-tone-warn {
+  color: #d08a2c;
+}
+
+.hxl-table .is-tone-bad {
+  color: #e2564f;
+}
+
+/* ---------- 视图：progress ---------- */
+.hxl-progress-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hxl-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hxl-progress-label {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hxl-progress-value {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.hxl-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.55), var(--accent));
+  transition: width 0.32s cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.hxl-bar-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+@media (max-width: 1000px) {
+  .plugin-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

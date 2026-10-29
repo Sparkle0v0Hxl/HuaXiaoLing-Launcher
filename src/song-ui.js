@@ -4,17 +4,22 @@
  * 点歌台的视图层。
  *
  * 拆出来是为了两件事：
- *   1. 三个平台的登录（网易云扫码 / QQ 音乐 / 酷狗）统一到一个「音乐账号」面板；
- *   2. 点歌台整体重排成播放器 + 歌词 + 工具 + 歌单/榜单分页的结构。
+ *   1. 四个平台的登录（网易云扫码 / QQ 音乐 / 酷狗 / 酷我）统一到一个「音乐账号」面板；
+ *   2. 点歌台重排成「左侧曲库导航 + 主区（搜索 / 队列 / 榜单 / 我的歌单）+ 右侧栏」。
  *
- * 依赖 app.js 里的全局：state / icon / esc / songCover / parseLrc /
- * playModeOptions / audioFxLabel / AUDIO_FX_PRESETS / chartPanelMarkup /
- * allPlaylistsMarkup / ensureAllPlaylistsLoaded / invalidateAllPlaylists /
- * syncPlaylistsAfterLogin / refreshNeteaseLogin / toast / openModal / closeModal / api。
+ * 左栏的存在理由：「我的歌单」原来挂在主区最底下，网易云账号歌单一多，
+ * 要一路滚到页面底部才点得到。挪进常驻左栏后一眼可见，一次点击就进。
+ *
+ * 依赖 app.js 里的全局：state / icon / esc / songCover / parseLrc / musicLoggedIn /
+ * musicPlatformLabel / playlistSyncSummary / playModeOptions / audioFxLabel /
+ * AUDIO_FX_PRESETS / chartPanelMarkup / allPlaylistsMarkup / ensureAllPlaylistsLoaded /
+ * invalidateAllPlaylists / syncPlaylistsAfterLogin / refreshNeteaseLogin /
+ * toast / openModal / closeModal / api。
  */
 
 const SONG_TABS = [
-  ['queue', '歌单'],
+  // 队列原来的标签是「歌单」，放在左栏里跟「我的歌单」并排时容易看错，统一叫「队列」
+  ['queue', '队列'],
   ['charts', '榜单'],
   ['mine', '我的歌单'],
   ['search', '搜索'],
@@ -29,10 +34,11 @@ const SONG_TABS = [
 function songSearchMarkup() {
   const s = state.songSearch;
   const platforms = [
-    ['all', '三平台'],
+    ['all', '四平台'],
     ['qq', 'QQ 音乐'],
     ['kugou', '酷狗'],
     ['netease', '网易云'],
+    ['kuwo', '酷我'],
   ];
   return `
     <div class="song-search">
@@ -70,7 +76,7 @@ function songSearchRow(item, index) {
 function songSearchPanel() {
   const s = state.songSearch;
   if (s.loading) {
-    return `<div class="song-empty">${icon('search')}<strong>正在搜索…</strong><span>同时查三个平台的公开接口。</span></div>`;
+    return `<div class="song-empty">${icon('search')}<strong>正在搜索…</strong><span>同时查四个平台的公开接口。</span></div>`;
   }
   if (!s.done) {
     return `<div class="song-empty">${icon('search')}<strong>搜点什么</strong><span>输入歌名或歌手，回车开始搜。结果点一下就加入歌单。</span></div>`;
@@ -93,117 +99,251 @@ function songSearchPanel() {
 
 /* ── 账号状态 ─────────────────────────────────────────────── */
 
+/** 四个平台，顺序固定：左栏、账号列表、登录面板都用这一份，别再各写一份漏掉酷我。 */
+const MUSIC_ACCOUNTS = [
+  ['netease', '网易云音乐'],
+  ['qq', 'QQ 音乐'],
+  ['kugou', '酷狗音乐'],
+  ['kuwo', '酷我音乐'],
+];
+
 function musicAccountLoggedIn(platform) {
   if (platform === 'netease') return Boolean(state.neteaseLogin?.loggedIn);
   return Boolean(state.musicLogin?.[platform]?.loggedIn);
 }
 
-function musicAccountSub(platform) {
-  if (platform === 'netease') {
-    if (!state.neteaseLogin?.loggedIn) return '扫码登录';
-    return '已连接';
-  }
-  const info = state.musicLogin?.[platform];
-  if (!info?.loggedIn) return '内置窗口登录';
+/**
+ * 账号状态：只回答「登没登录、是哪个号」。
+ * on 决定徽标文字（已登录 / 未登录），detail 是能拿到的账号信息，没有就留空不占行。
+ */
+function musicAccountStatus(platform) {
+  if (!musicAccountLoggedIn(platform)) return { on: false, detail: '' };
+  if (platform === 'netease') return { on: true, detail: state.neteaseLogin?.apiBase ? '已连接本地服务' : '' };
+  const info = state.musicLogin?.[platform] || {};
   const id = info.uin || info.userid || '';
-  return id ? `已登录 · ${id}` : '已登录';
+  return { on: true, detail: id ? `ID ${id}` : '' };
 }
 
-function musicAccountChip(platform, label) {
-  const on = musicAccountLoggedIn(platform);
+/** 面板顶部那行小字：说清「登没登录、是哪个号」，别写成操作提示。 */
+function musicAccountHeadText(platform) {
+  const status = musicAccountStatus(platform);
+  if (!status.on) return '未登录';
+  return status.detail ? `已登录 · ${status.detail}` : '已登录';
+}
+
+/**
+ * 点歌台右上角唯一的账号入口。
+ *
+ * 以前这里平铺三个平台胶囊（酷我压根没排进去），四个平台就占掉半行；
+ * 现在只留一个按钮，点开再去选平台。
+ */
+function musicAccountEntryMarkup() {
+  const total = MUSIC_ACCOUNTS.length;
+  const on = MUSIC_ACCOUNTS.filter(([key]) => musicAccountLoggedIn(key)).length;
   return `
-    <button class="song-account ${on ? 'is-on' : ''}" data-action="music-accounts" data-platform="${platform}"
-      title="${on ? `${label} 已登录，点击管理` : `登录 ${label}`}">
-      <span class="song-account-dot"></span>
-      <span class="song-account-text">
-        <strong>${label}</strong>
-        <small>${esc(musicAccountSub(platform))}</small>
-      </span>
+    <button class="kr-acct-entry ${on ? 'is-on' : ''}" data-action="music-accounts"
+      title="${on ? `${on} 个平台已登录，点开管理或退出` : '登录音乐账号'}">
+      ${icon(on ? 'check' : 'login', 'xs')}
+      <span>${on ? `账号 · 已登录 ${on}/${total}` : '登录'}</span>
     </button>`;
 }
 
-function songAccountsMarkup() {
+/* ── 音乐账号面板（两步：选平台 → 单平台登录） ──────────────── */
+
+/**
+ * 打开音乐账号弹窗。
+ *
+ * 不传 platform：第一步，四个平台一行一个，点进去看详情。
+ * 传 platform：第二步，只显示那一个平台的登录面板。
+ *
+ * 以前是四张大卡片全堆在一个框里，网易云那张还带二维码 + API 输入框 + 启动服务按钮，
+ * 一打开就是半个屏幕的空白和一堆技术字段 —— 用户的原话是「那么大个框，完全不好看」。
+ */
+function openMusicAccountsModal(focus = '') {
+  const platform = MUSIC_ACCOUNTS.some(([key]) => key === focus) ? focus : '';
+  const body = platform ? krAccountPanelMarkup(platform) : krAccountListMarkup();
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal kr-login-modal" role="dialog" aria-modal="true" data-platform="${platform}" tabindex="-1" autofocus>
+        ${body}
+      </div>
+    </div>
+  `);
+  bindMusicAccountsModal(platform);
+}
+
+/** 第一步：平台列表。 */
+function krAccountListMarkup() {
+  const rows = MUSIC_ACCOUNTS.map(([key, label]) => {
+    const status = musicAccountStatus(key);
+    return `
+      <div class="kr-acct-row ${status.on ? 'is-on' : ''}">
+        <button class="kr-acct-main" data-action="music-accounts" data-platform="${esc(key)}"
+          title="${status.on ? `${esc(label)} 已登录，点进去管理` : `登录 ${esc(label)}`}">
+          <span class="mp-dot" data-platform="${esc(key)}"></span>
+          <span class="kr-acct-copy">
+            <strong>${esc(label)}</strong>
+            ${status.detail ? `<small>${esc(status.detail)}</small>` : ''}
+          </span>
+          <span class="kr-acct-tag">${status.on ? '已登录' : '未登录'}</span>
+        </button>
+        ${
+          status.on
+            ? key === 'netease'
+              ? // 网易云的退出走它自己的接口：music:logout 只认 QQ / 酷狗 / 酷我
+                `<button class="kr-acct-out" id="kr-acct-out-netease">退出</button>`
+              : `<button class="kr-acct-out" data-action="music-account-logout" data-platform="${esc(key)}">退出</button>`
+            : ''
+        }
+      </div>`;
+  }).join('');
+
   return `
-    <div class="song-accounts">
-      ${musicAccountChip('netease', '网易云')}
-      ${musicAccountChip('qq', 'QQ 音乐')}
-      ${musicAccountChip('kugou', '酷狗')}
+    <div class="modal-head kr-login-head">
+      <div class="kr-login-title">
+        <h2>音乐账号</h2>
+        <p>四个平台各登各的，想登哪个点进去。</p>
+      </div>
+      <button class="icon-btn" data-close>${icon('x')}</button>
+    </div>
+    <div class="modal-body kr-login-body">
+      <div class="kr-acct-list">${rows}</div>
+      <p class="kr-acct-note">凭证只加密保存在这台电脑上，不会上传。登录后「我的歌单」「榜单」会按平台分开显示。</p>
     </div>`;
 }
 
-/* ── 三平台统一的登录面板 ─────────────────────────────────── */
+/** 第二步：单平台登录面板。 */
+function krAccountPanelMarkup(platform) {
+  const label = (MUSIC_ACCOUNTS.find(([key]) => key === platform) || ['', ''])[1];
+  const stateId = platform === 'netease' ? 'net-acc-state' : platform === 'qq' ? 'qq-acc-state' : platform === 'kugou' ? 'kg-acc-state' : 'kw-acc-state';
+  const head = `
+    <div class="modal-head kr-login-head">
+      <button class="kr-login-back" id="kr-acct-back" title="返回平台列表">${icon('chevron-left', 'xs')}<span>返回</span></button>
+      <div class="kr-login-title">
+        <h2>${esc(label)}</h2>
+        <p id="${stateId}">${esc(musicAccountHeadText(platform))}</p>
+      </div>
+      <button class="icon-btn" data-close>${icon('x')}</button>
+    </div>`;
 
-function openMusicAccountsModal(focus = '') {
-  const apiDefault = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
-  openModal(
-    `
-    <div class="modal-backdrop" data-backdrop>
-    <div class="modal music-accounts-modal" role="dialog" aria-modal="true">
-    <div class="modal-head"><div><h2>音乐账号</h2><p>三个平台的登录都在这里。凭证只加密保存在这台电脑上，不会上传。</p></div><button class="icon-btn" data-close>${icon('x')}</button></div>
-    <div class="modal-body music-accounts-body">
-      <section class="music-account-card ${focus === 'netease' ? 'is-focus' : ''}" data-platform="netease">
-        <header>
-          <div class="music-account-title">
-            <span class="music-account-badge is-netease">${icon('music')}</span>
-            <div><strong>网易云音乐</strong><small id="net-acc-state">${musicAccountSub('netease')}</small></div>
-          </div>
-          <span class="music-account-actions">
-            <button class="btn btn-ghost btn-sm" id="net-qr-refresh">${icon('refresh')}获取二维码</button>
-            <button class="btn btn-ghost btn-sm" id="net-acc-logout">退出</button>
-          </span>
-        </header>
-        <div class="music-account-body">
-          <div class="netease-qr-box is-inline">
-            <div class="netease-qr-image" id="netease-qr-image">${icon('music')}</div>
-            <div class="netease-qr-copy">
-              <strong id="netease-login-status">等待获取二维码</strong>
-              <span id="netease-login-hint">点「获取二维码」用网易云音乐 App 扫码。</span>
+  if (platform === 'netease') {
+    const apiDefault = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
+    /*
+     * 二维码这里只是 160px 的小图 + 右边一段状态文字，不再套一层大卡片。
+     * 下面这些 id 是和 app.js / bindNeteaseQr 的契约（二维码出图、状态刷新、退出都靠它们），
+     * 换结构可以，名字不能动。
+     */
+    return `${head}
+      <div class="modal-body kr-login-body">
+        <div class="kr-login-qr">
+          <div class="netease-qr-image" id="netease-qr-image">${icon('music')}</div>
+          <div class="kr-login-qr-copy">
+            <strong id="netease-login-status">等待获取二维码</strong>
+            <span id="netease-login-hint">用网易云音乐 App 扫一下，扫完在手机上确认。</span>
+            <div class="kr-login-qr-actions">
+              <button class="btn btn-ghost btn-sm" id="net-qr-refresh">${icon('refresh')}刷新二维码</button>
+              <button class="kr-login-link" id="net-acc-logout">退出登录</button>
             </div>
           </div>
-          <div class="music-account-row">
-            <input class="text-input" id="netease-login-api" value="${esc(apiDefault)}" placeholder="http://127.0.0.1:3100" spellcheck="false" />
-            <button class="btn btn-ghost btn-sm" id="netease-service-start">${icon('play')}启动本地服务</button>
+        </div>
+        <div class="kr-login-adv">
+          <button class="kr-login-adv-toggle" id="kr-login-adv-toggle" aria-expanded="false">
+            ${icon('chevron-down', 'xs')}<span>高级：本地服务地址</span>
+          </button>
+          <div class="kr-login-adv-body" id="kr-login-adv-body" hidden>
+            <span>扫码要连本机的 NeteaseCloudMusicApi，不确定就保持默认。</span>
+            <div class="kr-login-adv-row">
+              <input class="text-input" id="netease-login-api" value="${esc(apiDefault)}" placeholder="http://127.0.0.1:3100" spellcheck="false" />
+              <button class="btn btn-ghost btn-sm" id="netease-service-start">${icon('play')}启动服务</button>
+            </div>
           </div>
         </div>
-      </section>
+      </div>`;
+  }
 
-      <section class="music-account-card ${focus === 'qq' ? 'is-focus' : ''}" data-platform="qq">
-        <header>
-          <div class="music-account-title">
-            <span class="music-account-badge is-qq">${icon('music')}</span>
-            <div><strong>QQ 音乐</strong><small id="qq-acc-state">${musicAccountSub('qq')}</small></div>
-          </div>
-          <span class="music-account-actions">
-            <button class="btn btn-primary btn-sm" data-action="music-account-login" data-platform="qq">${icon('login')}打开登录</button>
-            <button class="btn btn-ghost btn-sm" data-action="music-account-logout" data-platform="qq">退出</button>
-          </span>
-        </header>
-        <div class="music-account-body">
-          <p class="music-account-note">弹出官方登录页，扫码 / QQ / 微信 / 手机验证码都可以。登录后榜单和歌单会显示在这里。</p>
-        </div>
-      </section>
+  const notes = {
+    qq: '弹出的官方登录页里，扫码 / QQ / 微信 / 手机验证码都行，登完窗口会自己关掉，歌单跟着同步过来。',
+    kugou: '同样走官方登录页，Cookie 按域内判断，不会莫名其妙掉登录。登录之后能用的是榜单和搜索。',
+    kuwo: '弹出来的是酷我官网，点右上角「登录」，扫码或手机号都行；登完「我的歌单」会读出默认列表和「我喜欢听」。',
+  };
 
-      <section class="music-account-card ${focus === 'kugou' ? 'is-focus' : ''}" data-platform="kugou">
-        <header>
-          <div class="music-account-title">
-            <span class="music-account-badge is-kugou">${icon('music')}</span>
-            <div><strong>酷狗音乐</strong><small id="kg-acc-state">${musicAccountSub('kugou')}</small></div>
-          </div>
-          <span class="music-account-actions">
-            <button class="btn btn-primary btn-sm" data-action="music-account-login" data-platform="kugou">${icon('login')}打开登录</button>
-            <button class="btn btn-ghost btn-sm" data-action="music-account-logout" data-platform="kugou">退出</button>
-          </span>
-        </header>
-        <div class="music-account-body">
-          <p class="music-account-note">同样走官方登录页。酷狗的 cookie 名常改，登录后按域内 cookie 判定，不会再莫名掉登录。</p>
-        </div>
-      </section>
-    </div>
-    </div>
-    </div>
-  `
-  );
-  bindNeteaseQr();
+  /*
+   * 酷狗 / 酷我的兜底说明。
+   *
+   * 酷狗网页端「我的歌单」接口官方已经关了，登录成功也读不到账号里的歌单，
+   * 但歌单链接（t1.kugou.com 短链、/plist/list/数字、share.html?chain=…）是通的。
+   * 这段就是把用户往「导入歌单链接」那边引，按钮直接复用点歌台现成的 action。
+   */
+  const tips = {
+    kugou: `
+      <div class="kr-login-tip is-warn">
+        <div class="kr-login-tip-head">${icon('alert', 'sm')}<strong>账号里的歌单读不出来</strong></div>
+        <p>酷狗官方把网页端「我的歌单」接口关了，登进去也拿不到你自己账号里的歌单 —— 登录只对榜单、搜索有用。</p>
+        <p>想听自己的歌单，用「导入歌单链接」把分享链接粘进来就行，<code>t1.kugou.com/xxxx</code> 这种短链也认。</p>
+        <button class="btn btn-ghost btn-sm kr-login-tip-btn" data-action="import-playlist-link">${icon('download')}去导入歌单链接</button>
+      </div>`,
+    kuwo: `
+      <div class="kr-login-tip">
+        <div class="kr-login-tip-head">${icon('info', 'sm')}<strong>歌单读不全，就用链接导入</strong></div>
+        <p>酷我的账号歌单接口不太稳，有时候只给默认那几张。拿不准就用「导入歌单链接」贴一张歌单分享链接，一样能听。</p>
+        <button class="btn btn-ghost btn-sm kr-login-tip-btn" data-action="import-playlist-link">${icon('download')}去导入歌单链接</button>
+      </div>`,
+  };
+
+  return `${head}
+    <div class="modal-body kr-login-body">
+      <p class="kr-login-note">${esc(notes[platform] || '')}</p>
+      ${tips[platform] || ''}
+      <div class="kr-login-actions">
+        <button class="btn btn-primary" data-action="music-account-login" data-platform="${esc(platform)}">${icon('login')}打开登录窗口</button>
+        <button class="kr-login-link" data-action="music-account-logout" data-platform="${esc(platform)}">退出登录</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * 登录/退出之后，如果账号弹窗还开着，把它刷成最新状态。
+ *
+ * 网易云面板跳过：那边有自己的二维码轮询，重开等于把正在扫的码换掉。
+ */
+function refreshMusicAccountsModal() {
+  const modal = document.querySelector('.kr-login-modal');
+  if (!modal) return;
+  const current = modal.dataset.platform || '';
+  if (current === 'netease') return;
+  openMusicAccountsModal(current);
+}
+
+/** 绑第一步的返回 / 网易云列表退出 / 高级折叠；第二步的二维码流程还是原来的 bindNeteaseQr。 */
+function bindMusicAccountsModal(platform) {
+  document.querySelector('#kr-acct-back')?.addEventListener('click', () => openMusicAccountsModal());
+
+  document.querySelector('#kr-acct-out-netease')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api.netease.logout();
+      await refreshNeteaseLogin();
+      invalidateAllPlaylists();
+      toast('已退出 网易云', 'success');
+      if (state.route === 'song') render({ preserveScroll: true });
+      refreshMusicAccountsModal();
+    } catch (error) {
+      toast(error.message || '退出失败', 'error');
+      button.disabled = false;
+    }
+  });
+
+  const advToggle = document.querySelector('#kr-login-adv-toggle');
+  const advBody = document.querySelector('#kr-login-adv-body');
+  advToggle?.addEventListener('click', () => {
+    const open = advToggle.getAttribute('aria-expanded') === 'true';
+    advToggle.setAttribute('aria-expanded', String(!open));
+    advToggle.classList.toggle('is-open', !open);
+    advBody.hidden = open;
+  });
+
+  if (platform === 'netease') bindNeteaseQr();
 }
 
 /** 网易云的二维码流程（内嵌在账号面板里，也兼容独立调用）。 */
@@ -214,6 +354,18 @@ function bindNeteaseQr() {
   const image = document.querySelector('#netease-qr-image');
   const refresh = document.querySelector('#net-qr-refresh');
   if (!apiInput || !refresh) return;
+
+  /*
+   * 本地服务没起来时，后端给的是一整串 "Error invoking remote method … fetch failed"。
+   * 这里只把这句话翻译成人话，流程一行没动 —— 提示里直接告诉用户去哪儿点「启动服务」。
+   */
+  const qrErrorText = (error) => {
+    const raw = String(error?.message || error || '');
+    if (/fetch failed|ECONNREFUSED|ENOTFOUND|net::|Failed to fetch/i.test(raw)) {
+      return '连不上本机的网易云服务：展开下面的「高级」点「启动服务」，或者自己先把 NeteaseCloudMusicApi 跑起来。';
+    }
+    return humanError(error);
+  };
 
   let timer = null;
   let qrKey = '';
@@ -251,7 +403,7 @@ function bindNeteaseQr() {
     } catch (error) {
       stop();
       status.textContent = '登录检查失败';
-      hint.textContent = error.message;
+      hint.textContent = qrErrorText(error);
     }
   };
 
@@ -274,7 +426,9 @@ function bindNeteaseQr() {
       timer = setInterval(check, 2000);
     } catch (error) {
       status.textContent = '获取二维码失败';
-      hint.textContent = error.message;
+      hint.textContent = qrErrorText(error);
+      // 拿码失败就把上一张码擦掉，免得用户对着一个已经死不掉的二维码扫
+      image.innerHTML = icon('music');
     } finally {
       refresh.disabled = false;
     }
@@ -292,7 +446,7 @@ function bindNeteaseQr() {
       refresh.click();
     } catch (error) {
       status.textContent = '自动启动服务失败';
-      hint.textContent = error.message;
+      hint.textContent = qrErrorText(error);
     } finally {
       button.disabled = false;
     }
@@ -320,28 +474,247 @@ function bindNeteaseQr() {
   setTimeout(() => refresh.click(), 260);
 }
 
-/* ── 点歌台主体 ───────────────────────────────────────────── */
+/* ── 左侧曲库导航栏 ───────────────────────────────────────── */
 
-function songTabMarkup() {
-  const tab = state.songTab || 'queue';
+/** 左栏每一项的图标，跟 SONG_TABS 的键一一对应。 */
+const KR_NAV_ICONS = { queue: 'order', charts: 'star', mine: 'music', search: 'search' };
+
+/** 某个平台的歌单分组（没有就是 null，用来区分「没同步过」和「同步后为空」）。 */
+function krPlaylistGroupOf(platform) {
+  return (state.myPlaylists.groups || []).find((group) => group.platform === platform) || null;
+}
+
+/**
+ * 一个平台当前的同步状态。
+ *
+ * 左栏和主区都读这一处，免得两边各写一套判断，出现「左栏说同步中、主区说失败」。
+ * 「同步中」是按平台判断的：只同步酷狗时，另外三行该老实显示自己的歌单数。
+ */
+function krSyncState(platform) {
+  const group = krPlaylistGroupOf(platform);
+  if (playlistSyncing(platform)) return { tone: 'syncing', text: '同步中…' };
+  /*
+   * 没有分组不等于在同步：可能是刚登录、还没拉过这个平台。
+   * 这种情况下一直显示「同步中…」会骗人，直接提示去点一次同步更诚实。
+   */
+  if (!group) return { tone: 'idle', text: '待同步' };
+  if (group.error) return { tone: 'failed', text: group.stale ? '读取失败' : group.expired ? '登录失效' : '读取失败' };
+  return { tone: 'ready', text: `${(group.list || []).length} 个` };
+}
+
+/** 这个平台上一次同步是多久以前（没有就返回空串，不给假时间）。 */
+function krSyncWhen(platform) {
+  const group = krPlaylistGroupOf(platform);
+  const at = Number(group?.syncedAt) || 0;
+  if (!at) return '';
+  const diff = Date.now() - at;
+  // 左栏一行只有 190px 宽，去掉空格压成「3分钟前」才塞得下
+  return (diff < 60 * 1000 ? '刚刚' : relativeDate(at)).replace(/\s+/g, '');
+}
+
+/** 左栏里的一个平台行：平台名 + 该平台的状态 + 只同步该平台的按钮。 */
+function krSyncRow(platform) {
+  const label = musicPlatformLabel(platform);
+  const sync = krSyncState(platform);
+  const syncing = playlistSyncing(platform);
+  const when = krSyncWhen(platform);
+  const group = krPlaylistGroupOf(platform);
+  const cost = Number(group?.durationMs) || 0;
+  const tip = syncing
+    ? `正在同步 ${label}…`
+    : `只同步 ${label}${when ? `（上次 ${when}${cost ? ` · 耗时 ${(cost / 1000).toFixed(1)}s` : ''}）` : ''}`;
+  /*
+   * 酷狗网页端的「账号歌单」接口被官方关了，点 ↻ 永远同步不回来。
+   * 这一行不再放同步按钮，换成「链接导入」：导入的歌单同样会进「我的歌单」。
+   * 状态位不再写「官方已关」之类的说明字——用户已经知道要导入了，
+   * 行里只留平台名和入口，有导入的歌单就显示个数。
+   */
+  if (platform === 'kugou') {
+    const ready = group && !group.error && (group.list || []).length;
+    const kugouSync = syncing
+      ? sync
+      : ready
+        ? { tone: 'ready', text: `${group.list.length} 个` }
+        : { tone: 'idle', text: '' };
+    return `
+    <div class="kr-sync-row is-${kugouSync.tone}">
+      <span class="mp-dot" data-platform="${esc(platform)}"></span>
+      <span class="kr-sync-name">${esc(label)}</span>
+      <span class="kr-sync-state">${esc(kugouSync.text)}</span>
+      <span class="kr-sync-when">${esc(when)}</span>
+      <button class="kr-sync-btn is-import" data-action="import-playlist-link"
+        title="用歌单链接导入，导入的歌单会进「我的歌单」"
+        style="width:auto;gap:3px;padding:0 7px;font-size:10.5px;">
+        ${icon('download', 'xs')}链接导入
+      </button>
+    </div>`;
+  }
   return `
-    <div class="song-tabs">
-      ${SONG_TABS.map(
-        ([key, label]) =>
-          `<button class="song-tab ${tab === key ? 'active' : ''}" data-action="song-tab" data-value="${key}">${label}</button>`
-      ).join('')}
+    <div class="kr-sync-row is-${sync.tone}">
+      <span class="mp-dot" data-platform="${esc(platform)}"></span>
+      <span class="kr-sync-name">${esc(label)}</span>
+      <span class="kr-sync-state">${esc(sync.text)}</span>
+      <span class="kr-sync-when">${esc(when)}</span>
+      <button class="kr-sync-btn" data-action="music-sync-one" data-platform="${esc(platform)}"
+        title="${esc(tip)}" ${syncing ? 'disabled' : ''}>
+        ${icon('refresh', 'xs')}
+      </button>
     </div>`;
 }
 
-function songQueueList() {
+/**
+ * 左侧导航栏。
+ *
+ * 分两块：上面是浏览用的分页（队列 / 榜单 / 我的歌单 / 搜索），
+ * 下面是「我的歌单」的同步区 —— 每个平台一行，按钮只同步它自己那一行。
+ * 需要一次性对齐全部平台时才点顶部那个「同步全部」。
+ */
+function krNavMarkup() {
+  const tab = state.songTab || 'queue';
+  // 酷狗排到最后：账号同步已被官方关掉，它在四家里最不重要，
+  // 留在中间只会把能用的平台隔开。顺序固定：网易云 / QQ / 酷我 / 酷狗。
+  const PLATFORM_ORDER = ['netease', 'qq', 'kuwo', 'kugou'];
+  const logged = PLATFORM_ORDER.filter((key) => musicLoggedIn(key));
+  const syncingAll = Boolean(state.myPlaylists.loadingAll);
+  const myCount = logged.reduce((sum, key) => sum + (krPlaylistGroupOf(key)?.list || []).length, 0);
+  const counts = { queue: state.songs.length, charts: (state.charts.list || []).length, mine: myCount };
+  // 后端返回的 syncedAt / durationMs：同步慢的时候用户得知道上次是什么时候、花了多久
+  const syncMeta = playlistSyncSummary();
+
+  const items = SONG_TABS.map(([key, label]) => {
+    const count = counts[key] || 0;
+    return `
+      <button class="kr-nav-item ${tab === key ? 'is-active' : ''}" data-action="song-tab" data-value="${key}">
+        <span class="kr-nav-icon">${icon(KR_NAV_ICONS[key] || 'music', 'xs')}</span>
+        <span class="kr-nav-text">${label}</span>
+        ${count ? `<span class="kr-nav-count">${count}</span>` : ''}
+      </button>`;
+  }).join('');
+
+  const syncBody = logged.length
+    ? `<div class="kr-sync-list">${logged.map(krSyncRow).join('')}</div>`
+    : `<p class="kr-nav-hint">还没有登录音乐账号，登录后这里会列出每个平台的歌单数。</p>
+       <button class="kr-nav-login" data-action="music-accounts">${icon('login', 'xs')}去登录</button>`;
+
   return `
-    <div class="song-queue-wrap" id="song-queue">
-      <div class="song-list">
-        ${
-          state.songs.length
-            ? state.songs
-                .map(
-                  (song, index) => `
+    <nav class="kr-nav" aria-label="点歌台导航">
+      <div class="kr-nav-block">
+        <p class="kr-nav-label">浏览</p>
+        ${items}
+      </div>
+      <div class="kr-nav-block kr-nav-sync">
+        <p class="kr-nav-label"><span>平台歌单</span><span class="kr-nav-label-hint">点 ↻ 只同步这一个</span></p>
+        <button class="kr-sync-all" data-action="music-sync-all" ${syncingAll ? 'disabled' : ''}>
+          ${icon('refresh', 'xs')}${syncingAll ? '同步中…' : '同步全部'}
+        </button>
+        ${syncBody}
+        ${syncMeta && !syncingAll ? `<p class="kr-sync-meta">${esc(syncMeta)}</p>` : ''}
+      </div>
+      <p class="kr-nav-hint">点歌单封面进去看曲目，卡片右下角的播放键直接整张开播。</p>
+    </nav>`;
+}
+
+/** 主区顶部条：当前分页的名字 + 一句话说明（替代原来那排分页按钮）。 */
+function krSectionHeadMarkup() {
+  const tab = state.songTab || 'queue';
+  const title = (SONG_TABS.find(([key]) => key === tab) || ['queue', '队列'])[1];
+  const meta =
+    tab === 'queue'
+      ? state.songs.length
+        ? `${state.songs.length} 首待播`
+        : '还没有歌'
+      : tab === 'charts'
+        ? '公开榜单，免登录'
+        : tab === 'mine'
+          ? '点歌单进曲目，可整张播放'
+          : '四个平台一起搜';
+  return `
+    <div class="kr-main-head">
+      <strong class="kr-main-title">${esc(title)}</strong>
+      <span class="kr-main-meta">${esc(meta)}</span>
+      ${tab === 'queue' && state.songs.length ? `<button class="kr-main-clear" data-action="song-clear">清空</button>` : ''}
+    </div>`;
+}
+
+/**
+ * 队列分段折叠：每段默认只渲染前这么多行，剩下的收进「展开其余 N 首」。
+ * 之前几百首的队列一次 innerHTML 全量画出来（几千个节点），点进队列页就卡；
+ * 折叠后首屏节点数恒定，展开仍然全量渲染（用户主动要的，慢一点没关系）。
+ */
+const QUEUE_SEGMENT_PREVIEW = 30;
+
+/**
+ * 队列分段：连续且同来源的歌归一段。
+ *
+ * 导入歌单是整张 append，天然连续；手动点的歌穿插在中间会切开段落。
+ * 段头写清来源（整张导入的歌单显示歌单名，手动加的归「自选」），
+ * 播放顺序不动，纯粹是给人看的分组。
+ */
+function songQueueSegments() {
+  const segments = [];
+  const keyOf = (song) =>
+    song.origin === 'playlist' ? `pl:${song.from || '歌单'}` : 'pick';
+  for (const song of state.songs) {
+    const key = keyOf(song);
+    const last = segments[segments.length - 1];
+    if (last && last.key === key) last.items.push(song);
+    else segments.push({ key, items: [song] });
+  }
+  return segments.map((seg) => ({
+    ...seg,
+    label: seg.key === 'pick' ? '自选歌曲' : seg.key.slice(3),
+  }));
+}
+
+/** 队列的过滤词：会话内状态，切页 / 重启都不保留。 */
+function queueFilterActive() {
+  return Boolean(String(state.queueFilter || '').trim());
+}
+
+/**
+ * 队列行渲染主体（不含外壳）。
+ *
+ * 行号映射规则（最要紧的一处）：
+ * data-index 永远是 state.songs 里的全局真实下标 —— flat 从 0 起、
+ * 遍历每个段的每一首（含被过滤掉的）逐个 +1 得到。折叠和过滤都只是
+ * 「少画几行」，不改变任何行的 index，song-select / song-remove
+ * 拿到的下标和没折叠时完全一致。
+ */
+function songQueueRowsMarkup() {
+  const segments = songQueueSegments();
+  const filter = String(state.queueFilter || '').trim().toLowerCase();
+  const rows = [];
+  let flat = 0;
+  for (let segIdx = 0; segIdx < segments.length; segIdx += 1) {
+    const seg = segments[segIdx];
+    // 先给整段编好全局下标，再按过滤词挑出可见的行
+    const all = seg.items.map((song) => {
+      const index = flat;
+      flat += 1;
+      return { song, index };
+    });
+    const visible = filter
+      ? all.filter(({ song }) => `${song.title || ''} ${song.artist || ''}`.toLowerCase().includes(filter))
+      : all;
+    if (!visible.length) continue;
+    const hasCurrent = visible.some(({ index }) => index === state.songIndex);
+    /*
+     * 展开状态：用户点过按钮的按记忆来；没点过的段里含当前播放的默认展开，
+     * 其余默认折叠。搜索过滤时一律全展开（搜都搜了，就该看到全部命中）。
+     */
+    const expanded = filter
+      ? true
+      : state.queueExpanded[segIdx] !== undefined
+        ? state.queueExpanded[segIdx]
+        : hasCurrent;
+    rows.push(
+      `<div class="song-queue-seg-head"><span>${esc(seg.label)}</span><small>${visible.length} 首</small>
+        <button class="song-queue-seg-toggle" data-action="queue-seg-toggle" data-seg="${segIdx}" title="${expanded ? '收起这一段' : '展开这一段'}">${expanded ? '收起' : `展开全部 ${visible.length} 首`}</button>
+      </div>`
+    );
+    const shown = expanded ? visible : visible.slice(0, QUEUE_SEGMENT_PREVIEW);
+    for (const { song, index } of shown) {
+      rows.push(`
               <div class="song-row ${index === state.songIndex ? 'active' : ''}">
                 <button class="song-row-main" data-action="song-select" data-index="${index}">
                   <span class="song-index">${index === state.songIndex ? icon('play') : index + 1}</span>
@@ -352,10 +725,43 @@ function songQueueList() {
                   </span>
                 </button>
                 <button class="song-row-remove" data-action="song-remove" data-index="${index}" title="移除">${icon('x')}</button>
-              </div>`
-                )
-                .join('')
-            : `<div class="song-empty">${icon('music')}<strong>歌单还是空的</strong><span>添加本地音频，或者导入一个网易云歌单。</span></div>`
+              </div>`);
+    }
+    if (!expanded && visible.length > QUEUE_SEGMENT_PREVIEW) {
+      const more = visible.length - QUEUE_SEGMENT_PREVIEW;
+      rows.push(
+        `<button class="song-queue-seg-more" data-action="queue-seg-toggle" data-seg="${segIdx}">展开其余 ${more} 首（共 ${visible.length} 首）</button>`
+      );
+    }
+  }
+  return rows.join('');
+}
+
+function songQueueList() {
+  const filter = String(state.queueFilter || '').trim();
+  /*
+   * 轻量过滤框：只在队列多于一段预览量时出现（几十首以内没必要）。
+   * 输入事件在 app.js 的 bindEvents 里监听，只重绘 .song-list，不碰输入框本身，
+   * 这样打字不会丢焦点。
+   */
+  const filterBar =
+    state.songs.length > QUEUE_SEGMENT_PREVIEW
+      ? `<div class="song-queue-filterbar">
+        <span class="song-queue-filter-icon">${icon('search', 'xs')}</span>
+        <input id="song-queue-filter" class="song-queue-filter" type="search" autocomplete="off"
+          placeholder="在队列里找歌名 / 歌手" value="${esc(filter)}" />
+        <button class="song-queue-filter-clear" data-action="queue-filter-clear" title="清空过滤" ${filter ? '' : 'hidden'}>${icon('x', 'xs')}</button>
+      </div>`
+      : '';
+  return `
+    <div class="song-queue-wrap" id="song-queue">
+      ${filterBar}
+      <div class="song-list">
+        ${
+          !state.songs.length
+            ? `<div class="song-empty">${icon('music')}<strong>歌单还是空的</strong><span>添加本地音频，或者导入一个网易云歌单。</span></div>`
+            : songQueueRowsMarkup() ||
+              `<div class="song-empty">${icon('search')}<strong>没有匹配的队列歌曲</strong><span>换个关键字，或者点右侧的 × 清空过滤。</span></div>`
         }
       </div>
     </div>`;
@@ -364,184 +770,13 @@ function songQueueList() {
 function songMineMarkup() {
   // 「我的歌单」按平台分区，所有已登录平台的歌单一起列出来。
   // 登录入口只有页头那排账号按钮（打开统一的「音乐账号」面板），这里不再放登录按钮。
-  const anyLogged = ['netease', 'qq', 'kugou'].some((key) => musicAccountLoggedIn(key));
-  if (!anyLogged) {
-    return `<div class="song-empty">${icon('login')}<strong>还没有登录音乐账号</strong><span>网易云 / QQ 音乐 / 酷狗 登录后，这里会按平台列出你账号里的歌单，整张歌单也能一键加入点歌队列。</span>
-      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}打开音乐账号</button></div>`;
-  }
-  ensureAllPlaylistsLoaded();
+  // 未登录也不再直接给空态：歌单广场不依赖登录，先让用户有东西可看。
+  const anyLogged = ['netease', 'qq', 'kugou', 'kuwo'].some((key) => musicAccountLoggedIn(key));
+  if (anyLogged) ensureAllPlaylistsLoaded();
+  /*
+   * 点开某张歌单后主区换成曲目页，广场被钻取页盖住了。
+   * 这时候还去拉广场第一页等于白发一次请求，所以只在浏览态预取。
+   */
+  if (!state.myPlaylists.detail) ensurePlaza(state.myPlaylists.plazaPlatform || 'netease');
   return allPlaylistsMarkup();
-}
-
-function songViewMarkup() {
-  const current = state.songs[state.songIndex] || null;
-  const playing = Boolean(current?.url);
-  const tab = state.songTab || "queue";
-  const qualityOptions = [
-    ["standard", "标准"],
-    ["higher", "较高"],
-    ["exhigh", "极高 320K"],
-    ["lossless", "无损"],
-    ["hires", "Hi-Res"],
-  ];
-  const qualitySelect = (id, cls) =>
-    `<select id="${id}" class="${cls}" title="音质">${qualityOptions
-      .map(([value, label]) => `<option value="${value}" ${state.songQuality === value ? "selected" : ""}>${label}</option>`)
-      .join('')}</select>`;
-  const cover = songCover(current);
-
-  return `
-    <div class="page song-page song-app">
-      <header class="song-app-head">
-        <div class="song-app-title">
-          <h1>点歌台</h1>
-          <span>${state.songs.length ? `${state.songs.length} 首` : "还没有歌"}${state.live.connected ? " · 弹幕已连接" : ""}</span>
-        </div>
-        <div class="song-app-accounts">
-          ${["netease", "qq", "kugou"]
-            .map((key) => {
-              const label = key === "netease" ? "网易云" : key === "qq" ? "QQ 音乐" : "酷狗";
-              const on = musicAccountLoggedIn(key);
-              return `<button class="song-app-account ${on ? "is-on" : ""}" data-action="music-accounts" data-platform="${key}" title="${label} · ${on ? "已登录" : "未登录"}">${on ? `${icon("check", "xs")}` : ""}${esc(label)}</button>`;
-            })
-            .join('')}
-        </div>
-        <div class="song-app-actions">
-          <button class="song-app-btn" data-action="add-song-file" title="添加本地歌曲">${icon("plus")}</button>
-          <button class="song-app-btn" data-action="import-netease" title="导入网易云歌单">${icon("download")}</button>
-          <button class="song-app-btn is-primary" data-action="add-song-link" title="添加音频链接">${icon("link")}</button>
-        </div>
-      </header>
-
-      <div class="song-app-body">
-        <main class="song-app-main">
-          <div class="song-app-tabs">
-            ${SONG_TABS.map(
-              ([key, label]) =>
-                `<button class="song-app-tab ${tab === key ? "active" : ""}" data-action="song-tab" data-value="${key}">${label}</button>`
-            ).join('')}
-            <span class="song-app-tabs-meta">
-              ${tab === "queue" && state.songs.length ? `<button class="song-app-clear" data-action="song-clear">清空</button>` : ""}
-            </span>
-          </div>
-          ${songSearchMarkup()}
-          <div class="song-app-scroll">
-            ${tab === "charts" ? chartPanelMarkup() : tab === "mine" ? songMineMarkup() : tab === "search" ? songSearchPanel() : songQueueList()}
-          </div>
-        </main>
-
-        <aside class="song-app-rail">
-          <section class="song-rail-card is-lyrics">
-            <div class="song-rail-head">
-              <span>歌词</span>
-              <small>${current?.lyric ? "同步中" : current?.neteaseId ? "播放时获取" : "暂无"}</small>
-            </div>
-            <div class="song-lyrics song-rail-lyrics" id="song-lyrics">
-              ${
-                current?.lyric
-                  ? parseLrc(current.lyric)
-                      .map((line) => `<p class="song-lyric-line" data-time="${line.time}">${esc(line.text)}</p>`)
-                      .join('')
-                  : `<div class="song-lyric-empty">${icon("music")}<span>${current?.neteaseId ? "播放时自动获取歌词" : "本地或直链歌曲没有歌词"}</span></div>`
-              }
-            </div>
-          </section>
-
-          <section class="song-rail-card">
-            <div class="song-rail-head">
-              <span>音效</span>
-              <button class="song-rail-more" data-action="open-audio-fx" title="完整音效面板">${icon("settings")}</button>
-            </div>
-            <div class="song-fx-row is-scroll">
-              ${AUDIO_FX_PRESETS.map(
-                (item) => `<button class="song-fx-chip ${state.audioFx.preset === item.key ? "active" : ""}"
-                  data-action="fx-preset" data-value="${item.key}" title="${esc(item.desc)}">${esc(item.label)}</button>`
-              ).join('')}
-            </div>
-            <div class="song-rail-row">
-              <span>音量</span>
-              <input class="song-rail-range" id="song-volume-main" type="range" min="0" max="100" step="1" value="${state.songVolume}" aria-label="歌曲音量" data-no-sound />
-              <small id="song-volume-main-value">${state.songMuted ? "静音" : `${state.songVolume}%`}</small>
-            </div>
-            <div class="song-rail-row">
-              <span>默认音质</span>
-              ${qualitySelect("song-quality", "song-rail-select")}
-            </div>
-            <div class="song-rail-row is-split">
-              <span class="song-rail-pair">
-                <span>开机继续播放</span>
-                <button class="switch ${state.autoResumeSong ? "on" : ""}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume"></button>
-              </span>
-              <span class="song-rail-pair">
-                <span>小播放器</span>
-                <button class="switch ${isMiniEnabled() ? "on" : ""}" role="switch" aria-checked="${Boolean(isMiniEnabled())}" data-action="toggle-mini-player"></button>
-              </span>
-            </div>
-          </section>
-
-          <section class="song-rail-card">
-            <div class="song-rail-head">
-              <span>弹幕点歌</span>
-              ${state.live.connected ? `<button class="song-rail-more" data-action="live-disconnect">断开</button>` : ""}
-            </div>
-            ${
-              state.live.connected
-                ? (() => {
-                    const getting = state.live.danmaku === "native" || state.live.danmaku === "bridge";
-                    const label = esc(state.live.platformLabel || "直播间");
-                    const bridgeStatus =
-                      state.live.danmaku === "bridge" && state.live.status
-                        ? `<p class="song-live-status">${esc(state.live.status)}</p>`
-                        : "";
-                    return `<div class="song-live-on ${getting ? "is-native" : "is-status"}">
-                      ${icon(getting ? "check" : "info")}
-                      <span>${label} · ${getting ? "等待「点歌 歌名」" : "仅显示状态"}</span>
-                    </div>${bridgeStatus}`;
-                  })()
-                : `<div class="song-live-form">
-                    <input class="song-live-input" id="live-room-input" placeholder="B站 / 斗鱼 / 虎牙 / 抖音 / 快手 / YY 等直播间链接" title="支持 B站、斗鱼、虎牙、抖音、快手、YY、网易CC、花椒、酷狗直播、小红书、淘宝直播、Twitch、YouTube，其它站点会尝试通用抓取" value="${esc(state.live.roomUrl || "")}" spellcheck="false" />
-                    <button class="song-live-btn" data-action="live-connect" ${state.live.connecting ? "disabled" : ""}>${state.live.connecting ? "连接中" : "连接"}</button>
-                  </div>`
-            }
-          </section>
-        </aside>
-      </div>
-
-      <footer class="song-bar">
-        <div class="song-bar-now">
-          <span class="song-bar-cover">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon("music")}</span>
-          <span class="song-bar-copy">
-            <strong id="dock-title">${esc(current?.title || "还没有点歌")}</strong>
-            <small id="dock-now-artist">${esc(current?.artist || "点歌台")}</small>
-          </span>
-        </div>
-
-        <div class="song-bar-center">
-          <div class="song-bar-controls">
-            <button class="song-bar-btn" data-action="song-prev" title="上一首">${icon("chevron-left")}</button>
-            <button class="song-bar-play ${playing ? "is-ready" : ""}" data-action="song-play" title="播放 / 暂停">
-              <svg class="icon"><use id="dock-play-use" href="#i-play"></use></svg>
-            </button>
-            <button class="song-bar-btn" data-action="song-next" title="下一首">${icon("chevron-right")}</button>
-          </div>
-          <div class="song-bar-progress">
-            <span id="song-current">0:00</span>
-            <input type="range" id="song-progress" min="0" max="1000" value="0" step="1" aria-label="播放进度" />
-            <span id="song-duration">0:00</span>
-          </div>
-        </div>
-
-        <div class="song-bar-right">
-          ${playModePopMarkup("dock-play-mode", "song-bar-pop")}
-          ${qualityPopMarkup("dock-quality", "song-bar-pop")}
-          <button class="song-bar-btn" data-action="song-mute" title="静音">
-            <svg class="icon"><use id="dock-volume-use" href="${state.songMuted ? "#i-volume-x" : "#i-volume"}"></use></svg>
-          </button>
-          <input class="song-bar-volume" id="dock-volume" type="range" min="0" max="100" step="1" value="${state.songVolume}" aria-label="音量" data-no-sound />
-          <button class="song-bar-btn" data-action="dock-open-list" title="歌曲列表">${icon("library")}</button>
-        </div>
-      </footer>
-
-      <svg hidden style="display:none"><use id="song-mute-use" href="${state.songMuted ? "#i-volume-x" : "#i-volume"}"></use></svg>
-    </div>`;
 }

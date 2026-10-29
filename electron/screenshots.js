@@ -57,7 +57,8 @@ function defaultRoots() {
     path.join(home, 'Videos', 'Genshin Impact'),
     path.join(home, 'Videos', 'StarRail'),
     path.join(home, 'Videos', 'ZZZ'),
-    path.join(pictures, 'Screenshots'),
+    // 刻意不扫 Pictures\Screenshots：那是 Windows 自带的整屏截图目录，
+    // 混进来只会把玩家的桌面截图当成"游戏内拍照"
   ];
 }
 

@@ -29,6 +29,12 @@ const CATEGORY_BY_GAME = {
   genshin: ['hk4e_cn', 'hk4e_global'],
   starrail: ['hkrpg_cn', 'hkrpg_global'],
   zzz: ['nap_cn', 'nap_global'],
+  /* 2.4.x 增量：崩坏3 也挂进官方素材接口。实测 getAllGameBasicInfo 的
+     bh3_cn 条目带 2 组背景，每组都有官方 webm 动图（10MB / 17MB，均
+     在 cacheStartVideo 的 80MB 上限内），启动页动态背景因此可以接通；
+     此前 CATEGORY_BY_GAME 无 bh3，officialBackgrounds 返回空、bh3 一直
+     回落到 pan + 钉住封面。 */
+  bh3: ['bh3_cn', 'bh3_global'],
 };
 
 async function getJson(url) {

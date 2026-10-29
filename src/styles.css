@@ -63,6 +63,7 @@
   --hero-muted: rgba(248, 243, 233, 0.68);
   --sidebar-bg: rgba(255, 255, 255, 0.012);
   --glass: rgba(10, 11, 15, 0.72);
+  --panel-soft: rgba(255, 255, 255, 0.05);
 }
 
 :root[data-theme="light"] {
@@ -72,6 +73,7 @@
   --surface: #fffdf9;
   --surface-2: #f8f3ea;
   --surface-3: #efe8dc;
+  --panel-soft: rgba(30, 28, 25, 0.045);
   --text: #1e1c19;
   --text-2: #4b463f;
   --muted: #7d756a;
@@ -2714,6 +2716,7 @@ button.recent-row {
   --hero-muted: rgba(248, 243, 233, 0.68);
   --sidebar-bg: rgba(255, 255, 255, 0.012);
   --glass: rgba(10, 11, 15, 0.72);
+  --panel-soft: rgba(255, 255, 255, 0.05);
 }
 
 :root[data-theme="light"] {
@@ -2723,6 +2726,7 @@ button.recent-row {
   --surface: #fffdf9;
   --surface-2: #f8f3ea;
   --surface-3: #efe8dc;
+  --panel-soft: rgba(30, 28, 25, 0.045);
   --text: #1e1c19;
   --text-2: #4b463f;
   --muted: #7d756a;
@@ -6393,6 +6397,21 @@ body.sidebar-collapsed .sidebar-toggle span {
 .task-dock[hidden] {
   display: none;
 }
+
+/* 启动页右下角是「开始游戏」面板（.start-dock），任务 / 硬链接队列列表原本也是
+   右下 fixed，会盖住开始按钮。这里在启动页把它挪到左下角避让；它仍在
+   .start-screen（isolation:isolate）之外，z-index:80 依旧压在底部游戏抽屉之上，
+   抽屉展开也不会被遮。 */
+body.start-mode .task-dock {
+  left: 22px;
+  right: auto;
+  bottom: 70px;
+}
+/* 点歌台底部有一条 82px 的播放条（song-bar），任务坞 fixed 右下 22px 正好压住它的
+   音量/列表按钮区；进点歌台时把坞抬到播放条上方。 */
+body.is-song-page .task-dock {
+  bottom: 98px;
+}
 .task-dock-main {
   flex: 1;
   min-width: 0;
@@ -6761,26 +6780,39 @@ body.sophon-minimized .modal-backdrop {
   font-weight: 600;
   letter-spacing: 0.1em;
 }
+/* 卡池垫数：单行式（名称 · 进度条 · 数字），比上下两行的旧排版省一半高度 */
 .gacha-pity-row {
-  margin-bottom: 9px;
+  display: grid;
+  grid-template-columns: minmax(88px, 150px) minmax(60px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
 }
 .gacha-pity-row:last-child {
-  margin-bottom: 0;
+  padding-bottom: 0;
 }
-.gacha-pity-title {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
+.gacha-pity-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 12.5px;
 }
-.gacha-pity-title strong {
+.gacha-pity-row strong {
   color: var(--gold);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gacha-pity-row strong em {
+  margin-left: 2px;
+  color: var(--muted);
+  font-size: 0.8em;
+  font-style: normal;
+  font-weight: 500;
 }
 .gacha-pity-bar {
   height: 3px;
-  margin-top: 3px;
   border-radius: 3px;
   background: var(--surface-3);
   overflow: hidden;
@@ -6797,74 +6829,61 @@ body.sophon-minimized .modal-backdrop {
   font-size: 12px;
   opacity: 0.8;
 }
-.gacha-five-row {
+/* 五星头像：圆形带金边，Starward 抽卡记录同款；无图回落到字牌 */
+.gacha-avatar {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid var(--gold);
+  background: color-mix(in srgb, var(--gold) 16%, transparent);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 0;
-  border-bottom: 1px solid var(--line);
+  justify-content: center;
 }
-.gacha-five-row:last-child {
-  border-bottom: 0;
-}
-.gacha-five-icon {
-  position: relative;
-  width: 44px;
-  height: 44px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border-radius: 9px;
-  border: 1px solid var(--line);
-  background: linear-gradient(145deg, var(--gold-soft), var(--surface-2));
-  color: var(--gold);
-  font-family: var(--font-display);
-  font-size: 17px;
-  font-weight: 700;
-}
-.gacha-five-icon img {
-  position: absolute;
-  inset: 0;
+.gacha-avatar img {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  z-index: 1;
-  image-rendering: -webkit-optimize-contrast;
 }
-.gacha-five-star {
-  flex: none;
-  padding: 2px 5px;
-  border-radius: 4px;
-  color: var(--gold);
-  background: var(--gold-soft);
-  font-size: 11.5px;
-  font-weight: 650;
-}
-.gacha-five-row div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.gacha-five-row strong {
-  font-size: 13.5px;
-  font-weight: 550;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.gacha-five-row small {
-  margin-top: 1px;
-  color: var(--muted);
+.gacha-avatar.is-blank {
   font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 700;
+  color: var(--gold);
+}
+.gacha-avatar.is-weapon {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .gacha-empty-line {
   color: var(--muted);
   font-size: 13px;
   padding: 10px 0;
+}
+
+/* 异环 B服资源预下载进度窗 */
+.nte-predl-status {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.nte-predl-bar {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.nte-predl-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--gold));
+  transition: width 0.3s ease;
+}
+.nte-predl-bar.is-done span {
+  background: var(--gold);
 }
 
 /* 受限平台（QQ 音乐 / 酷狗）的说明条，和普通空状态文案区分开 */
@@ -6911,21 +6930,22 @@ body.sophon-minimized .modal-backdrop {
 }
 .gacha-game-tab {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 7px 13px;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 11px;
   border-radius: 8px;
   color: var(--muted);
   transition: all 0.15s ease;
 }
 .gacha-game-tab span {
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 550;
+  white-space: nowrap;
 }
 .gacha-game-tab small {
-  font-size: 11.5px;
+  font-size: 11px;
   opacity: 0.7;
+  white-space: nowrap;
 }
 .gacha-game-tab:hover {
   color: var(--text-2);
@@ -7009,9 +7029,15 @@ body.sophon-minimized .modal-backdrop {
 .gacha-subtabs {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 14px;
+}
+/* 池子筛选并入 subtabs 同一行，右对齐，省掉单独一行 */
+.gacha-subtabs .gacha-scope-tabs {
+  margin: 0 0 0 auto;
+  padding-bottom: 4px;
 }
 .gacha-subtabs button {
   position: relative;
@@ -7103,11 +7129,9 @@ body.sophon-minimized .modal-backdrop {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
+/* KPI 数字条：无框无底色，数字本身当主角，页面更轻 */
 .gacha-kpi {
-  padding: 13px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-2);
+  padding: 6px 4px;
 }
 .gacha-kpi span {
   display: block;
@@ -7131,10 +7155,14 @@ body.sophon-minimized .modal-backdrop {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.gacha-overview-recent {
+/* 概览分段：每段池子一块，靠分隔线和留白分区 */
+.gacha-pool-section {
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
+}
+.gacha-pool-section:first-of-type {
+  margin-top: 14px;
 }
 .gacha-overview-head {
   display: flex;
@@ -7143,68 +7171,18 @@ body.sophon-minimized .modal-backdrop {
   gap: 12px;
   margin-bottom: 6px;
 }
+.gacha-overview-head em {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
 .gacha-overview-head h4 {
   color: var(--muted);
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: 0.1em;
-}
-.gacha-banner-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.gacha-banner-row {
-  display: grid;
-  grid-template-columns: 190px 62px minmax(0, 1fr);
-  align-items: center;
-  gap: 14px;
-  padding: 11px 0;
-  border-bottom: 1px solid var(--line);
-}
-.gacha-banner-row:last-child {
-  border-bottom: 0;
-}
-.gacha-banner-name {
-  display: flex;
-  flex-direction: column;
-}
-.gacha-banner-name strong {
-  font-size: 13.5px;
-  font-weight: 550;
-}
-.gacha-banner-name span {
-  color: var(--muted);
-  font-size: 12px;
-  margin-top: 2px;
-}
-.gacha-banner-pity {
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.gacha-banner-pity strong {
-  color: var(--gold);
-  font-size: 17px;
-  font-variant-numeric: tabular-nums;
-}
-.gacha-banner-row .gacha-pity-bar {
-  margin-top: 0;
-}
-.gacha-recent-list {
-  display: flex;
-  flex-direction: column;
-}
-.gacha-recent-list .gacha-five-row {
-  padding: 8px 0;
-}
-.gacha-recent-list .gacha-five-row strong {
-  font-size: 14px;
-}
-.gacha-recent-list .gacha-five-row small {
-  font-size: 12px;
 }
 
 @media (max-width: 980px) {
@@ -7213,12 +7191,6 @@ body.sophon-minimized .modal-backdrop {
   }
   .gacha-summary-meta {
     display: none;
-  }
-  .gacha-banner-row {
-    grid-template-columns: minmax(0, 1fr) 54px;
-  }
-  .gacha-banner-row .gacha-pity-bar {
-    grid-column: span 2;
   }
   .gacha-subtabs-source {
     display: none;
@@ -7787,48 +7759,56 @@ body.sidebar-collapsed .sidebar-toggle {
 }
 
 .gacha-account-meta span {
-  font-size: 14.5px;
+  font-size: 13.5px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .gacha-account-meta small {
   color: var(--muted);
-  font-size: 13.5px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
+/* 概览：一排小统计卡 + 垫数面板竖排，整体压进一屏 */
 .gacha-dashboard {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr);
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .gacha-dashboard .gacha-kpi-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
   gap: 8px;
 }
 
 .gacha-dashboard .gacha-kpi {
-  min-height: 86px;
-  padding: 13px 14px;
+  min-height: 0;
+  padding: 4px 6px;
 }
 
+.gacha-dashboard .gacha-kpi strong {
+  margin-top: 3px;
+  font-size: 19px;
+}
+
+.gacha-dashboard .gacha-kpi small {
+  margin-top: 2px;
+  font-size: 11.5px;
+}
+
+/* 垫数面板：去掉外框，靠分隔线和留白分区 */
 .gacha-pity-panel {
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
+  padding: 0 4px;
 }
 
 .gacha-pity-panel .gacha-overview-head {
-  margin-bottom: 10px;
+  margin-bottom: 4px;
 }
 
 .gacha-pity-panel .gacha-pity-row + .gacha-pity-row {
-  margin-top: 9px;
-}
-
-.gacha-overview-recent {
-  margin-top: 12px;
+  margin-top: 0;
+  border-top: 1px solid var(--line);
 }
 
 @media (max-width: 980px) {
@@ -8268,6 +8248,27 @@ body.start-mode .view {
     linear-gradient(90deg, rgba(6, 5, 9, 0.94) 0%, rgba(8, 6, 11, 0.7) 48%, rgba(8, 6, 11, 0.35) 100%),
     linear-gradient(0deg, rgba(6, 5, 9, 0.98) 0%, transparent 46%),
     radial-gradient(900px 500px at 18% 42%, rgba(var(--accent-rgb), 0.16), transparent 70%);
+}
+
+/* 启动页背景左侧压暗：官方版本图（原神等）常在左侧烧录标题 / logo，
+   和启动器自己的游戏名叠在一起很乱。原 .start-shade 被设成 z-index:-1，
+   压在背景图之下、根本没盖到图上，所以左侧字一直露着。
+   这里在 .start-art 内盖一层由左向右渐隐的遮罩：盖住 img/video 之上、
+   但仍在 .start-main 等文字内容之下，所以启动器自己的标题始终清晰，
+   官方左侧烧录文字被压掉，右侧人物主体不受影响。 */
+.start-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(6, 5, 9, 0.84) 0%,
+    rgba(6, 5, 9, 0.55) 24%,
+    rgba(6, 5, 9, 0.18) 44%,
+    rgba(6, 5, 9, 0) 60%
+  );
 }
 
 .start-top {
@@ -10169,6 +10170,146 @@ body.start-mode .view {
   line-height: 1.6;
 }
 
+/* ---------- 动态页置顶区：官方动态大框 + 置顶动态行列表 ---------- */
+
+.news-pinned-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-self: flex-start;
+}
+
+.news-pinned-game {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 11px;
+  color: var(--notice-accent, var(--accent));
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--notice-accent, var(--accent));
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+
+.news-pinned-type {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 4px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+}
+
+.news-feature--notice h2 {
+  font-size: clamp(22px, 2.4vw, 28px);
+}
+
+.news-feature-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.news-pinned-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.news-pinned-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.news-pinned-row:last-child {
+  border-bottom: 0;
+}
+
+.news-pinned-row:hover {
+  background: var(--surface-2);
+}
+
+.news-pinned-row--skeleton {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  cursor: default;
+}
+
+.news-pinned-chip {
+  display: inline-flex;
+  flex: none;
+  max-width: 9em;
+  overflow: hidden;
+  padding: 2px 9px;
+  color: var(--notice-accent, var(--accent));
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--accent-soft);
+}
+
+.news-pinned-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.news-pinned-title strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.news-pinned-row:hover .news-pinned-title strong {
+  color: var(--notice-accent, var(--accent));
+}
+
+.news-pinned-date {
+  flex: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.news-pinned-badge {
+  flex: none;
+  padding: 2px 7px;
+  color: var(--notice-accent, var(--accent));
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+
+@media (max-width: 760px) {
+  .news-pinned-date {
+    display: none;
+  }
+}
+
 @media (max-width: 760px) {
   .notice-page-actions {
     justify-content: flex-start;
@@ -10419,8 +10560,7 @@ body.start-mode .view {
   color: var(--accent);
 }
 
-.gacha-kpi strong em,
-.gacha-pity-title strong em {
+.gacha-kpi strong em {
   margin-left: 2px;
   color: var(--muted);
   font-size: 0.55em;
@@ -10428,35 +10568,8 @@ body.start-mode .view {
   font-weight: 500;
 }
 
-.gacha-pity-badge {
-  margin-left: auto;
-  padding: 2px 7px;
-  flex: none;
-  border-radius: 99px;
-  color: var(--muted);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-  background: var(--surface-3);
-  white-space: nowrap;
-}
-
-.gacha-five-copy {
-  min-width: 0;
-  flex: 1;
-}
-
 .gacha-pity-bar span.near {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
-}
-
-.gacha-banner-pity.near strong {
-  color: var(--accent);
-}
-
-.gacha-banner-pity em {
-  color: var(--muted);
-  font-size: 0.6em;
-  font-style: normal;
 }
 
 /* ---- import modal ---- */
@@ -10565,6 +10678,40 @@ body.start-mode .view {
   white-space: nowrap;
 }
 
+/* 导入弹窗的分步教程（异环等没有在线同步的游戏用） */
+.gacha-import-steps {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.gacha-import-steps li::marker {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* 导入弹窗里异环导出工具的下载按钮排 + 进度条（进度条样式复用 .nte-predl-bar） */
+.gacha-import-toolrow {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.nte-tool-progress {
+  margin-top: 10px;
+}
+.nte-tool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.nte-tool-row .form-hint {
+  margin: 0;
+}
+
 .gacha-import-result {
   display: flex;
   flex-direction: column;
@@ -10617,23 +10764,8 @@ body.start-mode .view {
 
 
 /* ------------------------------------------------------------------ */
-/* gacha: weapon rows, meta refresh bar                                */
+/* gacha: meta refresh bar                                              */
 /* ------------------------------------------------------------------ */
-
-.gacha-five-icon.is-weapon {
-  background: linear-gradient(150deg, var(--surface-3), var(--surface-2));
-}
-
-.gacha-five-icon.is-weapon > span .icon {
-  width: 15px;
-  height: 15px;
-  color: var(--muted);
-}
-
-.gacha-five-star.is-weapon {
-  color: var(--muted);
-  border-color: var(--line-strong);
-}
 
 .gacha-footnote-bar {
   display: flex;
@@ -10683,20 +10815,6 @@ body.start-mode .view {
 }
 
 
-/* 异环官网头像：138×278 两帧精灵图，只显示上半帧的圆形正脸 */
-.gacha-five-icon.is-sprite {
-  overflow: hidden;
-}
-
-.gacha-icon-sprite {
-  position: absolute;
-  inset: 0;
-  background-repeat: no-repeat;
-  background-size: 100% 200%;
-  background-position: 50% 0%;
-}
-
-
 /* ------------------------------------------------------------------ */
 /* readability pass: 次要信息再抬一档，行高一起放宽                     */
 /* ------------------------------------------------------------------ */
@@ -10727,15 +10845,9 @@ body {
 .server-state,
 .server-path,
 .dock-quality,
-.gacha-pity-badge,
 .gacha-subtabs button,
 .player-dock-handle {
   font-size: 13px;
-}
-
-.gacha-pity-badge {
-  font-size: 12.5px;
-  padding: 3px 8px;
 }
 
 .form-note,
@@ -10766,15 +10878,13 @@ select {
 
 /* 歌单和抽卡的次级说明 */
 .song-row-copy small,
-.gacha-five-copy small,
 .server-tile-copy small {
   font-size: 12.5px;
   line-height: 1.5;
 }
 
-.song-row-copy strong,
-.gacha-five-copy strong {
-  font-size: 14.5px;
+.song-row-copy strong {
+  font-size: 13px;
 }
 
 
@@ -10858,7 +10968,10 @@ select {
   position: absolute;
   right: clamp(24px, 3.4vw, 56px);
   bottom: clamp(96px, 13vh, 148px);
-  z-index: 3;
+  /* 压在底部游戏抽屉（z-index:5）之上，并开始游戏按钮永远可点；
+     注意 .start-screen 用了 isolation:isolate，所以这一层只和抽屉/遮罩比高低，
+     挡不住外部 fixed 的 .task-dock（那个靠 body.start-mode 平移避让处理）。 */
+  z-index: 90;
   display: flex;
   align-items: flex-end;
   gap: 14px;
@@ -10970,7 +11083,8 @@ select {
   transition: transform 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
 
-.start-dock-play:hover {
+.start-dock-play:hover,
+.start-screen .start-dock-play:hover {
   background: var(--accent-2);
   transform: translateY(-1px);
   box-shadow: 0 14px 32px rgba(var(--accent-rgb), 0.42);
@@ -10980,7 +11094,85 @@ select {
   transform: translateY(0);
 }
 
-.start-dock-play .icon {
+/* 未安装游戏的主按钮区：【下载游戏】+【自动检测】+【路径选择】一行三枚 */
+.start-dock-dl-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.start-dock-dl-row .start-dock-play {
+  padding: 0 20px;
+}
+
+/* 一键下载弹窗：渠道单选列表 */
+.dl-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 2px;
+}
+
+.dl-channel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.dl-channel:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dl-channel.is-active {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
+.dl-channel input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dl-channel-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+}
+
+.dl-channel.is-active .dl-channel-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.dl-channel-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dl-channel-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dl-channel-copy small {
+  color: var(--hero-muted);
+  font-size: 12px;
+}
+
+.start-dock-play .icon,
+.start-screen .start-dock-play .icon {
   width: 17px;
   height: 17px;
 }
@@ -11421,6 +11613,30 @@ select {
   .start-brand-copy small {
     display: none;
   }
+}
+
+/* 启动页左上角 logo 文字：裸 span 没套用设计系统样式，和二次元粉调图标不搭。
+   改成柔光粉白渐变 + 圆润字重 + 淡粉光晕，让文字像从图标里「长出来」。 */
+.start-brand > span {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  background: linear-gradient(180deg, #fff 0%, #ffd9e6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.42);
+  filter: drop-shadow(0 1px 6px rgba(255, 140, 170, 0.35));
+}
+
+/* 侧栏 logo 文字同样与粉调图标呼应（与启动页 .start-brand 一致）。 */
+.sidebar .brand-name {
+  background: linear-gradient(180deg, #fff 0%, #ffd9e6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 1px 5px rgba(255, 140, 170, 0.32));
 }
 
 
@@ -12222,6 +12438,64 @@ select {
   border-top: 1px solid var(--line);
 }
 
+/* 各游戏公告面板：默认折叠成一行，展开才显示全量卡片（动态页减滑动用） */
+.news-notices-box {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  overflow: hidden;
+}
+.news-notices-box summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-2);
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.16s ease;
+}
+.news-notices-box summary::-webkit-details-marker {
+  display: none;
+}
+.news-notices-box summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="light"] .news-notices-box summary:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+.news-notices-summary-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.news-notices-summary-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.news-notices-box[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+.news-notices-box[open] summary .news-notices-summary-side {
+  opacity: 0.7;
+}
+.news-notices-body {
+  padding: 14px 16px 8px;
+}
+.news-notices-body .news-notice-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
 /* 动态页上的「这一版改了什么」：和公告区一致的分隔与留白 */
 .news-update {
   margin-top: 30px;
@@ -12786,6 +13060,7 @@ select {
   top: auto;
   right: 28px;
   bottom: 96px;
+  z-index: 60;
   width: auto;
   min-height: 0;
   padding: 0;
@@ -13086,11 +13361,13 @@ select {
   margin-left: auto;
 }
 
-/* 旧的顶栏样式全部让位 */
+/* 旧的顶栏样式全部让位。
+   注意 .start-brand-copy 不在让位名单里：它是现在启动页的品牌名
+   （花筱灵 / HANABI STAGE，与侧栏展开态一致），之前误放进这条
+   display:none !important 把名字整个压没了，只剩 logo 图标。 */
 .start-home-btn,
 .start-home-icon,
 .start-home-copy,
-.start-brand-copy,
 .start-win-btn {
   display: none !important;
 }
@@ -13288,11 +13565,11 @@ body.start-mode .mini-player {
 
 #mini-player.is-on-start {
   position: fixed !important;
-  /* 吸在底部抽屉左侧，避开右下角的服务器卡片 */
-  left: clamp(20px, 2.6vw, 44px) !important;
-  right: auto !important;
+  /* 吸在右下角（用户确认这个位置就好，不要挪到左边） */
+  left: auto !important;
+  right: clamp(20px, 2.6vw, 44px) !important;
   top: auto !important;
-  bottom: 52px !important;
+  bottom: 92px !important;
   z-index: 80;
 }
 
@@ -13317,9 +13594,9 @@ body.start-mode .mini-player {
 
 /* 启动页展开时仍贴着右下，不要跑到抽屉下面 */
 #mini-player.is-on-start:not(.is-ball) {
-  left: clamp(20px, 2.6vw, 44px) !important;
-  right: auto !important;
-  bottom: 52px !important;
+  left: auto !important;
+  right: clamp(20px, 2.6vw, 44px) !important;
+  bottom: 92px !important;
   width: 320px;
 }
 
@@ -13339,12 +13616,26 @@ body.start-mode .start-games {
   right: 0;
   bottom: 0;
   z-index: 5;
-  padding: 12px 26px 18px;
+  padding: 7px 26px 18px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px 16px 0 0;
   background: linear-gradient(0deg, rgba(5, 4, 8, 0.95), rgba(5, 4, 8, 0.62));
   backdrop-filter: blur(18px);
-  transform: translateY(calc(100% - 40px));
+  transform: translateY(calc(100% - 44px));
   transition: transform 0.28s cubic-bezier(0.22, 0.85, 0.3, 1);
+}
+
+/* 顶部一抹花火粉 → 火花金 光轨，不挡背景 */
+.start-games::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #E8435A, #F0C674);
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 /* 鼠标移入或键盘聚焦时展开 */
@@ -13353,9 +13644,13 @@ body.start-mode .start-games {
   transform: translateY(0);
 }
 
-/* 收起时露出的一行提示 */
+/* 收起时露出的一行提示：高度必须 <= 抽屉露出的 44px，否则文字会被裁 */
 .start-games-head {
-  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  margin-bottom: 0;
   cursor: pointer;
 }
 
@@ -13376,11 +13671,11 @@ body.start-mode .start-games {
 
 /* 小球吸附在抽屉顶沿右侧 */
 .mini-player.is-on-start {
-  bottom: 52px !important;
+  bottom: 92px !important;
 }
 
 #mini-player.is-on-start.drawer-open {
-  bottom: 168px !important;
+  bottom: 208px !important;
 }
 
 @media (max-width: 1100px) {
@@ -13390,11 +13685,11 @@ body.start-mode .start-games {
     left: 0;
     right: 0;
     bottom: 0;
-    transform: translateY(calc(100% - 40px));
+    transform: translateY(calc(100% - 44px));
   }
 
   .mini-player.is-on-start {
-    bottom: 20px !important;
+    bottom: 64px !important;
   }
 }
 
@@ -13410,7 +13705,8 @@ body.start-mode .start-games {
      这里用 84 秒四段缓动：推近 → 继续推 → 轻微回拉 → 归位，
      速度在每一段头尾都放慢，看起来像镜头在呼吸。 */
   animation: startArtPan 84s cubic-bezier(0.37, 0, 0.63, 1) infinite;
-  will-change: transform;
+  /* 2.4.0 修复：勿加回 will-change: transform —— 它会让图层按缩放前尺寸
+     光栅化，pan 动画放大后整张启动页背景都发糊。 */
 }
 
 @keyframes startArtPan {
@@ -13576,7 +13872,7 @@ body.start-mode .start-games {
 /* ------------------------------------------------------------------ */
 
 .start-games {
-  padding: 8px 26px 18px;
+  padding: 7px 26px 18px;
   border-top: 1px solid rgba(255, 255, 255, 0.07);
   background: linear-gradient(180deg, rgba(9, 7, 13, 0.78), rgba(5, 4, 8, 0.97));
   backdrop-filter: blur(20px) saturate(1.08);
@@ -13585,8 +13881,8 @@ body.start-mode .start-games {
 
 .start-games-head {
   width: 100%;
-  height: 32px;
-  margin: 0 0 9px;
+  height: 30px;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -14742,6 +15038,59 @@ body.start-mode .start-games {
 .song-rail-more:hover {
   color: var(--text);
 }
+
+/* 「正在播放」卡片（右侧栏 is-now）：app.js 里的 .song-rail-now /
+   .song-rail-cover / .song-rail-now-copy 三个类原先完全没有样式，
+   封面图按原始尺寸渲染，专辑图一大就把整张卡片撑爆、图飞出框外。
+   这里补上布局，并把图片锁死在圆角框内（object-fit:cover 裁切填充）。 */
+.song-rail-now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.song-rail-cover {
+  width: 52px;
+  height: 52px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--accent);
+}
+.song-rail-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.song-rail-cover .icon {
+  width: 20px;
+  height: 20px;
+}
+.song-rail-now-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.song-rail-now-copy strong {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.song-rail-now-copy small {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .song-rail-lyrics {
   flex: 1;
   min-height: 0;
@@ -15180,99 +15529,90 @@ body.start-mode .start-games {
   font-size: 15px;
   font-weight: 650;
 }
+/* 数据口径提示：一行小字，不再占一个说明框 */
 .gacha-pity-note {
-  margin: 0 0 12px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--surface-2);
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.55;
-}
-.gacha-five-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.gacha-five-group > header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
+  margin: 0 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
-  letter-spacing: .04em;
-}
-.gacha-five-group > header span {
-  font-size: 11.5px;
-  opacity: .75;
-}
-.gacha-five-row.is-table {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 11px;
-  padding: 7px 0;
-}
-.gacha-five-row.is-table .gacha-five-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  font-size: 15px;
-}
-.gacha-five-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-.gacha-five-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13.5px;
-  font-weight: 600;
-}
-.gacha-five-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 11.5px;
   opacity: .85;
 }
-.gacha-five-rank-tag {
-  flex: none;
-  padding: 3px 8px;
-  border-radius: 6px;
-  color: var(--gold);
-  background: var(--gold-soft);
-  font-size: 11.5px;
-  font-weight: 650;
+/* 五星清单：全部图块顺序铺一面墙，不按月份分段；图上抽数角标、图下日期 */
+.gacha-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 12px 8px;
+}
+.gacha-tile-item {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  min-width: 0;
+}
+.gacha-tile-item small {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
   white-space: nowrap;
 }
-.gacha-five-rank-tag.is-weapon {
+.gacha-tile-item .gacha-tile {
+  width: 100%;
+}
+
+/* 五星大图块：正方形立绘 + 右上角抽数角标 */
+.gacha-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px 8px;
+}
+.gacha-tile {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.gacha-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.gacha-tile.is-blank {
+  display: grid;
+  place-items: center;
+}
+.gacha-tile-blank {
+  color: var(--gold);
+  font-size: 15px;
+  font-weight: 700;
+}
+.gacha-tile-blank.is-weapon {
   color: var(--accent);
-  background: var(--accent-soft);
 }
-.gacha-five-pity {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 2px;
-  min-width: 54px;
-  justify-content: flex-end;
+.gacha-tile-pity {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
 }
-.gacha-five-pity strong {
-  font-family: var(--font-display);
-  font-size: 16px;
-  font-weight: 650;
+.gacha-tile-pity.is-lucky {
+  background: rgba(0, 0, 0, 0.62);
+  color: var(--gold);
 }
-.gacha-five-pity em {
-  font-style: normal;
-  color: var(--muted);
-  font-size: 11.5px;
+.gacha-tile-pity.is-unlucky {
+  background: rgba(0, 0, 0, 0.62);
+  color: var(--danger, #ff7b8a);
 }
 
 /* ---------- 自更新 ---------- */
@@ -17043,6 +17383,10 @@ body.start-mode .start-games {
   background: #1a9dfb;
 }
 
+.mp-dot[data-platform="kuwo"] {
+  background: #f5512c;
+}
+
 .playlist-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
@@ -17085,10 +17429,23 @@ body.start-mode .start-games {
   height: 20px;
 }
 
+.playlist-card-body {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  cursor: pointer;
+}
+
 .playlist-card-count {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  left: 6px;
+  top: 6px;
   padding: 1px 6px;
   border-radius: 999px;
   color: #fff;
@@ -17096,6 +17453,47 @@ body.start-mode .start-games {
   font-variant-numeric: tabular-nums;
   background: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(4px);
+}
+
+.playlist-card-play {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--accent, #E8435A);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(4px) scale(0.9);
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  cursor: pointer;
+}
+
+.playlist-card-play .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.playlist-card:hover .playlist-card-play,
+.playlist-card:focus-within .playlist-card-play {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.playlist-card-play:hover {
+  background: var(--accent-strong, #ff5d72);
+}
+
+.playlist-card.is-open .playlist-card-play {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
 .playlist-card:hover .playlist-card-cover {
@@ -19042,22 +19440,14 @@ body.has-backdrop .gfx-card {
   gap: 2px;
 }
 
-/* ── 2）抽屉抬起右下服务器面板：只用兄弟选择器 ─────────────────── */
+/* ── 2）右下服务器面板：固定停在右下，不再随抽屉悬停抬起 ─────────
+   早期写法用 .start-games:hover ~ .start-dock 把面板顶高 108px 避开展开的抽屉，
+   但鼠标从抽屉移向被顶高的「开始游戏」时会离开抽屉悬停区，面板又掉回去，
+   形成「顶起来→移过去→掉下去」永远点不到的死结。
+   现在面板 z-index 已压在抽屉之上（见 .start-dock），抽屉在背后展开即可，
+   面板位置恒定，点击不再失效。 */
 .start-screen .start-dock {
   bottom: var(--hx-dock-bottom);
-  transition: bottom 0.24s cubic-bezier(0.22, 0.85, 0.3, 1);
-}
-
-.start-screen .start-games:hover ~ .start-dock,
-.start-screen .start-games:focus-within ~ .start-dock {
-  bottom: calc(var(--hx-dock-bottom) + 108px);
-}
-
-@media (max-height: 780px) {
-  .start-screen .start-games:hover ~ .start-dock,
-  .start-screen .start-games:focus-within ~ .start-dock {
-    bottom: calc(var(--hx-dock-bottom) + 92px);
-  }
 }
 
 /* ── 3）抽屉卡片：封面吃满，名字条只占一行 ─────────────────────── */
@@ -20052,6 +20442,45 @@ body.has-backdrop .gfx-card {
 
 .start-screen .start-dock .start-server-item + .start-server-item {
   border-top: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+/* 2.4.0 合并自对方分支：分组 —— 明日方舟国际服这类「一组里有多个区域服」的渠道，
+   用一条小标题把层级说清楚 */
+.start-server-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.start-screen .start-dock .start-server-group + .start-server-group,
+.start-screen .start-dock .start-server-group + .start-server-item,
+.start-screen .start-dock .start-server-item + .start-server-group {
+  border-top: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.start-server-group-label {
+  padding: 7px 10px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+/* 组内相邻条目不再重复画分隔线，交给组标题统一收口 */
+.start-screen .start-dock .start-server-group .start-server-item + .start-server-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+/* 组内条目稍微收一点高度：多了分组标题后整块会高出可视区十几像素，
+   刚好够触发一条没必要的滚动条 */
+.start-screen .start-dock .start-server-group .start-server-item {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.start-screen .start-dock .start-server-group .start-server-item-copy small {
+  line-height: 1.25;
 }
 
 .start-screen .start-dock .start-server-item:hover {
@@ -21240,29 +21669,33 @@ body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge)::after {
   transform: rotate(-10deg) scale(1.08);
 }
 
-/* 主视觉左侧：火花立在花火身边，淡一层，只当氛围 */
-.hero {
-  position: relative;
-}
+/*
+ * 主视觉右侧：和侧栏底部是同一张 sparxie-fullbody.png，只是放大摆到画面上。
+ *
+ * 左边那一列是标题和正文，她放左怎么调都会压在字上；挪到正文和头像卡之间的空档里，
+ * 脸、双马尾、红黑衣服一眼就能认出来，文字区一点没碰。
+ * 掩码做成「从左往右渐显」：靠正文那侧淡出，靠头像卡那侧实心，她和卡片之间就自然接上了。
+ */
 .hero-sparxie {
   position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 92%;
+  right: 262px;
+  bottom: -16%;
+  height: 116%;
   z-index: 0;
   pointer-events: none;
-  opacity: 0.2;
+  opacity: 0.86;
+  filter: brightness(1.12) saturate(1.05);
   -webkit-mask-image: linear-gradient(
-    to right,
-    rgba(0, 0, 0, 1) 6%,
-    rgba(0, 0, 0, 0.55) 44%,
-    transparent 80%
+    to left,
+    rgba(0, 0, 0, 1) 40%,
+    rgba(0, 0, 0, 0.82) 70%,
+    transparent 100%
   );
   mask-image: linear-gradient(
-    to right,
-    rgba(0, 0, 0, 1) 6%,
-    rgba(0, 0, 0, 0.55) 44%,
-    transparent 80%
+    to left,
+    rgba(0, 0, 0, 1) 40%,
+    rgba(0, 0, 0, 0.82) 70%,
+    transparent 100%
   );
   animation: hero-sparxie-float 16s ease-in-out infinite;
 }
@@ -21279,6 +21712,22 @@ body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge)::after {
   }
   50% {
     transform: translateY(-10px);
+  }
+}
+
+/*
+ * 窄屏（≤1120）头像卡会隐藏，正文改成整行铺满，这时候右侧立绘就会压到字上。
+ * 这里把她收回右侧边缘、淡下来，只留个气氛。
+ */
+@media (max-width: 1120px) {
+  .hero-sparxie {
+    right: -44px;
+    bottom: -8%;
+    height: 104%;
+    opacity: 0.32;
+    filter: none;
+    -webkit-mask-image: linear-gradient(to left, rgba(0, 0, 0, 1) 46%, transparent 100%);
+    mask-image: linear-gradient(to left, rgba(0, 0, 0, 1) 46%, transparent 100%);
   }
 }
 
@@ -21493,4 +21942,6643 @@ body.sidebar-collapsed .brand img {
 .start-screen .window-controls .window-control .icon {
   width: 15px;
   height: 15px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * v31：统一三处 logo + 启动顶栏按钮
+ *  - 侧栏 logo、启动页 logo：38×38，无描边，同阴影同圆角
+ *  - 启动顶栏所有按钮（返回/暂停/下载/窗口控制）：38×38
+ *  - 顶栏行高 40px，所有元素垂直居中对齐
+ * ═══════════════════════════════════════════════════════════════ */
+
+.sidebar .brand {
+  height: 44px;
+  padding: 0 8px;
+  align-items: center;
+}
+
+.sidebar {
+  padding-top: 16px !important;
+}
+
+.sidebar .brand .brand-text {
+  justify-content: center;
+  line-height: 1.2;
+}
+
+.sidebar .brand .brand-name {
+  font-size: 26px;
+  line-height: 1.15;
+}
+
+.sidebar .brand .brand-en {
+  font-size: 13px;
+  letter-spacing: 0.28em;
+  line-height: 1.2;
+}
+
+body.sidebar-collapsed .sidebar {
+  padding-top: 16px !important;
+}
+body.sidebar-collapsed .brand {
+  width: 46px;
+  height: 44px;
+  padding: 0;
+  margin: 0 auto 12px;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 三处 logo 完全一致 */
+.sidebar .brand-mark,
+.start-screen .start-top .start-brand-mark {
+  width: 42px !important;
+  height: 42px !important;
+  border: none !important;
+  border-radius: 11px !important;
+  background: linear-gradient(145deg, var(--accent-2), var(--accent) 58%, color-mix(in srgb, var(--accent) 82%, #000)) !important;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.35) !important;
+  object-fit: cover;
+  flex: none;
+  transform: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* 启动顶栏：行高 40px，所有按钮 38×38，和 logo 一样大 */
+.start-screen .start-top {
+  padding-top: 24px !important;
+  height: 44px;
+  align-items: center;
+  gap: 8px;
+}
+
+.start-screen .start-top .start-brand {
+  height: 44px;
+  align-items: center;
+  gap: 9px;
+}
+
+.start-screen .start-top .chrome-back,
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  width: 42px !important;
+  height: 42px !important;
+  border-radius: 11px !important;
+  flex: none;
+}
+
+.start-screen .start-top .chrome-back .icon,
+.start-screen .start-top .chrome-btn .icon,
+.start-screen .start-top .start-video-toggle .icon {
+  width: 16px !important;
+  height: 16px !important;
+}
+
+
+
+
+
+
+/* ============ v32 歌单广场 ============ */
+/* 广场分区：复用 playlists-bar 的排版，独立成段 */
+.plaza-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-weak, rgba(255, 255, 255, 0.08));
+}
+.plaza-section .playlists-bar {
+  margin-bottom: 10px;
+}
+.plaza-section .song-chart-tabs {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.plaza-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 2px;
+}
+/* 广场卡片副标题（创建者 · 播放量）比自建歌单的长，允许两行 */
+.playlist-card .playlist-card-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+ * 以下来自 2.3.0：工具页左导航 / 画质页控件 / 插件页样式。
+ * 基底仍是 2.1.9，所以侧栏 logo、启动页 logo、小按钮保持原样。
+ * ═══════════════════════════════════════════════════════════════ */
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.plugin-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.plugin-detail {
+  min-width: 0;
+  position: sticky;
+  top: 0;
+}
+
+.plugin-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  text-align: left;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.plugin-card:hover {
+  border-color: rgba(var(--accent-rgb), 0.4);
+  transform: translateY(-1px);
+}
+
+.plugin-card.is-active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.plugin-card-top {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.plugin-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 10px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.13);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.22);
+}
+
+.plugin-card-id {
+  flex: 1;
+  min-width: 0;
+}
+
+.plugin-card-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-card-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-card-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.plugin-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.plugin-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.2);
+}
+
+.plugin-chip.is-plain {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.plugin-size {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.plugin-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.plugin-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.plugin-status.is-ok {
+  color: var(--accent);
+}
+
+.plugin-status.is-ok i {
+  opacity: 1;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
+}
+
+.plugin-status.is-bad {
+  color: var(--text);
+  opacity: 0.75;
+}
+
+.plugin-broken-group-title {
+  margin: 8px 0 2px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.plugin-card.is-broken {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  border-color: var(--line-strong);
+  border-left: 3px solid rgba(var(--accent-rgb), 0.55);
+  cursor: default;
+}
+
+.plugin-card.is-broken:hover {
+  transform: none;
+  border-color: var(--line-strong);
+  border-left-color: rgba(var(--accent-rgb), 0.55);
+}
+
+.plugin-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.plugin-broken-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plugin-broken-file {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-broken-why {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plugin-broken-remove {
+  flex: none;
+}
+
+.plugin-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.plugin-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-panel-name {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.plugin-panel-meta {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.plugin-panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 56px 20px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.plugin-view-host {
+  min-width: 0;
+}
+
+.plugin-error {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  color: var(--text);
+  background: rgba(var(--accent-rgb), 0.09);
+  border: 1px solid rgba(var(--accent-rgb), 0.36);
+}
+
+.plugin-error strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plugin-error p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.plugin-loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.plugin-loading .icon {
+  animation: pluginSpin 1.1s linear infinite;
+}
+
+@keyframes pluginSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.plugin-dir-note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.plugin-guide {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 28px 24px;
+  background: var(--panel);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.plugin-guide h2 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.plugin-guide p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  max-width: 640px;
+}
+
+.plugin-guide code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  color: var(--accent);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12.5px;
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
+.plugin-code {
+  width: 100%;
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--line);
+}
+
+.plugin-perm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin-perm-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(var(--accent-rgb), 0.06);
+  border: 1px solid var(--line);
+}
+
+.plugin-perm-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plugin-perm-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.plugin-perm-file {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.hxl-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.hxl-view-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.hxl-text {
+  color: var(--text-2);
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.hxl-empty {
+  padding: 20px;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+.hxl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hxl-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(var(--accent-rgb), 0.045);
+  border: 1px solid var(--line);
+}
+
+.hxl-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.hxl-row-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hxl-row-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hxl-row-value {
+  flex: none;
+  color: var(--accent);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-bar.is-ok {
+  border-color: rgba(var(--accent-rgb), 0.4);
+}
+
+.hxl-bar.is-ok .hxl-bar-value {
+  color: var(--accent);
+}
+
+.hxl-bar.is-warn {
+  border-color: rgba(var(--accent-rgb), 0.26);
+}
+
+.hxl-bar.is-warn .hxl-bar-value {
+  color: var(--text-2);
+}
+
+.hxl-bar.is-bad {
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+
+.hxl-bar.is-bad .hxl-bar-value {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.hxl-table-wrap {
+  width: 100%;
+  overflow: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+
+.hxl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-table td {
+  padding: 9px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.hxl-table th {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.hxl-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.hxl-table tbody tr:hover td {
+  background: rgba(var(--accent-rgb), 0.04);
+}
+
+.hxl-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hxl-bar {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(var(--accent-rgb), 0.045);
+}
+
+.hxl-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.hxl-bar-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hxl-bar-value {
+  flex: none;
+  color: var(--muted);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hxl-bar-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.hxl-bar-fill {
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.55), var(--accent));
+  transition: width 0.32s cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.hxl-bar-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.gfx-card-writable {
+  border-color: var(--accent-line, rgba(var(--accent-rgb), 0.42));
+  box-shadow: 0 2px 14px rgba(var(--accent-rgb), 0.12);
+}
+
+.gfx-card-writable > header em {
+  color: var(--accent);
+}
+
+.gfx-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.gfx-hint {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.tools-shell {
+  display: grid;
+  grid-template-columns: 178px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.tools-nav {
+  position: sticky;
+  top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.tools-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.tools-nav-item .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.tools-nav-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.tools-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tools-nav-hint {
+  margin: 7px 4px 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  opacity: 0.72;
+}
+
+.tools-grid > [data-tools-group] {
+  display: none;
+}
+
+.tools-grid > [data-tools-group].is-active {
+  display: block;
+}
+
+.tools-panel {
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.tools-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15.5px;
+  font-weight: 650;
+}
+
+.tools-panel h2 .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+}
+
+.tools-panel > .desc {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.tools-rows {
+  margin-top: 6px;
+}
+
+.tools-rows .setting-copy strong {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tools-row-eyebrow {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.tools-rows .tools-feature-games {
+  margin-top: 7px;
+}
+
+.tools-rows .tools-feature-note {
+  margin-top: 6px;
+}
+
+.tools-panel-body {
+  margin-top: 6px;
+}
+
+.tools-panel-body .miyo-card {
+  margin-top: 12px;
+}
+
+.tools-panel-body .tools-game-grid {
+  margin-top: 12px;
+}
+
+.gfx-row-edit {
+  align-items: center;
+  padding: 8px 0;
+}
+
+.gfx-row-edit.is-pending {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.gfx-help {
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.gfx-control {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.gfx-input {
+  min-width: 128px;
+  max-width: 220px;
+  padding: 5px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--panel, var(--bg-deep));
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.gfx-input:hover {
+  border-color: var(--accent-line, rgba(var(--accent-rgb), 0.42));
+}
+
+.gfx-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint, rgba(var(--accent-rgb), 0.14));
+}
+
+.gfx-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel, var(--bg-deep));
+}
+
+.gfx-switch button {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.gfx-switch button:hover {
+  color: var(--text);
+}
+
+.gfx-switch button.active {
+  background: var(--accent-soft, rgba(var(--accent-rgb), 0.16));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tools-game-card.is-open .tools-game-head {
+  margin-bottom: 10px;
+}
+
+.tools-game-head:hover h3 {
+  color: var(--accent);
+}
+
+.tools-game-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tools-game-arrow {
+  color: var(--muted);
+  transition: transform 0.18s ease;
+}
+
+.tools-game-card.is-open .tools-game-arrow {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+.tools-game-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.tools-game-features {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tools-game-feature {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    'ico name arrow'
+    'ico desc arrow';
+  align-items: center;
+  gap: 0 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.tools-game-feature:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: var(--accent-tint, rgba(var(--accent-rgb), 0.09));
+}
+
+.tools-game-feature > .icon:first-child {
+  grid-area: ico;
+  color: var(--accent);
+}
+
+.tools-game-feature > span {
+  grid-area: name;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tools-game-feature > em {
+  grid-area: desc;
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.tools-game-feature > .icon:last-child {
+  grid-area: arrow;
+  color: var(--muted);
+}
+
+.tools-game-feature:hover > .icon:last-child {
+  color: var(--accent);
+}
+
+.tools-game-more-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.tools-game-rest {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tools-inline-games {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px dashed var(--line);
+}
+
+.tools-inline-games-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.tools-inline-games-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tools-inline-games-head p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tools-inline-games .tools-game-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.tools-inline-games .tools-game-card {
+  padding: 12px 14px;
+}
+
+.tools-inline-games .tools-game-head h3 {
+  font-size: 13.5px;
+}
+
+.tools-inline-games .tools-game-more {
+  display: none;
+}
+
+.gfx-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border-radius: inherit;
+  border: 1px solid color-mix(in srgb, var(--line, rgba(255, 255, 255, 0.12)) 80%, transparent);
+  color: var(--text-dim, rgba(255, 255, 255, 0.62));
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.gfx-source code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  color: var(--text, #fff);
+  opacity: 0.8;
+}
+
+
+/* ---- 2.3.0 修改过的工具/画质/插件块，放在最后以覆盖旧定义 ---- */
+
+
+/* ------------------------------------------------------------------ */
+/* 双人卡对齐：两块等高、立绘贴底，底部不再差一截                       */
+/* ------------------------------------------------------------------ */
+.char-duo {
+  align-items: stretch;
+  gap: 18px;
+}
+.char-duo-card {
+  height: 116px;
+}
+.char-duo-card img {
+  /* 两张立绘宽高比不同，默认居中会让脚底一高一低；改成贴底就落在同一条线上 */
+  object-position: bottom center;
+}
+
+/* ------------------------------------------------------------------ */
+/* 硬链接检测结果：先算出能省多少，确认后再动文件                       */
+/* ------------------------------------------------------------------ */
+.link-preview {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--gold-line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.2);
+}
+:root[data-theme="light"] .link-preview {
+  background: rgba(255, 255, 255, 0.5);
+}
+.link-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 13.5px;
+}
+.link-preview-head strong {
+  color: var(--gold);
+  font-weight: 600;
+}
+.link-preview-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.link-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.link-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+:root[data-theme="light"] .link-stat {
+  background: rgba(0, 0, 0, 0.02);
+}
+.link-stat.is-accent {
+  border-color: var(--gold-line);
+  background: rgba(214, 176, 106, 0.1);
+}
+.link-stat-num {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.link-stat.is-accent .link-stat-num {
+  color: var(--gold);
+}
+.link-stat-label {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.link-preview-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+@media (max-width: 560px) {
+  .link-preview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 开始页服务器切换器：圆点、行高、页脚统一，选中与未选中不再错位      */
+/* ------------------------------------------------------------------ */
+.start-server-menu {
+  gap: 3px;
+  padding: 7px;
+  border-radius: 13px;
+}
+
+.start-server-item {
+  gap: 10px;
+  /* 给个固定行高：长短不一的服务器名不会让列表高低起伏 */
+  min-height: 38px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.start-server-item-dot,
+.start-server-pick-dot {
+  /* 下拉里的小圆点原来没有光圈，和上方选中行不是一个东西；补齐成同一套 */
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+  transition: background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.start-server-item-dot.active {
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
+}
+
+.start-server-item-dot.ready {
+  box-shadow: 0 0 0 3px rgba(90, 214, 125, 0.16);
+}
+
+/*
+ * 未选中的行也占一个「勾」的位置。
+ * 原来只有选中项带勾，切换选中项时右侧少一块、文件名截断位置跟着变，
+ * 看起来像整行在左右跳。占位等宽后就稳住了。
+ */
+.start-server-item::after {
+  content: '';
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+
+.start-server-item.is-active::after {
+  display: none;
+}
+
+.start-server-item-tick {
+  margin-left: 2px;
+}
+
+/* 页脚三个按钮平分一行，不再因为 flex-wrap 换行导致高矮不齐 */
+.start-server-menu-foot {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 5px;
+  padding-top: 7px;
+}
+
+.start-server-foot-btn {
+  min-width: 0;
+  height: 29px;
+  border-radius: 8px;
+}
+
+/* 头部「服务器 x / y」和右侧齿轮保持同一中线 */
+.start-dock-server-head {
+  align-items: center;
+  min-height: 24px;
+}
+
+.start-dock-server-head .start-dock-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+/* ================================================================== */
+/* 开始页整体改版：花火（玫瑰红 #E8435A）× 火花（暖金 #F0C674）        */
+/* 右下角收成一张竖卡；顶部小按钮只换质感、不挪位置                    */
+/* ================================================================== */
+
+/* ---- 顶部小按钮：玻璃 + 内高光，悬停染上火花金 ---- */
+.chrome-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+.chrome-btn:hover {
+  color: #fff;
+  border-color: rgba(240, 198, 116, 0.55);
+  background: rgba(255, 255, 255, 0.17);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 8px 20px rgba(0, 0, 0, 0.34),
+    0 0 0 3px rgba(240, 198, 116, 0.12);
+}
+
+.chrome-btn:active {
+  transform: scale(0.94);
+}
+
+/* 关闭键保留「危险」语义，用花火红 */
+.chrome-close:hover {
+  border-color: rgba(232, 67, 90, 0.72);
+  background: rgba(232, 67, 90, 0.82);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 8px 20px rgba(232, 67, 90, 0.34);
+}
+
+.start-video-toggle {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(9, 7, 11, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+.start-video-toggle:hover {
+  color: #fff;
+  border-color: rgba(240, 198, 116, 0.5);
+  background: rgba(255, 255, 255, 0.13);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
+/* ---- 右下角整框：竖卡 ---- */
+.start-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  width: min(320px, calc(100vw - 40px));
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 18px;
+  /* 左上花火红、右下火花金，和首页两张角色卡同一套光感 */
+  background:
+    radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.17), transparent 58%),
+    radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.15), transparent 58%),
+    rgba(9, 7, 11, 0.62);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.start-dock-server-head {
+  padding: 0 2px;
+}
+
+.start-server-pick {
+  min-height: 46px;
+  padding: 8px 12px;
+  border-color: rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.start-server-pick:hover {
+  border-color: rgba(240, 198, 116, 0.45);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.start-dock.is-menu-open .start-server-pick {
+  border-color: rgba(240, 198, 116, 0.6);
+}
+
+/* ---- 开始按钮：花火红 → 火花金 ---- */
+/* 用 .start-screen 提权，压过原来那条按强调色算的渐变 */
+.start-dock-play,
+.start-screen .start-dock-play {
+  justify-content: center;
+  width: 100%;
+  height: 46px;
+  padding: 0 20px;
+  border-radius: 12px;
+  color: #2b1a20;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: linear-gradient(120deg, #e8435a 0%, #ef8a6a 52%, #f0c674 100%);
+  box-shadow: 0 10px 26px rgba(232, 67, 90, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+.start-dock-play:hover {
+  filter: brightness(1.07) saturate(1.05);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgba(232, 67, 90, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.34);
+}
+
+.start-dock-play .icon {
+  width: 17px;
+  height: 17px;
+}
+
+/* ---- 运行中：计时 + 结束按钮（Starward 式） ---- */
+.start-dock-running {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 10px 0 12px;
+  border: 1px solid rgba(232, 67, 90, 0.4);
+  border-radius: 12px;
+  background: linear-gradient(120deg, rgba(232, 67, 90, 0.2), rgba(240, 198, 116, 0.14));
+}
+
+.start-dock-running-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e8435a;
+  box-shadow: 0 0 0 3px rgba(232, 67, 90, 0.22);
+  animation: start-run-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes start-run-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 3px rgba(232, 67, 90, 0.22); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 6px rgba(232, 67, 90, 0.08); }
+}
+
+.start-dock-running-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.start-dock-running-copy strong {
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.start-dock-running-copy small {
+  color: #f5d79a;
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  line-height: 1.15;
+}
+
+.start-dock-stop {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 9px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.24);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.start-dock-stop:hover {
+  color: #fff;
+  border-color: rgba(232, 67, 90, 0.7);
+  background: rgba(232, 67, 90, 0.5);
+}
+
+.start-dock-stop .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---- 弹窗里的选项卡也跟上双色 ---- */
+.mode-card:has(input:checked) {
+  border-color: rgba(232, 67, 90, 0.55);
+  background: linear-gradient(135deg, rgba(232, 67, 90, 0.16), rgba(240, 198, 116, 0.1));
+}
+
+.mode-card:hover {
+  border-color: rgba(240, 198, 116, 0.42);
+}
+
+/* 矮屏时竖卡再收一点，别压住游戏抽屉 */
+@media (max-height: 720px) {
+  .start-dock {
+    gap: 7px;
+    padding: 10px;
+  }
+  .start-dock-play,
+  .start-dock-running {
+    height: 42px;
+  }
+}
+
+/* ---- 弹窗里的选择控件：聚焦/悬停统一到花火×火花 ---- */
+.select:hover {
+  border-color: rgba(240, 198, 116, 0.45);
+}
+
+.select:focus {
+  border-color: rgba(232, 67, 90, 0.7);
+  box-shadow: 0 0 0 3px rgba(232, 67, 90, 0.14);
+}
+
+.server-manager-actions .btn:hover {
+  border-color: rgba(240, 198, 116, 0.5);
+  color: var(--text);
+}
+
+/* 当前服务器：花火红起手，往火花金收尾，和管理弹窗外的风格接上 */
+.server-row.is-active {
+  background: linear-gradient(
+    90deg,
+    rgba(232, 67, 90, 0.15),
+    rgba(240, 198, 116, 0.08) 58%,
+    transparent
+  );
+  box-shadow: inset 2px 0 0 #e8435a;
+}
+
+/* ---- logo 名字 ↔ logo 图：用变量锁死比例，改图尺寸名字自动跟 ---- */
+.brand {
+  --brand-mark: 40px;
+}
+
+.brand-mark {
+  width: var(--brand-mark);
+  height: var(--brand-mark);
+}
+
+.brand-name {
+  /* 名字字号 = logo 图的 0.575 倍：40px 图配 23px 字，缩图时自动等比缩 */
+  font-size: calc(var(--brand-mark) * 0.575);
+}
+
+body.sidebar-collapsed .brand {
+  --brand-mark: 38px;
+}
+
+.start-brand {
+  --brand-mark: 24px;
+  font-size: calc(var(--brand-mark) * 0.58);
+}
+
+.start-brand-mark {
+  width: var(--brand-mark);
+  height: var(--brand-mark);
+}
+
+/* ---- 硬链接弹窗：源 / 目标 一行 + 交换键 ---- */
+.link-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.link-swap {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 6px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease, transform 0.2s ease;
+}
+
+.link-swap:hover {
+  color: #2b1a20;
+  border-color: rgba(240, 198, 116, 0.7);
+  background: linear-gradient(135deg, #f0c674, #e8435a);
+  transform: rotate(180deg);
+}
+
+.link-swap .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---- 检测结果：数字放大，重点突出「能省多少」 ---- */
+.link-preview-grid {
+  gap: 9px;
+}
+
+.link-stat {
+  padding: 11px 13px;
+  border-radius: 10px;
+}
+
+.link-stat-num {
+  font-size: 18px;
+}
+
+.link-stat.is-accent .link-stat-num {
+  font-size: 22px;
+}
+
+.link-preview-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* 窄屏时两个下拉改上下排，交换键横过来放在中间 */
+@media (max-width: 520px) {
+  .link-pair {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: stretch;
+  }
+  .link-swap {
+    justify-self: center;
+    margin: 0;
+    transform: rotate(90deg);
+  }
+  .link-swap:hover {
+    transform: rotate(270deg);
+  }
+}
+
+/* ---- logo 名字 ↔ logo 图：按更高优先级压过散落各处的硬编码字号 ---- */
+.sidebar .brand {
+  --brand-mark: 40px;
+}
+
+.sidebar .brand .brand-mark {
+  width: var(--brand-mark);
+  height: var(--brand-mark);
+}
+
+.sidebar .brand .brand-name {
+  /* 26 / 40 ≈ 0.65：名字高度始终是 logo 图的三分之二，缩图时自动等比缩 */
+  font-size: calc(var(--brand-mark) * 0.65);
+}
+
+.start-screen .start-top .start-brand {
+  --brand-mark: 26px;
+  font-size: calc(var(--brand-mark) * 0.62);
+}
+
+.start-screen .start-top .start-brand-mark {
+  width: var(--brand-mark);
+  height: var(--brand-mark);
+}
+
+/* ---- 花火 / 火花 挂饰：火花帽兔 + 花火狐面，轻摆如悬挂的小坠子 ---- */
+.start-dock-crest {
+  position: absolute;
+  top: -18px;
+  right: 6px;
+  width: 52px;
+  height: 52px;
+  pointer-events: none;
+  z-index: 2;
+  transform-origin: top center;
+  animation: crest-swing 4.6s ease-in-out infinite;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.45));
+}
+
+@keyframes crest-swing {
+  0%, 100% { transform: rotate(-3.2deg); }
+  50% { transform: rotate(3.2deg); }
+}
+
+.start-dock-crest img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: 15px;
+  padding: 3px;
+  background: linear-gradient(155deg, rgba(232, 67, 90, 0.16), rgba(240, 198, 116, 0.16));
+  /* 光轨：1px 金线描边，不挡背景 */
+  border: 1px solid rgba(240, 198, 116, 0.55);
+  box-shadow: 0 0 12px rgba(240, 198, 116, 0.28);
+  backdrop-filter: blur(4px);
+}
+
+/* 第二个挂饰：花火狐面，挂在主坠子左侧 */
+.start-dock-charm {
+  position: absolute;
+  top: -14px;
+  right: 64px;
+  width: 42px;
+  height: 42px;
+  pointer-events: none;
+  z-index: 2;
+  transform-origin: top center;
+  animation: crest-swing 5.4s ease-in-out infinite;
+  filter: drop-shadow(0 5px 12px rgba(0, 0, 0, 0.45));
+}
+
+.start-dock-charm img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: 13px;
+  padding: 2px;
+  background: linear-gradient(155deg, rgba(240, 198, 116, 0.16), rgba(232, 67, 90, 0.16));
+  border: 1px solid rgba(232, 67, 90, 0.5);
+  box-shadow: 0 0 10px rgba(232, 67, 90, 0.26);
+  backdrop-filter: blur(4px);
+}
+
+/* ---- 挂饰：主页左右下角两只改挂到标题栏右上（小球停靠右下，不再遮挡） ---- */
+.page-head-settings { position: relative; }
+
+.start-dock-sparks {
+  position: absolute;
+  right: 12px;
+  bottom: 6px;
+  display: flex;
+  gap: 5px;
+  color: rgba(232, 67, 90, 0.75);
+  pointer-events: none;
+}
+
+.start-dock-sparks i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px rgba(232, 67, 90, 0.6);
+  animation: dock-spark 2.4s ease-in-out infinite;
+}
+
+.start-dock-sparks i:nth-child(2) {
+  animation-delay: 0.5s;
+  opacity: 0.7;
+}
+
+.start-dock-sparks i:nth-child(3) {
+  animation-delay: 1s;
+  opacity: 0.45;
+}
+
+@keyframes dock-spark {
+  0%, 100% { transform: scale(0.7); opacity: 0.35; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+/* 开始页的 logo 图被好几处硬编码成 42px，用 img. 提权把尺寸收回到变量上 */
+.start-screen .start-top .start-brand img.start-brand-mark {
+  width: var(--brand-mark);
+  height: var(--brand-mark);
+  object-fit: cover;
+}
+
+/* ================================================================== */
+/* 收尾修正：2.3.0 那段 !important 把三处 logo 强行统一成 42px 并盖了    */
+/* 一层强调色渐变，把真实立绘糊住了。这里保留「三处同尺寸」，但把渐变   */
+/* 去掉换成玻璃描边，名字字号按 0.62 对齐 logo。                        */
+/* ================================================================== */
+.sidebar .brand-mark,
+.start-screen .start-top .start-brand-mark {
+  background: transparent !important;
+  border: 1px solid rgba(240, 198, 116, 0.55) !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.24) !important;
+}
+
+/* 名字 = logo 的 0.62：42px 的图配 26px 的字，两边一致 */
+.sidebar .brand .brand-name,
+.start-screen .start-top .start-brand {
+  font-size: 26px !important;
+}
+
+/* 右下角卡片再透一点，别把立绘 / 动态背景压死 */
+.start-dock {
+  backdrop-filter: blur(16px);
+  background:
+    radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.15), transparent 58%),
+    radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.13), transparent 58%),
+    rgba(9, 7, 11, 0.46);
+}
+
+/* 顶栏别压住画面：去掉实心底，只留按钮本身 */
+.start-screen .start-top {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* ---- 学「光轨」的做法：细线 + 微光，别用实心块压住立绘和动态背景 ---- */
+.start-dock {
+  border: 1px solid rgba(240, 198, 116, 0.26);
+  backdrop-filter: blur(10px);
+  background:
+    radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.13), transparent 60%),
+    radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.11), transparent 60%),
+    rgba(9, 7, 11, 0.26);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+/* 顶栏按钮也走同一套：透底 + 细描边 */
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  border-color: rgba(240, 198, 116, 0.3);
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(10px);
+}
+
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover {
+  border-color: rgba(240, 198, 116, 0.62);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* ================================================================== */
+/* 全页面装饰层：除启动页外，悬挂花火 / 火花小挂饰 + 淡角色背景          */
+/* 由 body.charms-on 控制（设置里可开关），body.start-mode 时排除        */
+/* ================================================================== */
+.page-deco {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+  overflow: hidden;
+  display: none;
+}
+/* 除启动页外容器常驻；挂饰 / 背景各自再由独立开关决定 */
+body:not(.start-mode) .page-deco { display: block; }
+
+/* 淡角色背景：花火立绘，低透明度铺在右下，大部分移出屏幕，不压阅读。受 charbg-on 控制 */
+.page-deco-bg {
+  display: none;
+  position: absolute;
+  right: -5%;
+  bottom: -4%;
+  height: 82%;
+  max-height: 760px;
+  opacity: 0.08;
+  filter: blur(1.2px) saturate(1.08);
+}
+body.charbg-on .page-deco-bg { display: block; }
+.page-deco-bg img { height: 100%; width: auto; max-width: none; display: block; }
+
+/* 挂饰：和启动页 dock 同一套轻摆逻辑。受 charms-on 控制 */
+.page-deco-charm {
+  display: none;
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  transform-origin: top center;
+  animation: deco-swing 5.4s ease-in-out infinite;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.4));
+}
+body.charms-on .page-deco-charm { display: block; }
+.page-deco-charm img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  border-radius: 13px;
+  padding: 4px;
+  background:
+    radial-gradient(120% 130% at 0% 0%, rgba(232, 67, 90, 0.22), transparent 62%),
+    radial-gradient(120% 130% at 100% 100%, rgba(240, 198, 116, 0.2), transparent 62%),
+    rgba(12, 9, 14, 0.55);
+  border: 1px solid rgba(240, 198, 116, 0.5);
+  box-shadow: 0 0 12px rgba(240, 198, 116, 0.25);
+  backdrop-filter: blur(3px);
+}
+/* 两只挂饰不再压左右下角：改挂到窗口右侧边缘中部，像从窗框垂下来的小坠子。
+   右下角留给迷你播放器，左下角留给内容与侧栏，互不打扰。 */
+.page-deco-charm--sparkle { top: 34%; right: 14px; bottom: auto; animation-duration: 5.8s; }
+.page-deco-charm--sparxie { top: 46%; right: 16px; bottom: auto; width: 38px; height: 38px; animation-duration: 4.8s; animation-direction: reverse; }
+.page-deco-charm--sparxie img {
+  border-color: rgba(232, 67, 90, 0.55);
+  box-shadow: 0 0 12px rgba(232, 67, 90, 0.24);
+}
+
+/* 漂浮小精灵：烟花（花火）/ 火元素（火花）/ 星空，淡光漂浮，不挡视线 */
+.page-deco-sprite {
+  display: none;
+  position: absolute;
+  pointer-events: none;
+  animation: deco-float 7s ease-in-out infinite;
+}
+body.charms-on .page-deco-sprite { display: block; }
+.page-deco-sprite img {
+  width: 100%; height: 100%; object-fit: contain; display: block;
+  opacity: 0.5;
+  animation: deco-twinkle 5s ease-in-out infinite;
+  filter: drop-shadow(0 0 10px rgba(240, 198, 116, 0.35));
+}
+.page-deco-sprite--fireworks { top: 30%; left: 1.4%; width: 52px; animation-duration: 8.5s; }
+.page-deco-sprite--fireworks img { opacity: 0.4; filter: drop-shadow(0 0 10px rgba(232, 67, 90, 0.32)); }
+.page-deco-sprite--flame { top: 42%; right: 3.5%; width: 42px; animation-duration: 6.5s; animation-delay: -2s; }
+.page-deco-sprite--flame img { filter: drop-shadow(0 0 12px rgba(232, 67, 90, 0.45)); animation-delay: -1.2s; }
+.page-deco-sprite--stars { bottom: 25%; left: 4.5%; width: 52px; animation-duration: 9.5s; animation-delay: -3.5s; }
+.page-deco-sprite--stars img { filter: drop-shadow(0 0 10px rgba(240, 198, 116, 0.5)); animation-delay: -2.4s; }
+
+@keyframes deco-swing {
+  0%, 100% { transform: rotate(-3.2deg); }
+  50% { transform: rotate(3.2deg); }
+}
+@keyframes deco-float {
+  0%, 100% { transform: translateY(0) rotate(-3deg); }
+  50% { transform: translateY(-13px) rotate(3deg); }
+}
+@keyframes deco-twinkle {
+  0%, 100% { opacity: 0.38; }
+  50% { opacity: 0.72; }
+}
+
+@media (max-width: 900px) {
+  .page-deco-charm { width: 36px; height: 36px; }
+  .page-deco-bg { height: 60%; opacity: 0.05; }
+}
+
+/* ================================================================== */
+/* 花火 / 火花 风格：按钮与控件统一的粉金描边光                          */
+/* 粉 #E8435A（花火）× 金 #F0C674（火花），悬停/聚焦浮现，不压底色       */
+/* ================================================================== */
+.btn:hover,
+.btn-ghost:hover,
+.btn-glass:hover,
+.btn-quiet:hover,
+.switch:hover,
+.swatch:hover,
+.segmented button:hover,
+.mini-chip:hover,
+.nav-item:hover {
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.32), 0 0 16px rgba(240, 198, 116, 0.32);
+}
+
+.btn-primary {
+  background-image: linear-gradient(135deg, rgba(232, 67, 90, 0.2), rgba(240, 198, 116, 0.2));
+  box-shadow: 0 0 0 1px rgba(240, 198, 116, 0.4), 0 0 14px rgba(240, 198, 116, 0.24);
+}
+.btn-primary:hover {
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.55), 0 0 22px rgba(240, 198, 116, 0.5);
+}
+
+.switch.on {
+  background: linear-gradient(135deg, rgba(232, 67, 90, 0.85), rgba(240, 198, 116, 0.85));
+  box-shadow: 0 0 0 1px rgba(240, 198, 116, 0.5), 0 0 12px rgba(240, 198, 116, 0.4);
+}
+
+/* 服务器选择行同样只留细线 */
+.start-server-pick {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ================================================================== */
+/* 小按钮重做：极简 + 花火(粉) × 火花(金) 角色色                         */
+/* 去掉丑陋的面具纹样(.hx-orn)，默认近乎无填充，hover 浮现粉→金渐变描边。 */
+/* ================================================================== */
+.hx-orn {
+  display: none !important;
+}
+
+.chrome-btn,
+.window-control,
+.start-video-toggle,
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  transition: color 0.16s ease, border-color 0.2s ease, background 0.16s ease,
+    box-shadow 0.22s ease, transform 0.16s ease;
+}
+
+.chrome-btn:hover,
+.window-control:hover,
+.start-video-toggle:hover,
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover {
+  color: #fff !important;
+  border-color: rgba(240, 198, 116, 0.85) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  /* 内圈花火粉 + 外晕火花金，组成角色色描边 */
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.32), 0 0 14px rgba(240, 198, 116, 0.35) !important;
+}
+
+/* 关闭键保持危险红，不参与粉金渐变 */
+.chrome-close:hover,
+.window-control-close:hover,
+.chrome-btn.chrome-close:hover,
+.start-screen .start-top .chrome-btn.chrome-close:hover {
+  color: #fff !important;
+  border-color: transparent !important;
+  background: rgba(216, 68, 63, 0.9) !important;
+  box-shadow: 0 0 14px rgba(216, 68, 63, 0.42) !important;
+}
+
+/* ================================================================== */
+/* 底部抽屉：收起时标题行与小播放器垂直居中；游戏卡 hover/选中 用角色色描边  */
+/* ================================================================== */
+
+/* 收起态小球嵌在「选择游戏」标题行右侧的槽里，约束高度避免把整行顶偏 */
+#start-mini-slot {
+  display: inline-flex;
+  align-items: center;
+  max-height: 30px;
+}
+
+#start-mini-slot #mini-player {
+  max-height: 30px;
+}
+
+#start-mini-slot #mini-player .mini-ball {
+  width: 28px;
+  height: 28px;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(10, 8, 12, 0.6);
+}
+
+.start-games-chevron {
+  color: #F0C674;
+}
+
+.start-games .start-game-thumb {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.start-games .start-game-thumb:hover {
+  border-color: rgba(240, 198, 116, 0.6);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.28), 0 6px 18px rgba(0, 0, 0, 0.42);
+  transform: translateY(-2px);
+}
+
+.start-games .start-game-thumb.active {
+  border-color: rgba(240, 198, 116, 0.85);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.3);
+}
+
+/* ================================================================== */
+/* 工具页重做：游戏能力卡（tg-*）——分类成组、功能直达、游戏主题色光带  */
+/* ================================================================== */
+.tools-game-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.tg-card {
+  --tg-accent: #f0c674;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--tg-accent) 12%, transparent), transparent 60%),
+    var(--surface);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.22s ease, transform 0.18s ease;
+}
+.tg-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--tg-accent) 55%, transparent);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.18), 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+/* 左侧游戏主题色光带 */
+.tg-bar {
+  width: 3px;
+  align-self: stretch;
+  border-radius: 3px;
+  margin: 10px 0;
+  background: linear-gradient(180deg, var(--tg-accent), rgba(232, 67, 90, 0.85));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--tg-accent) 70%, transparent);
+}
+
+.tg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tg-head-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.tg-head-copy strong { font-size: 15px; font-weight: 650; color: var(--text); }
+.tg-head-copy small {
+  font-size: 11px; letter-spacing: 0.02em;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tg-count {
+  font-size: 11px; color: var(--tg-accent);
+  border: 1px solid color-mix(in srgb, var(--tg-accent) 45%, transparent);
+  border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+  background: color-mix(in srgb, var(--tg-accent) 10%, transparent);
+}
+.tg-arrow {
+  display: inline-flex; color: var(--muted);
+  transition: transform 0.22s ease;
+}
+.tg-card:not(.is-open) .tg-arrow { transform: rotate(-90deg); }
+
+.tg-body {
+  padding: 2px 14px 13px 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tg-group { display: flex; flex-direction: column; gap: 6px; }
+.tg-group-label {
+  font-size: 10.5px; letter-spacing: 0.12em;
+  color: var(--muted);
+  padding-left: 2px;
+}
+.tg-feats { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.tg-feat {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 11px;
+  font-size: 12.5px; line-height: 1;
+  color: var(--text-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.18s ease, background 0.16s ease, box-shadow 0.2s ease, transform 0.14s ease;
+}
+.tg-feat .icon { color: var(--tg-accent); opacity: 0.9; }
+.tg-feat:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--tg-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--tg-accent) 12%, transparent);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.22), 0 0 14px rgba(240, 198, 116, 0.22);
+  transform: translateY(-1px);
+}
+.tg-feat.needs-login::after {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: rgba(240, 198, 116, 0.9);
+  box-shadow: 0 0 6px rgba(240, 198, 116, 0.8);
+}
+.tg-feat.is-static { cursor: default; opacity: 0.6; }
+
+@media (max-width: 720px) {
+  .tools-game-grid { grid-template-columns: 1fr; }
+}
+
+/* ================================================================ */
+/* 动态页重做（花火粉 #E8435A × 火花金 #F0C674 · 光轨细线微光）       */
+/* ================================================================ */
+.nd-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.nd-tabs { flex-shrink: 0; }
+.nd-tabs button { min-width: 84px; }
+
+/* 分区小标题：一条粉金火花 + 标题 */
+.nd-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 30px 2px 14px;
+}
+.nd-section-spark {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #F6D99B, #F0C674 55%, #E8435A);
+  box-shadow: 0 0 0 4px rgba(240, 198, 116, 0.10), 0 0 14px rgba(240, 198, 116, 0.55);
+  flex-shrink: 0;
+}
+.nd-section-head h3 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: 0.02em;
+  background: linear-gradient(90deg, #F3D9A0, #E8435A 130%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.nd-section-head p { margin: 2px 0 0; font-size: 12.5px; opacity: 0.6; }
+
+/* 版本时间线 */
+.nd-timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 4px;
+}
+.nd-timeline::before {
+  content: "";
+  position: absolute;
+  left: 43px; top: 18px; bottom: 18px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(232, 67, 90, 0.55), rgba(240, 198, 116, 0.28) 45%, transparent);
+}
+.nd-tl-item {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 18px 14px 0;
+  border-radius: 16px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.2s ease, transform 0.14s ease;
+}
+.nd-tl-item:hover {
+  background: color-mix(in srgb, var(--accent, #E8435A) 6%, var(--panel, rgba(255,255,255,0.04)));
+  border-color: rgba(232, 67, 90, 0.22);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.10), 0 8px 26px -18px rgba(240, 198, 116, 0.4);
+  transform: translateY(-1px);
+}
+.nd-tl-node {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  width: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nd-tl-node strong {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: var(--gold-ink, #F0C674);
+  background: rgba(20, 14, 20, 0.55);
+  border: 1px solid rgba(240, 198, 116, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(232, 67, 90, 0.12), 0 0 12px -4px rgba(240, 198, 116, 0.5);
+  white-space: nowrap;
+}
+.nd-tl-item.is-latest .nd-tl-node strong {
+  color: #3a1216;
+  background: linear-gradient(135deg, #F3D9A0, #F0C674 45%, #E8435A);
+  border-color: transparent;
+  box-shadow: 0 0 16px -2px rgba(232, 67, 90, 0.55);
+}
+.nd-tl-body { min-width: 0; flex: 1; }
+.nd-tl-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.nd-tl-head h4 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.nd-tl-date { margin-left: auto; font-size: 12px; opacity: 0.5; white-space: nowrap; }
+.nd-tl-body p {
+  margin: 5px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  opacity: 0.66;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.nd-tl-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 9px;
+  font-size: 11.5px;
+  opacity: 0.7;
+}
+.nd-tl-tag {
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(232, 67, 90, 0.35);
+  color: #F0A6B2;
+}
+.nd-tl-read { opacity: 0.55; }
+.nd-tl-go {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--gold-ink, #F0C674);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.nd-tl-item:hover .nd-tl-go { opacity: 1; transform: translateX(0); }
+
+/* 使用指南卡片网格 */
+.nd-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 10px;
+}
+.nd-guide-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  text-align: left;
+  padding: 13px 14px;
+  border-radius: 15px;
+  color: inherit;
+  background: color-mix(in srgb, var(--accent, #E8435A) 4%, var(--panel, rgba(255,255,255,0.04)));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: border-color 0.18s ease, box-shadow 0.2s ease, transform 0.14s ease;
+}
+.nd-guide-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(240, 198, 116, 0.4);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.18), 0 12px 28px -18px rgba(240, 198, 116, 0.55);
+}
+.nd-guide-icon {
+  flex-shrink: 0;
+  width: 38px; height: 38px;
+  display: grid; place-items: center;
+  border-radius: 11px;
+  color: var(--gold-ink, #F0C674);
+  background: rgba(232, 67, 90, 0.10);
+  border: 1px solid rgba(240, 198, 116, 0.28);
+}
+.nd-guide-text { min-width: 0; flex: 1; }
+.nd-guide-text h4 { margin: 0; font-size: 13.5px; font-weight: 650; }
+.nd-guide-text p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.nd-guide-card > .icon { opacity: 0.4; flex-shrink: 0; }
+
+/* 更新日志折叠：查看更早版本 / 收起早期版本 */
+.nd-more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px auto 0;
+  padding: 9px 18px;
+  align-self: center;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 198, 116, 0.32);
+  background: color-mix(in srgb, var(--accent, #E8435A) 6%, var(--panel, rgba(255, 255, 255, 0.04)));
+  color: var(--gold-ink, #F0C674);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.2s ease, transform 0.14s ease;
+}
+.nd-more-btn:hover {
+  border-color: rgba(240, 198, 116, 0.6);
+  box-shadow: 0 0 0 1px rgba(232, 67, 90, 0.18), 0 10px 24px -18px rgba(240, 198, 116, 0.55);
+  transform: translateY(-1px);
+}
+.nd-more-btn .icon { width: 14px; height: 14px; }
+
+/* 官方公告分区与动态页节奏对齐 */
+.nd-page .news-notices { margin-top: 32px; }
+.nd-page .news-update { margin-top: 8px; }
+
+@media (max-width: 720px) {
+  .nd-timeline::before { left: 35px; }
+  .nd-tl-node { width: 64px; }
+  .nd-tl-node strong { font-size: 11px; padding: 5px 8px; }
+  .nd-tl-date { margin-left: 0; width: 100%; }
+  .nd-guide-grid { grid-template-columns: 1fr; }
+}
+
+/* ================================================================== */
+/* 工具页一页式：去掉左导航后，全宽游戏能力卡墙 + 页头账号/插件入口      */
+/* ================================================================== */
+.tools-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 全宽后卡片更舒展，宽屏约 3 列，避免被拉成扁条 */
+.tg-grid-full {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+/* 账号登录弹窗：里面直接复用 .miyo-card / 通行证玻璃卡 */
+.tools-accounts-modal { max-width: 720px; }
+.tools-accounts-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.tools-accounts-body .miyo-card,
+.tools-accounts-body .page.glass-panel {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 2.4.0 合并自对方分支：工具页 · 游戏 Wiki                              */
+/* 卡片本身就是一条外链，所以比别的面板矮、也不用展开态。                 */
+/* ------------------------------------------------------------------ */
+.tools-wiki-panel {
+  margin-top: 18px;
+}
+
+.tools-wiki-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tools-wiki-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.tools-wiki-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 15px 13px;
+  border-radius: var(--radius, 14px);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.tools-wiki-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  transform: translateY(-1px);
+}
+
+.tools-wiki-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tools-wiki-head strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 「官方 / 社区」小标签：官方用 accent，社区走中性色，别让两者抢视觉 */
+.tools-wiki-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.tools-wiki-tag.is-official {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.tools-wiki-site {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  opacity: 0.86;
+}
+
+.tools-wiki-desc {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* 按钮推到卡片底部，同一行的卡片按钮才能对齐 */
+.tools-wiki-card .btn {
+  margin-top: auto;
+  align-self: flex-start;
+}
+
+@media (max-width: 1080px) {
+  .tools-wiki-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .tg-grid-full { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+}
+@media (max-width: 720px) {
+  .tg-grid-full { grid-template-columns: 1fr; }
+  .tools-head-actions { width: 100%; }
+}
+
+/* ================================================================== */
+/* 启动页抽屉 v21：游戏列表整体下挪，收起态不再露出卡片边缘                  */
+/* 收起只露 44px（标题行 30 + 上下 padding 7），把卡片推到 44px 以下       */
+/* ================================================================== */
+.start-screen .start-games .start-game-list {
+  margin-top: 6px;
+  padding-top: 16px;
+}
+
+/* ================================================================== */
+/* 按键手感 & 开关动画：统一收口（写在文件最后，收掉前面几版零散定义）       */
+/*                                                                     */
+/* 为什么必须放最后：styles.css 里 .switch 被改过多版，而浅色主题那一套是   */
+/* :root[data-theme="light"] .switch.on，特异性 (0,4,0)，比普通的          */
+/* .switch.on (0,2,0) 更高——写在文件中段的浅色分支会把后面补的普通定义     */
+/* 重新盖掉，于是「深色修好了、浅色还是老样子」。所以基础态和浅色态必须     */
+/* 成对地写在文件末尾，两个主题才长得一样。                                */
+/*                                                                     */
+/* 角色色：花火粉 #E8435A × 火花金 #F0C674                                */
+/* ================================================================== */
+:root {
+  /* 按键反馈统一参数：按下 120ms 出结果，松手 180ms 回弹，开关行程 200ms */
+  --tap-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --tap-press: 0.12s;
+  --tap-release: 0.18s;
+  --tap-slide: 0.2s;
+}
+
+/* ---- 开关：轨道 / 光轨 / 滑块 三层 ---- */
+/*
+ * 轨道拆成两层写：background-image（渐变）本身没法插值，只改它必然是瞬变，
+ * 看着就像「没动画」；真正被过渡的是 background-color，渐变只当纹理铺在上面。
+ */
+.switch {
+  position: relative;
+  box-sizing: border-box;
+  width: 46px;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background-color: #221d2b;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0.24));
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--tap-slide) var(--tap-ease),
+    box-shadow var(--tap-slide) var(--tap-ease),
+    transform var(--tap-press) var(--tap-ease);
+}
+/* 光轨：打开时轨道里亮起一道细光 */
+.switch::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(240, 198, 116, 0) 0%,
+    rgba(255, 236, 190, 0.6) 58%,
+    rgba(232, 67, 90, 0.55) 100%
+  );
+  opacity: 0;
+  transition: opacity var(--tap-slide) var(--tap-ease);
+  pointer-events: none;
+}
+/* 滑块：开/关是真实的 transform 位移，不只是换颜色 */
+.switch::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: #5f5872;
+  background-image: radial-gradient(
+    circle at 34% 30%,
+    rgba(255, 255, 255, 0.45),
+    rgba(255, 255, 255, 0) 60%
+  );
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  transform: translate(0, -50%);
+  transition:
+    transform var(--tap-slide) var(--tap-ease),
+    background-color var(--tap-slide) var(--tap-ease),
+    box-shadow var(--tap-slide) var(--tap-ease);
+}
+.switch.on {
+  background-color: rgba(232, 67, 90, 0.92);
+  background-image: linear-gradient(
+    120deg,
+    rgba(255, 122, 142, 0.5) 0%,
+    rgba(168, 76, 126, 0.35) 52%,
+    rgba(240, 198, 116, 0.5) 100%
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 198, 116, 0.55),
+    inset 0 1px 2px rgba(0, 0, 0, 0.28),
+    0 0 12px rgba(232, 67, 90, 0.26);
+}
+.switch.on::before {
+  opacity: 1;
+}
+.switch.on::after {
+  /* 46 宽 − 3 左内距 − 18 滑块 = 25 可用行程，取 22 让右端同样留 3，两边等距 */
+  transform: translate(22px, -50%);
+  background-color: #f7dc9c;
+  box-shadow: 0 0 10px rgba(240, 198, 116, 0.7), 0 0 18px rgba(232, 67, 90, 0.3);
+}
+.switch:hover {
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 198, 116, 0.5),
+    inset 0 1px 2px rgba(0, 0, 0, 0.35),
+    0 0 14px rgba(240, 198, 116, 0.28);
+}
+.switch.on:hover {
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 198, 116, 0.72),
+    inset 0 1px 2px rgba(0, 0, 0, 0.24),
+    0 0 16px rgba(232, 67, 90, 0.32);
+}
+.switch:active {
+  transform: scale(0.94);
+}
+.switch:focus-visible {
+  outline: 2px solid rgba(240, 198, 116, 0.75);
+  outline-offset: 3px;
+}
+
+/* 浅色主题：轨道翻成浅灰，滑块仍保持深色，否则白球压在浅轨上几乎看不见 */
+:root[data-theme="light"] .switch {
+  background-color: #d8d3e1;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(0, 0, 0, 0.05));
+  box-shadow:
+    inset 0 0 0 1px rgba(28, 18, 44, 0.16),
+    inset 0 1px 2px rgba(28, 18, 44, 0.1);
+}
+:root[data-theme="light"] .switch::after {
+  background-color: #7a7389;
+  box-shadow: 0 1px 2px rgba(28, 18, 44, 0.26);
+}
+:root[data-theme="light"] .switch.on {
+  background-color: rgba(232, 67, 90, 0.88);
+  background-image: linear-gradient(120deg, rgba(255, 138, 156, 0.5) 0%, rgba(240, 198, 116, 0.6) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(190, 140, 58, 0.55),
+    0 0 10px rgba(232, 67, 90, 0.18);
+}
+:root[data-theme="light"] .switch.on::after {
+  background-color: #f2c86a;
+  box-shadow: 0 0 8px rgba(190, 140, 58, 0.45), 0 1px 2px rgba(28, 18, 44, 0.22);
+}
+
+/* ---- 按键：hover / active / focus-visible 统一手感 ---- */
+.btn,
+.btn-ghost,
+.btn-quiet,
+.mini-chip,
+.segmented button,
+.nav-item,
+.swatch {
+  transition:
+    transform var(--tap-press) var(--tap-ease),
+    background-color var(--tap-release) var(--tap-ease),
+    border-color var(--tap-release) var(--tap-ease),
+    color var(--tap-release) var(--tap-ease),
+    box-shadow var(--tap-release) var(--tap-ease),
+    opacity var(--tap-release) var(--tap-ease),
+    filter var(--tap-release) var(--tap-ease);
+}
+.btn:active,
+.btn-ghost:active,
+.btn-quiet:active,
+.mini-chip:active,
+.segmented button:active {
+  transform: translateY(1px) scale(0.975);
+  filter: brightness(0.96);
+}
+.nav-item:active {
+  transform: scale(0.985);
+}
+.swatch:active {
+  transform: scale(1.02);
+}
+.btn:focus-visible,
+.btn-ghost:focus-visible,
+.btn-quiet:focus-visible,
+.mini-chip:focus-visible,
+.segmented button:focus-visible,
+.nav-item:focus-visible,
+.swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 关掉动效偏好：位移留给最终状态，压下去也不再做缩放回弹 */
+@media (prefers-reduced-motion: reduce) {
+  .switch,
+  .switch::before,
+  .switch::after,
+  .btn,
+  .btn-ghost,
+  .btn-quiet,
+  .mini-chip,
+  .segmented button,
+  .nav-item,
+  .swatch {
+    transition: none;
+  }
+  .switch:active,
+  .btn:active,
+  .btn-ghost:active,
+  .btn-quiet:active,
+  .mini-chip:active,
+  .segmented button:active,
+  .nav-item:active {
+    transform: none;
+  }
+}
+
+/* ================================================================== */
+/* 预下载：预下载面板 + 异环渠道面板                                  */
+/*                                                                     */
+/* 同样写在文件末尾：浅色主题的 .pd-badge 用的是 :root[data-theme=light]  */
+/* 前缀，特异性比普通 .pd-badge 高，成对写在后面才能真的生效。            */
+/* 角色色：花火粉 #E8435A × 火花金 #F0C674                              */
+/* ================================================================== */
+.pd-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.pd-badge.is-ready {
+  border-color: rgba(240, 198, 116, 0.5);
+  background: rgba(240, 198, 116, 0.14);
+  color: #f0c674;
+}
+.pd-badge.is-done {
+  border-color: rgba(111, 214, 176, 0.5);
+  background: rgba(111, 214, 176, 0.13);
+  color: #6fd6b0;
+}
+.pd-badge.is-update {
+  border-color: rgba(245, 163, 92, 0.5);
+  background: rgba(245, 163, 92, 0.13);
+  color: #f5a35c;
+}
+.pd-badge.is-block {
+  border-color: rgba(232, 67, 90, 0.5);
+  background: rgba(232, 67, 90, 0.13);
+  color: #ff7a8a;
+}
+.pd-badge.is-idle {
+  color: var(--muted);
+}
+
+.pd-status {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.pd-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pd-status-note {
+  flex: 1;
+  min-width: 180px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.pd-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.pd-note .icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  color: #f0c674;
+}
+
+.pd-story {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.pd-story-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+.pd-story-copy strong {
+  font-size: 13.5px;
+}
+.pd-story-copy span {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.pd-story-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-style: normal;
+}
+.pd-story-tag.is-over {
+  border-color: rgba(240, 198, 116, 0.55);
+  color: #f0c674;
+}
+.pd-story-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* 游戏卡上的预下载入口：有东西可下才点亮，其余时候和旁边工具键一样安静 */
+.card-tool.pd-card-entry.is-ready .icon {
+  color: #f0c674;
+}
+.card-tool.pd-card-entry.is-ready:hover {
+  border-color: rgba(240, 198, 116, 0.55);
+}
+.card-tool.pd-card-entry.is-update .icon {
+  color: #f5a35c;
+}
+.card-tool.pd-card-entry.is-done .icon {
+  color: #6fd6b0;
+}
+.card-tool.pd-card-entry.is-block .icon {
+  color: #ff7a8a;
+}
+
+/* 异环官服 / B服：那句 notice 是必读项，不做省略 */
+.nte-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #f5a35c;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.nte-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.nte-panel-head strong {
+  font-size: 14px;
+}
+.nte-current {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.nte-current.is-bili {
+  border-color: rgba(232, 67, 90, 0.5);
+  color: #ff7a8a;
+}
+.nte-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 8px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.nte-notice .icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  color: #f0c674;
+}
+.nte-notice.is-reason {
+  margin-top: 5px;
+  color: var(--muted);
+}
+
+/* 渠道卡片：点了就是切过去，当前渠道亮着带「当前」角标 */
+.nte-channel-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.nte-channel-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .18s, background .18s;
+}
+.nte-channel-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.nte-channel-card:disabled {
+  cursor: default;
+  opacity: .55;
+}
+.nte-channel-card.is-active {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  opacity: 1;
+}
+.nte-channel-card strong {
+  font-size: 13.5px;
+  font-weight: 650;
+}
+.nte-channel-card small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.nte-channel-card em {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+/* ---- 浅色主题：金/绿在浅底上太淡，压深一档才读得清 ---- */
+:root[data-theme="light"] .pd-badge.is-ready {
+  border-color: rgba(190, 140, 58, 0.55);
+  background: rgba(240, 198, 116, 0.24);
+  color: #8a6410;
+}
+:root[data-theme="light"] .pd-badge.is-done {
+  border-color: rgba(63, 168, 132, 0.5);
+  background: rgba(111, 214, 176, 0.22);
+  color: #1f6d53;
+}
+:root[data-theme="light"] .pd-badge.is-update {
+  border-color: rgba(217, 136, 52, 0.5);
+  background: rgba(245, 163, 92, 0.22);
+  color: #8a5210;
+}
+:root[data-theme="light"] .pd-badge.is-block {
+  border-color: rgba(200, 55, 78, 0.5);
+  background: rgba(232, 67, 90, 0.16);
+  color: #b02a3d;
+}
+
+:root[data-theme="light"] .pd-note .icon,
+:root[data-theme="light"] .nte-notice .icon,
+:root[data-theme="light"] .card-tool.pd-card-entry.is-ready .icon {
+  color: #b8860f;
+}
+:root[data-theme="light"] .card-tool.pd-card-entry.is-update .icon {
+  color: #c1761f;
+}
+:root[data-theme="light"] .card-tool.pd-card-entry.is-done .icon {
+  color: #2f8f70;
+}
+:root[data-theme="light"] .card-tool.pd-card-entry.is-block .icon {
+  color: #b02a3d;
+}
+:root[data-theme="light"] .card-tool.pd-card-entry.is-ready:hover {
+  border-color: rgba(190, 140, 58, 0.6);
+}
+:root[data-theme="light"] .pd-story-tag.is-over {
+  border-color: rgba(190, 140, 58, 0.6);
+  color: #8a6410;
+}
+:root[data-theme="light"] .nte-current.is-bili {
+  border-color: rgba(200, 55, 78, 0.5);
+  color: #b02a3d;
+}
+
+/* ── 点歌台重排：左侧曲库导航（kr-*） ─────────────────────────────
+ * 为什么要独立加一段：分页和「我的歌单」原来都在主区最下面，歌单一多就要长距离滚动。
+ * 这里把分页和平台同步提成常驻左栏，主区只负责搜索 + 当前分页的内容。
+ * 颜色一律取主题变量，深浅两套主题都不用另写一份。
+ */
+.kr-body {
+  /* 覆盖 .song-app-body 的两列：左栏 208 / 主区自适应 / 右栏 340 */
+  grid-template-columns: 208px minmax(0, 1fr) 340px;
+}
+
+.kr-nav {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  /* 用 surface 而不是 surface-2：浅色主题下 surface-2 和页面底色几乎一样，面板会看不出边界 */
+  background: var(--surface);
+}
+
+.kr-nav-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kr-nav-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 6px 4px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.kr-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.kr-nav-item:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+/* 选中态用左侧色条而不是整块填充：左栏常驻，整块高亮会抢主区的注意力 */
+.kr-nav-item.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.kr-nav-icon {
+  display: inline-flex;
+  flex: none;
+  opacity: 0.85;
+}
+
+.kr-nav-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-nav-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-nav-item.is-active .kr-nav-count {
+  color: var(--accent);
+}
+
+.kr-nav-sync {
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.kr-sync-all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--accent-line);
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.kr-sync-all:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.kr-sync-all:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
+.kr-sync-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kr-sync-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 8px;
+  border-radius: 9px;
+}
+
+.kr-sync-row:hover {
+  background: var(--surface-3);
+}
+
+.kr-sync-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-sync-state {
+  flex: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-sync-row.is-failed .kr-sync-state {
+  color: var(--accent);
+}
+
+.kr-sync-row.is-syncing .kr-sync-state {
+  opacity: 0.8;
+}
+
+.kr-sync-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.kr-sync-btn:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-sync-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.kr-sync-btn .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.kr-nav-hint {
+  margin-top: auto;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.kr-nav-login {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.kr-nav-login:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+/* 主区顶部条：替代原来那排分页按钮，只报当前分页和条数 */
+.kr-main-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 14px 4px;
+}
+
+.kr-main-title {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+.kr-main-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-main-clear {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.kr-main-clear:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+/* 平台分区头里的同步按钮：和左栏同一个动作，顺手就能点 */
+.playlists-group-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.kr-group-sync {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.kr-group-sync:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-group-sync:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.kr-group-sync .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.playlists-group-note.is-stale {
+  color: var(--accent);
+}
+
+/* ── 歌单钻取页：曲目单独占满主区，不用先展开再往下滑 ───────────── */
+.kr-detail {
+  display: flex;
+  flex-direction: column;
+  /* 抵消 .song-app-scroll 的 8px 内边距，让标题条能贴住主区顶边 */
+  margin: -8px;
+  min-height: 100%;
+  background: var(--surface);
+}
+
+.kr-detail-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.kr-detail-back {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+  padding: 0 10px 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.kr-detail-back:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-detail-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.kr-detail-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-detail-title small {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-detail-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kr-detail-play {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.kr-detail-play:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.kr-detail-play:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.kr-detail-play .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.kr-detail-hint {
+  margin: 0;
+  padding: 8px 14px 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* 曲目自己不再滚动：外层 .song-app-scroll 已经是滚动容器，
+   两层套起来会变成「滚到头还要再滚一次」 */
+.kr-detail-songs {
+  max-height: none;
+  overflow: visible;
+  padding: 4px 8px 14px;
+}
+
+.kr-detail-song {
+  width: 100%;
+}
+
+/* 窄屏：左栏折成顶部一条横向导航（可横向滚动），不能把主区挤爆 */
+@media (max-width: 1100px) {
+  .kr-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .kr-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    overflow: visible;
+    padding: 8px 10px;
+    border-radius: 14px;
+  }
+
+  .kr-nav-block {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: none;
+    min-width: 0;
+  }
+
+  .kr-nav-label {
+    display: none;
+  }
+
+  .kr-nav-item {
+    width: auto;
+    flex: none;
+    padding: 6px 11px;
+    border-radius: 999px;
+  }
+
+  .kr-nav-item.is-active {
+    box-shadow: none;
+    border: 1px solid var(--accent-line);
+  }
+
+  /* 同步区单独占一行：宽度不够时让平台 chip 自己换行，不做横向滚动
+     —— 横向滚动会把「酷狗 / 酷我」切掉一半，看着像坏了 */
+  .kr-nav-sync {
+    flex: 1 1 100%;
+    gap: 6px;
+    padding-top: 6px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .kr-sync-all {
+    width: auto;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+
+  .kr-sync-list {
+    flex-direction: row;
+    gap: 4px;
+  }
+
+  .kr-sync-row {
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  .kr-sync-state {
+    display: none;
+  }
+
+  .kr-nav-hint {
+    display: none;
+  }
+
+  .kr-detail {
+    margin: -8px;
+  }
+
+  .kr-detail-bar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .kr-detail-title {
+    flex: 1 1 100%;
+    order: 3;
+  }
+}
+
+/* 上次同步时间：主进程给了 syncedAt / durationMs 才有内容，没同步过就整行不渲染 */
+.kr-sync-meta {
+  margin: 0;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏：上次同步时间单独占一行，别把平台 chip 挤回上一行去 */
+@media (max-width: 1100px) {
+  .kr-sync-meta {
+    flex: 1 1 100%;
+    padding: 0 2px;
+  }
+}
+
+/* ── 更新日志查看器（设置 → 自更新 → 查看日志） ─────────────────────
+ * 这两个按钮以前是死的（markup 有、switch 没有 case）。补上之后需要一个能滚动、
+ * 等宽、不换行错位的展示区：日志里有大量路径和 JSON，比例字体读起来会很痛苦。
+ */
+.ulog-modal {
+  width: min(920px, calc(100vw - 96px));
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+.ulog-path {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.ulog-body {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ulog-block h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+}
+.ulog-pre {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+.ulog-empty {
+  margin: 0;
+  padding: 18px 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* ==================================================================
+ * 启动页服务器切换器 / 硬链接安装 / 硬链接去重（统一 sw- 前缀）
+ *
+ * 两类背景要分开对待：
+ *  - 启动页的 dock 在两种主题下都是「深色磨砂玻璃」，文字沿用 --hero-ink /
+ *    --hero-muted（这两个变量本身就是为压在图片上的浅色文字准备的）；
+ *  - 弹窗贴在 --surface 上，一律用 --text-2 / --muted / --line / --surface-2，
+ *    这样深浅主题都不用另写一套。
+ * ================================================================== */
+
+/* ---- A1. 渠道标签：跟在文件名前面，文件名截断时它不会跟着没 ---- */
+.sw-srv-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid rgba(var(--accent-rgb), 0.42);
+  border-radius: 5px;
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent-2);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 15px;
+  vertical-align: 1px;
+}
+
+/* ---- A2. 不可用的服务器：说出来为什么、下一步点哪 ---- */
+.sw-srv-state {
+  flex: none;
+  align-self: center;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  color: var(--hero-muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.sw-srv-state.active {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent-2);
+}
+
+.sw-srv-state.ready {
+  /* 就绪用金色而不是绿色：主题里没有绿色变量，金色是「可用的高光」那一档 */
+  border-color: rgba(240, 198, 116, 0.4);
+  color: var(--accent-2);
+}
+
+.sw-srv-state.missing {
+  border-style: dashed;
+}
+
+.sw-srv-unusable .start-server-item-copy strong {
+  color: var(--hero-muted);
+}
+
+.sw-srv-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--accent-2);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.sw-srv-block .icon {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 2px;
+}
+
+.sw-srv-block em {
+  display: block;
+  margin-top: 1px;
+  color: var(--hero-muted);
+  font-style: normal;
+}
+
+.sw-srv-pick-bad {
+  color: var(--accent-2);
+}
+
+/* ---- A3. 底部三组动作：一行一件事，右侧小字解释做什么 ---- */
+.sw-srv-actions {
+  /* 服务器多的时候列表会滚动，动作区跟着滚走就白写了，钉在底部 */
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.075);
+  background: rgba(14, 11, 17, 0.92);
+}
+
+.sw-srv-action {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--hero-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.sw-srv-action:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.sw-srv-action-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--accent-2);
+}
+
+.sw-srv-action-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.sw-srv-action-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sw-srv-action-copy strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.sw-srv-action-copy small {
+  color: var(--hero-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+/* ---- A4. 服务器管理面板顶部的一句话总结 ---- */
+.sw-mgr-summary {
+  margin: 0 0 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+/* ---- B1. 一句话说明 + 折叠细节 ---- */
+.sw-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.sw-note .icon {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
+  color: var(--accent-2);
+}
+
+.sw-note b {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.sw-note-more {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.sw-note-more > summary {
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.sw-note-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sw-note-more > summary::before {
+  content: '＋';
+  margin-right: 4px;
+  color: var(--accent-2);
+}
+
+.sw-note-more[open] > summary::before {
+  content: '－';
+}
+
+.sw-note-more p {
+  margin: 6px 0 0;
+  padding: 9px 11px;
+  border-left: 2px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-2);
+}
+
+/* ---- B2. 结论卡：装哪个版本 / 能复用多少 / 盘够不够 ---- */
+.sw-sum {
+  margin: 0 0 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-2);
+}
+
+.sw-sum-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 0;
+  border-top: 1px dashed var(--line);
+}
+
+.sw-sum-row:first-child {
+  border-top: 0;
+}
+
+.sw-sum-k {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.sw-sum-v {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}
+
+.sw-sum-v.is-warn {
+  color: var(--accent);
+}
+
+.sw-sum-v.is-warn::before {
+  content: '! ';
+  font-weight: 700;
+}
+
+.sw-sum-v.is-ok::before {
+  content: '✓ ';
+  color: var(--accent-2);
+}
+
+.sw-sum-hint {
+  margin: 0;
+  padding: 7px 0 8px;
+  border-top: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ---- B3. 阶段条：读清单 → 补丁修补 → 写入/下载 → 校验收尾 → 完成 ---- */
+.sw-stages {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.sw-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  text-align: center;
+  transition: border-color 0.14s ease, color 0.14s ease;
+}
+
+.sw-stage-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.sw-stage-label {
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.sw-stage.is-active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--text);
+}
+
+.sw-stage.is-active .sw-stage-dot {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.sw-stage.is-done {
+  color: var(--text-2);
+}
+
+.sw-stage.is-done .sw-stage-dot {
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent-2);
+}
+
+.sw-stage.is-skipped {
+  opacity: 0.55;
+}
+
+/* ---- B4. 补丁修补成绩：阶段过去之后仍然留着，别让用户回头找不到 ---- */
+.sw-ldiff {
+  margin: 0 0 10px;
+  padding: 8px 11px;
+  border-left: 2px solid var(--accent-2);
+  border-radius: 0 8px 8px 0;
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sw-ldiff[hidden] {
+  display: none !important;
+}
+
+/* ---- B5. 结果卡（安装完成 / 合并完成共用） ---- */
+.sw-result {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(var(--accent-rgb), 0.32);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-2);
+}
+
+.sw-result[hidden] {
+  display: none !important;
+}
+
+.sw-result-title {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.sw-result-title::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 12px;
+  margin-right: 7px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  vertical-align: -1px;
+}
+
+.sw-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.sw-result-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.sw-result-item span {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.sw-result-item strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sw-result-note {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.65;
+  word-break: break-all;
+}
+
+/* ---- C1. 三步式：选对象 → 预检 → 执行 ---- */
+.sw-steps {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.sw-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sw-step span {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.sw-step strong {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sw-step.is-active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--text);
+}
+
+.sw-step.is-active span {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.sw-step.is-done {
+  color: var(--text-2);
+}
+
+.sw-step.is-done span {
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent-2);
+}
+
+.sw-link-step[hidden] {
+  display: none !important;
+}
+
+/* 真实参与比较的两个目录，摊开给用户确认，省得猜到底比的是哪个文件夹 */
+.sw-link-dirs {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.sw-link-dirs[hidden],
+.sw-link-same[hidden] {
+  display: none !important;
+}
+
+.sw-link-same {
+  margin: 8px 0 0;
+  padding: 8px 11px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+/* 自定义文件夹不再折叠：没有官服 exe 的玩家全靠它 */
+.sw-link-custom {
+  margin: 12px 0;
+  padding: 11px 12px 4px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md, 12px);
+  background: var(--surface-2);
+}
+
+.sw-link-custom-head {
+  margin-bottom: 9px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sw-link-custom .hint {
+  margin: 4px 0 8px;
+}
+
+.sw-preview-line {
+  margin: 0 0 10px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.sw-preview-line b {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.sw-link-modal .link-progress {
+  margin-top: 12px;
+}
+
+/* ---- 窄屏：阶段条 / 步骤条收成两行，别把字挤成竖排 ---- */
+@media (max-width: 720px) {
+  .sw-stages {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .sw-step strong {
+    display: none;
+  }
+
+  .sw-sum-row {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .sw-sum-v {
+    text-align: left;
+  }
+}
+
+/* ---- 浅色主题：--line 在浅底上几乎看不见，卡片描边换成 --line-strong ---- */
+:root[data-theme="light"] .sw-sum,
+:root[data-theme="light"] .sw-stage,
+:root[data-theme="light"] .sw-step,
+:root[data-theme="light"] .sw-result-item,
+:root[data-theme="light"] .sw-link-custom {
+  border-color: var(--line-strong);
+}
+
+:root[data-theme="light"] .sw-result {
+  border-color: rgba(var(--accent-rgb), 0.28);
+}
+
+/* ── 切换器下拉：列表与动作区分层 ─────────────────────────────────
+ * B 那版把动作区写成 position:sticky;bottom:0，本意是让按钮常驻可见，
+ * 实际效果是它被钉在滚动区底部、直接盖住服务器行——三个服务器只看得到第一个。
+ * 这里改成：列表自己滚，动作区回到文档流。顺带把硬编码的深色背景换掉，
+ * 否则浅色主题下会凭空出现一条黑带。
+ */
+.start-server-menu {
+  overflow: hidden;
+  /* 三个服务器行 + 三个动作实测要 415px 左右，之前给 360 会把最后一项「服务器管理」
+     顶出容器（overflow:hidden 直接裁掉，既看不见也点不到）。这里留够高度；
+     服务器更多的游戏（终末地 5 个）由 .sw-srv-list 自己滚，动作区始终露在外面。 */
+  max-height: min(440px, 58vh);
+}
+.sw-srv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+.sw-srv-actions {
+  position: static;
+  flex: none;
+  background: transparent;
+  border-top: 1px solid var(--line);
+}
+
+/* ── 导入歌单 / 添加歌曲链接（弹窗重做） ─────────────────────────────
+ * 旧的导入弹窗把「本地 API 地址」和一大段 <code> 说明摊在表单最上面，
+ * 第一眼看到的是技术字段而不是「粘链接」。这里改成：一个输入框 + 边输边识别
+ * + 一张平台徽标卡；技术字段收进默认折叠的「高级」里。
+ * 颜色全取主题变量，下面只给浅色主题补两处需要压暗的地方。
+ */
+.kr-imp-modal {
+  width: min(520px, 100%);
+}
+
+.kr-imp-modal.is-narrow {
+  width: min(468px, 100%);
+}
+
+.kr-imp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 输入框和「从剪贴板粘贴」长在同一个盒子里，看上去就是一件事 */
+.kr-imp-box {
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface-2);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kr-imp-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.kr-imp-input {
+  display: block;
+  width: 100%;
+  min-height: 76px;
+  padding: 12px 14px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.kr-imp-input::placeholder {
+  color: var(--muted);
+}
+
+.kr-imp-box-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px 9px;
+}
+
+.kr-imp-paste {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.kr-imp-paste:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-imp-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 识别结果区固定占一块高度：在「正在识别…」和徽标卡之间切换时弹窗不跳 */
+.kr-imp-state {
+  display: flex;
+  align-items: stretch;
+  min-height: 54px;
+}
+
+.kr-imp-note {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.kr-imp-note.is-miss {
+  color: var(--accent);
+}
+
+.kr-imp-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.kr-imp-card .mp-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: 0;
+}
+
+.kr-imp-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.kr-imp-card-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.kr-imp-card-copy small {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-imp-card-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.kr-imp-card-ok .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.kr-imp-error {
+  margin: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.kr-imp-error[hidden] {
+  display: none;
+}
+
+.kr-imp-adv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kr-imp-adv-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.kr-imp-adv-toggle:hover {
+  color: var(--text-2);
+}
+
+.kr-imp-adv-toggle .icon {
+  width: 11px;
+  height: 11px;
+  transition: transform 0.15s ease;
+}
+
+.kr-imp-adv-toggle.is-open .icon {
+  transform: rotate(180deg);
+}
+
+.kr-imp-adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+/* hidden 属性必须显式压掉 display:flex，否则折叠区一上来就是展开的 */
+.kr-imp-adv-body[hidden] {
+  display: none;
+}
+
+.kr-imp-adv-body span {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.kr-imp-adv-input {
+  height: 36px;
+  font-size: 12.5px;
+}
+
+/* 「添加歌曲链接」：两个标签各占一行，地址用等宽字，一眼能看出是不是链接 */
+.kr-imp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kr-imp-field-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kr-imp-field-label em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
+}
+
+.kr-imp-url {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.kr-imp-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kr-imp-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.kr-imp-file:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-imp-submit {
+  min-width: 92px;
+}
+
+/* 左栏：每个平台自己的「x 分钟前」+ 分组小标题右侧的操作提示 */
+.kr-sync-when {
+  flex: none;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.kr-sync-row.is-syncing .kr-sync-when {
+  opacity: 0.3;
+}
+
+.kr-nav-label-hint {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
+/* 浅色主题：accent-soft 在白底上太淡，卡片和错误条需要一点实色压住 */
+:root[data-theme="light"] .kr-imp-card {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.09);
+}
+
+:root[data-theme="light"] .kr-imp-error {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.09);
+}
+
+:root[data-theme="light"] .kr-imp-box {
+  background: var(--surface);
+}
+
+:root[data-theme="light"] .kr-imp-paste {
+  background: var(--surface-2);
+}
+
+/* 窄屏：平台行折成胶囊，状态文字已经隐藏，时间也没地方放 */
+@media (max-width: 1100px) {
+  .kr-sync-when {
+    display: none;
+  }
+
+  .kr-nav-label-hint {
+    display: none;
+  }
+}
+
+/* 弹窗里的主按钮：全局 .btn-primary 最后一层只盖了 background-image，
+ * 底色透明 + 近白色字，浅色主题下就成了白字白底（几乎看不见）。
+ * 这里只在本轮两个弹窗里给回实色主按钮，不动全局按钮。 */
+.kr-imp-modal .btn-primary {
+  background-color: var(--accent);
+  background-image: none;
+  border: 1px solid var(--accent-line);
+  color: var(--accent-ink);
+  box-shadow: 0 8px 20px var(--accent-soft);
+}
+
+.kr-imp-modal .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.kr-imp-modal .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: grayscale(0.2);
+}
+
+/* 多行输入框不需要那个拖拽角，弹窗宽度是固定的 */
+.kr-imp-input {
+  resize: none;
+}
+
+/* 识别卡里的封面缩略图：短链能解析出封面时用它替掉平台圆点 */
+.kr-imp-card-cover {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  object-fit: cover;
+  background: var(--surface-3);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 预下载入口（对齐 Starward）：只在官方放出新版本时出现，
+ * 位置压在「开始游戏」正上方，没有新版本时整块不存在。
+ * ═══════════════════════════════════════════════════════════════ */
+.start-dock-pd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid rgba(240, 198, 116, 0.32);
+  border-radius: 12px;
+  background: linear-gradient(120deg, rgba(240, 198, 116, 0.13), rgba(232, 67, 90, 0.09));
+  color: var(--accent-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+.start-dock-pd:hover,
+.start-dock-pd:focus-visible {
+  outline: none;
+  border-color: rgba(240, 198, 116, 0.62);
+  background: linear-gradient(120deg, rgba(240, 198, 116, 0.24), rgba(232, 67, 90, 0.16));
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(240, 198, 116, 0.18);
+}
+.start-dock-pd .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+.start-dock-pd-label {
+  flex: none;
+}
+/* 版本号与体积靠右，淡淡的，不跟「预下载新版本」抢注意力 */
+.start-dock-pd-meta {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.62);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 音乐账号：右上角单入口 + 两步式登录面板 ──────────────────────────
+ * 以前右上角平铺三个平台胶囊（还没有酷我），点开是四张大卡片堆在一个
+ * 720px 的框里，网易云那张还带二维码 + API 地址 + 启动服务按钮 —— 用户的原话
+ * 是「那么大个框，完全不好看」。现在入口只有一个，弹窗分两步：
+ * 列表（四行）→ 单平台面板（扫二维码 / 一个主按钮）。
+ */
+.kr-acct-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.kr-acct-entry:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-acct-entry.is-on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.kr-acct-entry .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 弹窗本体：比原来的 720px 窄一半，两个视图都靠这一条定宽 */
+.kr-login-modal {
+  width: min(468px, calc(100vw - 64px));
+}
+
+.kr-login-head {
+  align-items: center;
+  gap: 10px;
+}
+
+.kr-login-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.kr-login-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 26px;
+  padding: 0 8px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.kr-login-back:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-login-back .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.kr-login-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── 第一步：平台列表 ── */
+.kr-acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kr-acct-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.kr-acct-row.is-on {
+  border-color: var(--accent-line);
+}
+
+.kr-acct-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.kr-acct-main:hover {
+  background: var(--surface-3);
+}
+
+.kr-acct-main .mp-dot {
+  flex: none;
+  margin-right: 0;
+}
+
+.kr-acct-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.kr-acct-copy strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kr-acct-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-acct-tag {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.kr-acct-row.is-on .kr-acct-tag {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.kr-acct-out {
+  flex: none;
+  height: 26px;
+  margin-right: 3px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.kr-acct-out:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.kr-acct-out:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.kr-acct-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* ── 第二步：单平台面板 ── */
+.kr-login-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.kr-login-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/*
+ * 酷狗 / 酷我的兜底提示条。
+ * 用户原话是「不能扫码或者登录账号获取歌单的话，你要在登录界面写清楚，用歌单链接导入」，
+ * 所以这块不能做成一坨灰色小字：左边一条竖色条 + 图标 + 加粗标题，再加一颗能直接跳过去的按钮。
+ */
+.kr-login-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 13px 14px 13px 15px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.kr-login-tip.is-warn {
+  border-color: var(--accent-line);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.kr-login-tip-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.kr-login-tip-head .icon {
+  flex: none;
+  color: var(--accent);
+}
+
+.kr-login-tip p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.kr-login-tip code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.kr-login-tip-btn {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.kr-login-tip-btn .icon {
+  color: var(--accent);
+}
+
+:root[data-theme="light"] .kr-login-tip {
+  border-color: rgba(24, 18, 20, 0.12);
+  border-left-color: var(--accent);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+:root[data-theme="light"] .kr-login-tip.is-warn {
+  border-color: var(--accent-line);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+:root[data-theme="light"] .kr-login-tip p {
+  color: #574a4d;
+}
+
+:root[data-theme="light"] .kr-login-tip code {
+  background: rgba(24, 18, 20, 0.07);
+  color: #2a2224;
+}
+
+.kr-login-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.kr-login-link:hover {
+  color: var(--accent);
+}
+
+/* 二维码：164px 一张小图 + 右边状态，不再套大卡片 */
+.kr-login-qr {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.kr-login-qr .netease-qr-image {
+  width: 164px;
+  height: 164px;
+}
+
+.kr-login-qr-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kr-login-qr-copy strong {
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.kr-login-qr-copy > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.kr-login-qr-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+/* 高级：本地服务地址默认折叠 */
+.kr-login-adv {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.kr-login-adv-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.kr-login-adv-toggle:hover {
+  color: var(--text-2);
+}
+
+.kr-login-adv-toggle .icon {
+  width: 11px;
+  height: 11px;
+  transition: transform 0.15s ease;
+}
+
+.kr-login-adv-toggle.is-open .icon {
+  transform: rotate(180deg);
+}
+
+.kr-login-adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* hidden 要显式压过 display:flex，否则一打开就是展开的 */
+.kr-login-adv-body[hidden] {
+  display: none;
+}
+
+.kr-login-adv-body > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.kr-login-adv-row {
+  display: flex;
+  gap: 8px;
+}
+
+.kr-login-adv-row .text-input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  font-size: 12.5px;
+}
+
+/* 浅色主题：行和入口都靠 surface 叠层，压一档免得糊成一片 */
+:root[data-theme="light"] .kr-acct-entry {
+  background: var(--surface);
+}
+
+:root[data-theme="light"] .kr-acct-entry:hover {
+  background: var(--surface-2);
+}
+
+:root[data-theme="light"] .kr-acct-row {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+
+:root[data-theme="light"] .kr-acct-row.is-on {
+  border-color: rgba(var(--accent-rgb), 0.42);
+}
+
+:root[data-theme="light"] .kr-acct-main:hover {
+  background: var(--surface-3);
+}
+
+:root[data-theme="light"] .kr-acct-out {
+  background: var(--surface);
+}
+
+:root[data-theme="light"] .kr-login-back {
+  background: var(--surface-2);
+}
+
+/* 窄窗口：二维码和文案竖着排，别把 164px 的图挤成一条 */
+@media (max-width: 520px) {
+  .kr-login-qr {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .kr-login-qr .netease-qr-image {
+    width: 148px;
+    height: 148px;
+  }
+}
+
+/* 账号面板里的主按钮：全局 .btn-primary 最后一层是半透明渐变 + 近白字，
+ * 浅色主题下就成了白字浅底（截图里「打开登录窗口」几乎看不见）。
+ * 只给这个弹窗补实色主按钮，不动全局按钮。 */
+.kr-login-modal .btn-primary {
+  background-color: var(--accent);
+  background-image: none;
+  border: 1px solid var(--accent-line);
+  color: var(--accent-ink);
+  box-shadow: 0 8px 20px var(--accent-soft);
+}
+
+.kr-login-modal .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.kr-login-modal .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: grayscale(0.2);
+}
+
+/* 没拿到二维码时那块 164px 的纯白方块太抢眼（背景色来自通用的 .netease-qr-image）。
+ * 面板里改成中性底色，白底只留给真正加载出来的二维码图。 */
+.kr-login-qr .netease-qr-image {
+  background: var(--surface-3);
+}
+
+.kr-login-qr .netease-qr-image img {
+  background: #fff;
+}
+
+/* 弹窗自己接管初始焦点：否则 openModal 会把焦点丢给列表第一行，
+ * 那一行就顶着一圈粉色描边，看着像「已选中」。Tab 仍然从第一行走起。 */
+.kr-login-modal:focus {
+  outline: none;
+}
+
+/* ================================================================== */
+/* 启动页抽屉：游戏多了以后的两件事                                     */
+/* 1) 展开时左下任务面板 / 右下开始面板下沉让路，不再压住游戏卡片        */
+/* 2) 列表两端加翻页箭头 + 滚轮横滚，排后面的游戏看得见也点得到          */
+/* ================================================================== */
+
+/* 抽屉 hover / 聚焦展开时 body 会挂 drawer-open（setupStartDrawerSync 联动）。
+   两个浮层都在抽屉（.start-screen isolate 内 z:5）之上：.task-dock 是外部
+   fixed z:80，.start-dock 是 start-screen 内 absolute z:90，层级压不过它们，
+   所以只能空间避让 —— 展开时整体沉下去淡出，收起后原样回来。 */
+body.start-mode .task-dock,
+.start-screen .start-dock {
+  transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
+}
+
+body.start-mode.drawer-open .task-dock {
+  transform: translateY(150%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.drawer-open .start-dock {
+  transform: translateY(46px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ---- 游戏列表导轨 ---- */
+
+.start-game-rail {
+  position: relative;
+}
+
+.start-game-list {
+  scroll-behavior: smooth;
+  /* 两端留一点余量，首尾卡片横向滚动能完全越过箭头盖片的范围 */
+  padding-inline: 30px;
+  margin-inline: -30px;
+}
+
+/* 两端渐隐盖片：提示「这边还有/没了」，不挡点击 */
+.start-game-rail::before,
+.start-game-rail::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  bottom: -2px;
+  width: 30px;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.start-game-rail::before {
+  left: -30px;
+  background: linear-gradient(90deg, rgba(6, 5, 9, 0.92), transparent);
+}
+
+.start-game-rail::after {
+  right: -30px;
+  background: linear-gradient(270deg, rgba(6, 5, 9, 0.92), transparent);
+}
+
+.start-game-rail:not(.is-at-start)::before,
+.start-game-rail:not(.is-at-end)::after {
+  opacity: 1;
+}
+
+/* ---- 翻页箭头：悬停抽屉时浮现，到头的一侧自动收起 ---- */
+
+.start-game-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 46px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  color: var(--hero-ink);
+  background: rgba(14, 11, 18, 0.72);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  pointer-events: none;
+}
+
+.start-game-nav.is-prev {
+  left: 0;
+}
+
+.start-game-nav.is-next {
+  right: 0;
+}
+
+.start-game-nav .start-games-nav-icon {
+  width: 14px;
+  height: 14px;
+  transform: rotate(90deg);
+}
+
+.start-game-nav.is-prev .start-games-nav-icon {
+  transform: rotate(-90deg);
+}
+
+.start-game-nav:hover {
+  border-color: rgba(240, 198, 116, 0.5);
+  background: rgba(24, 18, 28, 0.85);
+}
+
+.start-games:hover .start-game-nav:not([disabled]),
+.start-games:focus-within .start-game-nav:not([disabled]) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.start-game-rail.is-at-start .start-game-nav.is-prev,
+.start-game-rail.is-at-end .start-game-nav.is-next {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* ================================================================== */
+/* 启动页左上角品牌名：与侧栏展开态同一套样子                           */
+/* （.start-brand-copy 曾被「旧顶栏让位」规则 display:none 压掉，        */
+/*   只剩 logo 图标；这里恢复两行文字并对齐侧栏的渐变风格）              */
+/* ================================================================== */
+
+.start-screen .start-top .start-brand {
+  gap: 10px;
+}
+
+.start-screen .start-top .start-brand-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+/* 名字：和 .sidebar .brand-name 同一款粉白渐变 + 淡粉光晕，
+   字号按顶栏 38px logo 取比例，撑得进顶栏又不失侧栏的分量 */
+.start-screen .start-top .start-brand-copy strong {
+  display: block;
+  overflow: visible;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
+  background: linear-gradient(180deg, #fff 0%, #ffd9e6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.42);
+  filter: drop-shadow(0 1px 6px rgba(255, 140, 170, 0.35));
+}
+
+/* 英文副题：对应侧栏 .brand-en 的字距 */
+.start-screen .start-top .start-brand-copy small {
+  display: block;
+  overflow: visible;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.62);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.4);
+}
+
+@media (max-width: 900px) {
+  .start-screen .start-top .start-brand-copy strong {
+    font-size: 16px;
+  }
+}
+
+/* ================================================================== */
+/* 工具页视觉简化（卡墙降噪）：降低每张游戏能力卡的视觉噪音             */
+/* 为什么：旧卡墙每张卡都带彩色「N 项」徽章、描边功能标签和多层光晕，    */
+/* 信息密度大、扫一眼抓不到重点。现在重点只剩游戏名 + 支持状态 + 展开，  */
+/* 能力标签平时只有文字、悬停才浮现底色，颜色与留白统一。               */
+/* 注意：全部是末尾覆盖规则，前面的 .tg-* 原规则保持原样，功能不受影响。 */
+/* ================================================================== */
+
+/* 卡片本体：主题色渐变压暗一档，hover 不再跳起来、只提亮描边 */
+.tg-card {
+  border-radius: 14px;
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--tg-accent) 7%, transparent), transparent 55%),
+    var(--surface);
+}
+.tg-card:hover {
+  transform: none;
+  border-color: var(--line-strong);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+}
+
+/* 左侧光带收窄减淡，只留一点主题色暗示 */
+.tg-bar {
+  width: 2px;
+  margin: 13px 0;
+  box-shadow: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--tg-accent) 80%, transparent), transparent);
+}
+
+/* 卡头：留白加大、副标题更淡 */
+.tg-head {
+  padding: 13px 16px;
+  gap: 12px;
+}
+.tg-head-copy strong {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.tg-head-copy small {
+  color: var(--muted);
+}
+
+/* 「N 项」徽章弱化成纯灰字，去掉彩边和底色，不再和游戏名抢视觉 */
+.tg-count {
+  color: var(--muted);
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+}
+
+/* 卡体与分组：统一留白，分区标题进一步弱化成小号淡字 */
+.tg-body {
+  padding: 0 16px 14px 19px;
+  gap: 12px;
+}
+.tg-group {
+  gap: 7px;
+}
+.tg-group-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+/* 能力标签：平时只有文字+淡图标（信息收进悬停），悬停才浮现主题色底 */
+.tg-feat {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+.tg-feat .icon {
+  color: var(--muted);
+}
+.tg-feat:hover {
+  transform: none;
+  box-shadow: none;
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--tg-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--tg-accent) 9%, transparent);
+}
+.tg-feat:hover .icon {
+  color: var(--tg-accent);
+}
+/* 需登录小圆点同步降噪：不发光 */
+.tg-feat.needs-login::after {
+  background: var(--muted);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* 游戏 Wiki 收进游戏卡：卡内 details 收缩框                            */
+/* 为什么：wiki 与能力卡本是同一维度（按游戏查资料），底部独立面板让     */
+/* 页面凭空多出一大块；收进卡里后工具页少一个分区，找 wiki 也更直觉。    */
+/* 旧的 .tools-wiki-* 规则保留在上面，其中「官方/社区」小标签被复用。    */
+/* ------------------------------------------------------------------ */
+.tg-wiki {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+.tg-wiki summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-size: 12px;
+  color: var(--muted);
+  transition: color 0.15s ease;
+}
+.tg-wiki summary::-webkit-details-marker {
+  display: none;
+}
+.tg-wiki summary:hover {
+  color: var(--text-2);
+}
+.tg-wiki summary > .icon:first-child {
+  color: var(--muted);
+}
+/* 官方/社区标签推到最右，箭头收尾；展开时箭头转上来 */
+.tg-wiki summary .tools-wiki-tag {
+  margin-left: auto;
+}
+.tg-wiki-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.tg-wiki[open] .tg-wiki-chevron {
+  transform: rotate(180deg);
+}
+/* 介绍文案：说明游戏类型 + wiki 能查什么 */
+.tg-wiki-intro {
+  margin: 9px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.tg-wiki-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+.tg-wiki-site {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.tg-wiki-row .btn {
+  font-size: 12px;
+  padding: 5px 11px;
+}
+
+/* ------------------------------------------------------------------ */
+/* 二级页面顶部「返回工具页」条                                         */
+/* 为什么：从工具页点进 record/gacha 等页后，回工具页原本只能绕道侧栏；  */
+/* 这条细导航条只在 fromTools 来路时渲染，不挤占各页原本的头部操作区。   */
+/* ------------------------------------------------------------------ */
+.tools-back-bar {
+  display: flex;
+  margin-bottom: 10px;
+}
+.tools-back-bar .btn {
+  font-size: 12px;
+  padding: 4px 11px;
+  color: var(--muted);
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+}
+.tools-back-bar .btn:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+
+/* ================================================================== */
+/* 点歌台：队列分组段头（整张导入的歌单 / 自选歌曲 分段显示）           */
+/* ================================================================== */
+
+.song-queue-seg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 14px 6px;
+  border-bottom: 1px solid var(--line, rgba(255, 255, 255, 0.06));
+}
+
+.song-queue-seg-head span {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.song-queue-seg-head small {
+  font-size: 10.5px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+/* ================================================================== */
+/* 战绩页简约化：少一层是一层，能省的高度全省                            */
+/* 之前 page-head / 三行标签 / 角色框 / hero / bars / metrics / 每个分区  */
+/* 都是带边框的独立卡片纵向摞着，进来先滚一屏才看到数据。这里统一收紧。   */
+/* ================================================================== */
+
+/* 1) 页头压紧：大标题块不再是半屏 */
+.record-page .page-head {
+  margin-bottom: 12px;
+}
+
+.record-page .page-head h1 {
+  font-size: 22px;
+}
+
+.record-page .page-head .page-desc {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+/* 2) 期数（本期/上期）并入功能标签行，去掉独立第三行 */
+.record-tabs-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--line);
+}
+
+.record-tabs-feature .record-tab {
+  padding: 5px 11px;
+  font-size: 12px;
+}
+
+/* 3) 角色条去卡片化：一行浅色小字，不再是一个带边框的框 */
+.record-page .record-role-line {
+  padding: 2px 2px 0;
+  margin-bottom: 10px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+}
+
+.record-page .record-account-line {
+  padding: 0 2px;
+  margin-bottom: 6px;
+  border: none;
+  background: transparent;
+}
+
+.record-page .record-account-chip,
+.record-page .record-role-chip {
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+
+/* 4) 主数字 hero 收紧 */
+.record-page .record-hero {
+  padding: 12px 16px;
+  margin-bottom: 10px;
+  border-radius: var(--radius);
+}
+
+.record-page .record-hero-value {
+  font-size: 30px;
+}
+
+/* 5) 进度条 / 指标网格收紧 */
+.record-page .record-bars,
+.record-page .record-metrics,
+.record-page .record-section {
+  margin-bottom: 10px;
+}
+
+.record-page .record-bar {
+  padding: 9px 12px;
+}
+
+.record-page .record-metric {
+  padding: 9px 12px;
+}
+
+.record-page .record-metric-value {
+  font-size: 17px;
+}
+
+/* 6) 分区去卡片化：整个分区不再套边框底色，只留小标题 + 条目浅底 */
+.record-page .record-section {
+  padding: 2px 2px 0;
+  border: none;
+  background: transparent;
+}
+
+.record-page .record-section-head {
+  margin-bottom: 7px;
+}
+
+.record-page .record-section-head h2 {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.record-page .record-section-body.is-rows {
+  gap: 6px;
+}
+
+/* 7) 条目行收紧 */
+.record-page .record-item {
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+
+.record-page .record-item-avatars .record-avatar {
+  width: 34px;
+  height: 34px;
+}
+
+/* 8) 原始 JSON 折叠块与正文间距收小 */
+.record-page .record-raw {
+  margin-top: 6px;
+}
+/* ==================== 主页（home）紧凑化改造（追加统一覆盖） ==================== */
+/*
+ * 原因：主页从「游戏库」区块往下占屏太多，看完要滚很久。
+ * 本段样式只作用于 homeView 根节点上的 .home-page 作用域类，
+ * 不影响游戏库页（libraryView）、战绩页等其它页面的同名结构。
+ * 交互全部保留：搜索/筛选/排序/添加游戏/同步官网/自动检测、动态点击、双角色按钮均不变。
+ */
+
+/* 1) 区块标题头压成单行紧凑条：上下间距砍半、标题缩小 */
+.home-page .section-head {
+  align-items: center;
+  margin: 14px 0 8px;
+}
+.home-page .section-head h3 {
+  font-size: 16px;
+}
+
+/* 2) 游戏库区块：贴紧 hero，卡片墙提高密度（列更多、间距更紧、信息区压扁） */
+.home-page .home-library {
+  margin-top: 12px;
+}
+.home-page .home-library .section-head {
+  margin: 0 0 8px;
+}
+.home-page .home-library .library-toolbar {
+  margin-bottom: 8px;
+}
+.home-page .home-library .game-grid {
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+  gap: 10px;
+}
+.home-page .home-library .game-info {
+  padding: 7px 2px 0;
+}
+.home-page .home-library .game-title {
+  font-size: 13.5px;
+}
+.home-page .home-library .game-sub {
+  font-size: 12px;
+}
+.home-page .home-library .game-meta {
+  margin-top: 4px;
+  gap: 5px;
+  font-size: 11.5px;
+}
+
+/* 3) 游玩统计：改成 <details> 折叠条，默认收起只占一行，数字内联在摘要里 */
+.home-page details.home-stats {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.home-page .home-stats summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.home-page .home-stats summary::-webkit-details-marker {
+  display: none;
+}
+.home-page .home-stats-title {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.home-page .home-stats-brief {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.home-page .home-stats-brief strong {
+  color: var(--text);
+  font-weight: 650;
+}
+.home-page .home-stats-hint {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.home-page .home-stats[open] .home-stats-hint {
+  display: none;
+}
+/* 展开后给 KPI 卡和明细行留出内边距，内部结构复用原有样式 */
+.home-page .home-stats .playtime-summary {
+  margin: 0 10px 8px;
+}
+.home-page .home-stats .playtime-list {
+  padding: 0 10px 10px;
+}
+
+/* 4) 最新动态：三张大卡换成单行紧凑列表（点击行为不变，仍是 open-news） */
+.home-page .home-news-head {
+  margin: 14px 0 8px;
+}
+.home-news-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.home-news-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.home-news-row:first-child {
+  border-top: 0;
+}
+.home-news-row:hover {
+  background: var(--surface-2);
+}
+.home-news-tag {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.home-news-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.home-news-date {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.home-news-row svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+/* 5) 双角色装饰区：大立绘为主视觉，名字和状态压在卡片下缘，长介绍挪进悬停提示 */
+.home-page .char-duo {
+  display: flex;
+  gap: 14px;
+  margin: 14px 0 10px;
+}
+.home-page .char-duo-card {
+  flex: 1;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 14px;
+  height: 236px;
+  min-height: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+}
+/* 完全展开：立绘按卡片高度等比缩放、contain 完整显示、贴底——不再裁半 */
+.home-page .char-duo-card img {
+  flex: none;
+  width: auto;
+  max-width: 40%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+}
+.home-page .char-duo-card:hover,
+.home-page .char-duo-card:focus-visible {
+  height: 236px;
+}
+.home-page .char-duo-card:hover img,
+.home-page .char-duo-card:focus-visible img {
+  transform: translateY(-3px);
+}
+.home-page .char-duo-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  padding-bottom: 6px;
+}
+.home-page .char-duo-copy strong {
+  flex: none;
+  font-size: 17px;
+  letter-spacing: 0.06em;
+}
+/* 名字旁边的功能小标签（游戏快启 / 音乐遥控） */
+.home-page .duo-tag {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  vertical-align: 2px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+/* 卡片功能区的总开关：默认就展开，不用等悬停 */
+.home-page .char-duo-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  max-height: none;
+  margin-top: 9px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  opacity: 1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+}
+.home-page .char-duo-card:hover .char-duo-stat,
+.home-page .char-duo-card:focus-visible .char-duo-stat {
+  max-height: none;
+  margin-top: 9px;
+  padding-top: 10px;
+  opacity: 1;
+}
+/* 花火卡：最近游玩的游戏条 */
+.home-page .duo-game {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 100%;
+}
+.home-page .duo-game-cover {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.home-page .duo-game-cover.is-initial {
+  display: grid;
+  place-items: center;
+  color: var(--accent, #f08ba6);
+  font-weight: 700;
+  font-size: 15px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.home-page .duo-game-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text, inherit);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 火花卡：歌名一行 */
+.home-page .duo-song-line {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text, inherit);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 火花卡：上一首 / 播放暂停 / 下一首 */
+.home-page .duo-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.home-page .duo-ctrl {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+:root[data-theme="light"] .home-page .duo-ctrl {
+  border-color: rgba(0, 0, 0, 0.16);
+  color: rgba(0, 0, 0, 0.75);
+}
+.home-page .duo-ctrl:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.28);
+  transform: scale(1.06);
+}
+:root[data-theme="light"] .home-page .duo-ctrl:hover {
+  background: rgba(0, 0, 0, 0.07);
+  border-color: rgba(0, 0, 0, 0.3);
+}
+.home-page .duo-ctrl.is-main {
+  width: 36px;
+  height: 36px;
+  border-color: transparent;
+  background: linear-gradient(140deg, rgba(240, 198, 116, 0.9), rgba(232, 120, 150, 0.9));
+  color: #1c1620;
+}
+.home-page .duo-ctrl.is-main:hover {
+  border-color: transparent;
+  background: linear-gradient(140deg, rgba(240, 198, 116, 1), rgba(232, 120, 150, 1));
+}
+.home-page .duo-ic {
+  display: grid;
+  place-items: center;
+}
+.home-page .duo-ic[hidden] {
+  display: none;
+}
+/* 直播点歌 / 运行中 小牌子 */
+.home-page .duo-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  padding: 3px 9px;
+  border: 1px solid rgba(122, 200, 255, 0.35);
+  border-radius: 999px;
+  color: rgba(150, 215, 255, 0.95);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.home-page .duo-live.is-running {
+  border-color: rgba(120, 220, 160, 0.35);
+  color: rgba(150, 235, 185, 0.95);
+}
+.home-page .duo-note {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* 二级功能页（战绩/抽卡/画质/截图/下载）隐藏悬挂装饰挂件：
+   挂件固定在左上角，正好压住这些页面第一行标签的字 */
+body.is-subpage .page-deco {
+  display: none;
+}
+
+/* ================================================================== */
+/* 2.4.x 启动页「选择服务器」面板简约化（全部游戏统一走这套）              */
+/* ================================================================== */
+/*
+ * 痛点一：面板底部超出屏幕且滚不了。
+ * 根因不在高度——19954 行把展开态菜单写成 display:block，早前给
+ * .sw-srv-list 的 flex:1 + min-height:0 在块级布局里全部失效，
+ * 列表按自然高度撑开、被 .start-server-menu 的 overflow:hidden 裁掉，
+ * 于是既看不见也滚不动（明日方舟国际服分组、崩坏3 三服最明显）。
+ * 这里在展开态重新声明为 flex 纵列，并压住整体高度。
+ */
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  display: flex;
+  flex-direction: column;
+  /* 菜单自身不越界：矮窗口下吃 52vh，高窗口最多 430px，动作区永远露在外面 */
+  max-height: min(430px, 52vh);
+  overflow: hidden;
+}
+
+/* 服务器列表自己滚：细滚动条 + 悬停才显形，别让一条粗轨压脏面板 */
+.start-screen .start-dock .sw-srv-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
+}
+.start-screen .start-dock .sw-srv-list::-webkit-scrollbar {
+  width: 5px;
+}
+.start-screen .start-dock .sw-srv-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.start-screen .start-dock .sw-srv-list::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+}
+.start-screen .start-dock .sw-srv-list:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* 分组小标题吸顶：滚动到哪一段，「国际服 · 选择区域」都咬在列表顶上 */
+.start-screen .start-dock .start-server-group-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px 4px;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.36);
+  background: linear-gradient(180deg, rgba(12, 10, 15, 0.92) 62%, rgba(12, 10, 15, 0));
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.65);
+}
+
+/* 选项行收紧：高度收窄、字重分级（服务器名 600 / 渠道与文件名 11px 弱化） */
+.start-screen .start-dock .start-server-item {
+  min-height: 34px;
+  padding: 6px 9px;
+}
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+/* 悬浮态更清晰：底色浮起 + 描边一点暖光，一眼知道点下去会选中哪个 */
+.start-screen .start-dock .start-server-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(240, 198, 116, 0.28);
+}
+
+/* 当前选中渠道高亮明显：accent 底色 + 左侧竖条 + 行尾勾，三层信号 */
+.start-screen .start-dock .start-server-item.is-active {
+  background: rgba(var(--accent-rgb), 0.2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* ── 点歌台 · 我的歌单详情读取占位（骨架 + 曲目数提示） ───────────────── */
+/* 首次点开大歌单时详情页不再整页空白：一句话提示 + 几行骨架 */
+.kr-detail-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px;
+}
+/* 每行骨架模拟「序号 + 封面 + 文案」的曲目行形状，微光扫过表示还在读 */
+.kr-detail-skeleton-row {
+  height: 44px;
+  border-radius: 8px;
+  background: linear-gradient(
+    100deg,
+    rgba(255, 255, 255, 0.05) 40%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(255, 255, 255, 0.05) 60%
+  );
+  background-size: 200% 100%;
+  animation: kr-detail-skeleton 1.4s ease-in-out infinite;
+}
+@keyframes kr-detail-skeleton {
+  from { background-position: 120% 0; }
+  to { background-position: -80% 0; }
+}
+
+/* ── 点歌台 · 队列分段折叠条 ─────────────────────────────────────────── */
+/* 段头右侧的「展开全部 / 收起」：和段头同排，样式低调不抢焦点 */
+.song-queue-seg-head .song-queue-seg-toggle {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  font-size: 11.5px;
+  opacity: 0.75;
+  cursor: pointer;
+}
+.song-queue-seg-head .song-queue-seg-toggle:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.13);
+}
+/* 折叠段底部的「展开其余 N 首」：通栏细条，点哪都行 */
+.song-queue-seg-more {
+  display: block;
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 7px 0;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.song-queue-seg-more:hover {
+  opacity: 1;
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+/* ── 点歌台 · 队列过滤框 ─────────────────────────────────────────────── */
+/* 队列顶部的轻量过滤：和搜索栏同一套圆角输入风格，窄一号 */
+.song-queue-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.song-queue-filterbar:focus-within {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.4);
+}
+.song-queue-filter-icon {
+  display: grid;
+  place-items: center;
+  color: inherit;
+  opacity: 0.55;
+}
+.song-queue-filter {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  padding: 8px 0;
+  outline: none;
+}
+.song-queue-filter::placeholder { color: inherit; opacity: 0.4; }
+.song-queue-filter-clear {
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 4px;
+}
+.song-queue-filter-clear:hover { opacity: 1; }
+.song-queue-filter-clear[hidden] { display: none; }
+
+/* ═══ 2.4.x 主页扁平化 + 风格色统一 ═══════════════════════════════
+   与启动页导航浮层同一套语言：素面扁平 + 主题色点缀（竖条/淡底/细线）。
+   角色立绘、hero 底图照常保留，只收重阴影与硬编码金边，色感跟随主题变量。 */
+
+/* hero：收掉 30px/90px 重阴影与硬编码金边，换主题色淡边 + 一层薄影 */
+.home-page .hero {
+  border-color: rgba(var(--accent-rgb), 0.2);
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* hero 左下氛围光：硬编码红金 → 主题色 */
+.home-page .hero-shade {
+  background:
+    linear-gradient(90deg, rgba(10, 3, 8, 0.96) 0%, rgba(22, 7, 13, 0.79) 44%, rgba(16, 5, 9, 0.28) 78%, rgba(10, 3, 8, 0.54) 100%),
+    radial-gradient(700px 380px at 18% 92%, var(--accent-soft), transparent 68%),
+    linear-gradient(0deg, rgba(10, 3, 8, 0.9) 0%, transparent 62%);
+}
+
+/* hero 顶部的期数 pill：金渐变 → 主题色渐变 */
+.home-page .hero-kicker .pill {
+  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  color: var(--accent-ink);
+  box-shadow: none;
+}
+
+/* 分区标题：左侧 3px 主题色竖条（与浮层 active 竖条同一语言） */
+.home-page .section-head h3 {
+  position: relative;
+  padding-left: 13px;
+}
+
+.home-page .section-head h3::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* 游戏库卡片：去重影，悬停时一道主题色细边替代上浮阴影 */
+.home-page .game-card {
+  box-shadow: none;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.home-page .game-card:hover {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
+}
+/* ═══ 2.4.x 启动页菜单键 = 唤出主页那个原生侧栏 ═══════════════
+   不另造面板、不改造侧栏自身形态（收缩/展开、图标条宽度全部沿用主页），
+   只控制它「推」出来的方向：
+     · 窗口态：主进程把窗口整体向左外扩出侧栏那么宽的一块，侧栏回到正常布局流
+               里站在那块新区域中；画面在屏幕上的尺寸和位置都不变（不缩窄、
+               不右移被裁），不压暗、不加遮罩；
+     · 浮层态（全屏 / 最大化 / 窗口已贴显示器左边缘，扩不出去）：侧栏改为浮在
+               画面上方从左侧滑入往内展开，并补一层暗遮罩。
+   点侧栏外 / Esc / 跳转后收回（窗口一并还原）；唤出时顶部按钮压在遮罩之上仍可点。 */
+
+/* 窗口态：侧栏站在布局流里，靠窗口外扩出来的那块空间显示，画面尺寸不受影响 */
+body.start-mode.start-nav-open .sidebar {
+  display: flex;
+  animation: start-nav-push 0.24s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+
+@keyframes start-nav-push {
+  from { transform: translateX(-100%); }
+  to { transform: none; }
+}
+
+/* 浮层态：扩不出去才浮在画面上，并加暗遮罩 */
+body.start-mode.start-nav-overlay .sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 120;
+  box-shadow: 22px 0 56px rgba(0, 0, 0, 0.38);
+}
+
+body.start-mode.start-nav-overlay .start-screen::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 118;
+  background: rgba(10, 8, 14, 0.35);
+}
+
+/* 唤出时按钮仍可点：压在遮罩之上 */
+body.start-mode.start-nav-open .start-top .chrome-menu,
+body.start-mode.start-nav-open .start-top .start-window-controls,
+body.start-mode.start-nav-open .start-top .start-video-tools {
+  position: relative;
+  z-index: 119;
+}
+
+/* ═══ 2.4.x 主页 hero 立绘恢复：不再挤在正方形小框里被裁 ═══════
+   之前 hero 被压到 300px 高、立绘塞进 238×238 方框裁切，双人立绘
+   只看得到一角。这里把高度还给 hero，立绘改成纵向大框 + contain
+   完整显示，不裁不压。 */
+.home-page .hero,
+.home-page .hero-content {
+  min-height: 398px;
+}
+
+.home-page .hero-portrait {
+  right: 34px;
+  bottom: 22px;
+  width: 320px;
+  height: 356px;
+  border-radius: 20px;
+  overflow: hidden;
+}
+
+.home-page .hero-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+}
+
+@media (max-width: 1180px) {
+  .home-page .hero-portrait {
+    width: 260px;
+    height: 300px;
+  }
+}
+
+/* ═══ 2.4.x 点歌台「音源」卡片 ═════════════════════════════════
+   内置音源的启用开关 + 用户导入的第三方音源列表。
+   风格跟侧栏 rail 里其它卡片一致：小圆片 + 主题色点缀。 */
+.song-source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.song-source-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim, rgba(255, 255, 255, 0.62));
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.16s, color 0.16s, border-color 0.16s;
+}
+
+.song-source-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--text, #fff);
+}
+
+/* 最近连接的直播间：一键重连，不用重新复制链接 */
+.song-live-history {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.song-live-history-label {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0.8;
+}
+.song-live-history-btn {
+  max-width: 220px;
+  padding: 3px 10px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.16));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2, inherit);
+  font-size: 11.5px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s, background 0.16s;
+}
+.song-live-history-btn:hover {
+  border-color: var(--line-strong, rgba(255, 255, 255, 0.32));
+  background: rgba(255, 255, 255, 0.05);
+}
+:root[data-theme="light"] .song-live-history-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.song-source-chip.active {
+  background: rgba(var(--accent-rgb), 0.18);
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.song-source-custom {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.song-source-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.song-source-item.is-off {
+  opacity: 0.45;
+}
+
+.song-source-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--text, #fff);
+  font-size: 12.5px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.song-source-del {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim, rgba(255, 255, 255, 0.55));
+  cursor: pointer;
+}
+
+.song-source-del:hover {
+  background: rgba(255, 90, 90, 0.16);
+  color: #ff8080;
+}
+
+.song-source-empty {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.45));
+}
+
+.song-source-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.song-source-url {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.song-source-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text, #fff);
+  font-size: 12px;
+}
+
+/* ===== 弹幕点歌 · 多直播间并存（2.4.2） ===== */
+/* 观众点歌入队方式切换（下一首播放 / 立即播放） */
+.song-live-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 2px;
+  flex-wrap: wrap;
+}
+.song-live-mode-label {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.song-live-chip {
+  appearance: none;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.song-live-chip:hover {
+  color: var(--text, inherit);
+}
+.song-live-chip.on {
+  background: var(--accent, #ff5c8a);
+  border-color: transparent;
+  color: #fff;
+}
+/* 已连接房间卡片：支持多张并存 */
+.song-live-room {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.03);
+}
+.song-live-room-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.song-live-room-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.song-live-room .song-live-on {
+  margin: 8px 0 0;
+}
+.song-live-captured {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }

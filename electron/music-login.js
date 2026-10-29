@@ -75,6 +75,27 @@ const PLATFORM_CONFIG = {
     apiBase: 'https://wwwapi.kugou.com/',
     referer: 'https://www.kugou.com/',
   },
+  kuwo: {
+    label: '酷我音乐',
+    /*
+     * 酷我没有独立登录页（/login 会 302 回首页），登录框是首页上的 Vue 弹窗
+     * （.reg_login），由 LOGIN_CLICK_SCRIPT 自动点出来，支持扫码/手机号。
+     */
+    loginUrl: 'https://kuwo.cn/',
+    fallbackUrl: 'https://kuwo.cn/',
+    /*
+     * 登录成功后种下 sid / websid（会话）与 userid / t3kwid（用户 ID）。
+     * 两组各命中一个就算登录。
+     */
+    readyAny: [
+      ['sid', 'websid'],
+      ['userid', 't3kwid'],
+    ],
+    ready: [],
+    host: ['kuwo.cn'],
+    apiBase: 'http://nplserver.kuwo.cn/pl.svc',
+    referer: 'http://www.kuwo.cn/',
+  },
 };
 
 /**
@@ -104,16 +125,23 @@ const LOGIN_CLICK_SCRIPT = `
     return false;
   };
 
+  const kuwoDialogOpen = () => {
+    const el = document.querySelector('.reg_login');
+    return !!(el && el.offsetParent !== null);
+  };
   const alreadyOpen = () =>
     !!(document.querySelector('.yqq-dialog-wrap') ||
        document.querySelector('iframe[src*="graph.qq.com"]') ||
-       document.querySelector('iframe[src*="open.weixin.qq.com"]'));
+       document.querySelector('iframe[src*="open.weixin.qq.com"]') ||
+       kuwoDialogOpen());
 
   const tick = () => {
     if (alreadyOpen()) return true;
     return tryClick(['.top_login__link', '.login-link', '[class*="login__link"]', 'a[class*="login"]'], 'qq') ||
            // 酷狗首页的登录入口实测是 class="cmhead1_d5 _login"
-           tryClick(['._login', '.cmhead1_d5', '.header_login', '.top_login a', '[class*="login"] a'], 'kugou');
+           tryClick(['._login', '.cmhead1_d5', '.header_login', '.top_login a', '[class*="login"] a'], 'kugou'); ||
+           // 酷我首页登录弹窗（Vue 组件 .reg_login）
+           tryClick(['.reg_login', '.reg_text', 'a[class*="reg"]', '[class*="reg"]', '[class*="login"]'], 'kuwo');
   };
 
   // 首页是 JS 渲染的，元素可能晚一点才出来，所以轮询而不是只试一次
@@ -279,6 +307,28 @@ async function verifyMusicSession(platform, session, timeoutMs = 12000) {
       return { ok: true };
     }
 
+    if (platform === 'kuwo') {
+      /*
+       * 酷我网页端用户接口已全部删除，唯一活口是老接口 nplserver：
+       * 不要登录 cookie，知道 uid 即可；getuserlist 有数据说明 uid 有效。
+       */
+      const uid = String(session.userid || session.t3kwid || session.UserId || session.uid || '')
+        .trim().replace(/^o/i, '').replace(/\D/g, '');
+      if (!uid) return { ok: false, error: '登录信息里没有酷我用户 ID' };
+      const url = 'http://nplserver.kuwo.cn/pl.svc?op=getuserlist&uid=' + encodeURIComponent(uid) + '&pn=0&rn=200&encode=utf-8';
+      const resp = await fetch(url, { headers, signal: controller.signal });
+      if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
+      const text = await resp.text();
+      let json = null;
+      try {
+        const start = text.search(/[\[{]/);
+        json = JSON.parse(start >= 0 ? text.slice(start, text.lastIndexOf('}') + 1) : text);
+      } catch {
+        return { ok: false, error: '酷我返回内容不是 JSON' };
+      }
+      if (json && json.result && json.result !== 'ok') return { ok: false, error: '登录已失效（' + (json.reason || json.result) + '）' };
+      return { ok: true };
+    }
     /*
      * 酷狗：老的 www.kugou.com/yy/index.php?r=user/info 现在一律回
      * "Access Deny !!!"，已经不能用。改打移动站「我的歌单」接口：

@@ -59,6 +59,19 @@ contextBridge.exposeInMainWorld('launcher', {
   graphics: {
     read: (gameKey) => ipcRenderer.invoke('graphics:read', gameKey),
     write: (input) => ipcRenderer.invoke('graphics:write', input),
+    // 开机预读完成的通知：画质页收到后不需要做什么，只是方便界面知道自己已被预热
+    onPrimed: (callback) => subscribe('graphics:primed', callback),
+  },
+
+  // 用户自定义插件：清单、导入导出、插件自己的配置
+  plugins: {
+    list: () => ipcRenderer.invoke('plugin:list'),
+    read: (id) => ipcRenderer.invoke('plugin:read', id),
+    importFile: () => ipcRenderer.invoke('plugin:import'),
+    remove: (id) => ipcRenderer.invoke('plugin:remove', id),
+    storageGet: (id) => ipcRenderer.invoke('plugin:storage-get', id),
+    storageSet: (input) => ipcRenderer.invoke('plugin:storage-set', input),
+    openDoc: () => ipcRenderer.invoke('plugin:open-doc'),
   },
 
   // 安装与更新
@@ -81,6 +94,8 @@ contextBridge.exposeInMainWorld('launcher', {
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   moveWindowBy: (dx, dy) => ipcRenderer.invoke('window:move-by', { dx, dy }),
+  // 启动页唤出侧栏时把窗口向左外扩；扩不出去返回 { ok:false }，前端改走浮层
+  expandWindowLeft: (payload) => ipcRenderer.invoke('window:expand-left', payload),
 
   onState: (callback) => subscribe('state:changed', callback),
   onToast: (callback) => subscribe('toast', callback),
@@ -90,7 +105,37 @@ contextBridge.exposeInMainWorld('launcher', {
   onGameExited: (callback) => subscribe('game:exited', callback),
   onLinkProgress: (callback) => subscribe('link:progress', callback),
   onLinkDone: (callback) => subscribe('link:done', callback),
+  onLinkPreviewProgress: (callback) => subscribe('link:preview-progress', callback),
+  onLinkPreviewDone: (callback) => subscribe('link:preview-done', callback),
   onSophonProgress: (callback) => subscribe('sophon:progress', callback),
+  onPredownloadProgress: (callback) => subscribe('predownload:progress', callback),
+
+  // 窗口全屏状态（Electron 原生全屏不会触发 CSS :fullscreen，只能由主进程告知）
+  onFullscreenChange: (callback) => subscribe('window:fullscreen', callback),
+
+  // 预下载：新版本上线前先把内容拉到本地，上线后再应用
+  predownload: {
+    check: (input) => ipcRenderer.invoke('predownload:check', input),
+    start: (input) => ipcRenderer.invoke('predownload:start', input),
+    apply: (input) => ipcRenderer.invoke('predownload:apply', input),
+    clear: (input) => ipcRenderer.invoke('predownload:clear', input),
+    cancel: (jobId) => ipcRenderer.invoke('predownload:cancel', jobId),
+    pause: (input) => ipcRenderer.invoke('predownload:pause', input),
+    // 单个服务器覆盖「剧情等分类资源包」开关；传 null 表示跟随全局设置
+    setStoryResources: (input) => ipcRenderer.invoke('predownload:set-story-resources', input),
+  },
+
+  // 异环官服 / B服：改启动器配置里的 Branch / serialNumber / Partner，不动游戏文件
+  neverness: {
+    channel: (input) => ipcRenderer.invoke('neverness:channel', input),
+    setChannel: (input) => ipcRenderer.invoke('neverness:set-channel', input),
+    // 切到 B服后一键拉起官方启动器下载 B服资源（只有首次需要）
+    openLauncher: () => ipcRenderer.invoke('neverness:open-launcher'),
+    // 花筱灵自己按官方清单预下载渠道资源（可取消），进度走 onPredownload
+    predownload: (input) => ipcRenderer.invoke('neverness:predownload', input),
+    predownloadCancel: () => ipcRenderer.invoke('neverness:predownload-cancel'),
+    onPredownload: (callback) => subscribe('nte-predownload', callback),
+  },
   onNteCapture: (callback) => subscribe('nte-capture', callback),
 
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
@@ -122,9 +167,13 @@ contextBridge.exposeInMainWorld('launcher', {
     clearPath: (input) => ipcRenderer.invoke('servers:clear-path', input),
     activate: (input) => ipcRenderer.invoke('servers:activate', input),
     link: (input) => ipcRenderer.invoke('servers:link', input),
+    linkPreview: (input) => ipcRenderer.invoke('servers:link-preview', input),
     prepareEndfield: (input) => ipcRenderer.invoke('servers:prepare-endfield', input),
     prepareSophon: (input) => ipcRenderer.invoke('servers:prepare-sophon', input),
     updateSophon: (input) => ipcRenderer.invoke('servers:update-sophon', input),
+    // 一键下载：未安装游戏的全新安装（进度仍走 sophon:progress 通道）
+    downloadEstimate: (input) => ipcRenderer.invoke('servers:download-estimate', input),
+    downloadGame: (input) => ipcRenderer.invoke('servers:download-game', input),
     cancelSophon: (jobId) => ipcRenderer.invoke('servers:cancel-sophon', jobId),
     pauseSophon: (input) => ipcRenderer.invoke('servers:pause-sophon', input),
     cancelLink: (jobId) => ipcRenderer.invoke('servers:cancel-link', jobId),
@@ -144,12 +193,28 @@ contextBridge.exposeInMainWorld('launcher', {
   musicLoginConfirm: () => ipcRenderer.invoke('music:login-confirm'),
   musicLoginDebug: () => ipcRenderer.invoke('music:login-debug'),
   musicStatus: () => ipcRenderer.invoke('music:status'),
+  // 第三方音源导入：传 { text }（本地文件内容）或 { url }（订阅地址）
+  musicImportSources: (input) => ipcRenderer.invoke('music:sources-import', input),
   musicLogout: (platform) => ipcRenderer.invoke('music:logout', platform),
   musicVerify: (platform) => ipcRenderer.invoke('music:verify', platform),
   musicMyPlaylists: (platform) => ipcRenderer.invoke('music:my-playlists', platform),
-  musicAllPlaylists: () => ipcRenderer.invoke('music:all-playlists'),
+  /*
+   * 可以只同步指定的平台：musicAllPlaylists({ platforms: ['kugou'] })。
+   * 老代码 musicAllPlaylists() 不传参照旧 —— 主进程那边把「没传」当「全部」。
+   */
+  musicAllPlaylists: (payload) => ipcRenderer.invoke('music:all-playlists', payload || {}),
+  /*
+   * 我的歌单本地缓存。「我的歌单」原来只存在内存里，关掉启动器再开就要重新拉一遍，
+   * 这组接口让卡片墙在冷启动时先按上次的结果画出来，再决定要不要后台刷新。
+   */
+  musicPlaylistsCache: () => ipcRenderer.invoke('music:playlists-cache'),
+  musicSavePlaylistsCache: (payload) => ipcRenderer.invoke('music:playlists-cache-save', payload || {}),
+  musicDropPlaylistsCache: (payload) => ipcRenderer.invoke('music:playlists-cache-drop', payload || {}),
   musicResolve: (input) => ipcRenderer.invoke('music:resolve', input),
+  musicLyric: (input) => ipcRenderer.invoke('music:lyric', input),
   musicPlaylistSongs: (input) => ipcRenderer.invoke('music:playlist-songs', input),
+  musicParsePlaylistLink: (url) => ipcRenderer.invoke('music:parse-playlist-link', { url }),
+  musicPlaza: (platform, page) => ipcRenderer.invoke('music:plaza', { platform, page }),
   musicChartSongs: (input) => ipcRenderer.invoke('music:chart-songs', input),
   musicSearch: (input) => ipcRenderer.invoke('music:search', input),
   netease: {
@@ -170,8 +235,10 @@ contextBridge.exposeInMainWorld('launcher', {
     biliRoom: (input) => ipcRenderer.invoke('live:bili-room', input),
     room: (input) => ipcRenderer.invoke('live:bili-room', input),
     danmakuStart: (input) => ipcRenderer.invoke('live:danmaku-start', input),
-    danmakuPoll: () => ipcRenderer.invoke('live:danmaku-poll'),
-    danmakuStop: () => ipcRenderer.invoke('live:danmaku-stop'),
+    danmakuPoll: (id) => ipcRenderer.invoke('live:danmaku-poll', id),
+    danmakuStop: (id) => ipcRenderer.invoke('live:danmaku-stop', id),
+    danmuInfo: (roomId) => ipcRenderer.invoke('live:danmu-info', roomId),
+    biliLogin: () => ipcRenderer.invoke('bili:login'),
   },
 
   importCover: (path) => ipcRenderer.invoke('cover:import', path),
@@ -203,6 +270,10 @@ contextBridge.exposeInMainWorld('launcher', {
     nteCaptureStart: (autoPage = true) =>
       ipcRenderer.invoke('gacha:nte-capture-start', { autoPage }),
     nteCaptureStop: () => ipcRenderer.invoke('gacha:nte-capture-stop'),
+    // 异环导出工具一键获取（下载+解压到下载目录），进度走 onNteTool
+    nteToolDownload: () => ipcRenderer.invoke('gacha:nte-tool'),
+    nteToolCancel: () => ipcRenderer.invoke('gacha:nte-tool-cancel'),
+    onNteTool: (callback) => subscribe('nte-tool', callback),
     refreshMeta: () => ipcRenderer.invoke('gacha:refresh-meta'),
   },
 

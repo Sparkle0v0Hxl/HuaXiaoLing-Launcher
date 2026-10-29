@@ -1,0 +1,11 @@
+{
+  "version": "2.1.8",
+  "channel": "stable",
+  "date": "2026-10-27",
+  "title": "花筱灵启动器 2.1.8",
+  "notes": "品牌标识放大并与侧栏、启动页对齐；启动页换游戏后动态图不再退回静态图；网易云账号歌单可以正常点开并载入歌曲；点歌台音质与播放顺序改为向上弹出；VIP 专享曲目支持跨平台换源播放。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.1.8/HuaXiaoLing-2.1.8-Portable.zip",
+  "sha256": "7a00da7a4dcae5d01051a30226fd552a51989c364f7fa8eba6e6d01e5c86ff37",
+  "size": 300634040,
+  "portable": true
+}

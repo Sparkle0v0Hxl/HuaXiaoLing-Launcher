@@ -3,7 +3,9 @@
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const SEED_VERSION = 5;
+// 2.4.0 合并：新增明日方舟 / 崩坏3 两个内置游戏，种子版本随之升到 7，
+// 老存档会在下一次 ensureSeedData 时补齐这两个条目和它们的渠道行。
+const SEED_VERSION = 7;
 
 const GENSHIN = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
   <defs>
@@ -210,12 +212,107 @@ const NTE = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" v
   <path d="M78 618 H176" stroke="#f4b8ff" stroke-width="1" opacity=".55"/>
 </svg>`;
 
+/*
+ * 明日方舟：黑底 + 银白三角标识 + 红蓝双色细线。
+ * 用罗德岛式的几何切割感代替原画，和其余内置封面保持同一套视觉语言。
+ * （2.4.0 合并自对方开发分支的 seed.js）
+ */
+const ARKNIGHTS = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
+  <defs>
+    <linearGradient id="ak-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0b0d12"/><stop offset=".52" stop-color="#15181f"/><stop offset="1" stop-color="#07080b"/>
+    </linearGradient>
+    <linearGradient id="ak-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#07080b" stop-opacity="0"/><stop offset=".72" stop-color="#07080b" stop-opacity=".88"/><stop offset="1" stop-color="#07080b"/>
+    </linearGradient>
+    <linearGradient id="ak-steel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#f4f7fb"/><stop offset="1" stop-color="#9fb0c6"/>
+    </linearGradient>
+    <linearGradient id="ak-red" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#ff4d5a" stop-opacity="0"/><stop offset=".5" stop-color="#ff4d5a" stop-opacity=".9"/><stop offset="1" stop-color="#ff4d5a" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="ak-blur" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="26"/></filter>
+  </defs>
+  <rect width="600" height="800" fill="url(#ak-bg)"/>
+  <circle cx="300" cy="300" r="185" fill="#9fb0c6" opacity=".1" filter="url(#ak-blur)"/>
+  <g stroke="#c9d1d9" stroke-width=".6" opacity=".12">
+    <path d="M0 120h600M0 200h600M0 280h600M0 360h600M0 440h600M0 520h600"/>
+    <path d="M120 0v560M240 0v560M360 0v560M480 0v560"/>
+  </g>
+  <g transform="translate(300 300)">
+    <path d="M0-150 L130 75 L0 25 L-130 75 Z" fill="url(#ak-steel)" opacity=".92"/>
+    <path d="M0-96 L84 48 L0 16 L-84 48 Z" fill="#15181f"/>
+    <path d="M0-150 L130 75 L0 25 Z" fill="#0b0d12" opacity=".28"/>
+  </g>
+  <path d="M-20 470 H620" stroke="url(#ak-red)" stroke-width="2"/>
+  <path d="M-20 486 H620" stroke="#4d8bff" stroke-width="1" opacity=".45"/>
+  <g fill="#e8eef7">
+    <circle cx="96" cy="128" r="1.6" opacity=".6"/><circle cx="512" cy="112" r="1.2" opacity=".45"/>
+    <circle cx="540" cy="392" r="1.5" opacity=".5"/><circle cx="82" cy="420" r="1" opacity=".35"/>
+  </g>
+  <g fill="#c9d1d9" opacity=".5">
+    <rect x="468" y="196" width="6" height="6" transform="rotate(45 471 199)"/>
+    <rect x="120" y="520" width="5" height="5" transform="rotate(45 122 522)"/>
+  </g>
+  <path d="M0 600 H600 V800 H0 Z" fill="url(#ak-fade)"/>
+  <path d="M60 676 H190" stroke="#c9d1d9" stroke-width="2" opacity=".8"/>
+</svg>`;
+
+/*
+ * 崩坏3：深海蓝紫底 + 银蓝「崩坏结晶」棱面 + 赤色裂隙细线。
+ * 和其余内置封面同一套几何语言：用晶体切割感代替原画。
+ * （2.4.0 合并自对方开发分支的 seed.js）
+ */
+const BH3 = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
+  <defs>
+    <linearGradient id="bh-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#080b18"/><stop offset=".5" stop-color="#111a33"/><stop offset="1" stop-color="#05070f"/>
+    </linearGradient>
+    <linearGradient id="bh-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#05070f" stop-opacity="0"/><stop offset=".72" stop-color="#05070f" stop-opacity=".88"/><stop offset="1" stop-color="#05070f"/>
+    </linearGradient>
+    <linearGradient id="bh-crystal" x1="0" y1="0" x2=".4" y2="1">
+      <stop stop-color="#eaf3ff"/><stop offset=".55" stop-color="#8fb8ff"/><stop offset="1" stop-color="#3d6fd6"/>
+    </linearGradient>
+    <linearGradient id="bh-crack" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#ff4d5a" stop-opacity="0"/><stop offset=".5" stop-color="#ff4d5a" stop-opacity=".92"/><stop offset="1" stop-color="#ff4d5a" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="bh-blur" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="28"/></filter>
+  </defs>
+  <rect width="600" height="800" fill="url(#bh-bg)"/>
+  <ellipse cx="300" cy="320" rx="200" ry="190" fill="#6f9dff" opacity=".16" filter="url(#bh-blur)"/>
+  <ellipse cx="300" cy="320" rx="120" ry="120" fill="#ff4d5a" opacity=".07" filter="url(#bh-blur)"/>
+  <g stroke="#9cc0ff" stroke-width=".6" opacity=".1">
+    <path d="M0 140h600M0 230h600M0 320h600M0 410h600M0 500h600"/>
+    <path d="M110 0v600M220 0v600M330 0v600M440 0v600M550 0v600"/>
+  </g>
+  <!-- 崩坏结晶：八面体棱面 -->
+  <g transform="translate(300 310)">
+    <path d="M0-190 L118-38 L0 128 L-118-38 Z" fill="url(#bh-crystal)" opacity=".9"/>
+    <path d="M0-190 L118-38 L0 128 Z" fill="#ffffff" opacity=".14"/>
+    <path d="M0-190 L-118-38 L0 128 Z" fill="#2a4a99" opacity=".3"/>
+    <path d="M0-190 L0 128" stroke="#dbe9ff" stroke-width="1.2" opacity=".55"/>
+    <path d="M-118-38 L118-38" stroke="#dbe9ff" stroke-width="1.2" opacity=".4"/>
+    <path d="M0-190 L0 360" stroke="#9cc0ff" stroke-width="1" opacity=".22"/>
+  </g>
+  <!-- 赤色裂隙 -->
+  <path d="M-20 250 L150 330 L118 372 L300 430 L268 470 L560 520" fill="none" stroke="url(#bh-crack)" stroke-width="2.4"/>
+  <path d="M-20 292 L120 366 L92 404 L250 458 L222 496 L540 556" fill="none" stroke="url(#bh-crack)" stroke-width="1" opacity=".55"/>
+  <g fill="#eaf3ff" opacity=".5">
+    <circle cx="150" cy="132" r="1.7"/><circle cx="452" cy="196" r="1.3"/><circle cx="392" cy="96" r="1"/>
+    <circle cx="228" cy="486" r="1.2"/><circle cx="500" cy="386" r="1.1"/>
+  </g>
+</svg>`;
+
 const COVERS = {
   'builtin-genshin.svg': GENSHIN,
   'builtin-starrail.svg': STARRAIL,
   'builtin-zzz.svg': ZZZ,
   'builtin-endfield.svg': ENDFIELD,
   'builtin-neverness.svg': NTE,
+  // 2.4.0 合并：明日方舟 / 崩坏3 的内置封面（对方分支同样用 SVG 种子封面）
+  'builtin-arknights.svg': ARKNIGHTS,
+  'builtin-bh3.svg': BH3,
 };
 
 const BUILTIN_GAMES = [
@@ -331,6 +428,63 @@ const BUILTIN_GAMES = [
     launchCount: 0,
     playSeconds: 0,
   },
+  {
+    /*
+     * 明日方舟 PC 端（2.4.0 合并自对方分支）：和终末地共用鹰角启动器（GRYPHLINK），
+     * 但游戏本体独立安装，默认在 <盘>\Arknights，入口 Arknights.exe。
+     * 渠道比米哈游多一个 B服（bilibili 渠道的鹰角启动器）和国际服三区域 / 台服，
+     * 见 channelsFor() 与 ARKNIGHTS_CHANNELS。
+     * 适配说明：对方条目 cover 写的是 builtin-arknights.jpg，但对方分支里并不存在
+     * 该 jpg 资产（对方 COVERS 注册的也是 SVG），这里按我方种子封面机制改成 .svg。
+     */
+    id: 'builtin-arknights',
+    builtinKey: 'arknights',
+    builtin: true,
+    name: '明日方舟',
+    subtitle: 'Arknights',
+    description: '罗德岛的干员部署在泰拉的每一处战场，守住这条通往明天的防线。启动器会自动寻找已经安装的游戏。',
+    version: '',
+    tags: ['策略', '塔防', '剧情'],
+    target: '',
+    args: '',
+    workDir: '',
+    cover: 'covers/builtin-arknights.svg',
+    accent: '#c9d1d9',
+    favorite: false,
+    demo: false,
+    siteUrl: 'https://ak.hypergryph.com/',
+    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 8).toISOString(),
+    lastPlayed: null,
+    launchCount: 0,
+    playSeconds: 0,
+  },
+  {
+    /*
+     * 崩坏3（2.4.0 合并自对方分支）：米家同构渠道（官服 / B服 / 国际服），
+     * 无公开公告接口，启动页显示「暂无公告」是预期行为。
+     * cover 同上适配为 .svg。
+     */
+    id: 'builtin-bh3',
+    builtinKey: 'bh3',
+    builtin: true,
+    name: '崩坏3',
+    subtitle: 'Honkai Impact 3rd',
+    description: '为世界上所有的美好而战。女武神在崩坏的阴影下守卫人类的明天。启动器会自动寻找已经安装的游戏。',
+    version: '',
+    tags: ['动作', '科幻', '剧情'],
+    target: '',
+    args: '',
+    workDir: '',
+    cover: 'covers/builtin-bh3.svg',
+    accent: '#7fb2ff',
+    favorite: false,
+    demo: false,
+    siteUrl: 'https://bh3.mihoyo.com/',
+    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString(),
+    lastPlayed: null,
+    launchCount: 0,
+    playSeconds: 0,
+  },
 ];
 
 const SERVER_CHANNELS = [
@@ -348,23 +502,43 @@ const ENDFIELD_CHANNELS = [
 ];
 
 const NTE_CHANNELS = [
-  ['official', '国服'],
+  ['official', '官服'],
+  ['bilibili', 'B服'],
   ['global', '国际服'],
+];
+
+/**
+ * 明日方舟的服务器谱系（2.4.0 合并自对方分支）：
+ *   - 国服：官服（鹰角）/ B服（B站）
+ *   - 国际服（Yostar 发行）：EN / JP / KR 三个区域服，数据互不相通
+ *   - 台服（TW）：独立发行，与上面都不互通
+ * group 用于界面分组：同属国际服的三个区域服归到一组，选中组后再挑区域。
+ */
+const ARKNIGHTS_CHANNELS = [
+  ['official', '官服'],
+  ['bilibili', 'B服'],
+  ['global-en', '国际服 · 英文', 'global'],
+  ['global-jp', '国际服 · 日文', 'global'],
+  ['global-kr', '国际服 · 韩文', 'global'],
+  ['taiwan', '台服'],
 ];
 
 function channelsFor(game) {
   if (game.builtinKey === 'endfield') return ENDFIELD_CHANNELS;
+  if (game.builtinKey === 'arknights') return ARKNIGHTS_CHANNELS;
   if (game.builtinKey === 'neverness') return NTE_CHANNELS;
   return SERVER_CHANNELS;
 }
 
 for (const game of BUILTIN_GAMES) {
-  game.servers = channelsFor(game).map(([channel, name]) => ({
+  // 2.4.0 合并：渠道行支持可选的 group 字段（明日方舟国际服三区域分组用）
+  game.servers = channelsFor(game).map(([channel, name, group]) => ({
     id: `${game.id}-${channel}`,
     name,
     channel,
     path: '',
     root: '',
+    ...(group ? { group } : {}),
     addedAt: new Date().toISOString(),
   }));
   game.activeServerId = game.servers[0].id;
@@ -383,6 +557,20 @@ async function ensureSeedData(store, userData) {
     }
   }
 
+  // 异环官服行在老存档里叫「国服」，统一规范成「官服」（与其他游戏口径一致）。
+  // 必须放在 seedVersion 提前 return 之前，否则存量存档永远走不到；幂等，每次启动跑一遍。
+  let renamed = false;
+  for (const game of Array.isArray(store.data.games) ? store.data.games : []) {
+    if (game.builtinKey !== 'neverness') continue;
+    for (const item of game.servers || []) {
+      if (item.channel === 'official' && item.name === '国服') {
+        item.name = '官服';
+        renamed = true;
+      }
+    }
+  }
+  if (renamed) await store.saveNow();
+
   if ((store.data.seedVersion || 0) >= SEED_VERSION) return;
 
   const existing = Array.isArray(store.data.games) ? store.data.games : [];
@@ -398,16 +586,43 @@ async function ensureSeedData(store, userData) {
 
   store.data.games = [...missing, ...custom];
   for (const game of store.data.games) {
-    if (!game.builtin || (Array.isArray(game.servers) && game.servers.length)) continue;
-    game.servers = channelsFor(game).map(([channel, name]) => ({
-      id: `${game.id}-${channel}`,
-      name,
-      channel,
-      path: '',
-      root: '',
-      addedAt: new Date().toISOString(),
-    }));
-    game.activeServerId = game.servers[0].id;
+    if (!game.builtin) continue;
+    const list = Array.isArray(game.servers) ? game.servers : [];
+    if (!list.length) {
+      // 2.4.0 合并：渠道行支持可选的 group 字段（明日方舟国际服三区域分组用）
+      game.servers = channelsFor(game).map(([channel, name, group]) => ({
+        id: `${game.id}-${channel}`,
+        name,
+        channel,
+        path: '',
+        root: '',
+        ...(group ? { group } : {}),
+        addedAt: new Date().toISOString(),
+      }));
+      game.activeServerId = game.servers[0].id;
+      continue;
+    }
+    /*
+     * 老存档里的游戏已经有服务器行了，但后来新增的渠道（比如异环的 B服）不会自己冒出来。
+     * 这里把缺失的渠道补上；用户之后手动删掉的不会再被复活（seedVersion 已经记过了）。
+     */
+    const known = new Set(list.map((item) => item.channel));
+    for (const entry of channelsFor(game)) {
+      if (known.has(entry[0])) continue;
+      // 补的渠道行同样带上 group（明日方舟国际服三区域）
+      const [channel, name, group] = entry;
+      list.push({
+        id: `${game.id}-${channel}`,
+        name,
+        channel,
+        path: '',
+        root: '',
+        ...(group ? { group } : {}),
+        addedAt: new Date().toISOString(),
+      });
+    }
+    game.servers = list;
+    if (!game.activeServerId) game.activeServerId = list[0].id;
   }
   store.data.seedVersion = SEED_VERSION;
   store.data.seeded = true;

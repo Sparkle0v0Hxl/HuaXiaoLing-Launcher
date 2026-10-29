@@ -1,6 +1,6 @@
 {
   "name": "huaxiaoling-launcher",
-  "version": "2.1.9",
+  "version": "2.4.2",
   "private": true,
   "description": "花筱灵启动器 - 一个原创的桌面游戏启动器",
   "author": "HuaXiaoLing Studio",
@@ -22,21 +22,42 @@
     "productName": "花筱灵启动器",
     "copyright": "Copyright © 2026 HuaXiaoLing Studio",
     "directories": {
-      "output": "dist",
+      "output": "H:/HXL-pack/dist",
       "buildResources": "build"
     },
     "files": [
       "electron/**/*",
       "src/**/*",
       "build/icon.png",
+      "build/icon-taskbar.png",
+      "build/icon-taskbar.ico",
+      "build/icon-tray.png",
+      "build/icon-window-32.png",
+      "build/icon-window-64.png",
+      "build/icon.ico",
       "LICENSE",
       "README.md",
       "package.json"
+    ],
+    "asarUnpack": [
+      "electron/vendor/hpatchz.exe"
+    ],
+    "extraFiles": [
+      {
+        "from": "build/latest.json",
+        "to": "latest.json"
+      }
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
           "arch": [
             "x64"
           ]

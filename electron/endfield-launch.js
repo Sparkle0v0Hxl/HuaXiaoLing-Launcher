@@ -31,8 +31,32 @@ function findPlatformProcess(root, maxDepth = 3) {
   return null;
 }
 
+/**
+ * 上次启动被中断时（关掉 UAC、任务管理器强杀等）会在 %TEMP% 留下
+ * Vela-Endfield-xxxx 目录，里面是复制出来的 Games.exe。启动前顺手清掉旧残留。
+ */
+function cleanStaleTempDirs() {
+  try {
+    const tmp = os.tmpdir();
+    const now = Date.now();
+    for (const name of fs.readdirSync(tmp)) {
+      if (!name.startsWith('Vela-Endfield-')) continue;
+      const full = path.join(tmp, name);
+      try {
+        if (now - fs.statSync(full).mtimeMs < 10 * 60 * 1000) continue;
+        fs.rmSync(full, { recursive: true, force: true });
+      } catch {
+        /* 单个目录清不掉不影响启动 */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function launchEndfield(gameRoot, gameExe, args = '') {
   return new Promise((resolve) => {
+    cleanStaleTempDirs();
     const platformProcess = findPlatformProcess(gameRoot);
     if (!platformProcess) {
       resolve({ ok: false, error: '没有找到终末地官方 PlatformProcess.exe' });
@@ -251,14 +275,25 @@ function launchEndfieldElevated(gameRoot, gameExe, args = '') {
       }
     }, 400);
 
+    /*
+     * 这里的等待是在等用户点「用户账户控制」窗口里的「是」。
+     * 之前只给 60 秒，用户去干别的就超时，看到的却是毫无指向性的
+     * 「等待管理员授权超时」。给足 3 分钟并写清楚该做什么。
+     */
     const timer = setTimeout(() => {
-      finish({ ok: false, error: '等待管理员授权超时，请重试' });
-    }, 60000);
+      finish({
+        ok: false,
+        error: '等待管理员授权超时。启动终末地需要管理员权限，请在「用户账户控制」窗口里点“是”后重试',
+      });
+    }, 180000);
 
     outer.once('exit', (code) => {
       if (settled || fs.existsSync(pidFile)) return;
       if (code && code !== 0) {
-        finish({ ok: false, error: `管理员授权未完成（${code}）` });
+        finish({
+          ok: false,
+          error: `管理员授权未完成（退出码 ${code}）。如果在「用户账户控制」窗口点了“否”，请重试并点“是”`,
+        });
       }
     });
   });

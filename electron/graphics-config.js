@@ -136,24 +136,112 @@ function parseGraphicsValue(raw) {
 }
 
 /**
+ * 一次导出，把「值名 + 值 + 类型」全部拿到。
+ *
+ * 早年的写法是先导出取值名、再对每个画质键各跑一次 `reg query /v`。
+ * 一个进程调用约 40ms，终末地要读 31 个键 → 1.2 秒；崩3 更多。
+ * 而 `reg export` 的输出本来就带值，一次 60ms 就能拿全，没必要再起进程。
+ *
+ * 解析要点：
+ *   - 输出是 UTF-16LE（BOM ff fe），值可能是 hex(2) 的长串且折成多行，先把续行接起来；
+ *   - `"name"=hex(2):68,00,65,...` 是 UTF-16 字符串，要按字节还原；
+ *   - `"name"=dword:00000001` / `"name"=hex(b):...`（QWORD）；
+ *   - `"name"="文本"` 是 REG_SZ，反斜杠转义要还原；
+ *   - 自己的那一条 `@=hex(2):...` 是项的默认值，跳过。
+ *
+ * 返回 Map<name, { raw, type }>，形状与 readValueEntry 一致。
+ */
+function exportValues(key) {
+  const tempPath = path.join(require('node:os').tmpdir(), `hxl-exp-${process.pid}-${Date.now()}.reg`);
+  const out = new Map();
+  try {
+    execFileSync('reg.exe', ['export', key, tempPath, '/y'], { windowsHide: true, timeout: 30000 });
+    let text;
+    try {
+      text = fs.readFileSync(tempPath, 'utf16le');
+    } catch {
+      text = fs.readFileSync(tempPath, 'latin1');
+    }
+    // hex 长串会被折行（续行以空白开头），先接回一整行
+    text = text.replace(/\r?\n[ \t]{2,}/g, '');
+    const re = /^\s*(?:"((?:[^"\\]|\\.)*)"|@)=([^\r\n]*)$/gm;
+    let match;
+    while ((match = re.exec(text))) {
+      const name = match[1] ? match[1].replace(/\\(.)/g, '$1') : '';
+      if (!name) continue;
+      const value = match[2].trim();
+      out.set(name, decodeRegValue(value));
+    }
+  } catch {
+    // 导出失败就返回空表，调用方按「读不到」处理
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
+  return out;
+}
+
+/** 把 reg export 右侧的 `hex(2):68,00,...` / `dword:1` / `"文本"` 还原成 { raw, type }。 */
+function decodeRegValue(value) {
+  // 字符串："文本"，里面有 \" 和 \\ 转义
+  const str = value.match(/^"((?:[^"\\]|\\.)*)"$/);
+  if (str) return { raw: str[1].replace(/\\(.)/g, '$1'), type: 'REG_SZ' };
+
+  const hex = value.match(/^hex(?:\(([0-9a-f]+)\))?:([\s\S]*)$/i);
+  if (hex) {
+    const kind = (hex[1] || '3').toLowerCase();
+    const bytes = Buffer.from(hex[2].replace(/[\s\\]/g, '').split(',').filter(Boolean).map((b) => parseInt(b, 16)));
+    // hex(2) = REG_EXPAND_SZ，内容是 UTF-16LE（含结尾 \0）
+    if (kind === '2') {
+      return { raw: new TextDecoder('utf-16le').decode(bytes).replace(/\u0000+$/, ''), type: 'REG_EXPAND_SZ' };
+    }
+    // hex(1) = REG_SZ
+    if (kind === '1') {
+      return { raw: new TextDecoder('utf-16le').decode(bytes).replace(/\u0000+$/, ''), type: 'REG_SZ' };
+    }
+    // hex(4) = REG_DWORD，小端
+    if (kind === '4' && bytes.length >= 4) {
+      return { raw: String(bytes.readUInt32LE(0)), type: 'REG_DWORD' };
+    }
+    // hex(b) = REG_QWORD，小端 8 字节
+    if (kind === 'b' && bytes.length >= 8) {
+      return { raw: String(bytes.readBigUInt64LE(0)), type: 'REG_QWORD' };
+    }
+    // hex(7) = REG_MULTI_SZ
+    if (kind === '7') {
+      return { raw: new TextDecoder('utf-16le').decode(bytes).replace(/\u0000+$/, ''), type: 'REG_MULTI_SZ' };
+    }
+    // 其余二进制：尽量当 UTF-16 文本解出来（米哈游有用 REG_BINARY 存 JSON 的）
+    if (bytes.length > 8) {
+      const decoded = decode(bytes).replace(/\u0000+$/, '');
+      return { raw: decoded, type: 'REG_BINARY' };
+    }
+    return { raw: hex[2].trim(), type: 'REG_BINARY' };
+  }
+
+  const dword = value.match(/^dword:([0-9a-f]+)$/i);
+  if (dword) return { raw: String(parseInt(dword[1], 16)), type: 'REG_DWORD' };
+  return { raw: value, type: null };
+}
+
+/**
  * 读某游戏的画质配置。
  *
  * 性能要点：原神项下有 345KB 的 REG_BINARY，`reg query <项>` 整项导出要 18 秒。
- * 所以先用 listValueNamesFast（reg export，40ms）拿全量值名，再只对**画质相关**的
- * 键逐个 `reg query /v`，一条几十毫秒到底。
+ * 所以走 exportValues：一次 reg export 到临时文件（约 60ms），
+ * 名、值、类型一次全拿到，不再对每个键单独起进程。
  *
  * 返回 { ok, key, entries: [{ name, raw, type, json }] }
  */
 function readGraphics(registryKey, isInteresting) {
   if (!registryKey) return { ok: false, reason: '这个游戏没有登记画质注册表位置' };
-  const tempPath = path.join(require('node:os').tmpdir(), `hxl-reg-${process.pid}-${Date.now()}.reg`);
-  const names = listValueNamesFast(registryKey, tempPath);
-  if (!names.length) {
+  const values = exportValues(registryKey);
+  if (!values.size) {
     return { ok: false, reason: '没有读到画质配置（游戏可能还没启动过一次）', key: registryKey };
   }
+  const names = [...values.keys()];
   const wanted = typeof isInteresting === 'function' ? names.filter(isInteresting) : names;
   const entries = wanted.map((name) => {
-    const entry = readValueEntry(registryKey, name);
+    const entry = values.get(name) || { raw: null, type: null };
     return { name, raw: entry.raw, type: entry.type, json: parseGraphicsValue(entry.raw) };
   });
   return { ok: true, key: registryKey, entries, totalNames: names.length };
@@ -169,8 +257,34 @@ function readGraphics(registryKey, isInteresting) {
  */
 function writeValue(registryKey, name, value, backupPath, type) {
   const previous = readValueEntry(registryKey, name);
-  const writeType = type || previous.type || 'REG_SZ';
-  const data = String(value);
+  // JSON 这类字符串值要是被读成了 REG_BINARY 的 UTF-16，按原类型写回会变成一堆乱码，
+  // 所以「内容是 JSON / 普通字符串」时一律写成 REG_SZ。
+  const looksText = /^\s*[[{]/.test(String(value));
+  const writeType = !type && looksText && (!previous.type || previous.type === 'REG_BINARY')
+    ? 'REG_SZ'
+    : type || previous.type || 'REG_SZ';
+
+  /*
+   * 布尔值必须先翻译成注册表认识的形式，否则 reg add 会直接报
+   * 「无效语法：为 '/d' 指定的值无效」——界面上看就是「这一项点了没反应」。
+   *   DWORD / QWORD：true → 1、false → 0
+   *   字符串类：true/false 原样写，游戏自己按字符串读
+   */
+  let data;
+  if (writeType === 'REG_DWORD' || writeType === 'REG_QWORD') {
+    if (typeof value === 'boolean') data = value ? '1' : '0';
+    else if (value === 'true') data = '1';
+    else if (value === 'false') data = '0';
+    else data = String(value);
+    if (!/^-?\d+$/.test(data)) {
+      return { ok: false, reason: `「${name}」是 ${writeType}，只能写整数，收到的是「${String(value)}」` };
+    }
+  } else if (writeType === 'REG_BINARY') {
+    // 二进制值不在这个界面里改：写不好会毁掉整条配置
+    return { ok: false, reason: `「${name}」是二进制值，暂时不支持在界面里修改` };
+  } else {
+    data = String(value);
+  }
 
   const args = ['add', registryKey, '/v', name, '/t', writeType, '/d', data, '/f'];
   try {
@@ -190,9 +304,84 @@ function writeValue(registryKey, name, value, backupPath, type) {
   return { ok: true, previous: previous.raw, type: writeType };
 }
 
+/**
+ * 改 JSON 值里的单个字段，其余字段原样保留。
+ *
+ * 星铁 / 崩3 的画质是整条 JSON 存在一个注册表值里（GraphicsSettings_Model、
+ * GENERAL_DATA_V2_PersonalGraphicsSettingV2…），只改其中一项时**不能**整条覆盖，
+ * 否则没读到过的字段会被抹掉。所以这里：读出 JSON → 只改目标字段 → 写回。
+ *
+ * 返回 { ok, previous, value, type } 或 { ok:false, reason }
+ */
+function updateJsonField(registryKey, name, field, value, backupPath, type) {
+  if (!registryKey || !name || !field) return { ok: false, reason: '缺少参数' };
+  const previous = readValueEntry(registryKey, name);
+  if (!previous.raw) return { ok: false, reason: `读不到 ${name} 的当前值` };
+  const json = parseGraphicsValue(previous.raw);
+  if (!json || typeof json !== 'object') {
+    return { ok: false, reason: `${name} 不是 JSON，没法单独改其中的字段` };
+  }
+  if (!Object.prototype.hasOwnProperty.call(json, field)) {
+    return { ok: false, reason: `${name} 里没有 ${field} 这个字段` };
+  }
+
+  // 类型跟着原值走：原来就是布尔就别写成数字，原来是数字就别写成字符串
+  let next = value;
+  let changed = false;
+  if (typeof json[field] === 'boolean') {
+    next = value === true || value === 'true' || value === 1 || value === '1';
+    changed = next !== json[field];
+  } else if (typeof json[field] === 'number') {
+    next = Number(value);
+    if (!Number.isFinite(next)) return { ok: false, reason: '这个字段要填数字' };
+    changed = next !== json[field];
+  } else if (typeof json[field] === 'string') {
+    next = String(value);
+    changed = next !== json[field];
+  } else {
+    changed = true;
+  }
+
+  // 值没变就别写注册表：省一次写操作，也免得把用户没动过的项反复覆盖
+  if (!changed) {
+    return { ok: true, unchanged: true, previous: previous.raw, value: json[field], type: 'REG_SZ', field };
+  }
+
+  json[field] = next;
+  const written = writeValue(registryKey, name, JSON.stringify(json), backupPath, type || 'REG_SZ');
+  if (!written.ok) return written;
+  return { ok: true, unchanged: false, previous: previous.raw, value: next, type: written.type, field };
+}
+
+/**
+ * 这条注册表值到底是不是「一整条 JSON 对象」。
+ *
+ * 用来区分两种画质项：
+ *   - 单值项：`Screenmanager Resolution Width_h182942802` = REG_DWORD 1920
+ *   - JSON 项：`GENERAL_DATA_V2_PersonalGraphicsSettingV2_h…` = REG_SZ '{...21 个字段...}'
+ *
+ * 以前主进程只看「entry 和 field 都传了」就当成 JSON 去改，
+ * 单值项因此全部报「不是 JSON，没法单独改其中的字段」，界面上就是所有选项都不可用。
+ * 读一次真实值来判断，读不到就当作不是 JSON（走整条改写，那条路会有自己的校验）。
+ */
+function looksLikeJsonObject(registryKey, name) {
+  try {
+    const previous = readValueEntry(registryKey, name);
+    if (!previous || !previous.raw) return false;
+    const text = String(previous.raw).trim();
+    if (!/^[{[]/.test(text)) return false;
+    const parsed = parseGraphicsValue(previous.raw);
+    return Boolean(parsed) && typeof parsed === 'object';
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   readGraphics,
   writeValue,
+  updateJsonField,
+  looksLikeJsonObject,
   listValueNames,
   listValueNamesFast,
   readValue,

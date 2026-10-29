@@ -36,6 +36,18 @@ const UI_SCALE_STEPS = [80, 90, 100, 110, 120, 130];
  */
 const REPO_URL = 'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher';
 const REPO_RELEASES_URL = `${REPO_URL}/releases`;
+/**
+ * 设置页「项目主页 / 问题反馈」这两个入口的地址。
+ *
+ * 反馈走仓库自带的 issue 表单（`.github/ISSUE_TEMPLATE/bug_report.yml`），
+ * 提前把模板选好，省得用户进去还得自己挑用哪个模板、再手写一遍版本号。
+ * 版本号用 URL 编码塞进 query，模板里对应的 input 会把预填值直接显示出来。
+ */
+const REPO_NEW_ISSUE_URL = `${REPO_URL}/issues/new?template=bug_report.yml`;
+const REPO_FEEDBACK_URL = () => {
+  const version = (state.app && state.app.version) || '';
+  return version ? `${REPO_NEW_ISSUE_URL}&version=${encodeURIComponent(version)}` : REPO_NEW_ISSUE_URL;
+};
 
 function normalizeUiScale(value) {
   const number = Number(value);
@@ -70,10 +82,16 @@ const state = {
   downloads: [],
   app: {},
   news: [],
+  // 动态页分类筛选：all / release / guide
+  newsFilter: 'all',
+  // 动态页「更新日志」是否展开全部版本（默认只显示最新几个，旧版本折叠）
+  newsReleasesExpanded: false,
   // 游戏能力注册表（主进程 game-features.js 提供），tools 页据此渲染
   features: null,
   // 侧栏「工具」分组的展开状态
   navToolsOpen: false,
+  // 启动页左上「导航」浮层的开合状态（不落盘；开合只切 class 不重绘，视频不中断）
+  startNavOpen: false,
   hoyolab: null,
   // 鹰角 / 完美世界 / 库街区等通行证的登录态，key 是 provider id
   passport: null,
@@ -82,11 +100,19 @@ const state = {
   shotsLoading: false,
   shotsError: '',
   shotsGame: '',
-  // 画质配置：读的是注册表，只读展示 + 备份后写回
+  // 画质配置：读的是注册表，每一项都能改（改动前自动备份旧值）
   graphics: null,
   graphicsLoading: false,
   graphicsError: '',
   graphicsGame: 'starrail',
+  // 'trait'＝能力表里写死了注册表项；'auto'＝主进程探测出来的（终末地 / 明日方舟这类）
+  graphicsSource: '',
+  // 自动探测命中的注册表项，仅供排查显示，不做任何写入依据
+  graphicsDetectKey: '',
+  // 画质读取结果缓存：{ [gameKey]: { at, result, dirty } }，见 loadGraphics()
+  graphicsCache: {},
+  // 正在写入的那一项，画质页用它显示「写入中」，形如 { name, value }
+  graphicsPending: null,
   // 安装与更新的展示改由启动页承担（版本、更新入口都在启动页上），
   // 这里不再单开一个页面，state 里也不再保留 install / installLoading 等字段。
   noticeBoard: {},
@@ -105,7 +131,6 @@ const state = {
   gachaError: '',
   gachaGameKey: '',
   gachaUid: '',
-  gachaTab: 'overview',
   nteAccount: null,
   update: {
     checkedAt: 0,
@@ -132,14 +157,70 @@ const state = {
   notices: [],
   noticesGameId: '',
   noticesLoading: false,
-  live: { connected: false, connecting: false, roomTitle: '', roomId: '', liveStatus: 0, status: '' },
+  // 弹幕点歌的输入框记忆上次连接的直播间链接（localStorage），重启后不用重新复制
+  live: { roomUrl: localStorage.getItem('vela:live-room-url') || '', connecting: false },
+  // 最近连接过的直播间（最多 5 个）：重启后一键重连，不用再翻聊天记录找链接
+  liveHistory: (() => {
+    try {
+      const list = JSON.parse(localStorage.getItem('vela:live-room-history') || '[]');
+      return Array.isArray(list) ? list.filter((item) => typeof item === 'string').slice(0, 5) : [];
+    } catch {
+      return [];
+    }
+  })(),
+  /* 已连接的直播间列表（支持同时连多个平台）：每项
+   * { id, url, connected, connecting, roomTitle, roomId, platform, platformLabel, danmaku, status, captured } */
+  liveRooms: [],
   charts: { platform: 'all', loading: false, list: [], detail: null, error: '' },
-  musicLogin: { qq: null, kugou: null, loading: false },
+  musicLogin: { qq: null, kugou: null, kuwo: null, loading: false },
   neteaseLogin: { loggedIn: false, apiBase: '' },
   songTab: localStorage.getItem('vela:song-tab') || 'queue',
   // 点歌台搜索：无状态输入放在 input 里，结果只在内存
   songSearch: { keyword: '', platform: 'all', loading: false, list: [], errors: [], done: false },
-  myPlaylists: { platform: '', loading: false, list: [], error: '', detail: null, groups: [], loadingAll: false },
+  /*
+   * 队列页的折叠与过滤（会话内状态，不落盘）：
+   *   queueExpanded[段序号] = true/false，用户点过「展开/收起」的段按记忆来，
+   *   没点过的段里含当前播放的默认展开、其余默认折叠（见 song-ui.js）。
+   *   queueFilter 是队列顶部的轻量过滤词，输入即过滤标题/歌手。
+   * 队列变化（增删歌）后段序号可能漂移，折叠状态允许漂，不影响正确性。
+   */
+  queueExpanded: {},
+  queueFilter: '',
+  // syncedAt / syncDurationMs 来自主进程 music:all-playlists 的返回值，用来显示「上次同步」
+  myPlaylists: {
+    platform: '',
+    loading: false,
+    list: [],
+    error: '',
+    detail: null,
+    groups: [],
+    loadingAll: false,
+    /*
+     * 每个平台各自的同步开关：loadingAll 是「同步全部」，这里是单平台。
+     * 分开存是因为界面上「同步中…」只该出现在被点的那一个平台行里，
+     * 用一个全局布尔会把四行一起点亮。
+     */
+    syncing: { netease: false, qq: false, kugou: false, kuwo: false },
+    syncedAt: 0,
+    syncDurationMs: 0,
+    plaza: {},
+    plazaPlatform: 'netease',
+    /*
+     * 后台静默刷新中：和 loadingAll 分开。
+     * loadingAll 会让界面整片转圈、按钮变「同步中…」，而冷启动时按缓存画完卡片墙之后
+     * 偷偷补一次最新数据，不该让用户看着转圈 —— 所以单独一个标记。
+     */
+    bgRefreshing: false,
+    /*
+     * 歌单详情的会话内缓存：key=`${platform}:${id}`，值={ detail, at }。
+     * 之前每点一次歌单卡片都重新拉一遍全量曲目（网易大歌单公开直连失败时
+     * 要退本地 API 全量解析，动辄几十秒），来回切换就是来回重拉。
+     * 只存内存、不落盘：刷新应用即清，TTL 过期后先显示旧的再后台补新。
+     */
+    detailCache: {},
+    // 各歌单正在后台静默刷新的标记，防止同一张歌单并发刷两次
+    detailRefreshing: {},
+  },
   // 默认 Hi-Res；用户手动改过后会记住那个选择
   songQuality: (() => {
     const saved = localStorage.getItem('vela:song-quality');
@@ -191,6 +272,16 @@ const state = {
    * 之所以按组合缓存而不是只存一份：用户会在「原神便笺 → 深渊 → 星铁便笺」
    * 之间来回点，每次都重新请求既慢又容易触发风控。
    */
+  /* 工具页左侧分组导航当前停在哪个分类（默认停在「按游戏查看」） */
+  toolsTab: 'games',
+  /*
+   * 二级页「返回工具页」条的来路标记。
+   * 从工具页点功能入口进 record / gacha 等页时置真，目标页据此渲染返回条；
+   * 任何不带 fromTools 的路由切换都会清掉它，从侧栏直接进这些页面不会多出按钮。
+   */
+  fromTools: false,
+  /* 工具页「按游戏查看」里展开的是哪张游戏卡（'' 表示全部收起） */
+  toolsGame: '',
   record: {
     feature: 'daily-note',
     game: 'genshin',
@@ -205,10 +296,29 @@ const state = {
     role: {},
     cache: {},
   },
+  /*
+   * 插件页。
+   *
+   * list 是 plugins.list() 的原始结果（null 表示还没读过）；views / errors / running
+   * 由 window.HXLPlugin.Host 通过回调写回来，这里只存快照，好让重绘时能还原现场。
+   * active 是右边面板正在看哪个插件；pending 是刚导入、还没确认权限的插件。
+   */
+  plugins: {
+    list: null,
+    loading: false,
+    error: '',
+    active: '',
+    views: {},
+    errors: {},
+    running: {},
+    pending: '',
+  },
 };
-let liveSocket = null;
-let liveHeartbeat = null;
-let liveBridgeTimer = null;
+/*
+ * 多直播间并存的运行时句柄：room.id → { socket, heartbeat, timer }。
+ * B 站的 WebSocket / 其它平台的轮询定时器都挂在各自房间上，互不影响。
+ */
+const liveRuntimes = new Map();
 
 try {
   const savedSongs = JSON.parse(localStorage.getItem('vela:songs') || '[]');
@@ -229,6 +339,7 @@ const PAGE_META = {
   record: { label: '战绩', eyebrow: 'RECORD' },
   screenshots: { label: '截图管理', eyebrow: 'GALLERY' },
   graphics: { label: '画质配置', eyebrow: 'GRAPHICS' },
+  plugins: { label: '插件', eyebrow: 'PLUGINS' },
   // 公告已并入动态页；保留键只为兼容旧数据的 lastPage
   announcements: { label: '动态', eyebrow: 'JOURNAL' },
   settings: { label: '设置', eyebrow: 'PREFERENCES' },
@@ -1526,6 +1637,22 @@ function applyBackdrop(settings) {
   document.body.classList.toggle('has-backdrop', Boolean(image));
 }
 
+/*
+ * charms（装饰挂饰）和 charBg（角色背景水印）只在渲染进程里用：主进程的
+ * settings:update 白名单没有这两个键，快照里永远不出现它们。于是任何一次
+ * 状态回推 / applySettingLocally 回填，都会把刚点下去的值抹掉，开关看着就是
+ * 「点了又弹回去」。这里在覆盖 state.settings 之前把这两个值捞回来。
+ */
+const RENDERER_ONLY_SETTINGS = ['charms', 'charBg'];
+
+function keepRendererSettings(next, fallback) {
+  const merged = { ...(next || {}) };
+  for (const key of RENDERER_ONLY_SETTINGS) {
+    if (fallback && key in fallback) merged[key] = fallback[key];
+  }
+  return merged;
+}
+
 function applySettings() {
   const settings = state.settings || {};
   const mode = settings.theme || 'dark';
@@ -1538,6 +1665,8 @@ function applySettings() {
   document.documentElement.dataset.theme = resolved === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.accent = settings.accent || 'spark';
   document.body.classList.toggle('sidebar-collapsed', settings.sidebarCollapsed === true);
+  document.body.classList.toggle('charms-on', settings.charms !== false);
+  document.body.classList.toggle('charbg-on', settings.charBg !== false);
   applyBackdrop(settings);
   document.title = `花筱灵启动器 · ${PAGE_META[state.route]?.label || '主页'}`;
 }
@@ -1571,7 +1700,8 @@ async function applySettingLocally(patch) {
   }
 
   if (saved?.settings) {
-    state.settings = saved.settings;
+    // 就地保留 charms / charBg：主进程不认这两个键，直接覆盖会把它俩抹掉
+    state.settings = keepRendererSettings(saved.settings, state.settings);
     applySettings();
     updateChrome();
   }
@@ -1618,14 +1748,67 @@ function updateChrome() {
   syncNavToolsOpen();
 }
 
+/*
+ * 启动页唤出侧栏：优先把窗口整体向左外扩出一块放侧栏，画面尺寸/位置都不变；
+ * 扩不出去（全屏 / 最大化 / 已经贴着显示器左边缘）才退化成浮层（挂 start-nav-overlay）。
+ * 侧栏宽度直接读 CSS 变量，收缩态是 72px 图标条、展开态是 238px，不用写死。
+ */
+function startNavSidebarWidth() {
+  const element = document.querySelector('.sidebar');
+  if (!element) return 72;
+  const parsed = Number.parseFloat(getComputedStyle(element).getPropertyValue('--sidebar-w'));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 72;
+}
+
+async function setStartNavOpen(open) {
+  state.startNavOpen = open;
+  document.body.classList.toggle('start-nav-open', open);
+  let overlay = false;
+  if (!open) {
+    document.body.classList.remove('start-nav-overlay');
+    try {
+      await api.expandWindowLeft({ expand: false });
+    } catch (error) {
+      /* 窗口还原失败不影响界面收起 */
+    }
+    return;
+  }
+  if (document.body.classList.contains('is-fullscreen')) {
+    overlay = true;
+  } else {
+    let result = null;
+    try {
+      result = await api.expandWindowLeft({ expand: true, width: startNavSidebarWidth() });
+    } catch (error) {
+      result = null;
+    }
+    overlay = !result || !result.ok;
+  }
+  document.body.classList.toggle('start-nav-overlay', overlay);
+}
+
 function navigate(route, options = {}) {
   if (route === 'library') route = 'home';
   if (!PAGE_META[route]) route = 'home';
+  // 启动页唤出的侧栏开着时跳走：顺手收回
+  if (state.startNavOpen) {
+    setStartNavOpen(false).catch(() => {});
+  }
   const changed = route !== state.route;
+  /*
+   * 「返回工具页」条的来路标记：工具页的功能入口 navigate 时会带 fromTools，
+   * 目标二级页据此显示返回条；任何其它路由切换都视为已离开工具页链路，
+   * 自动清除，保证从侧栏直接进这些页面时不多出按钮、也不弄坏现有返回行为。
+   */
+  if (options.fromTools) state.fromTools = true;
+  else if (changed) state.fromTools = false;
   state.route = route;
   if (!document.body.classList.contains('sophon-minimized')) closeModal();
   render({ preserveScroll: false });
   if (route !== 'gacha') stopGachaRefresh();
+  if (route !== 'start') stopStartRunningTimer();
+  // 离开插件页就把所有 Worker 停掉：它们没必要在后台占着 CPU 和内存
+  if (changed && state.route === 'plugins') stopAllPlugins();
   if (route === 'gacha' && !state.gacha && !state.gachaLoading) {
     loadGacha();
   }
@@ -1643,13 +1826,16 @@ function navigate(route, options = {}) {
   if (route === 'tools' && !state.features) {
     // 先异步取数据，拿到后再重绘；失败也要重绘，否则会卡在「正在读取」
     loadFeatures().then(() => {
-      if (state.route === 'tools') render({ preserveScroll: true });
+      // 2.4.0 修复：这里不能传 preserveScroll —— navigate 进工具页时是异步重绘，
+      // 传 true 会把用户进入工具页之前的滚动位置原样还原回去，表现为「点进工具页滚动条跑到奇怪的地方」。
+      if (state.route === 'tools') render();
     });
   }
   if (route === 'tools') {
     // 顺带刷一次米游社登录态，拿到角色后重绘
     refreshHoyolabStatus('miyoushe').then(() => {
-      if (state.route === 'tools') render({ preserveScroll: true });
+      // 同上：异步数据回来后的重绘不还原滚动位
+      if (state.route === 'tools') render();
     });
     // 鹰角 / 完美世界 / 库街区的登录态一并拉一次
     const passportIds = [
@@ -1660,7 +1846,8 @@ function navigate(route, options = {}) {
       ),
     ];
     Promise.all(passportIds.map((id) => refreshPassportStatus(id))).then(() => {
-      if (state.route === 'tools') render({ preserveScroll: true });
+      // 同上：异步数据回来后的重绘不还原滚动位
+      if (state.route === 'tools') render();
     });
   }
   if (route === 'record') {
@@ -1708,6 +1895,9 @@ function navigate(route, options = {}) {
   }
   if (route === 'graphics' && !state.graphics && !state.graphicsLoading) {
     loadGraphics(state.graphicsGame);
+  }
+  if (route === 'plugins' && !state.plugins.list) {
+    loadPlugins();
   }
   if (route === 'start') {
     const startGame =
@@ -1952,6 +2142,13 @@ function decorateCharacterMotifs() {
 function render(options = {}) {
   if (!state.games.length && !state.app.version) return;
   document.body.classList.toggle('start-mode', state.route === 'start');
+  // 二级功能页隐藏悬挂装饰：挂件固定在左上角，正好压住战绩/抽卡页第一行标签的字
+  document.body.classList.toggle(
+    'is-subpage',
+    ['record', 'gacha', 'graphics', 'screenshots', 'downloads'].includes(state.route)
+  );
+  // 点歌台底部有 82px 的播放条：任务坞（硬链接/下载）fixed 在右下会压住它，CSS 里据此抬升
+  document.body.classList.toggle('is-song-page', state.route === 'song');
   if (state.route !== 'start' && state.startServerMenu) state.startServerMenu = false;
   applySettings();
   updateChrome();
@@ -1968,6 +2165,7 @@ function render(options = {}) {
     record: recordView,
     screenshots: shotsView,
     graphics: graphicsView,
+    plugins: pluginsView,
     announcements: announcementsView,
     settings: settingsView,
   }[state.route];
@@ -1983,18 +2181,41 @@ function render(options = {}) {
    */
   const lyricBox = dom.view.querySelector('#song-lyrics');
   const lyricScroll = lyricBox ? lyricBox.scrollTop : 0;
+  /*
+   * 内层滚动容器也要保滚：队列列表（.song-list）有 max-height + overflow，
+   * 是自己的滚动容器。整页 innerHTML 重绘后这些节点是全新的，scrollTop 归零，
+   * 表现为"点收起后列表跳回顶部"。按选择器记忆各容器位置，重绘后原样还回去。
+   */
+  const INNER_SCROLL_SELECTORS = ['.song-list'];
+  const innerScrollMemo = options.preserveScroll
+    ? INNER_SCROLL_SELECTORS.map((sel) =>
+        Array.from(dom.view.querySelectorAll(sel)).map((el) => ({ top: el.scrollTop, left: el.scrollLeft }))
+      )
+    : [];
   const videoMemo = memoStartVideo();
   const prevArt = dom.view.querySelector(`.start-screen ${START_ART_LIVE}`);
   dom.view.innerHTML = view ? view() : homeView();
   handoffStartArt(prevArt);
-  if (options.preserveScroll) dom.view.scrollTop = scroll;
-  else dom.view.scrollTop = 0;
+  if (options.preserveScroll) {
+    dom.view.scrollTop = scroll;
+    INNER_SCROLL_SELECTORS.forEach((sel, i) => {
+      const nodes = dom.view.querySelectorAll(sel);
+      (innerScrollMemo[i] || []).forEach((memo, j) => {
+        const el = nodes[j];
+        if (el) {
+          el.scrollTop = memo.top;
+          el.scrollLeft = memo.left;
+        }
+      });
+    });
+  } else dom.view.scrollTop = 0;
   const nextLyricBox = dom.view.querySelector('#song-lyrics');
   if (nextLyricBox && lyricScroll) nextLyricBox.scrollTop = lyricScroll;
   bindView();
   restoreStartVideo(videoMemo);
   bindStartArtVideo();
   setupStartDrawerSync();
+  setupStartGameRail();
   updateSongChrome();
   renderQuickPanel();
   decorateCharacterMotifs();
@@ -2031,7 +2252,7 @@ function stageHero(latest, mood) {
     <section class="hero">
       <div class="hero-bg" style="background-image:${esc(cssUrl('assets/character.png'))}"></div>
       <div class="hero-shade"></div>
-      <div class="hero-sparxie" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></div>
+      <div class="hero-sparxie" aria-hidden="true"><img src="assets/sparkle-hero.png" alt="" draggable="false" /></div>
       <div class="hero-sparks" aria-hidden="true">
         <svg viewBox="0 0 260 260">
           <g fill="none" stroke="currentColor">
@@ -2070,9 +2291,17 @@ function stageHero(latest, mood) {
           <button class="btn btn-primary" data-action="${action}"${actionId}>
             ${icon(actionIcon)}${esc(actionLabel)}
           </button>
-          <button class="btn btn-glass hero-start-btn" data-nav="start">
+          ${
+            /* 2.4.x：有游戏时直达该游戏的启动页（侧栏直达后主页转「快速通道」定位）；
+               没有游戏时退回普通启动页入口。 */
+            latest
+              ? `<button class="btn btn-glass hero-start-btn" data-action="continue-game" data-id="${esc(latest.id)}">
+            ${icon('play')}进入启动页
+          </button>`
+              : `<button class="btn btn-glass hero-start-btn" data-nav="start">
             ${icon('play')}启动页
-          </button>
+          </button>`
+          }
           <button class="btn btn-glass" data-action="scroll-library">${icon('library')}查看游戏库</button>
         </div>
       </div>
@@ -2120,6 +2349,18 @@ function newsCard(post) {
       <h4>${esc(post.title)}</h4>
       <p>${esc(post.excerpt)}</p>
       <span class="news-more">阅读全文 ${icon('chevron-right')}</span>
+    </button>`;
+}
+
+/* 主页专用的一行动态条：标题 + 日期 + 箭头，点击行为与 news-card 一致（open-news），
+   只是把三张大卡换成单行列表，让主页不用为动态区滚一大屏。 */
+function homeNewsRow(post) {
+  return `
+    <button class="home-news-row" data-action="open-news" data-id="${esc(post.id)}">
+      <span class="home-news-tag">${esc(post.tag)}</span>
+      <span class="home-news-title">${esc(post.title)}</span>
+      <span class="home-news-date">${esc(post.date || '')}</span>
+      ${icon('chevron-right')}
     </button>`;
 }
 
@@ -2178,10 +2419,15 @@ function startView() {
       <div class="start-shade"></div>
       ${hasVideo ? '<div class="start-text-veil" aria-hidden="true"></div>' : ''}
       <header class="start-top">
-        <button class="chrome-btn chrome-back" data-action="back-home" title="返回主界面（Esc）" aria-label="返回主界面">${icon('chevron-left')}</button>
+        <!-- 2.4.x：返回键换成「打开导航」——侧栏浮层直接去任何页面，
+             回主页走浮层第一项或 Esc，不再单独占一个键 -->
+        <button class="chrome-btn chrome-menu" data-action="toggle-start-nav" title="打开侧栏（Esc 返回主界面）" aria-label="打开侧栏">${icon('menu')}</button>
         <div class="start-brand">
           <img class="start-brand-mark" src="assets/character-face.png" alt="" aria-hidden="true" />
-          <span>花筱灵启动器</span>
+          <div class="start-brand-copy">
+            <strong>花筱灵</strong>
+            <small>HANABI STAGE</small>
+          </div>
         </div>
         <div class="start-video-tools">
           <button class="start-video-toggle" data-action="toggle-start-video" title="${hasVideo ? '暂停动态背景' : '这个游戏没有官方动态背景'}" aria-label="暂停或播放动态背景" ${hasVideo ? '' : 'disabled'}>
@@ -2256,13 +2502,15 @@ function startView() {
           <span class="start-games-mini-slot" id="start-mini-slot" aria-hidden="true"></span>
           <span>${state.games.length} 款 · 悬停展开</span>
         </div>
-        <div class="start-game-list">
+        <div class="start-game-rail">
+          <button class="start-game-nav is-prev" type="button" tabindex="-1" aria-label="往前翻游戏">${icon('chevron-down', 'start-games-nav-icon')}</button>
+          <div class="start-game-list">
           ${ordered
             .map(
               (game) => `
               <button class="start-game-thumb ${game.id === selected.id ? 'active' : ''}" data-action="start-select" data-id="${esc(game.id)}" title="${esc(game.name)}">
                 <span class="start-game-media">
-                  ${game.coverUrl ? `<img src="${esc(game.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : `<span class="start-game-initial">${esc(initial(game.name))}</span>`}
+                  ${(game.startCoverUrl || game.coverUrl) ? `<img src="${esc(game.startCoverUrl || game.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : `<span class="start-game-initial">${esc(initial(game.name))}</span>`}
                 </span>
                 <span class="start-game-copy">
                   <strong>${esc(game.name)}</strong>
@@ -2272,6 +2520,8 @@ function startView() {
               </button>`
             )
             .join('')}
+          </div>
+          <button class="start-game-nav is-next" type="button" tabindex="-1" aria-label="往后翻游戏">${icon('chevron-down', 'start-games-nav-icon')}</button>
         </div>
       </div>
       <button class="start-menu-scrim" data-action="start-server-menu" aria-label="关闭服务器选择"></button>
@@ -2297,60 +2547,198 @@ function closeStartServerMenu() {
   document.querySelector('.start-screen')?.classList.remove('dock-open');
 }
 
+/**
+ * 服务器列表按 group 分组渲染（2.4.0 合并自对方分支）。
+ * 明日方舟的国际服是 Yostar 发行的一组区域服（EN / JP / KR），
+ * 它们平铺在一起会和「官服 / B服」混成六个平级条目，看不出层级关系。
+ * 这里把同组的收进一个小标题下面，其余条目照原样平铺。
+ */
+function groupServersForDisplay(servers) {
+  const GROUP_LABELS = { global: '国际服 · 选择区域' };
+  const groups = [];
+  const seen = new Map();
+  for (const server of servers) {
+    const key = server.group || '';
+    if (!key) {
+      groups.push({ key: 'solo-' + server.id, label: '', items: [server] });
+      continue;
+    }
+    if (!seen.has(key)) {
+      const entry = { key, label: GROUP_LABELS[key] || key, items: [] };
+      seen.set(key, entry);
+      groups.push(entry);
+    }
+    seen.get(key).items.push(server);
+  }
+  return groups;
+}
+
+/**
+ * 启动页 dock 的主按钮区。
+ * 已安装：单个「开始游戏」，行为一字不变。
+ * 未安装的内置游戏：换成【下载游戏】+【自动检测】+【路径选择】三个动作 ——
+ *   - 下载游戏：米哈游三游 / 崩坏3官服 / 终末地 / 明日方舟官服走官方渠道一键下载；
+ *     异环没有公开下载接口，点开弹窗会如实说明并附官网入口；
+ *   - 自动检测：复用 games:detect，扫注册表和常见目录找已装好的客户端；
+ *   - 路径选择：手动指定启动程序（复用服务器编辑弹窗）。
+ * 非内置游戏保持原来的「配置游戏」。
+ */
+function startDockDownloadActions(game) {
+  if (game.installed) {
+    return `<button class="start-dock-play" data-action="start-selected" data-id="${esc(game.id)}">
+        ${icon('play')}
+        <span>开始游戏</span>
+      </button>`;
+  }
+  if (!game.builtin) {
+    return `<button class="start-dock-play" data-action="edit-game" data-id="${esc(game.id)}">
+        ${icon('wrench')}
+        <span>配置游戏</span>
+      </button>`;
+  }
+  return `<div class="start-dock-dl-row">
+      <button class="start-dock-play" data-action="download-game" data-id="${esc(game.id)}" title="从官方渠道下载并安装">
+        ${icon('download')}
+        <span>下载游戏</span>
+      </button>
+      <button class="start-dock-secondary" data-action="detect-game" data-id="${esc(game.id)}" title="扫描注册表和常见安装目录，找已经装好的客户端">
+        ${icon('refresh')}
+        <span>自动检测</span>
+      </button>
+      <button class="start-dock-secondary" data-action="start-pick-path" data-id="${esc(game.id)}" title="手动指定客户端启动程序">
+        ${icon('folder')}
+        <span>路径选择</span>
+      </button>
+    </div>`;
+}
+
 function startServerPanel(game) {
   const servers = game.servers || [];
   const active =
     servers.find((server) => server.id === game.activeServerId) || servers[0] || null;
   const status = active ? serverState(active) : null;
   const fileName = active && active.path ? active.path.split(/[\\/]/).pop() : '';
+  const activeBlock = active ? serverBlockHint(active) : null;
   const ready = servers.filter((server) => server.exists && !server.incomplete).length;
   const open = Boolean(state.startServerMenu);
 
-  const items = servers
-    .map((server) => {
-      const state_ = serverState(server);
-      const file = server.path ? server.path.split(/[\\/]/).pop() : '';
-      return `
-        <button class="start-server-item ${server.active ? 'is-active' : ''} ${server.incomplete ? 'is-broken' : ''}"
+  const itemMarkup = (server) => {
+    const state_ = serverState(server);
+    const file = server.path ? server.path.split(/[\\/]/).pop() : '';
+    const tag = serverChannelTag(game, server);
+    const block = serverBlockHint(server);
+    // 右边这枚小标签是「一眼看出状态」的那一眼：只有文件名和圆点还是要点进去才知道能不能用
+    const badge = server.active ? '当前' : server.incomplete ? '不完整' : server.exists ? '就绪' : '未配置';
+    return `
+        <button class="start-server-item ${server.active ? 'is-active' : ''} ${block ? 'is-broken sw-srv-unusable' : ''}"
           role="option" aria-selected="${server.active ? 'true' : 'false'}"
           data-action="start-server-pick" data-game="${esc(game.id)}" data-server="${esc(server.id)}"
           title="${esc(server.path || server.packPath || server.name)}">
           <span class="start-server-item-dot ${state_.cls}"></span>
           <span class="start-server-item-copy">
             <strong>${esc(server.name)}</strong>
-            <small>${esc(file || state_.label)}</small>
+            <small>${
+              // 渠道放在文件名前面：文件名会被截断，渠道不能跟着一起消失
+              tag ? `<em class="sw-srv-tag">${esc(tag)}</em>` : ''
+            }${esc(file || state_.label)}</small>
+            ${
+              block
+                ? `<span class="sw-srv-block">${icon('alert', 'xs')}<span>${esc(block.text)}<em>${esc(
+                    block.next
+                  )}</em></span></span>`
+                : ''
+            }
           </span>
+          <em class="sw-srv-state ${state_.cls}">${esc(badge)}</em>
           ${server.active ? `<span class="start-server-item-tick">${icon('check')}</span>` : ''}
         </button>`;
+  };
+
+  /*
+   * 2.4.0 合并自对方分支：服务器列表按 group 分组渲染。
+   * 明日方舟的国际服是 Yostar 发行的一组区域服（EN / JP / KR），
+   * 它们平铺在一起会和「官服 / B服」混成六个平级条目，看不出层级关系。
+   * 这里把同组的收进一个小标题下面，其余条目照原样平铺。
+   */
+  const items = groupServersForDisplay(servers)
+    .map((group) => {
+      const body = group.items.map(itemMarkup).join('');
+      if (!group.label) return body;
+      return `<div class="start-server-group">
+          <div class="start-server-group-label">${esc(group.label)}</div>
+          ${body}
+        </div>`;
     })
     .join('');
 
+  /*
+   * 下拉里的「服务器列表」和「动作区」必须是两个兄弟节点。
+   * 之前动作区用 position:sticky;bottom:0 钉在滚动区底部，实测直接把服务器行盖住了
+   * （官服那行带告警块、比较高，B服/国际服被压在动作区下面，既看不见也点不到）。
+   * 现在列表自己滚（.sw-srv-list），动作区在文档流里占固定高度。
+   */
   return `
     <div class="start-dock${open ? ' is-menu-open' : ''}">
+      <span class="start-dock-crest" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></span>
+      <span class="start-dock-charm" aria-hidden="true"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
+      <span class="start-dock-sparks" aria-hidden="true"><i></i><i></i><i></i></span>
       <div class="start-dock-server-head">
-        <span class="start-dock-label">服务器 <em>${ready} / ${servers.length}</em></span>
-        <button class="start-dock-icon" data-action="start-server-manage" data-game="${esc(game.id)}" title="管理服务器、硬链接、自动检测">${icon('settings')}</button>
+        <span class="start-dock-label">服务器 <em>${ready} / ${servers.length} 可用</em></span>
       </div>
       <button class="start-server-pick" data-action="start-server-menu" aria-expanded="${open ? 'true' : 'false'}" title="切换服务器">
         <span class="start-server-pick-dot ${status ? status.cls : 'missing'}"></span>
         <span class="start-server-pick-copy">
           <strong>${esc(active ? active.name : '未配置服务器')}</strong>
-          <small>${esc(fileName || (status ? status.label : '还没有可用客户端'))}</small>
+          <small>${
+            activeBlock
+              ? `<span class="sw-srv-pick-bad">${esc(activeBlock.text)}</span>`
+              : `${
+                  active && serverChannelTag(game, active)
+                    ? `<em class="sw-srv-tag">${esc(serverChannelTag(game, active))}</em>`
+                    : ''
+                }${esc(fileName || (status ? status.label : '还没有可用客户端'))}`
+          }</small>
         </span>
         <span class="start-server-pick-caret">${icon('chevron-down')}</span>
       </button>
       <div class="start-server-menu" role="listbox" aria-label="服务器列表">
-              ${items || '<p class="start-server-empty">还没有服务器</p>'}
-              <div class="start-server-menu-foot">
-                <button class="start-server-foot-btn" data-action="start-detect" data-game="${esc(game.id)}">${icon('refresh')}检测</button>
-                <button class="start-server-foot-btn" data-action="start-link" data-game="${esc(game.id)}">${icon('link')}硬链接</button>
-                <button class="start-server-foot-btn" data-action="start-server-manage" data-game="${esc(game.id)}">${icon('settings')}管理</button>
+              <div class="sw-srv-list">${items || '<p class="start-server-empty">还没有服务器</p>'}</div>
+              <div class="sw-srv-actions">
+                <button class="sw-srv-action" data-action="start-link" data-game="${esc(game.id)}">
+                  <span class="sw-srv-action-icon">${icon('link')}</span>
+                  <span class="sw-srv-action-copy">
+                    <strong>硬链接去重</strong>
+                    <small>两个客户端里完全相同的文件只留一份，省掉重复占的空间</small>
+                  </span>
+                </button>
+                <button class="sw-srv-action" data-action="start-detect" data-game="${esc(game.id)}">
+                  <span class="sw-srv-action-icon">${icon('refresh')}</span>
+                  <span class="sw-srv-action-copy">
+                    <strong>重新扫描安装目录</strong>
+                    <small>刚装完游戏或挪过文件夹时，让启动器重新找一遍</small>
+                  </span>
+                </button>
+                <button class="sw-srv-action" data-action="start-server-manage" data-game="${esc(game.id)}">
+                  <span class="sw-srv-action-icon">${icon('settings')}</span>
+                  <span class="sw-srv-action-copy">
+                    <strong>服务器管理</strong>
+                    <small>重建、编辑 exe 路径、清除、移除都在这里</small>
+                  </span>
+                </button>
               </div>
             </div>
-      <button class="start-dock-play" data-action="${game.installed ? 'start-selected' : game.builtin ? 'detect-game' : 'edit-game'}" data-id="${esc(game.id)}">
-        ${icon(game.installed ? 'play' : game.builtin ? 'refresh' : 'wrench')}
-        <span>${game.installed ? '开始游戏' : game.builtin ? '检测安装' : '配置游戏'}</span>
-      </button>
+      ${
+        game.running
+          ? `<div class="start-dock-running">
+              <span class="start-dock-running-dot"></span>
+              <span class="start-dock-running-copy">
+                <strong>正在运行</strong>
+                <small id="start-run-timer" data-since="${esc(String(game.runningSince || 0))}">00:00</small>
+              </span>
+              <button class="start-dock-stop" data-action="stop-game" data-id="${esc(game.id)}" title="结束游戏进程" aria-label="结束游戏进程">${icon('stop')}</button>
+            </div>`
+          : `${startDockPredownload(game)}${startDockDownloadActions(game)}`
+      }
     </div>`;
 }
 
@@ -2370,12 +2758,22 @@ function openStartServerManager(gameId) {
           <button class="modal-close" data-close title="关闭">${icon('x')}</button>
         </div>
         <div class="modal-body">
+          <p class="sw-mgr-summary">
+            ${servers.filter((server) => server.exists && !server.incomplete).length} 个可用 · ${
+              servers.filter((server) => !server.exists || server.incomplete).length
+            } 个需要处理 —— 缺启动程序的点「编辑」选 exe，显示「需要重建」的点「重建」。
+          </p>
           <div class="server-manager-actions">
-            <button class="btn btn-ghost btn-sm" data-action="start-detect" data-game="${esc(game.id)}">${icon('refresh')}自动检测</button>
-            <button class="btn btn-ghost btn-sm" data-action="start-link" data-game="${esc(game.id)}">${icon('link')}硬链接去重</button>
+            <button class="btn btn-ghost btn-sm" data-action="start-detect" data-game="${esc(game.id)}" title="重新扫描安装目录，找已经装好的客户端">${icon('refresh')}重新扫描目录</button>
+            <button class="btn btn-ghost btn-sm" data-action="start-link" data-game="${esc(game.id)}" title="两个客户端里完全相同的文件只留一份，省下重复占的空间">${icon('link')}硬链接去重</button>
             ${game.builtin ? '' : `<button class="btn btn-ghost btn-sm" data-action="add-server" data-game="${esc(game.id)}">${icon('plus')}添加服务器</button>`}
           </div>
-          <div class="server-list">${servers.map((server) => serverRow(game, server)).join('') || '<p class="gacha-empty-line">还没有服务器</p>'}</div>
+          ${
+            game.builtinKey === 'neverness'
+              ? nteChannelMarkup(game, servers.find((item) => item.active) || servers[0])
+              : ''
+          }
+          <div class="server-list" id="server-manager-list" data-game="${esc(game.id)}">${servers.map((server) => serverRow(game, server)).join('') || '<p class="gacha-empty-line">还没有服务器</p>'}</div>
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" data-close>关闭</button>
@@ -2384,9 +2782,45 @@ function openStartServerManager(gameId) {
       </div>
     </div>
   `);
+  // 渠道和预下载状态都是外部读来的，弹窗建好后再补，不阻塞打开
+  if (game.builtinKey === 'neverness') refreshNtePanel();
+  autoCheckPredownload(game);
 }
 
 /** 让暂停按钮的图标和文案跟着视频状态走。 */
+/**
+ * 开始页的运行计时：游戏跑起来后，开始按钮的位置改显示「已运行 时:分:秒」，
+ * 跟 Starward 一样让人一眼看到这局跑了多久。
+ */
+function syncStartRunningTimer() {
+  const el = document.querySelector('#start-run-timer');
+  if (!el) return false;
+  const since = Number(el.dataset.since || 0);
+  if (!since) return false;
+  const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  const pad = (value) => String(value).padStart(2, '0');
+  el.textContent = hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(secs)}` : `${pad(minutes)}:${pad(secs)}`;
+  return true;
+}
+
+let startRunTimerId = null;
+
+function stopStartRunningTimer() {
+  if (startRunTimerId) clearInterval(startRunTimerId);
+  startRunTimerId = null;
+}
+
+function startStartRunningTimer() {
+  stopStartRunningTimer();
+  if (!syncStartRunningTimer()) return;
+  startRunTimerId = setInterval(() => {
+    if (!syncStartRunningTimer()) stopStartRunningTimer();
+  }, 1000);
+}
+
 function restoreStartVideoState() {
   const video = liveStartVideo();
   if (!video) return;
@@ -2457,10 +2891,11 @@ function wasStartVideoPaused(gameId) {
 /**
  * 花火 / 火花：官方透明立绘（1306 / 1501），摆在主页当后台双人卡。
  *
- * 这两张卡不是纯摆设：花火盯着游戏（最近在玩 + 累计时长，点一下直接开那个游戏），
- * 火花盯着点歌台（正在播放 / 队列，点一下进点歌台）。数据都取自本机现有状态。
- *
- * 位置：homeView() 里放在最新动态之后（主页最底部），平时只露立绘，hover 才展开。
+ * 这两张卡不是纯摆设：
+ *   花火 = 游戏快启：显示最近游玩的封面和名字，点一下直接开那个游戏；
+ *   火花 = 音乐遥控：显示正在播的歌，卡上自带 上一首/播放暂停/下一首 三个键，
+ *          连了直播点歌还会亮牌子；点卡身其它位置进点歌台。
+ * 数据都取自本机现有状态，播放键图标由 updateSongChrome() 在 play/pause 事件里同步。
  */
 function characterDuoMarkup() {
   const recent =
@@ -2478,38 +2913,58 @@ function characterDuoMarkup() {
   const audio = document.querySelector('#song-audio');
   const playing = Boolean(song) && Boolean(audio && audio.src) && Boolean(audio && !audio.paused);
   const queue = state.songs.length;
+  const liveCount = Array.isArray(state.liveRooms) ? state.liveRooms.length : 0;
 
-  const gameStat = recent
-    ? `${recent.name}`
-    : '还没有开过场';
   const gameSub = recent
     ? `累计 ${formatPlaytime(totalSeconds)} · 点一下接着演`
     : '在游戏库里挑一个开场吧';
-
-  const songStat = song ? songTitle || '未知曲目' : '点歌台空着';
   const songSub = song
     ? `${playing ? '正在播放' : '已暂停'}${songArtist ? ' · ' + songArtist : ''} · 队列 ${queue} 首`
     : `队列 ${queue} 首 · 点一下去点歌`;
 
+  const gameBody = recent
+    ? `<span class="duo-game">
+        ${
+          recent.coverUrl
+            ? `<img class="duo-game-cover" src="${esc(recent.coverUrl)}" alt="" referrerpolicy="no-referrer" />`
+            : `<span class="duo-game-cover is-initial">${esc(initial(recent.name))}</span>`
+        }
+        <span class="duo-game-name">${esc(recent.name)}</span>
+        ${recent.running ? '<span class="duo-live is-running">运行中</span>' : ''}
+      </span>
+      <small class="duo-note">累计 ${formatPlaytime(totalSeconds)} · 点击直接启动</small>`
+    : '<small class="duo-note">先去游戏库添加一款游戏</small>';
+
+  const songBody = `
+    <span class="duo-song-line" id="duo-song-title">${esc(song ? songTitle || '未知曲目' : '队列空着，去点歌')}</span>
+    <span class="duo-controls">
+      <span class="duo-ctrl" data-action="duo-prev" title="上一首">${icon('chevron-left', 'xs')}</span>
+      <span class="duo-ctrl is-main" data-action="duo-toggle" title="${playing ? '暂停' : '播放'}">
+        <span class="duo-ic" data-when="play"${playing ? ' hidden' : ''}>${icon('play')}</span>
+        <span class="duo-ic" data-when="pause"${playing ? '' : ' hidden'}>${icon('pause')}</span>
+      </span>
+      <span class="duo-ctrl" data-action="duo-next" title="下一首">${icon('chevron-right', 'xs')}</span>
+      ${liveCount ? `<span class="duo-live">${icon('mic', 'xs')}直播点歌 × ${liveCount}</span>` : ''}
+    </span>
+    <small class="duo-note">${songArtist ? esc(songArtist) + ' · ' : ''}队列 ${queue} 首</small>`;
+
   return `
     <div class="char-duo">
-      <button type="button" class="char-duo-card is-sparkle" data-action="duo-game"${
+      <button type="button" class="char-duo-card is-sparkle" data-action="duo-game" title="${esc(gameSub)}"${
         recent ? ` data-game="${esc(recent.id)}"` : ''
       }>
-        <img src="assets/sparkle.png" alt="花火" />
-        <div class="char-duo-copy">
-          <strong>花火</strong>
-          <em>假面愚者。把每一场演出都当成即兴，后台的灯从不为她熄灭。</em>
-          <span class="char-duo-stat"><b>${esc(gameStat)}</b><i>${esc(gameSub)}</i></span>
-        </div>
+        <img src="assets/sparkle-fullbody.png" alt="花火" />
+        <span class="char-duo-copy">
+          <strong>花火 <i class="duo-tag">游戏快启</i></strong>
+          <span class="char-duo-stat">${gameBody}</span>
+        </span>
       </button>
-      <button type="button" class="char-duo-card is-sparxie" data-action="duo-song">
-        <img src="assets/sparxie.png" alt="火花" />
-        <div class="char-duo-copy">
-          <strong>火花</strong>
-          <em>烟花一响，后台就热闹起来。花花兔和火火菇也跟着上场。</em>
-          <span class="char-duo-stat"><b>${esc(songStat)}</b><i>${esc(songSub)}</i></span>
-        </div>
+      <button type="button" class="char-duo-card is-sparxie" data-action="duo-song" title="${esc(songSub)}">
+        <img src="assets/sparxie-fullbody.png" alt="火花" />
+        <span class="char-duo-copy">
+          <strong>火花 <i class="duo-tag">音乐遥控</i></strong>
+          <span class="char-duo-stat">${songBody}</span>
+        </span>
       </button>
     </div>
   `;
@@ -2523,13 +2978,19 @@ function homePlaytimeMarkup() {
   );
   const total = ordered.reduce((sum, game) => sum + (game.playSeconds || 0), 0);
   const launches = ordered.reduce((sum, game) => sum + (game.launchCount || 0), 0);
+  const playedCount = ordered.filter((game) => (game.playSeconds || 0) > 0).length;
   const maxSeconds = Math.max(1, ...ordered.map((game) => game.playSeconds || 0));
+  /*
+   * 主页紧凑化：整个统计区改成 <details> 折叠条，默认收起只留一行摘要，
+   * 数字全部内联在摘要里；展开后仍是原来的 KPI 卡和逐款明细，数据一点不丢。
+   */
   return `
-    <section class="home-stats" id="home-stats">
-      <div class="section-head">
-        <div><h3>游玩统计</h3><p>每款游戏的本机累计时长，退出游戏后自动结算。</p></div>
-        <span class="home-stats-note">${total ? `共 ${formatPlaytime(total)}` : '启动游戏后开始累计'}</span>
-      </div>
+    <details class="home-stats" id="home-stats">
+      <summary class="home-stats-summary">
+        <span class="home-stats-title">游玩统计</span>
+        <span class="home-stats-brief">累计 <strong>${formatPlaytime(total)}</strong> · ${launchedLabel(launches)} · ${ordered.length} 款游戏${total ? ` · 已游玩 ${playedCount} 款` : ''}</span>
+        <span class="home-stats-hint">点开看明细</span>
+      </summary>
       <div class="playtime-summary">
         <div class="playtime-total">
           <span>累计游玩</span>
@@ -2537,7 +2998,7 @@ function homePlaytimeMarkup() {
           <small>${launchedLabel(launches)} · ${ordered.length} 款游戏</small>
         </div>
         <div class="playtime-kpi"><strong>${launches}</strong><span>总启动次数</span></div>
-        <div class="playtime-kpi"><strong>${ordered.filter((game) => (game.playSeconds || 0) > 0).length}</strong><span>已游玩游戏</span></div>
+        <div class="playtime-kpi"><strong>${playedCount}</strong><span>已游玩游戏</span></div>
       </div>
       <div class="playtime-list">
         ${ordered
@@ -2562,7 +3023,7 @@ function homePlaytimeMarkup() {
           })
           .join('')}
       </div>
-    </section>`;
+    </details>`;
 }
 
 function launchedLabel(count) {
@@ -2596,7 +3057,7 @@ function homeView() {
 
   if (!state.games.length) {
     return `
-      <div class="page">
+      <div class="page home-page">
         ${head}
         <div class="empty">
           <div class="empty-char" aria-hidden="true"><img src="assets/character-face.png" alt="" /></div>
@@ -2615,7 +3076,7 @@ function homeView() {
   }
 
   return `
-    <div class="page">
+    <div class="page home-page">
       ${head}
       ${stageHero(recent[0], mood)}
       ${
@@ -2632,11 +3093,11 @@ function homeView() {
       }
       ${librarySectionMarkup()}
       ${homePlaytimeMarkup()}
-      <div class="section-head">
-        <div><h3>最新动态</h3><p>使用指南、功能说明与一些想法</p></div>
+      <div class="section-head home-news-head">
+        <div><h3>最新动态</h3></div>
         <button class="link-btn" data-nav="news">全部动态 ${icon('chevron-right')}</button>
       </div>
-      <div class="news-grid">${state.news.slice(0, 3).map(newsCard).join('')}</div>
+      <div class="home-news-list">${state.news.slice(0, 3).map(homeNewsRow).join('')}</div>
       ${characterDuoMarkup()}
     </div>`;
 }
@@ -2653,11 +3114,8 @@ function librarySectionMarkup() {
   ];
   return `
     <section class="home-library" id="home-library">
-      <div class="section-head">
-        <div>
-          <h3>游戏库</h3>
-          <p>所有游戏都在这里，添加、检测、整理封面和启动路径。</p>
-        </div>
+      <div class="section-head home-library-head">
+        <div><h3>游戏库</h3></div>
         <div class="home-library-actions">
           <button class="btn btn-ghost btn-icon" data-action="sync-official" title="同步官网版本与封面">${icon('sparkle')}</button>
           <button class="btn btn-ghost btn-icon" data-action="detect-all" title="自动检测已安装游戏">${icon('refresh')}</button>
@@ -2723,6 +3181,7 @@ function gameCard(game) {
           </button>
           <button class="card-tool" data-action="change-cover" data-id="${esc(game.id)}" title="更换封面">${icon('image')}</button>
           <button class="card-tool" data-action="edit-game" data-id="${esc(game.id)}" title="编辑游戏">${icon('edit')}</button>
+          ${cardPredownloadEntry(game)}
           ${game.builtin ? '' : `<button class="card-tool danger" data-action="delete-game" data-id="${esc(game.id)}" title="从游戏库移除">${icon('trash')}</button>`}
         </div>
       </div>
@@ -2861,6 +3320,50 @@ function serverState(server) {
   return { label: '未配置', cls: 'missing' };
 }
 
+/**
+ * 渠道短名（官服 / B服 / 国际服 …）。
+ *
+ * 内置渠道的服务器名本身就叫「官服」「B服」，再贴一个同名标签只是噪音，
+ * 所以名字已经写着渠道时返回空串；只有玩家自己加的行才需要标出来。
+ */
+function serverChannelTag(game, server) {
+  if (!server || !server.channel) return '';
+  const tags = {
+    // 终末地官方口径叫「国服」，和原神那套「官服」不是一回事
+    official: '官服',
+    bilibili: 'B服',
+    global: '国际服',
+    play: 'Play',
+    steam: 'Steam',
+    custom: '自建',
+  };
+  const tag = tags[server.channel] || '';
+  return tag && tag !== server.name ? tag : '';
+}
+
+/**
+ * 这一行为什么用不了、下一步该点哪。
+ *
+ * 只说「未配置」玩家分不清是没装游戏、没选 exe，还是上次生成到一半，
+ * 于是只能在几个菜单之间乱点 —— 这里把原因和去处分两行写清楚。
+ */
+function serverBlockHint(server) {
+  if (!server) return null;
+  if (server.incomplete) {
+    return {
+      text: '客户端不完整（文件缺失），现在启动会失败',
+      next: '点这一行 → 服务器管理 → 重建',
+    };
+  }
+  if (!server.exists) {
+    return {
+      text: '还没选择启动程序（.exe）',
+      next: '点这一行 → 服务器管理 → 编辑 → 选 exe',
+    };
+  }
+  return null;
+}
+
 function serverRow(game, server) {
   const status = serverState(server);
   const usable = server.exists && !server.incomplete;
@@ -2925,6 +3428,580 @@ function serverRow(game, server) {
         }
       </div>
     </article>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* 预下载                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 预下载的全部结论都由主进程算好，存在 server.predownload 里（结构见
+ * electron/predownload.js 顶部注释），界面只负责呈现：拿到什么显示什么，
+ * 没拿过就显示「未查询」并给一个「检查」按钮。
+ *
+ * 异环和终末地 Steam 是明确不支持的，但后端给的 reason 必须显示出来 ——
+ * 藏起来只会让用户以为功能坏了。
+ */
+const PREDOWNLOAD_GAMES = ['genshin', 'starrail', 'zzz', 'endfield', 'neverness'];
+
+/** state → 徽标文案与配色。没有查过就是 unknown，界面给「检查」按钮。 */
+const PREDOWNLOAD_STATES = {
+  available: { label: '可以预下载', cls: 'is-ready' },
+  done: { label: '预下载已完成', cls: 'is-done' },
+  update: { label: '正式版已上线', cls: 'is-update' },
+  none: { label: '官方暂未开放', cls: 'is-idle' },
+  'not-installed': { label: '没读到客户端版本', cls: 'is-idle' },
+  unsupported: { label: '不支持预下载', cls: 'is-block' },
+  error: { label: '状态读取失败', cls: 'is-block' },
+};
+
+/** 进度事件里 phase 的人话翻译。 */
+const PREDOWNLOAD_PHASES = {
+  start: '准备中',
+  version: '版本信息',
+  manifest: '读取官方清单',
+  download: '下载预下载内容',
+  install: '写入游戏文件',
+  extract: '解压预下载包',
+  stage: '整理更新内容',
+  patch: '应用补丁',
+  done: '完成',
+  error: '出错',
+};
+
+/** 正在向官方查询的服务器，界面上显示「查询中」而不是假装没事。 */
+const pdBusy = new Set();
+
+/** 预下载面板打开时登记的重绘函数，查完状态时顺手把面板也刷一遍。 */
+let pdModalRepaint = null;
+let pdModalStoryRepaint = null;
+
+/** 异环渠道是读启动器配置来的，缓存一份，免得每次重绘都去读文件。 */
+const nteChannelCache = new Map();
+
+function predownloadApi() {
+  return api.predownload && typeof api.predownload.check === 'function' ? api.predownload : null;
+}
+
+/** 只有这五个内置游戏才有预下载这条链路；自建游戏没有清单可查。 */
+function predownloadWired(game) {
+  return Boolean(game && PREDOWNLOAD_GAMES.includes(game.builtinKey));
+}
+
+function predownloadInfo(server) {
+  const info = server && server.predownload;
+  return info && typeof info === 'object' ? info : null;
+}
+
+function predownloadMeta(info) {
+  return PREDOWNLOAD_STATES[String(info && info.state ? info.state : '')] || null;
+}
+
+/** 游戏卡上那个预下载入口：只在接入了预下载的游戏上出现，点击直达面板。 */
+function cardPredownloadEntry(game) {
+  if (!predownloadWired(game)) return '';
+  const servers = game.servers || [];
+  const server = servers.find((item) => item.active) || servers[0];
+  const info = predownloadInfo(server);
+  const pdState = String((info && info.state) || '');
+  const known = {
+    available: { cls: 'is-ready', title: '预下载新版本' },
+    done: { cls: 'is-done', title: '应用预下载更新' },
+    update: { cls: 'is-update', title: '应用官方更新' },
+    unsupported: { cls: 'is-block', title: '这个服务器不支持预下载，点开看原因' },
+    none: { cls: 'is-idle', title: '查看预下载状态' },
+  };
+  const view = known[pdState] || { cls: 'is-idle', title: '查看预下载状态' };
+  return `<button class="card-tool pd-card-entry ${view.cls}" data-action="open-predownload" data-id="${esc(game.id)}" title="${view.title}" aria-label="${view.title}">${icon('download')}</button>`;
+}
+
+/**
+ * 启动页「开始游戏」上方那条预下载入口。
+ *
+ * 只在两种情况下出现：官方真的放出了新版本可以预下载（available），
+ * 或者已经下好了等着安装（done）。没新版本时这里一个字都不显示 ——
+ * 留一个灰按钮占位只会让人以为功能坏了。
+ *
+ * 这块是照 Starward 的位置做的：预下载不是「工具」，是「比开始游戏更早一步的事」，
+ * 所以它待在开始游戏正上方，而不是藏进服务器卡片或设置里。
+ */
+function startDockPredownload(game) {
+  if (!predownloadWired(game)) return '';
+  const servers = game.servers || [];
+  const server = servers.find((item) => item.active) || servers[0];
+  const info = predownloadInfo(server);
+  const pdState = String((info && info.state) || '');
+  if (pdState !== 'available' && pdState !== 'done') return '';
+  const done = pdState === 'done';
+  const version = String(info.targetVersion || info.latestVersion || '');
+  const bytes =
+    Number(info.bytesTotal) ||
+    Number(info.bytesGame || 0) + Number(info.bytesAudio || 0) + Number(info.bytesCategory || 0);
+  const bits = [];
+  if (version) bits.push(version);
+  if (done && Number(info.storedBytes)) bits.push(`已下 ${fmtBytes(info.storedBytes)}`);
+  else if (!done && bytes) bits.push(`约 ${fmtBytes(bytes)}`);
+  return `<button class="start-dock-pd" data-action="open-predownload" data-id="${esc(game.id)}" title="${
+    done ? '预下载内容已经下好了，点开安装到游戏目录' : '官方放出了新版本，现在可以先下载'
+  }">
+      ${icon('download', 'xs')}
+      <span class="start-dock-pd-label">${done ? '安装预下载的版本' : '预下载新版本'}</span>
+      ${bits.length ? `<span class="start-dock-pd-meta">${esc(bits.join(' · '))}</span>` : ''}
+    </button>`;
+}
+
+/** 体积拆解只列后端真算出来的那几段，凑不出「0 GB」这种没意义的行。 */function predownloadSizeText(info) {
+  if (!info) return '';
+  const parts = [];
+  if (Number(info.bytesGame)) parts.push(`本体 ${fmtBytes(info.bytesGame)}`);
+  if (Number(info.bytesAudio)) parts.push(`语音 ${fmtBytes(info.bytesAudio)}`);
+  if (Number(info.bytesCategory)) parts.push(`剧情 ${fmtBytes(info.bytesCategory)}`);
+  return parts.join(' + ');
+}
+
+function predownloadDetail(info, busy) {
+  if (busy) return '正在向官方查询…';
+  if (!info) return '还没查过，点「检查」问一次官方有没有开放预下载';
+  const state = String(info.state || '');
+  if (state === 'unsupported') return info.reason || '这个游戏 / 渠道不支持预下载';
+  if (state === 'error') {
+    // 后端会把「用户点停止」也记成 error，别让用户看到一条像是坏掉的红字
+    if (String(info.error || '').includes('已取消')) return '上次预下载被你停掉了，已经下好的分块还在，接着下就行';
+    return info.error || '读取预下载状态失败';
+  }
+  const bits = [];
+  if (info.localVersion) bits.push(`本地 ${info.localVersion}`);
+  if (info.targetVersion) bits.push(`预下载目标 ${info.targetVersion}`);
+  // 正式版只有在「已经比本地新」时才值得说；否则和本地版本是同一个，说了是废话
+  if (info.latestVersion && info.latestVersion !== info.localVersion) {
+    bits.push(`正式版 ${info.latestVersion}`);
+  }
+  const size = predownloadSizeText(info);
+  if (size) bits.push(`约 ${size}`);
+  if (state === 'done') {
+    if (info.storedFiles) bits.push(`已存 ${info.storedFiles} 个分块 · ${fmtBytes(info.storedBytes)}`);
+    if (info.categoryCount) bits.push(`含 ${info.categoryCount} 份剧情分类包`);
+  }
+  if (state === 'update') bits.push('预下载按钮让位，直接用「应用更新」把新版本装上');
+  return bits.join(' · ');
+}
+
+/** 预下载面板里的状态行。 */
+function predownloadStatusMarkup(server) {
+  const info = predownloadInfo(server);
+  const meta = predownloadMeta(info);
+  return `
+    <div class="pd-status-row">
+      <span class="pd-badge ${meta ? meta.cls : 'is-idle'}">${meta ? meta.label : '未查询'}</span>
+      <span class="pd-status-note">${esc(predownloadDetail(info, false))}</span>
+    </div>`;
+}
+
+/**
+ * 单个服务器覆盖「剧情分类资源包」：true / false 是覆盖，null 是跟随全局。
+ * 继承链在后端是 server → game → settings（见 main.js 的 storyResourcesEnabled）。
+ */
+function storyOverride(server) {
+  return typeof (server && server.includeStoryResources) === 'boolean'
+    ? server.includeStoryResources
+    : null;
+}
+
+function storyResourcesMarkup(game, server) {
+  if (game.builtinKey !== 'zzz') {
+    return `<p class="pd-note">${icon('info', 'xs')}<span>这款游戏的官方清单里没有单独的剧情分类包（原神 / 星穹铁道实测为 0 份），剧情资源开关对它不起作用。</span></p>`;
+  }
+  const override = storyOverride(server);
+  const on = override === null ? state.settings.includeStoryResources === true : override;
+  const attrs = `data-game="${esc(game.id)}" data-server="${esc(server.id)}"`;
+  return `
+    <div class="pd-story">
+      <div class="pd-story-copy">
+        <strong>剧情资源</strong>
+        <span>把主线剧情、个人线、影像档案这些分类包一起预下载。不勾只是缺剧情动画，不影响进游戏；勾上多占近 20GB。</span>
+        <em class="pd-story-tag${override === null ? '' : ' is-over'}">${override === null ? '跟随全局设置' : '已单独设置'}</em>
+      </div>
+      <div class="pd-story-control">
+        <button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}" data-action="toggle-pd-story" ${attrs} title="${on ? '关闭' : '开启'}"></button>
+        <button class="btn btn-quiet" data-action="reset-pd-story" ${attrs} title="不覆盖，跟随全局设置" ${override === null ? 'hidden' : ''}>跟随全局</button>
+      </div>
+    </div>`;
+}
+
+/** 预下载面板：状态 + 剧情资源开关 + 进度 + 开始 / 应用 / 清除。 */
+function openPredownloadModal(gameId, serverId) {
+  if (!predownloadApi()) {
+    toast('当前版本还没有接入预下载', 'info');
+    return;
+  }
+  const game = state.games.find((item) => item.id === gameId);
+  const server = game && (game.servers || []).find((item) => item.id === serverId);
+  if (!game || !server) {
+    toast('没有找到这个服务器', 'error');
+    return;
+  }
+  const jobId = `pd-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const html = `
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>预下载</h2>
+            <p>${esc(game.name)} · ${esc(server.name)} · 新版本上线前先把内容拉到本地，上线后再应用</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <div class="pd-status" id="pd-status">${predownloadStatusMarkup(server)}</div>
+          <div class="pd-story-host" id="pd-story">${storyResourcesMarkup(game, server)}</div>
+          <div class="link-progress" id="pd-progress" style="display:none">
+            <div class="link-progress-head">
+              <strong id="pd-phase">准备中…</strong>
+              <span id="pd-count"></span>
+            </div>
+            <div class="progress-bar"><span id="pd-bar" style="width:0%"></span></div>
+            <div class="link-progress-meta">
+              <span id="pd-stats"></span>
+              <span id="pd-current"></span>
+            </div>
+          </div>
+          <div class="field-error" id="pd-error"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" data-close>关闭</button>
+          <button class="btn btn-ghost" id="pd-pause" style="display:none">暂停</button>
+          <button class="btn btn-ghost" id="pd-cancel" style="display:none">停止</button>
+          <button class="btn btn-ghost" id="pd-refresh">${icon('refresh')}重新检查</button>
+          <button class="btn btn-primary" id="pd-apply" style="display:none">${icon('download')}应用更新</button>
+          <button class="btn btn-primary" id="pd-start">${icon('download')}开始预下载</button>
+        </div>
+      </div>
+    </div>`;
+
+  openModal(html, {
+    onClose: () => {
+      // 关窗即视为停止：先记下，免得后端抛回「已取消」时又弹一条错误提示
+      if (running) {
+        cancelled = true;
+        api.predownload.cancel(jobId).catch(() => {});
+      }
+      if (unsubscribe) unsubscribe();
+      pdModalRepaint = null;
+      pdModalStoryRepaint = null;
+    },
+  });
+
+  const phase = document.querySelector('#pd-phase');
+  const count = document.querySelector('#pd-count');
+  const stats = document.querySelector('#pd-stats');
+  const current = document.querySelector('#pd-current');
+  const bar = document.querySelector('#pd-bar');
+  const progress = document.querySelector('#pd-progress');
+  const errorBox = document.querySelector('#pd-error');
+  const start = document.querySelector('#pd-start');
+  const apply = document.querySelector('#pd-apply');
+  const cancel = document.querySelector('#pd-cancel');
+  const pause = document.querySelector('#pd-pause');
+  let running = false;
+  let cancelled = false;
+  let paused = false;
+  let unsubscribe = null;
+
+  const currentServer = () => {
+    const live = state.games.find((item) => item.id === gameId);
+    return live && (live.servers || []).find((item) => item.id === serverId);
+  };
+
+  /** 只重绘状态行和两个按钮的可见性，不动整页，也不重建开关节点。 */
+  const repaint = () => {
+    const target = currentServer();
+    if (!target) return;
+    const statusHost = document.querySelector('#pd-status');
+    if (statusHost) statusHost.innerHTML = predownloadStatusMarkup(target);
+    const info = predownloadInfo(target);
+    const pdState = String((info && info.state) || '');
+    if (start) start.style.display = pdState === 'available' ? '' : 'none';
+    if (apply) apply.style.display = pdState === 'done' || pdState === 'update' ? '' : 'none';
+  };
+  /** 剧情资源那块单独重绘：只有「跟随全局」这种非开关点击才需要重建。 */
+  const repaintStory = () => {
+    const target = currentServer();
+    const storyHost = document.querySelector('#pd-story');
+    if (target && storyHost) storyHost.innerHTML = storyResourcesMarkup(game, target);
+  };
+  pdModalRepaint = repaint;
+  pdModalStoryRepaint = repaintStory;
+
+  const onProgress = (event) => {
+    if (!event || event.jobId !== jobId) return;
+    const total = Number(event.total) || 0;
+    const processed = Number(event.processed) || 0;
+    const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+    const base = PREDOWNLOAD_PHASES[event.phase] || '处理中…';
+    const counted = ['download', 'install', 'patch'].includes(event.phase);
+    const tip = counted ? '' : String(event.current || '');
+    if (phase) phase.textContent = tip ? `${base} · ${tip}` : base;
+    if (count) count.textContent = total ? `${processed} / ${total}` : '';
+    if (bar) bar.style.width = `${event.phase === 'done' ? 100 : percent}%`;
+    if (stats) {
+      const parts = [];
+      if (Number(event.totalBytes)) {
+        parts.push(`${fmtBytes(event.bytesDone)} / ${fmtBytes(event.totalBytes)}`);
+      } else if (Number(event.bytesDone)) {
+        parts.push(fmtBytes(event.bytesDone));
+      }
+      if (Number(event.skipped)) parts.push(`复用 ${event.skipped}`);
+      if (Number(event.reusedChunks)) parts.push(`命中缓存 ${event.reusedChunks} 块`);
+      stats.textContent = parts.join(' · ');
+    }
+    if (current) current.textContent = String(event.current || '');
+  };
+
+  const resetFoot = () => {
+    running = false;
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    start.disabled = false;
+    cancel.style.display = 'none';
+    pause.style.display = 'none';
+    pause.textContent = '暂停';
+    paused = false;
+  };
+
+  const run = async (kind) => {
+    cancelled = false;
+    running = true;
+    progress.style.display = 'block';
+    errorBox.textContent = '';
+    start.disabled = true;
+    apply.disabled = true;
+    cancel.style.display = '';
+    pause.style.display = '';
+    unsubscribe = typeof api.onPredownloadProgress === 'function' ? api.onPredownloadProgress(onProgress) : null;
+    const bridge = predownloadApi();
+    try {
+      const result = await (kind === 'apply'
+        ? bridge.apply({ gameId, serverId, jobId })
+        : bridge.start({ gameId, serverId, jobId }));
+      if (cancelled || (result && result.cancelled)) {
+        toast('已停止，下次可以从头再来或继续', 'info');
+      } else if (kind === 'apply') {
+        toast(`更新已应用到 ${result.tag || '新版本'}`, 'success');
+      } else {
+        toast(`预下载完成，目标版本 ${result.targetVersion || ''}`, 'success');
+      }
+    } catch (error) {
+      const text = humanError(error);
+      if (!cancelled) {
+        errorBox.textContent = text;
+        toast(text, 'error');
+      }
+    } finally {
+      resetFoot();
+      apply.disabled = false;
+      // 后端会把「点停止」也记成 error 状态，重新查一次才能把「开始预下载」还回来
+      if (cancelled) await runPredownloadCheck(gameId, serverId);
+      repaint();
+      repaintServerRows();
+    }
+  };
+
+  start.addEventListener('click', () => run('start'));
+  apply.addEventListener('click', () => run('apply'));
+  cancel.addEventListener('click', () => {
+    cancelled = true;
+    cancel.disabled = true;
+    api.predownload.cancel(jobId).catch(() => {});
+  });
+  pause.addEventListener('click', () => {
+    paused = !paused;
+    api.predownload.pause({ jobId, paused }).catch(() => {});
+    pause.textContent = paused ? '继续' : '暂停';
+    if (phase) phase.textContent = paused ? '已暂停（点继续恢复）' : '恢复中…';
+  });
+  document.querySelector('#pd-refresh').addEventListener('click', () => {
+    runPredownloadCheck(gameId, serverId);
+  });
+
+  // 打开时还没查过就先问一次官方，别让用户对着「未查询」发呆
+  if (!predownloadInfo(server)) runPredownloadCheck(gameId, serverId);
+}
+
+/**
+ * 向官方查一次预下载状态。
+ * 弹窗开着时主进程的回推不会重绘页面（onState 会跳过），所以这里自己重绘
+ * 受影响的那两小块，而不是整页 render()。
+ */
+async function runPredownloadCheck(gameId, serverId) {
+  const bridge = predownloadApi();
+  if (!bridge) return;
+  const key = `${gameId}:${serverId}`;
+  if (pdBusy.has(key)) return;
+  pdBusy.add(key);
+  repaintServerRows();
+  try {
+    await bridge.check({ gameId, serverId });
+  } catch (error) {
+    toast(humanError(error), 'error');
+  } finally {
+    pdBusy.delete(key);
+    repaintServerRows();
+    if (pdModalRepaint) pdModalRepaint();
+  }
+}
+
+/** 服务器管理弹窗里整片列表的就地重绘。 */
+function repaintServerRows() {
+  const host = document.querySelector('#server-manager-list');
+  if (!host) return;
+  const game = state.games.find((item) => item.id === host.dataset.game);
+  if (!game) return;
+  const servers = game.servers || [];
+  host.innerHTML =
+    servers.map((server) => serverRow(game, server)).join('') ||
+    '<p class="gacha-empty-line">还没有服务器</p>';
+}
+
+/** 打开服务器管理时自动查一次当前服务器，省得每次都要手点。 */
+async function autoCheckPredownload(game) {
+  if (!predownloadWired(game)) return;
+  const servers = game.servers || [];
+  const server =
+    servers.find((item) => item.active) || servers.find((item) => item.exists) || servers[0];
+  if (!server || !server.exists || predownloadInfo(server)) return;
+  await runPredownloadCheck(game.id, server.id);
+}
+
+/* ------------------------------------------------------------------ */
+/* 异环官服 / B服                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 异环的渠道写在 <安装目录>/NTELauncher/Config/Config.ini 里，切渠道只改三行
+ * 配置，不动游戏文件。后端把「两服账号独立、官方口径 PC 只支持官服、切完要重启」
+ * 放在返回的 notice 里，界面必须原样呈现给用户 —— 尤其是切到 B服之前，
+ * 不能默默就切了。
+ */
+function nteChannelLabel(channel) {
+  if (channel === 'bilibili') return 'B服';
+  if (channel === 'official') return '官服';
+  return '未读取';
+}
+
+function nteChannelMarkup(game, server) {
+  const cached = server ? nteChannelCache.get(server.id) : null;
+  const channel = cached ? String(cached.channel || '') : '';
+  const serverId = server ? server.id : '';
+  const attrs = `data-game="${esc(game.id)}" data-server="${esc(serverId)}"`;
+  const notice = cached ? String(cached.notice || '') : '';
+  const reason = cached ? String(cached.reason || cached.error || '') : '';
+  const broken = Boolean(cached && cached.state !== 'ok');
+  // 渠道做成两张可点卡片：点了就是切过去，当前渠道亮着带「当前」角标
+  const card = (key, label, desc) => {
+    const active = channel === key;
+    return `
+      <button class="nte-channel-card${active ? ' is-active' : ''}" data-action="nte-set-channel" data-channel="${key}" ${attrs} ${active || broken ? 'disabled' : ''}>
+        <strong>${label}</strong>
+        <small>${desc}</small>
+        ${active ? '<em>当前</em>' : ''}
+      </button>`;
+  };
+  return `
+    <section class="nte-panel" id="nte-channel-panel" data-game="${esc(game.id)}" data-server="${esc(serverId)}">
+      <div class="nte-panel-head">
+        <strong>异环渠道</strong>
+        <span class="nte-current ${channel === 'bilibili' ? 'is-bili' : ''}">${cached ? nteChannelLabel(channel) : '读取中…'}</span>
+      </div>
+      <div class="nte-channel-cards">
+        ${card('official', '官服', '完美世界账号 · 官方完整链路')}
+        ${card('bilibili', 'B服', 'B站账号 · 与官服数据不互通')}
+      </div>
+      <p class="nte-notice">${icon('alert', 'xs')}<span>${esc(notice || '正在读取 NTELauncher 配置…')}</span></p>
+      ${reason ? `<p class="nte-notice is-reason">${icon('info', 'xs')}<span>${esc(reason)}</span></p>` : ''}
+    </section>`;
+}
+
+/**
+ * 异环渠道切换完整流程（服务器管理面板和主界面 dock 的服务器下拉共用）：
+ * B服先弹四步确认 → 改 Config.ini → 切换成功后两个渠道都询问「花筱灵直接下载」（官方链路切服后都可能要补渠道资源）。
+ * 返回是否成功（用户取消/失败都算 false，调用方据此决定要不要继续 activate）。
+ */
+async function switchNteChannel(game, server, channel) {
+  if (channel === 'bilibili') {
+    const ok = await confirmDialog({
+      title: '切换到异环 B服',
+      message:
+        '切换流程（很简单，不用慌）：\n' +
+        '1. 点「切到 B服」改的是启动器配置，游戏文件一个不动；\n' +
+        '2. 首次切 B服，花筱灵可以按官方清单直接下载 B服资源（只此一次，之后互相切换都是秒切）；\n' +
+        '3. 下载完从花筱灵点「启动」就能进 B服，用 B站账号登录；\n' +
+        '4. 切换前记得完全退出异环官方启动器（右下角薄荷托盘图标也要退）。\n\n' +
+        '注意：官服（完美世界账号）和 B服（B站账号）数据完全不互通。',
+      confirmText: '切到 B服',
+      danger: true,
+    });
+    if (!ok) return false;
+  }
+  try {
+    const result = await api.neverness.setChannel({
+      gameId: game.id,
+      serverId: server.id,
+      channel,
+    });
+    if (result && result.changed) {
+      // 成功提示交给调用方（dock 说「已切换到 xx」，面板刷新后自己显示当前渠道），
+      // 避免 dock 场景下「已切回官服」+「已切换到 国服」弹两个框。
+      // 两个渠道对称：切换后官方链路都可能要补几十 M 渠道资源，问一次要不要花筱灵直接下。
+      const isB = channel === 'bilibili';
+      const direct = await confirmDialog({
+        title: isB ? '下载 B服资源' : '下载官服资源',
+        message: isB
+          ? '花筱灵可以直接按官方清单把 B服资源下载好，全程不用打开官方启动器。\n' +
+            '只下载本机缺的文件，已存在的自动跳过；下载完从花筱灵点「启动」就能进 B服。'
+          : '切回官服后，官方链路可能还要补几十 M 的官服资源。\n' +
+            '花筱灵可以直接按官方清单提前下载好，全程不用打开官方启动器；\n' +
+            '只下载本机缺的文件，已存在的自动跳过，之后切回官服就不用再下了。',
+        confirmText: '花筱灵直接下载',
+      });
+      if (direct) {
+        openNtePredownloadModal(server.id, channel);
+      } else {
+        try {
+          await api.neverness.openLauncher();
+          toast(`官方启动器已打开，等下载完就能从花筱灵启动${isB ? ' B服' : ''}`, 'success');
+        } catch (err) {
+          toast(humanError(err), 'error');
+        }
+      }
+    } else {
+      toast('渠道没有变化', 'info');
+    }
+    return true;
+  } catch (error) {
+    toast(humanError(error), 'error');
+    return false;
+  }
+}
+
+/** 读一次渠道配置并就地替换整块面板。 */
+async function refreshNtePanel() {
+  const host = document.querySelector('#nte-channel-panel');
+  if (!host) return;
+  const game = state.games.find((item) => item.id === host.dataset.game);
+  const serverId = host.dataset.server;
+  if (!game) return;
+  try {
+    const result = await api.neverness.channel({ serverId });
+    nteChannelCache.set(serverId, result);
+  } catch (error) {
+    nteChannelCache.set(serverId, { channel: '', notice: humanError(error), state: 'error' });
+  }
+  const server = (game.servers || []).find((item) => item.id === serverId);
+  const next = document.querySelector('#nte-channel-panel');
+  if (next) next.outerHTML = nteChannelMarkup(game, server);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2996,11 +4073,26 @@ function gachaPityCap(game) {
 /* karaoke request queue                                               */
 /* ------------------------------------------------------------------ */
 
+/** 上一次提示「存档写不下」的时间戳，用来节流，别每加一首就弹一次。 */
+let saveSongsWarnedAt = 0;
+
 function saveSongs() {
   try {
-    localStorage.setItem('vela:songs', JSON.stringify(state.songs.slice(0, 200)));
-  } catch {
-    /* local persistence is optional */
+    // 队列里的歌原来最多只存 200 首：整张歌单八百首进来时，
+    // 重开一次启动器就只剩前 200 首，注释还要告诉用户去恢复。现在改存全诗。
+    localStorage.setItem('vela:songs', JSON.stringify(state.songs));
+  } catch (error) {
+    /*
+     * 不再截 200 首之后，几百首的队列有可能顶到 localStorage 配额。
+     * 内存里的队列一首没少，只是没写进本地存档而已，
+     * 但默认静默吞掉会让用户以为「歌单丢了」——必须说清楚。
+     * 每加一首都会走到这里，所以用时间戳压一下，别反复弹同一句。
+     */
+    console.error('[saveSongs] 队列写不进本地存档:', error);
+    if (Date.now() - saveSongsWarnedAt > 60000) {
+      saveSongsWarnedAt = Date.now();
+      toast('队列太长了，这次没能写进本地存档。歌单还在播放列表里没丢，只是重启启动器后需要重新导入一次。', 'info');
+    }
   }
 }
 
@@ -3624,8 +4716,13 @@ function setMiniExpanded(expanded) {
         'transform',
         'display',
       ].forEach((prop) => mini.style.removeProperty(prop));
-      const origin = miniExpandOrigin || { x: before.left, y: before.top };
-      const position = clampMiniPosition(mini, origin.x, origin.y);
+      // 展开卡片按 chip 原位弹出：以 chip 的「右下角」为锚点向左上生长，
+      // 卡片就不会再向下延伸、盖住下方的「开始游戏」按钮。
+      const anchorX = (miniExpandOrigin?.x ?? before.left) + before.width;
+      const anchorY = (miniExpandOrigin?.y ?? before.top) + before.height;
+      const cardW = mini.offsetWidth || 240;
+      const cardH = mini.offsetHeight || 320;
+      const position = clampMiniPosition(mini, anchorX - cardW, anchorY - cardH);
       mini.style.position = 'fixed';
       mini.style.left = `${position.x}px`;
       mini.style.top = `${position.y}px`;
@@ -3650,18 +4747,60 @@ function setMiniExpanded(expanded) {
 function setupStartDrawerSync() {
   const drawer = document.querySelector('.start-games');
   const mini = document.querySelector('#mini-player');
-  if (!drawer || !mini || drawer.dataset.syncBound === '1') return;
+  if (!drawer || drawer.dataset.syncBound === '1') return;
   drawer.dataset.syncBound = '1';
   const sync = () => {
     const open = drawer.matches(':hover') || drawer.matches(':focus-within');
-    mini.classList.toggle('drawer-open', open);
+    // body 级联动：展开时左下任务面板 / 右下开始面板整体让路（CSS 接手），
+    // 否则这两个浮层会压在抽屉的游戏卡片上，排后面的游戏点不到。
+    document.body.classList.toggle('drawer-open', open);
+    if (mini) mini.classList.toggle('drawer-open', open);
     // 展开形态已挪到 body 固定定位，别在抽屉 hover 时把它拽回槽里
-    if (mini.classList.contains('is-on-start') && !isMiniExpanded()) positionStartMini(mini);
+    if (mini && mini.classList.contains('is-on-start') && !isMiniExpanded()) positionStartMini(mini);
   };
   drawer.addEventListener('mouseenter', sync);
   drawer.addEventListener('mouseleave', sync);
   drawer.addEventListener('focusin', sync);
   drawer.addEventListener('focusout', () => setTimeout(sync, 60));
+}
+
+/**
+ * 启动页抽屉的游戏列表导轨：左右翻页箭头 + 滚轮横滚。
+ *
+ * 游戏多了以后一行放不下，列表本身能横向滚（滚动条特意藏了），
+ * 但没有可见的翻页入口，排在后面的游戏「看不到」。这里补两个箭头：
+ * - 箭头按滚动位置自动显隐（到头的一侧不显示）；
+ * - 鼠标滚轮在列表上直接横向滚，不用按住 Shift。
+ */
+function setupStartGameRail() {
+  const rail = document.querySelector('.start-game-rail');
+  const list = rail?.querySelector('.start-game-list');
+  if (!rail || !list || rail.dataset.railBound === '1') return;
+  rail.dataset.railBound = '1';
+  const prev = rail.querySelector('.start-game-nav.is-prev');
+  const next = rail.querySelector('.start-game-nav.is-next');
+  const step = () => Math.max(list.clientWidth * 0.65, 320);
+  const sync = () => {
+    const max = list.scrollWidth - list.clientWidth;
+    rail.classList.toggle('is-at-start', list.scrollLeft <= 4);
+    rail.classList.toggle('is-at-end', list.scrollLeft >= max - 4);
+  };
+  prev?.addEventListener('click', () => list.scrollBy({ left: -step(), behavior: 'smooth' }));
+  next?.addEventListener('click', () => list.scrollBy({ left: step(), behavior: 'smooth' }));
+  list.addEventListener(
+    'wheel',
+    (event) => {
+      // 触控板横向手势原生就有，只接管纵向滚轮；deltaX 为主时别画蛇添足
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      if (list.scrollWidth <= list.clientWidth) return;
+      event.preventDefault();
+      list.scrollLeft += event.deltaY;
+    },
+    { passive: false }
+  );
+  list.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('resize', sync);
+  sync();
 }
 
 /**
@@ -3888,14 +5027,25 @@ function updateSongChrome() {
     if (onStart) {
       // 启动页：收起形态由 positionStartMini 内嵌在抽屉标题行右侧的槽里；
       // 展开形态已经由 setMiniExpanded 挪到 body 固定定位，别再用 positionStartMini 拽回去
+      mini.dataset.wasOnStart = '1';
       if (!isMiniExpanded()) {
         positionStartMini(mini);
       }
     } else {
+      /*
+       * 只有「真的从启动页切出来」这一次才丢弃原位锚点。
+       * 之前这里无条件清空，而 updateSongChrome 每次渲染 / 每次播放状态变化都会跑，
+       * 结果展开时刚记下的原位立刻被抹掉，收起只能走「按卡片中心缩」的兜底 ——
+       * 表现就是「展开再收起，没回到原来的位置」。
+       */
+      const cameFromStart = mini.dataset.wasOnStart === '1';
       unmountStartMini(mini);
-      // 离开启动页：之前记录的原位收起锚点是启动页槽里的坐标，不能再用于主页
-      miniExpandOrigin = null;
-      delete mini.dataset.draggedSinceExpand;
+      if (cameFromStart) {
+        // 离开启动页：启动页槽里的坐标不能再用于主页
+        miniExpandOrigin = null;
+        delete mini.dataset.draggedSinceExpand;
+        delete mini.dataset.wasOnStart;
+      }
       if (!mini.hidden) {
         // 离开启动页：清掉启动页留下的内联定位，交回按场景记忆的位置
         ['position', 'left', 'right', 'top', 'bottom', 'width'].forEach((prop) =>
@@ -3959,6 +5109,14 @@ function updateSongChrome() {
     if (dockArtist) dockArtist.textContent = song.artist || '';
     if (dockIcon) dockIcon.setAttribute('href', playing ? '#i-pause' : '#i-play');
   }
+
+  /* 主页双人卡（火花 · 音乐遥控）：同步歌名和播放键图标，不用整页重绘 */
+  const duoTitle = document.querySelector('#duo-song-title');
+  if (duoTitle) duoTitle.textContent = song ? song.title || '未知曲目' : '队列空着，去点歌';
+  document.querySelectorAll('.duo-ctrl[data-action="duo-toggle"] .duo-ic').forEach((node) => {
+    const wantPlay = node.dataset.when === 'play';
+    node.hidden = wantPlay === playing;
+  });
 }
 
 function bindSongLyrics() {
@@ -4097,21 +5255,49 @@ function bindSongLyrics() {
 }
 
 async function hydrateSong(song) {
-  if (!song || !song.neteaseId) return;
-  if (song.metaChecked || (song.lyric && song.cover && song.artist)) return;
+  if (!song) return;
+  // 网易云曲目走本地 API 补歌手/封面/歌词；别的平台的曲目用跨平台搜索补歌词
+  if (song.neteaseId) {
+    if (song.metaChecked || (song.lyric && song.cover && song.artist)) return;
+    try {
+      const meta = await api.netease.songMeta({
+        apiBase: localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100',
+        id: song.neteaseId,
+      });
+      song.metaChecked = true;
+      if (!meta) return;
+      if (meta.artist) song.artist = meta.artist;
+      if (meta.cover && !song.cover) song.cover = meta.cover;
+      if (meta.lyric) song.lyric = meta.lyric;
+      saveSongs();
+    } catch {
+      /* local service may be offline */
+    }
+    return;
+  }
+  // 非网易云：没有原生歌词接口时去酷我 / QQ 找 LRC
+  if (song.lyric || song.lyricChecked) return;
   try {
-    const meta = await api.netease.songMeta({
+    const result = await api.musicLyric({
+      song: {
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        platform: song.platform || song.source || '',
+        mid: song.mid,
+        hash: song.hash,
+        neteaseId: song.neteaseId,
+      },
       apiBase: localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100',
-      id: song.neteaseId,
     });
-    song.metaChecked = true;
-    if (!meta) return;
-    if (meta.artist) song.artist = meta.artist;
-    if (meta.cover && !song.cover) song.cover = meta.cover;
-    if (meta.lyric) song.lyric = meta.lyric;
-    saveSongs();
+    song.lyricChecked = true;
+    if (result?.ok && result.lyric) {
+      song.lyric = result.lyric;
+      saveSongs();
+    }
   } catch {
-    /* local service may be offline */
+    song.lyricChecked = true;
+    /* 拉不到歌词就拉不到，不阻断播放 */
   }
 }
 
@@ -4128,7 +5314,7 @@ function biliPacket(value, operation = 7) {
   return buffer;
 }
 
-async function decodeBiliFrame(data) {
+async function decodeBiliFrame(data, room) {
   let buffer = data;
   if (buffer instanceof Blob) buffer = await buffer.arrayBuffer();
   if (!(buffer instanceof ArrayBuffer)) return;
@@ -4141,15 +5327,24 @@ async function decodeBiliFrame(data) {
     const operation = view.getUint32(offset + 8);
     if (!total || total > view.byteLength - offset) break;
     const body = buffer.slice(offset + header, offset + total);
+    if (operation === 8) {
+      // 服务器对 auth 包的确认（cmd=AUTH_OK）。收到它才算真的"弹幕推送中"，
+      // 之前的"已连接"只代表 TCP 握手成功。
+      if (room && room.connected) {
+        room.status = "弹幕推送中";
+        if (state.route === "song") render({ preserveScroll: true });
+      }
+    }
     if (operation === 5) {
       if (version === 2 || version === 3) {
+        // protover 2 = zlib deflate；protover 3 = brotli（Chromium 原生支持）
         try {
-          const stream = new DecompressionStream('deflate');
+          const stream = new DecompressionStream(version === 3 ? "br" : "deflate");
           const writer = stream.writable.getWriter();
           writer.write(new Uint8Array(body));
           writer.close();
           const inflated = await new Response(stream.readable).arrayBuffer();
-          await decodeBiliFrame(inflated);
+          await decodeBiliFrame(inflated, room);
         } catch {
           /* ignore a malformed compressed frame */
         }
@@ -4162,6 +5357,13 @@ async function decodeBiliFrame(data) {
             if (String(item?.cmd || '').includes('DANMU_MSG')) {
               const message = String(item.info?.[1] || '');
               const user = String(item.info?.[2]?.[1] || '');
+              // B 站也计捕获数：卡片上"已捕获 N 条弹幕"数字动 = 服务器真的在推，
+              // 不动 = 没在推（而不是点歌匹配的问题）。直接改 DOM，不走整页重绘。
+              if (room) {
+                room.captured = (room.captured || 0) + 1;
+                const node = document.querySelector(`#live-captured-${room.id} b`);
+                if (node) node.textContent = String(room.captured);
+              }
               handleLiveDanmaku(message, user);
             }
           }
@@ -4174,70 +5376,132 @@ async function decodeBiliFrame(data) {
   }
 }
 
-function disconnectBiliLive() {
-  if (liveHeartbeat) clearInterval(liveHeartbeat);
-  liveHeartbeat = null;
-  if (liveBridgeTimer) clearInterval(liveBridgeTimer);
-  liveBridgeTimer = null;
-  try {
-    if (state.live?.danmaku === 'bridge') api.live.danmakuStop();
-  } catch {
-    /* 主进程没起来时忽略 */
-  }
-  if (liveSocket) {
-    try {
-      liveSocket.close();
-    } catch {
-      /* ignore */
+/** 关掉一个房间的运行时链路（B 站 WebSocket / 其它平台的轮询与隐藏窗口）。 */
+function closeLiveRuntime(room) {
+  const rt = liveRuntimes.get(room.id);
+  if (rt) {
+    liveRuntimes.delete(room.id);
+    if (rt.heartbeat) clearInterval(rt.heartbeat);
+    if (rt.timer) clearInterval(rt.timer);
+    if (rt.socket) {
+      try {
+        rt.socket.close();
+      } catch {
+        /* ignore */
+      }
     }
   }
-  liveSocket = null;
-  state.live = { connected: false, connecting: false, roomTitle: '', roomId: '', liveStatus: 0, status: '' };
+  if (room.danmaku === 'bridge') {
+    try {
+      api.live.danmakuStop(room.id);
+    } catch {
+      /* 主进程没起来时忽略 */
+    }
+  }
+}
+
+/** 从列表里摘掉一个房间并关链路（卡片上的「断开」按钮）。 */
+function disconnectLiveRoom(id) {
+  const idx = state.liveRooms.findIndex((r) => r.id === id);
+  if (idx < 0) return;
+  const [room] = state.liveRooms.splice(idx, 1);
+  closeLiveRuntime(room);
+  toast(`已断开：${room.roomTitle || room.platformLabel || '直播间'}`, 'info');
+  if (state.route === 'song') render({ preserveScroll: true });
+}
+
+/** 兼容旧调用：断开全部（app 退出等场景）。 */
+function disconnectBiliLive() {
+  for (const room of state.liveRooms.splice(0)) closeLiveRuntime(room);
   if (state.route === 'song') render({ preserveScroll: true });
 }
 
 /**
- * 连接直播间。
+ * 连接直播间（可同时连多个：B站+抖音+斗鱼…并存，弹幕汇进同一个点歌处理）。
  *
- * B站：直接建 WebSocket 收弹幕并自动点歌。
- * 斗鱼 / 虎牙 / 抖音：目前只能解析房间信息（弹幕要私有签名），
- * 连接后会在界面里明确提示「仅显示状态」，不会假装能收弹幕。
+ * B站：官方 WebSocket，auth 带弹幕鉴权 token（见下方说明）。
+ * 其它平台：主进程隐藏窗口抓聊天区（见 electron/live-danmaku.js）。
  */
 async function connectLiveRoom(rawUrl) {
-  // 换房间/重连前先把上一条链路（B站 WebSocket 或其它平台的隐藏窗口）关干净
-  disconnectBiliLive();
-  state.live = {
+  const url = String(rawUrl || '').trim();
+  if (!url) return;
+  // 同一个链接重复连接：先把旧的顶掉；这个链接还在连接中就直接忽略（防连点重复建卡）
+  const dup = state.liveRooms.find((r) => r.url === url);
+  if (dup) {
+    if (dup.connecting) return;
+    disconnectLiveRoom(dup.id);
+  }
+
+  state.live.roomUrl = url;
+  localStorage.setItem('vela:live-room-url', url);
+  const room = {
+    id: `room-${Date.now()}-${Math.floor(Math.random() * 1e4)}`,
+    url,
     connected: false,
     connecting: true,
-    roomUrl: rawUrl,
     roomTitle: '',
     roomId: '',
     platform: '',
     platformLabel: '',
-    danmaku: "",
-    note: '',
-    liveStatus: 0,
+    danmaku: '',
     status: '连接直播间…',
+    captured: 0,
   };
+  state.liveRooms.push(room);
+  /*
+   * 之前这里把全局 state.live.connecting 锁成 true 且只有"解析房间失败"才解锁，
+   * 导致连过一次后表单永远显示"连接中"、输入框废掉（断开也不恢复）。
+   * 多房间并存后每个房间卡自己显示"连接中"，表单不该被全局锁死——常保持可填可点。
+   */
+  state.live.connecting = false;
   render({ preserveScroll: true });
   try {
-    const room = await api.live.room(rawUrl);
-    state.live.platform = room.platform || "";
-    state.live.platformLabel = room.platformLabel || "";
-    state.live.roomId = room.roomId;
-    state.live.roomTitle = room.title || `房间 ${room.roomId}`;
-    state.live.liveStatus = room.liveStatus || 0;
-    state.live.danmaku = room.danmaku || "";
-    state.live.note = room.note || "";
+    const info = await api.live.room(url);
+    room.platform = info.platform || '';
+    room.platformLabel = info.platformLabel || '';
+    room.roomId = info.roomId;
+    room.roomTitle = info.title || `房间 ${info.roomId}`;
+    room.danmaku = info.danmaku || '';
+    room.status = info.note || '';
+    // 连接成功就记进历史（去重、最新在前、最多 5 个），重启后一键重连
+    state.liveHistory = [url, ...(state.liveHistory || []).filter((item) => item !== url)].slice(0, 5);
+    localStorage.setItem('vela:live-room-history', JSON.stringify(state.liveHistory));
 
-    // B 站走官方 WebSocket（更准更省）；其它平台走隐藏窗口抓聊天区
-    if (room.platform !== "bilibili") {
-      await startBridgeLive(room, rawUrl);
+    if (room.platform !== 'bilibili') {
+      await startBridgeLive(room);
       return;
     }
 
-    const socket = new WebSocket('wss://broadcastlv.chat.bilibili.com/sub');
-    liveSocket = socket;
+    /*
+     * 先拿弹幕鉴权：官方 WS 的 auth 包必须带 getDanmuInfo 发的 token（key），
+     * 不带 key 服务器接受连接但一条弹幕都不推——"已连接却收不到点歌"的根因。
+     * 顺便用 host_list 里的弹幕服务器，比写死的 broadcastlv 更稳。
+     */
+    let authKey = '';
+    let wsUrl = 'wss://broadcastlv.chat.bilibili.com/sub';
+    try {
+      const danmu = await api.live.danmuInfo(room.roomId);
+      if (danmu?.token) {
+        authKey = danmu.token;
+        if (danmu.host && danmu.port) wsUrl = `wss://${danmu.host}:${danmu.port}/sub`;
+      }
+    } catch (error) {
+      /*
+       * 拿不到鉴权就直接不连：B 站服务器对空 key 的连接"接受但一条弹幕都不推"，
+       * 以前这里静默继续，用户看到"已连接"却永远收不到点歌，还以为是自己房间没开播的问题。
+       * 现在把失败原因亮在卡片上（-352 = B站风控），用户能自己判断要不要重试。
+       */
+      room.connecting = false;
+      room.connected = false;
+      room.status = `弹幕鉴权失败：${error.message}`;
+      if (state.route === 'song') render({ preserveScroll: true });
+      toast(`B站弹幕鉴权失败：${error.message}`, 'error');
+      return;
+    }
+
+    const socket = new WebSocket(wsUrl);
+    const rt = { socket, heartbeat: null, timer: null };
+    liveRuntimes.set(room.id, rt);
     socket.binaryType = 'arraybuffer';
     socket.addEventListener('open', () => {
       socket.send(
@@ -4247,78 +5511,80 @@ async function connectLiveRoom(rawUrl) {
           protover: 2,
           platform: 'web',
           type: 2,
+          key: authKey,
         })
       );
-      liveHeartbeat = setInterval(() => {
+      rt.heartbeat = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN) socket.send(biliPacket({}, 2));
       }, 30000);
-      state.live.connected = true;
-      state.live.connecting = false;
-      state.live.status = '已连接';
-      toast(`已连接直播间：${state.live.roomTitle}`, "success");
-      if (state.route === "song") render({ preserveScroll: true });
+      room.connected = true;
+      room.connecting = false;
+      room.status = authKey ? '已连接' : '已连接（未取得弹幕鉴权，可能收不到弹幕）';
+      toast(`已连接直播间：${room.roomTitle}`, 'success');
+      if (state.route === 'song') render({ preserveScroll: true });
     });
-    socket.addEventListener('message', (event) => decodeBiliFrame(event.data));
+    socket.addEventListener('message', (event) => decodeBiliFrame(event.data, room));
     socket.addEventListener('error', () => {
-      state.live.connecting = false;
-      state.live.status = '连接失败';
-      if (state.route === "song") render({ preserveScroll: true });
+      room.connecting = false;
+      room.status = '连接失败';
+      if (state.route === 'song') render({ preserveScroll: true });
     });
     socket.addEventListener('close', () => {
-      if (liveHeartbeat) clearInterval(liveHeartbeat);
-      liveHeartbeat = null;
-      state.live.connected = false;
-      state.live.connecting = false;
-      state.live.status = '已断开';
-      if (state.route === "song") render({ preserveScroll: true });
+      if (rt.heartbeat) clearInterval(rt.heartbeat);
+      rt.heartbeat = null;
+      room.connected = false;
+      room.connecting = false;
+      room.status = '已断开';
+      if (state.route === 'song') render({ preserveScroll: true });
     });
   } catch (error) {
+    // 房间信息都解析不出来：从列表里摘掉，别留一张永远转圈的卡
+    const idx = state.liveRooms.indexOf(room);
+    if (idx >= 0) state.liveRooms.splice(idx, 1);
     state.live.connecting = false;
-    state.live.status = error.message;
-    toast(`直播间连接失败：${error.message}`, "error");
-    if (state.route === "song") render({ preserveScroll: true });
+    toast(`直播间连接失败：${error.message}`, 'error');
+    if (state.route === 'song') render({ preserveScroll: true });
   }
 }
 
 /**
- * 斗鱼 / 虎牙 / 抖音 / 快手：后台隐藏窗口抓聊天区。
+ * 斗鱼 / 虎牙 / 抖音 / 快手：后台隐藏窗口抓聊天区（每路房间一个窗口）。
  *
  * 这几个平台没有公开弹幕协议（斗鱼 TCP、虎牙 Tars、抖音/快手要签名），
  * 硬啃私有协议平台一改版就废。这里让主进程开一个隐藏窗口真的把直播间网页
  * 加载出来，只读聊天区的文字；视频流在请求阶段就被拦掉，不会真的把流拉下来。
- * 页面结构变了抓不到时，状态栏会如实说明，不会假装已连接。
+ * captured 计数会显示在卡片上：观众发了弹幕但计数不动 = 这个站抓取失效。
  */
-async function startBridgeLive(room, rawUrl) {
+async function startBridgeLive(room) {
   const label = room.platformLabel || '该平台';
   try {
-    const started = await api.live.danmakuStart({ url: rawUrl, platform: room.platform });
-    state.live.connected = true;
-    state.live.connecting = false;
-    state.live.danmaku = 'bridge';
-    state.live.status = started?.status || '已连接';
-    if (started?.pageTitle && !room.title) state.live.roomTitle = started.pageTitle;
-    toast(`已连接${label}直播间：${state.live.roomTitle}`, 'success');
+    const started = await api.live.danmakuStart({ url: room.url, platform: room.platform, id: room.id });
+    room.connected = true;
+    room.connecting = false;
+    room.danmaku = 'bridge';
+    room.status = started?.status || '已连接';
+    if (started?.pageTitle && !room.roomTitle) room.roomTitle = started.pageTitle;
+    toast(`已连接${label}直播间：${room.roomTitle}`, 'success');
     if (state.route === 'song') render({ preserveScroll: true });
 
-    if (liveBridgeTimer) clearInterval(liveBridgeTimer);
-    liveBridgeTimer = setInterval(async () => {
+    const rt = liveRuntimes.get(room.id) || {};
+    liveRuntimes.set(room.id, rt);
+    rt.timer = setInterval(async () => {
       let payload = null;
       try {
-        payload = await api.live.danmakuPoll();
+        payload = await api.live.danmakuPoll(room.id);
       } catch {
         return;
       }
       if (!payload) return;
-      if (payload.status && payload.status !== state.live.status) {
-        state.live.status = payload.status;
+      room.captured = payload.captured ?? room.captured;
+      if (payload.status && payload.status !== room.status) {
+        room.status = payload.status;
         if (state.route === 'song') render({ preserveScroll: true });
       }
       if (!payload.alive) {
-        if (liveBridgeTimer) clearInterval(liveBridgeTimer);
-        liveBridgeTimer = null;
-        state.live.connected = false;
-        state.live.status = payload.status || '已断开';
-        if (state.route === 'song') render({ preserveScroll: true });
+        disconnectLiveRoom(room.id);
+        toast(`${label}弹幕已断开：${payload.status || '连接失效'}`, 'info');
         return;
       }
       for (const item of payload.messages || []) {
@@ -4326,12 +5592,11 @@ async function startBridgeLive(room, rawUrl) {
       }
     }, 900);
   } catch (error) {
-    state.live.connected = false;
-    state.live.connecting = false;
-    state.live.status = `${label}弹幕连接失败`;
+    const idx = state.liveRooms.indexOf(room);
+    if (idx >= 0) state.liveRooms.splice(idx, 1);
     // 起窗口过程中失败时别把隐藏窗口留成孤儿
     try {
-      api.live.danmakuStop();
+      api.live.danmakuStop(room.id);
     } catch {
       /* ignore */
     }
@@ -4357,7 +5622,7 @@ async function syncPlaylistsAfterLogin(platform) {
   if (state.route === 'song') render({ preserveScroll: true });
   await loadAllPlaylists(true);
   if (!platform) return;
-  const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : '酷狗';
+  const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '酷狗';
   const group = (state.myPlaylists.groups || []).find((item) => item.platform === platform);
   const count = (group?.list || []).length;
   if (group?.error) {
@@ -4380,12 +5645,292 @@ function musicLoggedIn(platform) {
   return Boolean(state.musicLogin?.[platform]?.loggedIn);
 }
 
+/* ---------- 歌单广场（公开热门歌单，免登录） ---------- */
+
+/** 广场单个平台的缓存：{ loading, list, page, error, done }。 */
+function plazaState(platform) {
+  const plaza = state.myPlaylists.plaza || (state.myPlaylists.plaza = {});
+  return plaza[platform] || (plaza[platform] = { loading: false, list: [], page: 0, error: '', done: false });
+}
+
+/** 播放量格式化：过万就折算成「x.x万」。 */
+function formatPlaycount(n) {
+  const num = Number(n) || 0;
+  if (num >= 100000000) return (num / 100000000).toFixed(1).replace(/\.0$/, '') + '亿';
+  if (num >= 10000) return (num / 10000).toFixed(1).replace(/\.0$/, '') + '万';
+  return String(num);
+}
+
+/** 确保某个平台的广场第一页已经加载。 */
+async function ensurePlaza(platform, force = false) {
+  const plaza = plazaState(platform);
+  if (plaza.loading) return;
+  if (!force && (plaza.list.length || plaza.done)) return;
+  plaza.loading = true;
+  plaza.error = '';
+  if (state.route === 'song') render({ preserveScroll: true });
+  try {
+    const result = await api.musicPlaza(platform, 1);
+    if (result?.ok && Array.isArray(result.lists)) {
+      plaza.list = result.lists;
+      plaza.page = 1;
+      plaza.done = result.lists.length < 10;
+    } else {
+      plaza.error = result?.reason || '读取歌单广场失败';
+    }
+  } catch (error) {
+    plaza.error = humanError(error);
+  } finally {
+    plaza.loading = false;
+    if (state.route === 'song') render({ preserveScroll: true });
+  }
+}
+
+/** 广场翻页：下一页追加，按 id 去重。 */
+async function plazaMore(platform) {
+  const plaza = plazaState(platform);
+  if (plaza.loading || plaza.done) return;
+  const next = (plaza.page || 1) + 1;
+  plaza.loading = true;
+  if (state.route === 'song') render({ preserveScroll: true });
+  try {
+    const result = await api.musicPlaza(platform, next);
+    if (result?.ok && Array.isArray(result.lists)) {
+      const seen = new Set(plaza.list.map((item) => item.id));
+      const fresh = result.lists.filter((item) => !seen.has(item.id));
+      plaza.list.push(...fresh);
+      plaza.page = next;
+      plaza.done = fresh.length === 0;
+    } else {
+      plaza.error = result?.reason || plaza.error;
+      plaza.done = true;
+    }
+  } catch (error) {
+    plaza.error = humanError(error);
+    plaza.done = true;
+  } finally {
+    plaza.loading = false;
+    if (state.route === 'song') render({ preserveScroll: true });
+  }
+}
+
+/** 广场分区：平台切换 + 卡片网格 + 加载更多。 */
+function plazaSectionMarkup() {
+  const platforms = [
+    ['netease', '网易云'],
+    ['qq', 'QQ 音乐'],
+    ['kugou', '酷狗'],
+    ['kuwo', '酷我'],
+  ];
+  const active = state.myPlaylists.plazaPlatform || 'netease';
+  const plaza = plazaState(active);
+  const tabs = platforms
+    .map(([key, label]) =>
+      `<button class="song-chart-tab ${active === key ? 'active' : ''}" data-action="plaza-platform" data-value="${key}">${label}</button>`
+    )
+    .join('');
+  let body = '';
+  if (plaza.error && !plaza.list.length) {
+    body = `<div class="playlists-error">${icon('alert', 'xs')}<span>${esc(plaza.error)}</span>
+      <button class="link-btn" data-action="plaza-retry" data-platform="${esc(active)}">重试</button></div>`;
+  } else if (!plaza.list.length) {
+    body = `<p class="playlists-group-note">${plaza.loading ? '正在读取广场歌单…' : '广场暂时没有内容。'}</p>`;
+  } else {
+    const detail = state.myPlaylists.detail;
+    body = `<div class="playlist-cards">
+      ${plaza.list.map((item) => playlistCardMarkup(item, active, Boolean(detail && detail.id === item.id && detail.platform === active))).join('')}
+    </div>
+    ${plaza.loading ? '<p class="playlists-group-note">正在加载更多…</p>' : plaza.done ? '' : `<div class="plaza-more-wrap"><button class="playlists-chip" data-action="plaza-more" data-platform="${esc(active)}">${icon('plus', 'xs')}加载更多</button></div>`}`;
+  }
+  return `<section class="plaza-section">
+    <div class="playlists-bar">
+      <div class="playlists-bar-title"><strong>歌单广场</strong><span>热门公开歌单 · 点开看曲目，免登录</span></div>
+      <div class="playlists-bar-actions"><span class="song-chart-tabs">${tabs}</span></div>
+    </div>
+    ${body}
+  </section>`;
+}
+
+/**
+ * 把一次全平台同步的结果并进现有分组。
+ *
+ * 为什么要合并而不是直接替换：某个平台这次读失败（登录过期、接口抽风）时，
+ * 上次读到的歌单其实还能用，直接替换会把它连卡片一起抹掉。
+ * 这里保留旧列表并打上 stale 标记，只把失败原因标在那一个平台上，别的平台照常。
+ *
+ * 顺序以后端返回的为准（主进程已经按 netease / qq / kugou / kuwo 固定排好），
+ * 只有后端没返回的已登录平台才补到末尾，不在渲染层再排一次。
+ */
+function mergeAllPlaylistGroups(logged, incoming) {
+  const prev = state.myPlaylists.groups || [];
+  const list = Array.isArray(incoming) ? incoming : [];
+  const keys = list.map((group) => group.platform).filter((key) => logged.includes(key));
+  logged.forEach((key) => {
+    if (!keys.includes(key)) keys.push(key);
+  });
+
+  return keys.map((key) => {
+    const fresh = list.find((group) => group.platform === key);
+    const old = prev.find((group) => group.platform === key);
+    if (!fresh) {
+      // 后端这次没返回这个平台（多半是登录态刚变），别把它永远停在「同步中」
+      if (old) return old;
+      return {
+        platform: key,
+        label: musicPlatformLabel(key),
+        ok: false,
+        list: [],
+        error: '这次同步没有返回这个平台，稍后再试一次',
+      };
+    }
+    if (fresh.ok) return fresh;
+    if (old && (old.list || []).length) return { ...fresh, list: old.list, stale: true };
+    return fresh;
+  });
+}
+
+/**
+ * 「上次同步：3 分钟前 · 耗时 1.2s」。
+ *
+ * 主进程返回 syncedAt / durationMs 就是给这个用的：
+ * 歌单同步慢起来要几十秒，没有时间戳用户没法判断该不该再点一次。
+ */
+function playlistSyncSummary() {
+  const at = Number(state.myPlaylists.syncedAt) || 0;
+  if (!at) return '';
+  const diff = Date.now() - at;
+  const when = diff < 60 * 1000 ? '刚刚' : relativeDate(at);
+  const ms = Number(state.myPlaylists.syncDurationMs) || 0;
+  const cost = ms ? ` · 耗时 ${(ms / 1000).toFixed(1)}s` : '';
+  return `上次同步：${when}${cost}`;
+}
+
+/**
+ * 这个平台是不是正在同步。
+ *
+ * 三处地方共用：左栏平台行、主区平台分区、「同步全部」按钮的禁用态。
+ * 全量同步的时候四个平台都在转，所以 loadingAll 为真一律算同步中。
+ */
+function playlistSyncing(platform) {
+  if (state.myPlaylists.loadingAll) return true;
+  const map = state.myPlaylists.syncing || (state.myPlaylists.syncing = {});
+  return Boolean(map[platform]);
+}
+
+/** 某个平台自己的「上次同步」文案；没同步过就返回空串（不显示）。 */
+function playlistSyncWhen(group, { withCost = false } = {}) {
+  const at = Number(group?.syncedAt) || 0;
+  if (!at) return '';
+  const diff = Date.now() - at;
+  const when = diff < 60 * 1000 ? '刚刚' : relativeDate(at);
+  const ms = Number(group?.durationMs) || 0;
+  return withCost && ms ? `上次同步：${when} · 耗时 ${(ms / 1000).toFixed(1)}s` : `上次同步：${when}`;
+}
+
+/**
+ * 只把「一个平台」的结果并回分组，其它平台原样不动。
+ *
+ * 这是单平台同步的关键：库里另外三个平台的对象引用一个都不换，
+ * 所以不会出现「点了酷狗，网易云的卡片闪一下重新加载」。
+ * 失败时保留上次读到的列表（打 stale 标记），把原因挂在这一个平台上。
+ */
+function applyPlaylistGroup(platform, fresh, meta = {}) {
+  const prev = state.myPlaylists.groups || [];
+  const index = prev.findIndex((group) => group.platform === platform);
+  const old = index >= 0 ? prev[index] : null;
+  const syncedAt = Number(meta.syncedAt) || Date.now();
+  const durationMs = Number(meta.durationMs) || 0;
+
+  let next;
+  if (!fresh) {
+    /*
+     * 后端没返回这个平台：多半是登录态在服务端已经失效（本地还留着「已登录」）。
+     * 旧数据留着别抹掉，但要挂上原因，否则用户点完同步看不出任何变化，
+     * 还会以为歌单没更新。
+     */
+    const reason = '这次没取到这个平台的歌单，可能登录已经失效了，重新登录一次试试';
+    next = old
+      ? { ...old, ok: false, error: reason, stale: true, syncedAt, durationMs }
+      : {
+          platform,
+          label: musicPlatformLabel(platform),
+          ok: false,
+          list: [],
+          error: reason,
+          syncedAt,
+          durationMs,
+        };
+  } else if (fresh.ok) {
+    next = { ...fresh, syncedAt, durationMs };
+  } else if (old && (old.list || []).length) {
+    next = { ...fresh, list: old.list, stale: true, syncedAt, durationMs };
+  } else {
+    next = { ...fresh, syncedAt, durationMs };
+  }
+
+  const groups = prev.slice();
+  if (index >= 0) groups[index] = next;
+  else groups.push(next);
+  state.myPlaylists.groups = groups;
+  // 有结果就排一次落盘：下次冷启动能直接画出这面卡片墙。
+  // skipCache 是「刚从磁盘读回来的」，没必要马上又写一遍。
+  if (!meta.skipCache) schedulePlaylistsCacheSave();
+  return next;
+}
+
+/**
+ * 把「链接导入」的歌单并进「我的歌单」对应平台分组。
+ *
+ * 酷狗等平台的账号歌单同步已被官方关掉，链接导入是往「我的歌单」里添歌单的唯一入口，
+ * 所以导入成功后要主动并进来，不然导入完在「我的歌单」里永远看不到。
+ * 分组不存在就新建一个；同 id 已存在就原地覆盖（刷新名字/封面/曲目数）。
+ * 歌单打上 imported 标记：缓存恢复时未登录的平台只捞回导入的歌单，
+ * 账号同步出来的私有歌单不该在没登录时出现。
+ */
+function mergeImportedPlaylist(platform, entry) {
+  const key = String(platform || '');
+  const id = String(entry?.id || '');
+  if (!key || !id) return null;
+  const item = {
+    id,
+    name: String(entry?.name || '').trim() || '导入的歌单',
+    cover: String(entry?.cover || ''),
+    count: Number(entry?.count) || 0,
+    creator: String(entry?.creator || ''),
+    playcount: Number(entry?.playcount) || 0,
+    imported: true,
+  };
+  const groups = (state.myPlaylists.groups || []).slice();
+  const index = groups.findIndex((group) => group.platform === key);
+  if (index < 0) {
+    // 新分组不带 syncedAt：导入不是同步，「上次同步」不该显示一个假时间
+    groups.push({ platform: key, label: musicPlatformLabel(key), ok: true, list: [item] });
+  } else {
+    const group = groups[index];
+    const list = (group.list || []).slice();
+    const at = list.findIndex((old) => String(old?.id) === id);
+    if (at >= 0) list[at] = { ...list[at], ...item };
+    else list.push(item);
+    // 导入成功说明这张歌单是好的，把之前同步失败挂着的红字清掉，别让卡片墙顶着报错显示
+    groups[index] = { ...group, list, ok: true, error: '', stale: false };
+  }
+  state.myPlaylists.groups = groups;
+  // 跟账号同步一样排一次落盘，冷启动才能把导入的歌单画回来
+  schedulePlaylistsCacheSave();
+  return item;
+}
+
+
 /**
  * 一次性拉取所有已登录平台的歌单。
  * 用 loadingAll 防重入，避免每帧 render 都触发请求。
+ *
+ * 这是「同步全部」的入口。单个平台的同步走 loadPlaylistsFor：一次只问后端要一个平台，
+ * 其它平台的歌单对象一个都不换，这样点酷狗不会连带把网易云重新拉一遍。
+ * 主进程 music:all-playlists 不带参数时仍然是四家并发、按固定平台顺序返回整包。
  */
 async function loadAllPlaylists(force = false) {
-  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
+  const logged = ['netease', 'qq', 'kugou', 'kuwo'].filter(musicLoggedIn);
   if (!logged.length) return;
   if (state.myPlaylists.loadingAll) return;
   if (!force && state.myPlaylists.groups?.length) return;
@@ -4396,31 +5941,51 @@ async function loadAllPlaylists(force = false) {
    * 兜底：主进程那边每一步都有超时，但万一整条 IPC 卡死（比如内置窗口
    * 被系统挂起），界面就会一直停在「正在读取」。这里放一个上限，
    * 到点自己收尾，至少让用户看到「读取超时」而不是无限转圈。
+   * 已经读到过的平台不受影响 —— 不能因为一次超时把好好的卡片也清掉。
    */
   const guard = setTimeout(() => {
     if (!state.myPlaylists.loadingAll) return;
     state.myPlaylists.loadingAll = false;
-    state.myPlaylists.groups = logged.map((key) => ({
-      platform: key,
-      label: key === 'netease' ? '网易云' : key === 'qq' ? 'QQ 音乐' : '酷狗',
-      ok: false,
-      list: [],
-      error: '读取超时了，稍后再点一次刷新',
-    }));
+    state.myPlaylists.groups = logged.map((key) => {
+      const old = (state.myPlaylists.groups || []).find((group) => group.platform === key);
+      if (old && (old.list || []).length) return old;
+      return {
+        platform: key,
+        label: musicPlatformLabel(key),
+        ok: false,
+        list: [],
+        error: '读取超时了，稍后再点一次同步',
+      };
+    });
     if (state.route === 'song') render({ preserveScroll: true });
   }, 75000);
   try {
     const result = await api.musicAllPlaylists();
-    state.myPlaylists.groups = Array.isArray(result?.groups) ? result.groups : [];
+    state.myPlaylists.groups = mergeAllPlaylistGroups(logged, Array.isArray(result?.groups) ? result.groups : []);
+    /*
+     * syncedAt / durationMs 由主进程给：四家现在全并发，一次同步的耗时和完成时刻
+     * 只有后端最清楚。界面拿它显示「上次同步：x 分钟前 · 耗时 1.2s」。
+     */
+    state.myPlaylists.syncedAt = Number(result?.syncedAt) || Date.now();
+    state.myPlaylists.syncDurationMs = Number(result?.durationMs) || 0;
+    state.myPlaylists.error = '';
+    // 每个平台也各记一份，左栏平台行才有自己的「x 分钟前」
+    stampPlaylistGroups(logged, state.myPlaylists.syncedAt, state.myPlaylists.syncDurationMs);
+    schedulePlaylistsCacheSave();
   } catch (error) {
-    // 整体失败时，把错误摊到每个平台上，至少能看出为什么
-    state.myPlaylists.groups = logged.map((key) => ({
-      platform: key,
-      label: key === 'netease' ? '网易云' : key === 'qq' ? 'QQ 音乐' : '酷狗',
-      ok: false,
-      list: [],
-      error: humanError(error),
-    }));
+    // 整体失败（IPC 层就挂了）时，失败原因摊到每个平台，但已经成功拿到歌单的平台保持原样
+    const message = humanError(error);
+    state.myPlaylists.groups = logged.map((key) => {
+      const old = (state.myPlaylists.groups || []).find((group) => group.platform === key);
+      if (old && old.ok && (old.list || []).length) return old;
+      return {
+        platform: key,
+        label: musicPlatformLabel(key),
+        ok: false,
+        list: [],
+        error: message,
+      };
+    });
   } finally {
     clearTimeout(guard);
     state.myPlaylists.loadingAll = false;
@@ -4428,13 +5993,142 @@ async function loadAllPlaylists(force = false) {
   }
 }
 
+/** 给一批平台的分组统一盖上同步时间戳（全量同步共用同一个时刻）。 */
+function stampPlaylistGroups(platforms, syncedAt, durationMs) {
+  const at = Number(syncedAt) || Date.now();
+  const ms = Number(durationMs) || 0;
+  state.myPlaylists.groups = (state.myPlaylists.groups || []).map((group) =>
+    platforms.includes(group.platform) ? { ...group, syncedAt: at, durationMs: ms } : group
+  );
+}
+
+/**
+ * 只同步一个平台。
+ *
+ * 后端契约：musicAllPlaylists({ platforms: ['kugou'] }) 只回这一个平台的分组。
+ * 前端也只把这个平台并回去，别写成整包替换 —— 那等于又把四家重拉了一遍，
+ * 正是用户抱怨的「点一次同步，全部平台都重新转」。
+ *
+ * 老版本 preload 会忽略参数、照旧回全部平台；这种情况我们仍然只取要的那个平台，
+ * 界面行为是一致的，只是白跑了后端，不影响正确性。
+ */
+async function loadPlaylistsFor(platform) {
+  const key = String(platform || '');
+  if (!key) return null;
+  if (!musicLoggedIn(key)) return null;
+  if (state.myPlaylists.loadingAll) return null;
+  if (playlistSyncing(key)) return null;
+
+  const map = state.myPlaylists.syncing || (state.myPlaylists.syncing = {});
+  map[key] = true;
+  if (state.route === 'song') render({ preserveScroll: true });
+
+  // 单个平台也有超时兜底，卡住时只影响它自己，别的平台的数据不动
+  const guard = setTimeout(() => {
+    if (!map[key]) return;
+    map[key] = false;
+    applyPlaylistGroup(
+      key,
+      { platform: key, label: musicPlatformLabel(key), ok: false, list: [], error: '读取超时了，稍后再点一次同步' },
+      {}
+    );
+    if (state.route === 'song') render({ preserveScroll: true });
+  }, 60000);
+
+  try {
+    const result = await api.musicAllPlaylists({ platforms: [key] });
+    const incoming = Array.isArray(result?.groups) ? result.groups : [];
+    const fresh = incoming.find((group) => group && group.platform === key) || null;
+    applyPlaylistGroup(key, fresh, {
+      syncedAt: Number(result?.syncedAt) || Date.now(),
+      durationMs: Number(result?.durationMs) || 0,
+    });
+  } catch (error) {
+    applyPlaylistGroup(
+      key,
+      { platform: key, label: musicPlatformLabel(key), ok: false, list: [], error: humanError(error) },
+      {}
+    );
+  } finally {
+    clearTimeout(guard);
+    map[key] = false;
+    if (state.route === 'song') render({ preserveScroll: true });
+  }
+  return (state.myPlaylists.groups || []).find((group) => group.platform === key) || null;
+}
+
+/**
+ * 「只同步这个平台」按钮的入口：结果说清楚，失败也只在它自己身上。
+ */
+async function syncOnePlaylist(platform) {
+  const key = String(platform || '');
+  if (!key) return;
+  const label = musicPlatformLabel(key);
+  if (!musicLoggedIn(key)) {
+    toast(`${label} 还没登录，先登录再同步`, 'info');
+    openMusicAccountsModal(key);
+    return;
+  }
+  if (state.myPlaylists.loadingAll) {
+    toast('正在同步全部平台，等这一轮跑完再单独同步', 'info');
+    return;
+  }
+  if (playlistSyncing(key)) return;
+
+  const group = await loadPlaylistsFor(key);
+  if (!group) return;
+  const count = (group.list || []).length;
+  if (group.ok) {
+    toast(count ? `${label} 已同步，${count} 个歌单` : `${label} 已同步，这个账号下还没有歌单`, 'success');
+    return;
+  }
+  const reason = group.error || '没读到歌单';
+  toast(
+    group.stale ? `${label} 这次没读到，先显示上次的结果：${reason}` : `${label} 同步失败：${reason}`,
+    group.stale ? 'info' : 'error'
+  );
+}
+
+/**
+ * 「同步全部」：一次请求把所有已登录平台的歌单拉齐，并把结果说清楚。
+ *
+ * 左栏顶部的「同步全部」走这一条；各平台行里的刷新按钮走 syncOnePlaylist。
+ * 两条路各管各的范围，界面上也各自标「同步中」。
+ */
+async function syncAllPlaylists() {
+  const logged = ['netease', 'qq', 'kugou', 'kuwo'].filter(musicLoggedIn);
+  if (!logged.length) {
+    toast('还没有登录音乐账号，先登录一个再同步', 'info');
+    openMusicAccountsModal();
+    return;
+  }
+  if (state.myPlaylists.loadingAll) return;
+  await loadAllPlaylists(true);
+  const groups = state.myPlaylists.groups || [];
+  const failed = groups.filter((group) => !group.ok);
+  if (!failed.length) {
+    toast(`已同步 ${groups.length} 个平台的歌单`, 'success');
+    return;
+  }
+  // 失败要指名道姓：只说「同步失败」用户不知道是哪个平台出了问题
+  const names = failed.map((group) => group.label || musicPlatformLabel(group.platform)).join('、');
+  toast(
+    failed.length === groups.length
+      ? `同步失败：${names} 都没读到`
+      : `${groups.length - failed.length} 个平台已同步，${names} 没读到`,
+    failed.length === groups.length ? 'error' : 'info'
+  );
+}
+
 /**
  * 渲染期间确保所有平台的歌单已经有着落。
  */
 function ensureAllPlaylistsLoaded() {
-  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
+  const logged = ['netease', 'qq', 'kugou', 'kuwo'].filter(musicLoggedIn);
   if (!logged.length) return;
   if (state.myPlaylists.loadingAll) return;
+  // 正在单独同步某个平台时别再插一次全量请求，两边同时写 groups 只会互相盖
+  if (Object.values(state.myPlaylists.syncing || {}).some(Boolean)) return;
   if (state.myPlaylists.groups?.length) return;
   loadAllPlaylists();
 }
@@ -4445,25 +6139,253 @@ function ensureAllPlaylistsLoaded() {
 function invalidateAllPlaylists() {
   state.myPlaylists.groups = [];
   state.myPlaylists.loadingAll = false;
+  // 各平台的同步开关也要一起复位，否则退登录后那行会一直停在「同步中」
+  state.myPlaylists.syncing = { netease: false, qq: false, kugou: false, kuwo: false };
+  /*
+   * 歌单详情缓存一并清掉：登录状态一变（换号 / 退登录），
+   * 缓存里的曲目就是上一个账号的视图了，不能再用。
+   */
+  state.myPlaylists.detailCache = {};
+  state.myPlaylists.detailRefreshing = {};
+}
+
+/* ── 我的歌单：本地缓存（冷启动先画上次的结果，再悄悄补新的） ───────── */
+
+/*
+ * 缓存落在主进程的 userData/playlists-cache.json（见 electron/main.js 的 playlistCache）。
+ * 这里只管三件事：读回来灌进 state、同步完写回去、账号对不上就丢掉。
+ *
+ * 三条约定：
+ *  1. 已登录平台照常灌回；未登录平台只灌「链接导入」的歌单（带 imported 标记），
+ *     账号同步的私有歌单没登录就不该出现。
+ *  2. 缓存里的账号标识和当前登录账号不一致 = 换过号，这一组作废（顺手把盘上那份删掉）。
+ *  3. 缓存超过 TTL 就先给用户看旧数据，再后台静默补一次新的，不转圈、不禁用按钮。
+ */
+const PLAYLIST_CACHE_TTL = 30 * 60 * 1000;
+const PLAYLIST_CACHE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+
+/** 当前登录账号的标识；拿不到就返回空串（网易云走本地 API，没有 uin/userid）。 */
+function musicAccountKey(platform) {
+  if (!musicLoggedIn(platform)) return '';
+  const info = state.musicLogin?.[platform] || {};
+  return String(info.uin || info.userid || '');
+}
+
+let playlistsHydrating = false;
+
+/** 把磁盘缓存灌回内存。返回是否真的灌到了东西。 */
+async function hydratePlaylistsFromCache() {
+  if (playlistsHydrating) return false;
+  if (typeof api.musicPlaylistsCache !== 'function') return false;
+  playlistsHydrating = true;
+  try {
+    const cache = await api.musicPlaylistsCache();
+    const savedAt = Number(cache?.savedAt) || 0;
+    if (!savedAt) return false;
+    // 太旧的缓存不如不显示：卡片墙上挂着「上次同步 40 天前」只会让用户更困惑
+    if (Date.now() - savedAt > PLAYLIST_CACHE_MAX_AGE) {
+      api.musicDropPlaylistsCache({}).catch(() => {});
+      return false;
+    }
+    const drop = [];
+    let filled = 0;
+    for (const key of ['netease', 'qq', 'kugou', 'kuwo']) {
+      const cached = cache.groups?.[key];
+      if (!cached || !Array.isArray(cached.list) || !cached.list.length) continue;
+      /*
+       * 未登录的平台只捞回「链接导入」的歌单（带 imported 标记）：
+       * 账号同步出来的歌单是账号私有的，没登录就不该出现；
+       * 而酷狗链接导入的歌单不依赖登录，重启后也得能画回来。
+       */
+      const list = musicLoggedIn(key) ? cached.list : cached.list.filter((item) => item && item.imported);
+      if (!list.length) continue;
+      const cachedAccount = String(cache.accounts?.[key] || '');
+      const nowAccount = musicAccountKey(key);
+      // 两边都有值还不同 = 换过号，这份歌单不是这个人的
+      if (cachedAccount && nowAccount && cachedAccount !== nowAccount) {
+        drop.push(key);
+        continue;
+      }
+      // 已经有在线数据（比如刚手动同步过）就别拿旧的盖掉
+      const exists = (state.myPlaylists.groups || []).some(
+        (group) => group.platform === key && (group.list || []).length
+      );
+      if (exists) continue;
+      /*
+       * 酷狗的账号同步本来就被官方关了，缓存里挂着的「登录失效 / 读取失败」
+       * 全是历史同步留下的死标记，对酷狗毫无意义，恢复时直接剥掉，
+       * 别让「我的歌单」一直顶着一条清不掉的红字。
+       */
+      const clean = key === 'kugou'
+        ? { error: '', stale: false, expired: false }
+        : {};
+      applyPlaylistGroup(
+        key,
+        { ...cached, ...clean, list, platform: key, label: cached.label || musicPlatformLabel(key) },
+        { syncedAt: cached.syncedAt, durationMs: cached.durationMs, skipCache: true }
+      );
+      filled += 1;
+    }
+    if (drop.length) api.musicDropPlaylistsCache({ platforms: drop }).catch(() => {});
+    if (!filled) return false;
+    if (state.route === 'song') render({ preserveScroll: true });
+    // 缓存有点旧了：后台补一次新的，界面上不转圈
+    if (Date.now() - savedAt > PLAYLIST_CACHE_TTL) refreshPlaylistsSilently();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    playlistsHydrating = false;
+  }
+}
+
+let playlistsSaveTimer = null;
+
+/** 把当前分组写回磁盘。合并写：只传这次真有数据的平台，空列表不写。 */
+function schedulePlaylistsCacheSave(delay = 800) {
+  if (typeof api.musicSavePlaylistsCache !== 'function') return;
+  if (playlistsSaveTimer) clearTimeout(playlistsSaveTimer);
+  playlistsSaveTimer = setTimeout(() => {
+    playlistsSaveTimer = null;
+    const groups = (state.myPlaylists.groups || []).filter((g) => Array.isArray(g.list) && g.list.length);
+    if (!groups.length) return;
+    const accounts = {};
+    for (const key of ['netease', 'qq', 'kugou', 'kuwo']) accounts[key] = musicAccountKey(key);
+    api.musicSavePlaylistsCache({ groups, accounts }).catch(() => {});
+  }, delay);
+}
+
+/**
+ * 静默补一次最新数据：不动 loadingAll，所以界面不转圈、按钮不禁用。
+ * 只在「缓存已经把卡片墙画出来」之后由 hydrate 触发。
+ */
+async function refreshPlaylistsSilently() {
+  if (state.myPlaylists.bgRefreshing) return;
+  if (state.myPlaylists.loadingAll) return;
+  if (Object.values(state.myPlaylists.syncing || {}).some(Boolean)) return;
+  if (!['netease', 'qq', 'kugou', 'kuwo'].some(musicLoggedIn)) return;
+  if (typeof api.musicAllPlaylists !== 'function') return;
+  state.myPlaylists.bgRefreshing = true;
+  try {
+    const result = await api.musicAllPlaylists();
+    const groups = Array.isArray(result?.groups) ? result.groups : [];
+    const syncedAt = Number(result?.syncedAt) || Date.now();
+    const durationMs = Number(result?.durationMs) || 0;
+    for (const group of groups) {
+      if (!group || !group.platform) continue;
+      applyPlaylistGroup(group.platform, group, { syncedAt, durationMs });
+    }
+    state.myPlaylists.syncedAt = syncedAt;
+    state.myPlaylists.syncDurationMs = durationMs;
+    if (state.route === 'song') render({ preserveScroll: true });
+  } catch {
+    // 静默刷新失败就算了：卡片墙上还留着旧数据，用户点「同步」会看到真正的报错
+  } finally {
+    state.myPlaylists.bgRefreshing = false;
+  }
+}
+
+/** 歌单详情缓存的 TTL：10 分钟内来回点同一张歌单不重新拉取。 */
+const PLAYLIST_DETAIL_TTL = 10 * 60 * 1000;
+
+function playlistDetailCacheKey(platform, playlistId) {
+  return `${platform}:${playlistId}`;
+}
+
+/**
+ * 从分组（我的歌单）和广场里找出这张歌单登记的曲目数。
+ * 只用来给「正在读取曲目」的占位提示估个规模，找不到就返回 0。
+ */
+function findPlaylistCount(platform, playlistId) {
+  for (const group of state.myPlaylists.groups || []) {
+    if (group.platform !== platform) continue;
+    const hit = (group.list || []).find((item) => item.id === playlistId);
+    if (hit) return Number(hit.count) || 0;
+  }
+  const plaza = (state.myPlaylists.plaza || {})[platform];
+  const hit = (plaza?.list || []).find((item) => item.id === playlistId);
+  return hit ? Number(hit.count) || 0 : 0;
+}
+
+/**
+ * 取歌单详情（带会话缓存）。
+ *
+ * 命中且未过 TTL 直接回缓存；否则现取并写回缓存。
+ * openMyPlaylist / playPlaylist 共用这一条路，保证两边看到的数据一致，
+ * 也避免「点开看了一遍，整张播放又重新拉一遍」的重复等待。
+ */
+async function fetchPlaylistDetail(platform, playlistId) {
+  const key = playlistDetailCacheKey(platform, playlistId);
+  const cached = state.myPlaylists.detailCache[key];
+  if (cached && Date.now() - cached.at < PLAYLIST_DETAIL_TTL) {
+    return { ok: true, detail: cached.detail };
+  }
+  const result = await api.musicPlaylistSongs({ platform, playlistId });
+  if (result?.ok && result.detail) {
+    // platform 放在展开之后，保证分区高亮一定认得出来是哪个平台的歌单
+    const detail = { ...result.detail, id: playlistId, platform };
+    state.myPlaylists.detailCache[key] = { detail, at: Date.now() };
+    result.detail = detail;
+  }
+  return result;
+}
+
+/** 缓存过期后只补数据不抢界面：先显示旧的，取到了再悄悄换上。 */
+async function refreshPlaylistDetailSilently(platform, playlistId) {
+  const key = playlistDetailCacheKey(platform, playlistId);
+  if (state.myPlaylists.detailRefreshing[key]) return;
+  state.myPlaylists.detailRefreshing[key] = true;
+  try {
+    const result = await api.musicPlaylistSongs({ platform, playlistId });
+    if (result?.ok && result.detail) {
+      const detail = { ...result.detail, id: playlistId, platform };
+      state.myPlaylists.detailCache[key] = { detail, at: Date.now() };
+      // 用户还停在这张歌单的详情页上时才换内容，别把别处正在看的给顶掉
+      const current = state.myPlaylists.detail;
+      if (current && current.id === playlistId && current.platform === platform) {
+        state.myPlaylists.detail = detail;
+        if (state.route === 'song') render({ preserveScroll: true });
+      }
+    }
+  } catch {
+    // 静默刷新失败就算了：界面还留着旧数据，重新点一次会走真正的报错
+  } finally {
+    delete state.myPlaylists.detailRefreshing[key];
+  }
 }
 
 /** 打开某个自建歌单的曲目。 */
 async function openMyPlaylist(platform, playlistId) {
   if (!platform || !playlistId) return;
+  const key = playlistDetailCacheKey(platform, playlistId);
+  const cached = state.myPlaylists.detailCache[key];
+  if (cached) {
+    // 命中缓存：无论新旧先把上次的详情摆出来，不转圈、不白屏。
+    state.myPlaylists.detail = cached.detail;
+    state.myPlaylists.error = '';
+    render({ preserveScroll: true });
+    // 过了 TTL 的后台悄悄补一次新的；没过期就直接用
+    if (Date.now() - cached.at >= PLAYLIST_DETAIL_TTL) {
+      refreshPlaylistDetailSilently(platform, playlistId);
+    }
+    return;
+  }
+  // 首次点开：loading 态先画出来（占位带上曲目数估算），取完写进缓存
   state.myPlaylists.loading = true;
   state.myPlaylists.detail = { id: playlistId, platform, loading: true };
   render({ preserveScroll: true });
   try {
-    const result = await api.musicPlaylistSongs({ platform, playlistId });
-    if (result?.ok) {
-      // platform 放在展开之后，保证分区高亮一定认得出来是哪个平台的歌单
-      state.myPlaylists.detail = { ...result.detail, id: playlistId, platform };
+    const result = await fetchPlaylistDetail(platform, playlistId);
+    if (result?.ok && result.detail) {
+      state.myPlaylists.detail = result.detail;
       state.myPlaylists.error = '';
     } else {
       state.myPlaylists.detail = null;
       state.myPlaylists.error = result?.reason || '读取歌单失败';
     }
   } catch (error) {
+    // 读失败必须退出钻取态：否则主区会永远停在「正在读取曲目…」上
+    state.myPlaylists.detail = null;
     state.myPlaylists.error = humanError(error);
   } finally {
     state.myPlaylists.loading = false;
@@ -4476,6 +6398,71 @@ async function openMyPlaylist(platform, playlistId) {
     if (state.myPlaylists.error) {
       toast(state.myPlaylists.error, 'error');
     }
+  }
+}
+
+/**
+ * 串行把一批曲目加进点歌队列，边加边报进度。
+ *
+ * 曲源是逐首解析的（每首都可能要走一次网易云同名曲兜底），
+ * 八百首的歌单跑下来要几分钟。不报数的话，界面停在那儿跟卡死没区别，
+ * 所以这里每 20 首喊一次进度，并且先告诉用户总共多少首。
+ */
+async function addSongsToQueue(songs, options = {}) {
+  const list = Array.isArray(songs) ? songs.filter(Boolean) : [];
+  if (!list.length) return 0;
+  const platform = options.platform || '';
+  const label = options.label || '加入点歌队列';
+  // 来源标记跟着整批走：整张导入的歌单标 playlist + 歌单名，队列页按它分段
+  const origin = options.origin || '';
+  const from = options.from || '';
+  if (list.length > 1) {
+    toast(`正在${label}：共 ${list.length} 首，逐首解析需要一点时间…`, 'info');
+  }
+  let added = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    if (await addChartSongToQueue(list[i], { silent: true, platform: platform || list[i].platform || '', origin, from })) added += 1;
+    const done = i + 1;
+    // 最后一条不用报，紧接着就是总结的 toast
+    if (done % 20 === 0 && done < list.length) {
+      toast(`正在${label}… ${done}/${list.length}（已可播 ${added} 首）`, 'info');
+    }
+  }
+  return added;
+}
+
+/**
+ * 整张歌单直接开播：读取曲目 → 装进点歌队列（替换当前队列）→ 从第 1 首开始播放。
+ * 这是「我的歌单点击播放」的核心：歌单卡片上的播放按钮直接走这里，
+ * 不用先展开再一首首「加入点歌队列」。
+ */
+async function playPlaylist(platform, playlistId) {
+  if (!platform || !playlistId) return;
+  toast('正在准备歌单…', 'info');
+  try {
+    // 和「点开详情」共用同一条缓存路：刚看过的歌单直接开播，不再重拉一遍
+    const result = await fetchPlaylistDetail(platform, playlistId);
+    const songs = result?.detail?.songs || [];
+    if (!result?.ok || !songs.length) {
+      toast('这个歌单里没有可播放的曲目', 'info');
+      return;
+    }
+    // 先清空队列再逐首解析可播版本，避免和上一首歌单的残留混在一起
+    state.songs = [];
+    // 整张歌单全都要：不再截 200 首，progress 由 addSongsToQueue 报
+    const added = await addSongsToQueue(songs, { platform, label: '解析歌单', origin: 'playlist', from: result?.detail?.name || '歌单' });
+    if (!added) {
+      toast('这些曲目暂时都找不到可播放版本', 'info');
+      return;
+    }
+    state.songIndex = 0;
+    state.songTab = 'queue';
+    // 开播后退出歌单钻取态：否则下次点左栏「我的歌单」还会停在这张歌单上，回不到卡片墙
+    state.myPlaylists.detail = null;
+    await playSongAt(0, { preserveScroll: true });
+    toast(`正在播放歌单 · 已载入 ${added} 首`, 'success');
+  } catch (error) {
+    toast(humanError(error), 'error');
   }
 }
 
@@ -4498,17 +6485,24 @@ async function refreshMusicLogin() {
       netease: status?.netease || null,
       qq: status?.qq || null,
       kugou: status?.kugou || null,
+      kuwo: status?.kuwo || null,
       loading: false,
     };
   } catch {
-    state.musicLogin = { netease: null, qq: null, kugou: null, loading: false };
+    state.musicLogin = { netease: null, qq: null, kugou: null, kuwo: null, loading: false };
   }
   /**
    * 登录状态一变，「我的歌单」的缓存就可能不对了：
    * 换了账号要重拉，新登录一个平台要补上这个平台。
-   * 这里统一清缓存，界面渲染时 ensureAllPlaylistsLoaded 会自己重拉。
+   * 这里统一清内存里的分组，再按磁盘缓存重新摆回来（账号对不上的平台会被丢掉），
+   * 剩下的平台由 ensureAllPlaylistsLoaded / 静默刷新补新。
    */
   invalidateAllPlaylists();
+  /*
+   * 清完立刻把上次的歌单墙摆回来：冷启动时用户点进点歌台就能看到卡片，
+   * 不用干等四家平台重新拉一遍（酷狗那边常常要等到超时）。
+   */
+  await hydratePlaylistsFromCache();
   if (state.route === 'song') render({ preserveScroll: true });
 }
 
@@ -4524,31 +6518,54 @@ async function addChartSongToQueue(song, options = {}) {
   const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
   try {
     await api.netease.startService(apiBase).catch(() => {});
+    /*
+     * platform 一定要带上：解析器靠它判断能不能走原生直链。
+     * 不带 platform 时只能老老实实去网易云找同名曲（会员曲目多半扑空）。
+     */
+    const platform = song.platform || options.platform || '';
     const result = await api.musicResolve({
       song: {
         title: song.title,
         artist: song.artist,
         cover: song.cover,
+        album: song.album,
+        platform,
         mid: song.mid,
         hash: song.hash,
+        neteaseId: song.neteaseId,
       },
       apiBase,
       level: state.songQuality,
     });
     if (!result?.ok || !result.url) {
       if (!options.silent) {
-        toast(`「${song.title || '这首'}」暂时找不到可播放版本`, 'info');
+        const why = result?.reason ? `（${result.reason}）` : '';
+        toast(`「${song.title || '这首'}」暂时找不到可播放版本${why}`, 'info');
       }
       return false;
     }
-    state.songs.push({
+    const entry = {
       title: result.title || song.title,
       artist: result.artist || song.artist,
       cover: result.cover || song.cover || '',
-      neteaseId: result.neteaseId,
+      album: result.album || song.album || '',
+      neteaseId: result.neteaseId || song.neteaseId,
+      source: result.source || platform || '',
       quality: result.level || state.songQuality,
       url: result.url,
-    });
+    };
+    // 换源成功时来源和点的那首不同，把原生 key 一起留着，下次还能直连
+    if (result.matched) entry.matched = result.matched;
+    if (song.hash) entry.hash = song.hash;
+    if (song.mid) entry.mid = song.mid;
+    // 队列分组标记：整张导入的歌单带歌单名，其余（单点/本地/直链）都是自选
+    if (options.origin === 'playlist') {
+      entry.origin = 'playlist';
+      entry.from = options.from || '歌单';
+    } else {
+      entry.origin = 'pick';
+    }
+    state.songs.push(entry);
     saveSongs();
     if (!options.silent) {
       state.songIndex = state.songs.length - 1;
@@ -4596,6 +6613,14 @@ async function runSongSearch() {
   render({ preserveScroll: true });
 }
 
+/**
+ * 观众点歌的入队方式：'next'（默认）插到当前歌曲后面当"下一首"，
+ * 'now' 立即切过去播放。在点歌台的弹幕点歌卡片里切换。
+ */
+function liveSongMode() {
+  return localStorage.getItem("vela:live-song-mode") === "now" ? "now" : "next";
+}
+
 async function handleLiveDanmaku(message, user) {
   const match = String(message || '').match(/^\s*点歌\s*(.+)$/);
   if (!match || liveRequestBusy) return;
@@ -4606,11 +6631,27 @@ async function handleLiveDanmaku(message, user) {
     const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
     await api.netease.startService(apiBase).catch(() => {});
     const song = await api.netease.searchSong({ apiBase, keyword, level: state.songQuality });
-    state.songs.push(song);
-    if (!state.songs[state.songIndex] || !state.songIndex) state.songIndex = state.songs.length - 1;
-    saveSongs();
-    toast(`${user || '观众'} 点歌：${song.title}`, 'success');
-    if (state.route === 'song') render({ preserveScroll: true });
+    const mode = liveSongMode();
+    if (!state.songs.length) {
+      // 队列是空的：无论什么模式都直接播这首
+      state.songs.push(song);
+      saveSongs();
+      await playSongAt(0, {});
+      toast(`${user || "观众"} 点歌：${song.title}`, "success");
+    } else if (mode === "now") {
+      const at = Math.min(state.songIndex + 1, state.songs.length);
+      state.songs.splice(at, 0, song);
+      saveSongs();
+      await playSongAt(at, {});
+      toast(`${user || "观众"} 点歌（立即播放）：${song.title}`, "success");
+    } else {
+      // 下一首播放：插在当前歌曲后面，不打断正在听的
+      const at = Math.min(state.songIndex + 1, state.songs.length);
+      state.songs.splice(at, 0, song);
+      saveSongs();
+      toast(`${user || "观众"} 点歌（下一首）：${song.title}`, "success");
+      if (state.route === "song") render({ preserveScroll: true });
+    }
   } catch (error) {
     toast(`弹幕点歌失败：${error.message}`, 'error');
   } finally {
@@ -4675,13 +6716,758 @@ async function ensureSongQuality(song) {
   }
 }
 
+/* ---------- 导入歌单 / 添加歌曲：两个弹窗 ---------- */
+
+/**
+ * 从音频地址里猜一个能读的歌名：去掉域名、路径、扩展名、参数。
+ * 猜不出来就返回空串，交给调用方让用户自己填。
+ */
+function titleFromAudioUrl(rawUrl) {
+  const text = String(rawUrl || '').trim();
+  if (!text) return '';
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return '';
+  }
+  const last = (url.pathname || '').split('/').filter(Boolean).pop() || '';
+  let name = '';
+  try {
+    name = decodeURIComponent(last);
+  } catch {
+    name = last;
+  }
+  name = name
+    .replace(/\.[a-z0-9]{1,5}$/i, '')
+    .replace(/[-_+]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!name) name = url.hostname.replace(/^www\./i, '');
+  return name.slice(0, 60);
+}
+
+/**
+ * 「导入歌单」弹窗。
+ *
+ * 设计上只留一个输入框：粘链接，或者直接把 App 里「分享 → 复制链接」的整段文案贴进来。
+ * 边输边识别（防抖 450ms），认出来就在下面显示平台徽标卡，主按钮才亮；
+ * 认不出来给一句人话，不把后端的异常栈直接甩到脸上。
+ * 网易云的本地服务地址不影响其它平台，所以收进默认折叠的「高级」里。
+ */
+function openImportPlaylistModal() {
+  const defaultApi = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal kr-imp-modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div><h2>导入歌单</h2><p>粘贴歌单链接，或者整个分享文案一起贴进来，都能认。</p></div>
+          <button class="icon-btn" data-close>${icon('x')}</button>
+        </div>
+        <form class="modal-body kr-imp-body" id="playlist-link-form">
+          <div class="kr-imp-box">
+            <textarea class="kr-imp-input" name="url" rows="3" spellcheck="false" autofocus
+              placeholder="https://music.163.com/#/playlist?id=…&#10;也可以粘一整段「分享文案」，多余的说明文字会自动忽略"></textarea>
+            <div class="kr-imp-box-foot">
+              <button type="button" class="kr-imp-paste" id="kr-imp-paste">${icon('file-text', 'xs')}从剪贴板粘贴</button>
+              <span class="kr-imp-hint">网易云 / QQ 音乐 / 酷狗 / 酷我</span>
+            </div>
+          </div>
+          <div class="kr-imp-state" id="kr-imp-state"></div>
+          <p class="kr-imp-error" id="kr-imp-error" hidden></p>
+          <div class="kr-imp-adv">
+            <button type="button" class="kr-imp-adv-toggle" id="kr-imp-adv-toggle" aria-expanded="false">
+              ${icon('chevron-down', 'xs')}<span>高级：网易云本地服务地址</span>
+            </button>
+            <label class="kr-imp-adv-body" id="kr-imp-adv-body" hidden>
+              <span>只有导入网易云歌单时才用得上，不确定就保持默认。</span>
+              <input class="text-input kr-imp-adv-input" name="apiBase" value="${esc(defaultApi)}"
+                placeholder="http://127.0.0.1:3100" spellcheck="false" />
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" data-close>取消</button>
+            <button class="btn btn-primary kr-imp-submit" type="submit" id="kr-imp-submit" disabled>导入</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `);
+
+  const form = document.querySelector('#playlist-link-form');
+  if (!form) return;
+  const urlInput = form.querySelector('[name="url"]');
+  const apiInput = form.querySelector('[name="apiBase"]');
+  const submit = form.querySelector('#kr-imp-submit');
+  const stateHost = form.querySelector('#kr-imp-state');
+  const errorHost = form.querySelector('#kr-imp-error');
+
+  let parsedFor = ''; // 这份链接已经认出过结果，提交时不用再问一次后端
+  let parsedData = null;
+  let timer = null;
+  let seq = 0;
+  let busy = false;
+
+  const showError = (message) => {
+    errorHost.hidden = !message;
+    errorHost.textContent = message || '';
+  };
+  const noteMarkup = (text, miss = false) =>
+    `<p class="kr-imp-note ${miss ? 'is-miss' : ''}">${esc(text)}</p>`;
+
+  // 识别成功后的平台徽标卡：平台名 + 歌单名/曲目数（后端给多少显示多少）
+  const cardMarkup = (data) => {
+    const platform = String(data?.platform || '');
+    const label = data?.label || musicPlatformLabel(platform);
+    const name = String(data?.name || data?.playlistName || data?.title || '').trim();
+    const count = Number(data?.songCount || data?.trackCount || data?.count || 0) || 0;
+    const creator = String(data?.creator || '').trim();
+    const cover = String(data?.cover || '').trim();
+    const id = String(data?.playlistId || data?.id || '');
+    /*
+     * playlistId 是不透明字符串（酷狗自建歌单是 collect:用户:…:签名），
+     * 只用来原样透传给后端，不要拆不要转数字。
+     * 界面上也只在它是纯数字（网易云 / QQ 那种）时才当「歌单号」露出来，
+     * 免得把一长串签名糊到用户脸上。
+     */
+    const showId = /^\d+$/.test(id) ? id : '';
+    // 有歌单名就把名字当主标题（分享短链能解析出名字），没有就退回「酷狗歌单 + 歌单号」
+    const title = name || `${label}歌单`;
+    const sub = [
+      name ? label : showId ? `歌单号 ${showId}` : '',
+      count ? `${count} 首` : '',
+      creator,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    return `<div class="kr-imp-card">
+        ${
+          cover
+            ? `<img class="kr-imp-card-cover" src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />`
+            : `<span class="mp-dot" data-platform="${esc(platform)}"></span>`
+        }
+        <span class="kr-imp-card-copy">
+          <strong>${esc(title)}</strong>
+          ${sub ? `<small>${esc(sub)}</small>` : ''}
+        </span>
+        <span class="kr-imp-card-ok">${icon('check', 'xs')}认出来了</span>
+      </div>`;
+  };
+
+  /*
+   * 只有真的带回了平台和歌单号才算认出来。
+   * 后端偶发只回一个 ok（比如还在解析短链），这时候当成没认出来更诚实，
+   * 免得界面显示「音乐歌单」这种似是而非的结果。
+   */
+  const recognized = (data) => Boolean(data?.ok && data?.platform && (data?.playlistId || data?.id));
+
+  /*
+   * 封面是外链，挂了就换回平台圆点 —— 否则卡片上会留一个空方块，像加载坏了。
+   * 弹窗内容不经过 bindView()，所以这里自己挂一次。
+   */
+  const bindCardCover = (data) => {
+    const img = stateHost.querySelector('.kr-imp-card-cover');
+    if (!img) return;
+    img.addEventListener(
+      'error',
+      () => {
+        const dot = document.createElement('span');
+        dot.className = 'mp-dot';
+        if (data?.platform) dot.dataset.platform = String(data.platform);
+        img.replaceWith(dot);
+      },
+      { once: true }
+    );
+  };
+
+  const paintCard = (data) => {
+    stateHost.innerHTML = cardMarkup(data);
+    bindCardCover(data);
+  };
+
+  const runParse = async () => {
+    const url = urlInput.value.trim();
+    if (!url) return;
+    const mine = ++seq;
+    stateHost.innerHTML = noteMarkup('正在识别…');
+    submit.disabled = true;
+    try {
+      const data = await api.musicParsePlaylistLink(url);
+      if (mine !== seq) return; // 用户又改了输入，这次结果作废
+      if (!recognized(data)) {
+        parsedFor = '';
+        parsedData = null;
+        stateHost.innerHTML = noteMarkup(data?.reason || '这条链接还没认出来，换一条完整链接试试', true);
+        return;
+      }
+      parsedFor = url;
+      parsedData = data;
+      paintCard(data);
+      submit.disabled = false;
+    } catch (error) {
+      if (mine !== seq) return;
+      stateHost.innerHTML = noteMarkup(humanError(error), true);
+    }
+  };
+
+  urlInput.addEventListener('input', () => {
+    showError('');
+    submit.disabled = true;
+    const value = urlInput.value.trim();
+    if (value !== parsedFor) {
+      parsedData = null;
+      parsedFor = '';
+    }
+    clearTimeout(timer);
+    if (!value) {
+      stateHost.innerHTML = '';
+      return;
+    }
+    stateHost.innerHTML = noteMarkup('正在识别…');
+    timer = setTimeout(runParse, 450);
+  });
+
+  form.querySelector('#kr-imp-paste')?.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) {
+        toast('剪贴板里没有文字', 'info');
+        return;
+      }
+      urlInput.value = text.trim();
+      urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch {
+      // 拿不到剪贴板权限时不装作成功了，直接把人送回输入框
+      urlInput.focus();
+      toast('读不到剪贴板，直接按 Ctrl + V 粘进来就行', 'info');
+    }
+  });
+
+  const advToggle = form.querySelector('#kr-imp-adv-toggle');
+  const advBody = form.querySelector('#kr-imp-adv-body');
+  advToggle?.addEventListener('click', () => {
+    const open = advToggle.getAttribute('aria-expanded') === 'true';
+    advToggle.setAttribute('aria-expanded', String(!open));
+    advToggle.classList.toggle('is-open', !open);
+    advBody.hidden = open;
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    const url = urlInput.value.trim();
+    const apiBase = String(apiInput?.value || '').trim() || defaultApi;
+    if (!url) {
+      showError('先把歌单链接粘进来');
+      urlInput.focus();
+      return;
+    }
+    showError('');
+    localStorage.setItem('vela:netease-api', apiBase);
+
+    const setBusy = (text) => {
+      busy = Boolean(text);
+      submit.disabled = busy;
+      submit.textContent = text || '导入';
+    };
+
+    setBusy('正在识别…');
+    try {
+      const info = parsedData && parsedFor === url ? parsedData : await api.musicParsePlaylistLink(url);
+      if (!recognized(info)) {
+        stateHost.innerHTML = noteMarkup(info?.reason || '这条链接还没认出来，换一条完整链接试试', true);
+        showError('这条链接暂时读不出来，换一条再试');
+        setBusy('');
+        return;
+      }
+      parsedFor = url;
+      parsedData = info;
+      paintCard(info);
+      setBusy('正在读取曲目…');
+
+      if (info.platform === 'netease') {
+        // 网易云沿用原来的本地 API 流程：它直接带可播放地址回来
+        const result = await api.neteasePlaylist({ apiBase, url, level: state.songQuality });
+        if (!result?.songs?.length) {
+          showError('没读到曲目：本地网易云服务可能没起来，或者这张歌单本身是空的');
+          setBusy('');
+          return;
+        }
+        // 链接导入的歌单也并进「我的歌单」，不然导入完在那里看不到
+        mergeImportedPlaylist('netease', {
+          id: info.playlistId || info.id,
+          name: result.playlist || info.name || info.playlistName || info.title || '',
+          cover: info.cover || '',
+          count: result.songs.length,
+          creator: info.creator || '',
+        });
+        state.songs.push(...result.songs);
+        state.songIndex = Math.max(0, state.songs.length - result.songs.length);
+        saveSongs();
+        closeModal();
+        render({ preserveScroll: true });
+        toast(
+          `已导入「${result.playlist}」${result.songs.length} 首${result.skipped ? `，跳过 ${result.skipped} 首没有版权的` : ''}，已加入我的歌单`,
+          'success'
+        );
+        playCurrentSong();
+        return;
+      }
+
+      // QQ 音乐 / 酷狗 / 酷我：走各自的公开详情
+      const result = await api.musicPlaylistSongs({ platform: info.platform, playlistId: info.playlistId });
+      const songs = result?.detail?.songs || [];
+      if (!result?.ok || !songs.length) {
+        showError(result?.reason || '这张歌单里没有读到曲目，换一张试试');
+        setBusy('');
+        return;
+      }
+      // 链接导入的歌单也并进「我的歌单」：酷狗账号同步已被官方关掉，导入是唯一入口
+      mergeImportedPlaylist(info.platform, {
+        id: info.playlistId || info.id,
+        name: result.detail.name || info.name || info.playlistName || info.title || '',
+        cover: result.detail.cover || info.cover || '',
+        count: songs.length,
+        creator: info.creator || result.detail.creator || '',
+      });
+      closeModal();
+      render({ preserveScroll: true });
+      // 曲源逐首解析（每首都要找回可播版本），大歌单要跑一会儿，进度由这里报
+      const added = await addSongsToQueue(songs, {
+        platform: info.platform,
+        label: `导入「${result.detail.name || info.label}歌单」`,
+      });
+      if (!added) {
+        toast('这些曲目暂时都找不到可播放版本', 'info');
+        return;
+      }
+      state.songIndex = Math.max(0, state.songs.length - added);
+      saveSongs();
+      render({ preserveScroll: true });
+      toast(`已导入 ${added} 首${added < songs.length ? `（${songs.length - added} 首没有可播放版本）` : ''}，已加入我的歌单`, 'success');
+      playCurrentSong();
+    } catch (error) {
+      // 失败不关弹窗：留在原地改链接就能重试
+      showError(`导入失败：${humanError(error)}`);
+      setBusy('');
+    }
+  });
+}
+
+/**
+ * 「添加歌曲链接」弹窗。
+ *
+ * 一个地址输入框为主，歌名跟着地址自动填（可改），旁边直接给一个「选本地文件」。
+ * 地址不对就在弹窗里说清楚哪儿不对，不再点了按钮毫无反应。
+ */
+function openAddSongLinkModal() {
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal kr-imp-modal is-narrow" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div><h2>添加歌曲</h2><p>贴一个音频直链就行，歌名会自动填好。</p></div>
+          <button class="icon-btn" data-close>${icon('x')}</button>
+        </div>
+        <form class="modal-body kr-imp-body" id="song-link-form">
+          <label class="kr-imp-field">
+            <span class="kr-imp-field-label">音频地址</span>
+            <input class="text-input kr-imp-url" name="url" placeholder="https://.../song.mp3" spellcheck="false" autofocus />
+          </label>
+          <p class="kr-imp-error" id="song-link-error" hidden></p>
+          <label class="kr-imp-field">
+            <span class="kr-imp-field-label">歌名<em>可选，自动填好后还能改</em></span>
+            <input class="text-input" name="title" placeholder="夜航星" />
+          </label>
+          <div class="kr-imp-foot-row">
+            <button type="button" class="kr-imp-file" data-action="add-song-file">${icon('folder', 'xs')}选本地文件</button>
+            <span class="kr-imp-hint">支持 mp3 / flac / m4a / wav</span>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" data-close>取消</button>
+            <button class="btn btn-primary" type="submit">加入歌单</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `);
+
+  const form = document.querySelector('#song-link-form');
+  if (!form) return;
+  const urlInput = form.querySelector('[name="url"]');
+  const titleInput = form.querySelector('[name="title"]');
+  const errorHost = form.querySelector('#song-link-error');
+
+  const showError = (message) => {
+    errorHost.hidden = !message;
+    errorHost.textContent = message || '';
+  };
+
+  // 只有用户没自己动过歌名时才跟着地址改，别把人家改好的名字覆盖掉
+  let titleTouched = false;
+  titleInput.addEventListener('input', () => {
+    titleTouched = Boolean(titleInput.value.trim());
+  });
+
+  urlInput.addEventListener('input', () => {
+    showError('');
+    const guess = titleFromAudioUrl(urlInput.value);
+    if (!titleTouched && guess) titleInput.value = guess;
+  });
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const url = String(urlInput.value || '').trim();
+    if (!url) {
+      showError('先把音频地址粘进来');
+      urlInput.focus();
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      showError('这个地址要以 http:// 或 https:// 开头，复制完整链接再试');
+      urlInput.focus();
+      return;
+    }
+    const title = String(titleInput.value || '').trim() || titleFromAudioUrl(url) || '未命名音频';
+    state.songs.push({ title, url });
+    state.songIndex = state.songs.length - 1;
+    saveSongs();
+    closeModal();
+    render({ preserveScroll: true });
+    playCurrentSong();
+  });
+}
+
+/**
+ * 点歌台整体布局。
+ *
+ * 视图层组件分散在 song-ui.js（每块都是纯函数、可单独复用），本函数只负责把它们拼起来：
+ *   顶部操作区（账号 / 添加歌曲）
+ *   中间 左栏「曲库导航 + 歌单同步」+ 主区（标题条 / 搜索一条 / 队列或歌单或榜单）+ 右侧栏（歌词/音效/设置/弹幕）
+ *   底部播放条
+ *
+ * 为什么把分页放到左栏：「我的歌单」原来跟队列挤在同一列里，还得滚到底才看得见，
+ * 等于把人挡在门外。改成常驻左栏后，进歌单只要一次点击；窄屏（<1100px）由 CSS 把它折成顶部横向 tab。
+ */
+/* ── 点歌台「音源」卡片：内置音源勾选 + 第三方音源导入 ──────────
+ * 内置五家里酷狗 / QQ 的匿名接口对付费曲目一律要会员，酷我常把人往手机端引，
+ * 所以默认只开网易云和咪咕；用户想开哪家自己点 chip。
+ * 第三方音源是一份 JSON，描述「怎么搜」和「怎么取地址」两个接口，
+ * 可以从文件导入，也可以用订阅地址导入。
+ */
+
+const MUSIC_SOURCE_LABELS = [
+  ['netease', '网易云'],
+  ['migu', '咪咕'],
+  ['kuwo', '酷我'],
+  ['kugou', '酷狗'],
+  ['qq', 'QQ 音乐'],
+];
+const MUSIC_SOURCE_DEFAULTS = { netease: true, migu: true, kuwo: false, kugou: false, qq: false };
+
+function musicSourceFlags() {
+  return Object.assign({}, MUSIC_SOURCE_DEFAULTS, (state.settings && state.settings.musicSources) || {});
+}
+
+function musicCustomSources() {
+  const list = state.settings?.musicCustomSources;
+  return Array.isArray(list) ? list : [];
+}
+
+/** 音源开关里被停用的平台，点歌台里的平台标签也跟着隐藏（酷我停了就不再显示酷我 tab）。 */
+function musicPlatformEnabled(key) {
+  return musicSourceFlags()[key] !== false;
+}
+
+function musicSourceCardMarkup() {
+  const flags = musicSourceFlags();
+  const customs = musicCustomSources();
+  const on = customs.filter((def) => def.enabled !== false).length;
+  /*
+   * 音源卡只显示启用的内置音源；停用的（如酷我）不在界面上留任何入口。
+   * 数据里的开关仍然生效：换源竞速、搜索、回退解析都会跳过停用的源。
+   */
+  const enabledLabels = MUSIC_SOURCE_LABELS.filter(([key]) => flags[key] !== false);
+  const chips = enabledLabels
+    .map(
+      ([key, label]) =>
+        `<button class="song-source-chip active" data-action="toggle-music-source" data-id="${key}" title="点击停用">${esc(label)}</button>`
+    )
+    .join('');
+  const list = customs.length
+    ? customs
+        .map(
+          (def) => `
+        <span class="song-source-item ${def.enabled === false ? 'is-off' : ''}">
+          <button class="song-source-name" data-action="toggle-music-custom" data-id="${esc(def.id)}" title="启用 / 停用">${esc(def.name || def.id)}</button>
+          <button class="song-source-del" data-action="music-source-remove" data-id="${esc(def.id)}" title="删除">${icon('x', 'xs')}</button>
+        </span>`
+        )
+        .join('')
+    : '<p class="song-source-empty">还没有导入第三方音源</p>';
+  return `
+    <section class="song-rail-card is-source">
+      <div class="song-rail-head">
+        <span>音源</span>
+        <small>${on ? `已启用 ${on} 个第三方` : '点标签切换'}</small>
+      </div>
+      <div class="song-source-chips">${chips}</div>
+      <div class="song-source-custom">${list}</div>
+      <div class="song-source-url" id="song-source-url-row" hidden>
+        <input class="song-source-input" id="music-source-url" type="text" placeholder="粘贴音源 JSON 的订阅地址" />
+        <button class="song-rail-more" data-action="music-source-url-go">导入</button>
+      </div>
+      <div class="song-source-actions">
+        <button class="song-rail-more" data-action="music-source-pick" title="导入本地音源文件">${icon('download', 'xs')}导入文件</button>
+        <button class="song-rail-more" data-action="music-source-subscribe" title="用订阅地址导入">${icon('link', 'xs')}订阅地址</button>
+      </div>
+      <input type="file" id="music-source-file" accept=".json,application/json" hidden />
+    </section>`;
+}
+
+/** 把一份音源内容交给主进程校验入库（本地文本或订阅地址二选一）。 */
+async function importMusicSource(input) {
+  if (typeof api.musicImportSources !== 'function') {
+    toast('当前版本还不支持导入音源', 'error');
+    return;
+  }
+  const result = await api.musicImportSources(input).catch((error) => ({ ok: false, reason: humanError(error) }));
+  if (!result?.ok) {
+    toast(result?.reason || '导入失败', 'error');
+    return;
+  }
+  state.settings.musicCustomSources = result.sources || [];
+  render({ preserveScroll: true });
+  const extra = (result.rejected || []).length ? `（${result.rejected.length} 个不合格已跳过）` : '';
+  toast(`已导入 ${result.added} 个音源${extra}`, 'success');
+}
+
+function musicSourceFileText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('文件读不出来'));
+    reader.readAsText(file);
+  });
+}
+
+function karaokeViewMarkup() {
+  const current = state.songs[state.songIndex] || null;
+  const playing = Boolean(current?.url);
+  const tab = state.songTab || 'queue';
+  const cover = songCover(current);
+  const qualitySelect = (id, cls) =>
+    `<select id="${id}" class="${cls}" title="音质">${QUALITY_LEVELS.map(
+      ([value, label]) => `<option value="${value}" ${state.songQuality === value ? 'selected' : ''}>${label}</option>`
+    ).join('')}</select>`;
+
+  return `
+    <div class="page song-page song-app">
+      <header class="song-app-head">
+        <div class="song-app-title">
+          <h1>点歌台</h1>
+          <span>${state.songs.length ? `${state.songs.length} 首` : '还没有歌'}${state.liveRooms.some((r) => r.connected) ? ' · 弹幕已连接' : ''}</span>
+        </div>
+        <div class="song-app-accounts">
+          ${musicAccountEntryMarkup()}
+        </div>
+        <div class="song-app-actions">
+          <button class="song-app-btn" data-action="add-song-file" title="添加本地歌曲">${icon('plus')}</button>
+          <button class="song-app-btn" data-action="import-playlist-link" title="导入歌单链接（网易云 / QQ音乐 / 酷狗）">${icon('download')}</button>
+          <button class="song-app-btn is-primary" data-action="add-song-link" title="添加音频链接">${icon('link')}</button>
+        </div>
+      </header>
+
+      <div class="song-app-body kr-body">
+        ${krNavMarkup()}
+
+        <main class="song-app-main">
+          ${krSectionHeadMarkup()}
+          <div class="song-app-searchbar">
+            ${songSearchMarkup()}
+          </div>
+          <div class="song-app-scroll">
+            ${tab === 'charts' ? chartPanelMarkup() : tab === 'mine' ? songMineMarkup() : tab === 'search' ? songSearchPanel() : songQueueList()}
+          </div>
+        </main>
+
+        <aside class="song-app-rail">
+          <section class="song-rail-card is-now">
+            <div class="song-rail-head">
+              <span>${icon('headphones', 'xs')} 正在播放</span>
+              <small>${state.songs.length ? `队列 ${state.songs.length} 首` : '暂无曲目'}</small>
+            </div>
+            <div class="song-rail-now">
+              <span class="song-rail-cover ${cover ? 'has-cover' : ''}">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>
+              <span class="song-rail-now-copy">
+                <strong id="rail-now-title">${esc(current?.title || '还没有点歌')}</strong>
+                <small id="rail-now-artist">${esc(current?.artist || '点歌台')}</small>
+              </span>
+            </div>
+          </section>
+
+          <section class="song-rail-card is-lyrics">
+            <div class="song-rail-head">
+              <span>歌词</span>
+              <small>${current?.lyric ? '同步中' : current?.neteaseId ? '播放时获取' : '暂无'}</small>
+            </div>
+            <div class="song-lyrics song-rail-lyrics" id="song-lyrics">
+              ${
+                current?.lyric
+                  ? parseLrc(current.lyric)
+                      .map((line) => `<p class="song-lyric-line" data-time="${line.time}">${esc(line.text)}</p>`)
+                      .join('')
+                  : `<div class="song-lyric-empty">${icon('music')}<span>${current?.neteaseId ? '播放时自动获取歌词' : '本地或直链歌曲没有歌词'}</span></div>`
+              }
+            </div>
+          </section>
+
+          <section class="song-rail-card is-fx">
+            <div class="song-rail-head">
+              <span>音效</span>
+              <button class="song-rail-more" data-action="open-audio-fx" title="完整音效面板">${icon('settings', 'xs')}更多</button>
+            </div>
+            <div class="song-fx-row">
+              ${AUDIO_FX_PRESETS.map(
+                (item) => `<button class="song-fx-chip ${state.audioFx.preset === item.key ? 'active' : ''}"
+                  data-action="fx-preset" data-value="${item.key}" title="${esc(item.desc)}">${esc(item.label)}</button>`
+              ).join('')}
+            </div>
+          </section>
+
+          <section class="song-rail-card is-settings">
+            <div class="song-rail-head">
+              <span>播放设置</span>
+            </div>
+            <div class="song-rail-row">
+              <span>音量</span>
+              <input class="song-rail-range" id="song-volume-main" type="range" min="0" max="100" step="1" value="${state.songVolume}" aria-label="歌曲音量" data-no-sound />
+              <small id="song-volume-main-value">${state.songMuted ? '静音' : `${state.songVolume}%`}</small>
+            </div>
+            <div class="song-rail-row">
+              <span>默认音质</span>
+              ${qualitySelect('song-quality', 'song-rail-select')}
+            </div>
+            <div class="song-rail-row is-split">
+              <span class="song-rail-pair">
+                <span>开机续播</span>
+                <button class="switch ${state.autoResumeSong ? 'on' : ''}" role="switch" aria-checked="${Boolean(state.autoResumeSong)}" data-action="toggle-auto-resume"></button>
+              </span>
+              <span class="song-rail-pair">
+                <span>小播放器</span>
+                <button class="switch ${isMiniEnabled() ? 'on' : ''}" role="switch" aria-checked="${Boolean(isMiniEnabled())}" data-action="toggle-mini-player"></button>
+              </span>
+            </div>
+          </section>
+
+          ${musicSourceCardMarkup()}
+
+          <section class="song-rail-card is-live">
+            <div class="song-rail-head">
+              <span>弹幕点歌</span>
+              ${state.liveRooms.length ? `<button class="song-rail-more" data-action="live-disconnect-all">全部断开</button>` : ''}
+            </div>
+            ${state.liveRooms.length
+              ? `<div class="song-live-mode">
+                  <span class="song-live-mode-label">观众点歌</span>
+                  <button class="song-live-chip ${liveSongMode() === 'next' ? 'on' : ''}" data-action="live-song-mode" data-id="next">下一首播放</button>
+                  <button class="song-live-chip ${liveSongMode() === 'now' ? 'on' : ''}" data-action="live-song-mode" data-id="now">立即播放</button>
+                </div>`
+              : ''}
+            ${state.liveRooms
+              .map((room) => {
+                const label = esc(room.platformLabel || '直播间');
+                const statusLine = room.status ? `<p class="song-live-status">${esc(room.status)}</p>` : '';
+                // B站风控(-352)：给一个一键登录入口，登录后重连即可
+                const needBiliLogin = /鉴权失败|-352/.test(String(room.status || ''));
+                const captured =
+                  room.connected
+                    ? `<p class="song-live-captured" id="live-captured-${esc(room.id)}">已捕获 <b>${room.captured || 0}</b> 条弹幕${
+                        room.danmaku === 'bridge'
+                          ? '（观众发弹幕后数字不动 = 该站抓取失效）'
+                          : '（发条弹幕试试：数字不动 = 服务器没推送，看状态行的原因）'
+                      }</p>`
+                    : '';
+                return `<div class="song-live-room">
+                  <div class="song-live-room-head">
+                    <span class="song-live-room-title">${label} · ${esc(room.roomTitle || `房间 ${room.roomId || ''}`)}</span>
+                    <button class="song-rail-more" data-action="live-disconnect" data-id="${esc(room.id)}">断开</button>
+                  </div>
+                  <div class="song-live-on ${room.connected ? 'is-native' : 'is-status'}">
+                    ${room.connecting || room.connected ? icon(room.connected ? 'check' : 'info') : icon('info')}
+                    <span>${esc(room.connecting ? '连接中…' : room.connected ? '等待「点歌 歌名」' : room.status || '已断开')}</span>
+                  </div>
+                  ${statusLine}
+                  ${captured}
+                  ${needBiliLogin ? `<button class="song-live-btn" data-action="bili-login" style="width:100%;margin-top:8px">登录B站账号</button>` : ''}
+                </div>`;
+              })
+              .join('')}
+            <div class="song-live-form">
+              <input class="song-live-input" id="live-room-input" placeholder="B站 / 斗鱼 / 虎牙 / 抖音 / 快手 / YY 等直播间链接" title="支持 B站、斗鱼、虎牙、抖音、快手、YY、网易CC、花椒、酷狗直播、小红书、淘宝直播、Twitch、YouTube，其它站点会尝试通用抓取。可同时连接多个直播间" value="${esc(state.live.roomUrl || '')}" spellcheck="false" />
+              <button class="song-live-btn" data-action="live-connect" ${state.live.connecting ? 'disabled' : ''}>${state.live.connecting ? '连接中' : '连接'}</button>
+            </div>
+            ${
+              state.liveHistory?.length
+                ? `<div class="song-live-history"><span class="song-live-history-label">最近连接</span>${state.liveHistory
+                    .map(
+                      (item) =>
+                        `<button class="song-live-history-btn" data-action="live-connect" data-url="${esc(item)}" title="点击直接重连：${esc(item)}">${esc(
+                          String(item).replace(/^https?:\/\//, '').replace(/\/$/, '').slice(0, 30)
+                        )}</button>`
+                    )
+                    .join('')}</div>`
+                : ''
+            }
+          </section>
+        </aside>
+      </div>
+
+      <footer class="song-bar">
+        <div class="song-bar-now">
+          <span class="song-bar-cover">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>
+          <span class="song-bar-copy">
+            <strong id="dock-title">${esc(current?.title || '还没有点歌')}</strong>
+            <small id="dock-now-artist">${esc(current?.artist || '点歌台')}</small>
+          </span>
+        </div>
+
+        <div class="song-bar-center">
+          <div class="song-bar-controls">
+            <button class="song-bar-btn" data-action="song-prev" title="上一首">${icon('chevron-left')}</button>
+            <button class="song-bar-play ${playing ? 'is-ready' : ''}" data-action="song-play" title="播放 / 暂停">
+              <svg class="icon"><use id="dock-play-use" href="#i-play"></use></svg>
+            </button>
+            <button class="song-bar-btn" data-action="song-next" title="下一首">${icon('chevron-right')}</button>
+          </div>
+          <div class="song-bar-progress">
+            <span id="song-current">0:00</span>
+            <input type="range" id="song-progress" min="0" max="1000" value="0" step="1" aria-label="播放进度" />
+            <span id="song-duration">0:00</span>
+          </div>
+        </div>
+
+        <div class="song-bar-right">
+          ${playModePopMarkup('dock-play-mode', 'song-bar-pop')}
+          ${qualityPopMarkup('dock-quality', 'song-bar-pop')}
+          <button class="song-bar-btn" data-action="song-mute" title="静音">
+            <svg class="icon"><use id="dock-volume-use" href="${state.songMuted ? '#i-volume-x' : '#i-volume'}"></use></svg>
+          </button>
+          <input class="song-bar-volume" id="dock-volume" type="range" min="0" max="100" step="1" value="${state.songVolume}" aria-label="音量" data-no-sound />
+          <button class="song-bar-btn" data-action="dock-open-list" title="歌曲列表">${icon('library')}</button>
+        </div>
+      </footer>
+
+      <svg hidden style="display:none"><use id="song-mute-use" href="${state.songMuted ? '#i-volume-x' : '#i-volume'}"></use></svg>
+    </div>`;
+}
+
 function songView() {
-  return songViewMarkup();
+  return karaokeViewMarkup();
 }
 
 /* ── 我的歌单：按平台分区，登录统一走「音乐账号」面板 ─────────────── */
 
-const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kugou: '酷狗' };
+const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kugou: '酷狗', kuwo: '酷我' };
 
 function musicPlatformLabel(platform) {
   return MUSIC_PLATFORM_LABELS[platform] || '音乐';
@@ -4692,58 +7478,84 @@ function playlistCardMarkup(item, platform, active) {
   const cover = item.cover
     ? `<img src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
     : icon('music');
+  const pid = esc(item.id);
+  const pplatform = esc(platform);
   return `
-    <button class="playlist-card ${active ? 'is-open' : ''}"
-      data-action="my-playlist-open" data-platform="${esc(platform)}" data-id="${esc(item.id)}"
-      title="${esc(item.name)}">
-      <span class="playlist-card-cover">${cover}
-        <span class="playlist-card-count">${item.count ? `${item.count} 首` : '歌单'}</span>
+    <div class="playlist-card ${active ? 'is-open' : ''}" data-id="${pid}" data-platform="${pplatform}">
+      <span class="playlist-card-cover">
+        <button class="playlist-card-body" data-action="my-playlist-open" data-platform="${pplatform}" data-id="${pid}" title="${esc(item.name)}">
+          ${cover}
+          <span class="playlist-card-count">${item.count ? `${item.count} 首` : '歌单'}</span>
+        </button>
+        <button class="playlist-card-play" data-action="my-playlist-play" data-platform="${pplatform}" data-id="${pid}" title="播放歌单" aria-label="播放歌单">${icon('play')}</button>
       </span>
       <span class="playlist-card-name">${esc(item.name)}</span>
-      <span class="playlist-card-sub">${item.subscribed ? '收藏歌单' : '自建歌单'}</span>
-    </button>`;
+      <span class="playlist-card-sub">${
+        item.plaza
+          ? [item.creator, item.playcount ? formatPlaycount(item.playcount) + '次播放' : ''].filter(Boolean).join(' · ') || '公开歌单'
+          : item.imported ? '链接导入' : item.subscribed ? '收藏歌单' : '自建歌单'
+      }</span>
+    </div>`;
 }
 
-/** 展开的某张歌单：曲目列表 + 一键入队。 */
+/**
+ * 点开的某张歌单：整块主区换成「返回 / 标题 / 整张播放 / 加入队列 + 全量曲目」。
+ *
+ * 以前曲目详情是挂在卡片墙下面的，歌单多的时候要一路滑到底才看得到曲目，
+ * 用户反馈「点进去没反应」。现在改成钻取：点卡片 → 主区只剩这张歌单，
+ * 头部常驻四个动作，进来第一眼就能整张播放。
+ *
+ * 曲目不再截断：整张歌单多少首就渲染多少首（历史上截过 100 首，用户以为是歌单缺歌）。
+ */
 function playlistDetailMarkup(detail, platform) {
   if (!detail) return '';
-  if (detail.loading) {
-    return `<div class="playlist-detail"><p class="playlists-group-note">正在读取曲目…</p></div>`;
-  }
   const songs = detail.songs || [];
-  return `
-    <div class="playlist-detail">
-      <div class="playlist-detail-head">
-        <div class="playlist-detail-title">
+  const label = musicPlatformLabel(platform);
+  const head = `
+      <div class="kr-detail-bar">
+        <button class="kr-detail-back" data-action="my-playlist-close">${icon('chevron-left', 'xs')}返回歌单</button>
+        <div class="kr-detail-title">
           <strong>${esc(detail.name || '歌单')}</strong>
-          <small>${songs.length} 首 · ${esc(musicPlatformLabel(platform))}</small>
+          <small>${detail.loading ? '正在读取…' : `${songs.length} 首 · ${esc(label)}`}</small>
         </div>
-        <div class="playlist-detail-actions">
-          <button class="playlists-chip is-primary" data-action="my-playlist-import" data-platform="${esc(platform)}" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}加入点歌队列</button>
-          <button class="playlists-chip" data-action="my-playlist-close">${icon('x', 'xs')}收起</button>
+        <div class="kr-detail-actions">
+          <button class="kr-detail-play" data-action="my-playlist-play" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}" ${songs.length ? '' : 'disabled'}>${icon('play', 'xs')}整张播放</button>
+          <button class="playlists-chip" data-action="my-playlist-import" data-platform="${esc(platform)}" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}加入队列</button>
         </div>
+      </div>`;
+
+  if (detail.loading) {
+    /*
+     * 首次点开的读取占位：把卡片上登记的曲目数亮出来（网易云大歌单退本地
+     * API 全量解析时可能要几十秒），再垫几行骨架，别整页只有一句话。
+     */
+    const count = findPlaylistCount(platform, detail.id);
+    const hint = count ? `正在读取曲目（共 ${count} 首，大歌单解析需要一些时间）` : '正在读取曲目…';
+    const skeleton = Array.from({ length: 6 }, () => '<span class="kr-detail-skeleton-row"></span>').join('');
+    return `<div class="kr-detail">${head}<p class="playlists-group-note">${esc(hint)}</p><div class="kr-detail-skeleton">${skeleton}</div></div>`;
+  }
+  if (!songs.length) {
+    return `<div class="kr-detail">${head}<p class="playlists-group-note">这个歌单里没有读到曲目。</p></div>`;
+  }
+  return `
+    <div class="kr-detail">${head}
+      <p class="kr-detail-hint">点任意一首加进队列；「整张播放」会替换当前队列并从第 1 首开播。</p>
+      <div class="playlist-songs kr-detail-songs">
+        ${songs
+          .map(
+            (song, index) => `
+          <button class="song-chart-song kr-detail-song" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="加入点歌队列">
+            <span class="song-chart-index">${index + 1}</span>
+            <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
+            <span class="song-chart-copy">
+              <strong>${esc(song.title)}</strong>
+              <small>${esc(song.artist || '未知歌手')}</small>
+            </span>
+            ${icon('plus', 'xs')}
+          </button>`
+          )
+          .join('')}
       </div>
-      ${
-        songs.length
-          ? `<div class="playlist-songs">
-              ${songs
-                .slice(0, 30)
-                .map(
-                  (song, index) => `
-                <button class="song-chart-song" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="加入点歌队列">
-                  <span class="song-chart-index">${index + 1}</span>
-                  <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
-                  <span class="song-chart-copy">
-                    <strong>${esc(song.title)}</strong>
-                    <small>${esc(song.artist || '未知歌手')}</small>
-                  </span>
-                  ${icon('plus', 'xs')}
-                </button>`
-                )
-                .join('')}
-            </div>`
-          : `<p class="playlists-group-note">这个歌单里没有读到曲目。</p>`
-      }
     </div>`;
 }
 
@@ -4751,18 +7563,49 @@ function playlistDetailMarkup(detail, platform) {
 function myPlaylistGroupMarkup(group) {
   const { platform, list = [], error = '', loading = false } = group;
   const label = group.label || musicPlatformLabel(platform);
-  const detail = state.myPlaylists.detail;
-  const openDetail = detail && detail.platform === platform ? detail : null;
+  // 只有这个平台自己在同步时才转圈；别的平台同步不影响这一行
+  const syncing = playlistSyncing(platform) || loading;
+  const when = playlistSyncWhen(group, { withCost: true });
+  /*
+   * 酷狗的报错一概不显示：账号同步被官方关掉，同步失败的标记永远挂在那，
+   * 把它当「登录失效」让用户反复重登只会误导。它有导入的歌单就显示个数。
+   */
+  const showError = error && platform !== 'kugou';
+  const meta = syncing
+    ? '同步中…'
+    : showError
+      ? group.stale
+        ? '读取失败 · 显示上次结果'
+        : group.expired
+          ? '登录失效'
+          : '读取失败'
+      : `${list.length} 个歌单${when ? ` · ${when.replace('上次同步：', '')}` : ''}`;
 
   const head = `<div class="playlists-group-head">
       <span class="playlists-group-name"><span class="mp-dot" data-platform="${esc(platform)}"></span>${esc(label)}</span>
-      <span class="playlists-group-meta">${loading ? '同步中…' : error ? (group.expired ? '登录失效' : '读取失败') : `${list.length} 个歌单`}</span>
+      <span class="playlists-group-tail">
+        <span class="playlists-group-meta">${meta}</span>
+        <button class="kr-group-sync" data-action="music-sync-one" data-platform="${esc(platform)}"
+          title="${syncing ? `正在同步 ${esc(label)}…` : `只同步 ${esc(label)}，其它平台不动`}" ${syncing ? 'disabled' : ''}>${icon('refresh', 'xs')}</button>
+      </span>
     </div>`;
 
-  if (loading) {
+  if (loading && !list.length) {
     return `<section class="playlists-group">${head}<p class="playlists-group-note">正在读取 ${esc(label)} 账号里的歌单…</p></section>`;
   }
-  if (error) {
+  /*
+   * 酷狗分组空态：账号歌单接口官方已关，这里不再复述原因，
+   * 只留一个「链接导入」入口（导入的歌单同样落在这个分组）。
+   * 有歌单（哪怕只是导入的）就照常走下面的卡片墙。
+   */
+  if (platform === 'kugou' && !list.length) {
+    return `<section class="playlists-group">${head}
+      <div class="playlists-group-actions">
+        <button class="playlists-chip" data-action="import-playlist-link">${icon('download', 'xs')}链接导入</button>
+      </div>
+    </section>`;
+  }
+  if (error && !list.length && platform !== 'kugou') {
     /*
      * 分类处理：登录态过期（QQ 音乐 500003、酷狗 Access Deny）时，
      * 用户真正要做的是重新登录，不是「再读一次」。
@@ -4776,9 +7619,9 @@ function myPlaylistGroupMarkup(group) {
         expired
           ? `<div class="playlists-group-actions">
               <button class="btn btn-primary btn-sm" data-action="${reloginAction}" data-platform="${esc(platform)}">${icon('login')}重新登录</button>
-              <button class="playlists-chip" data-action="my-playlists-reload" data-platform="${esc(platform)}">${icon('refresh', 'xs')}再试一次</button>
+              <button class="playlists-chip" data-action="music-sync-one" data-platform="${esc(platform)}">${icon('refresh', 'xs')}再试一次</button>
             </div>`
-          : `<button class="playlists-chip" data-action="my-playlists-reload" data-platform="${esc(platform)}">${icon('refresh', 'xs')}重新读取</button>`
+          : `<button class="playlists-chip" data-action="music-sync-one" data-platform="${esc(platform)}">${icon('refresh', 'xs')}重新读取</button>`
       }
       ${expired ? `<details class="playlists-group-detail"><summary>看看具体原因</summary><p>${esc(error)}</p></details>` : ''}
     </section>`;
@@ -4788,36 +7631,75 @@ function myPlaylistGroupMarkup(group) {
   }
 
   return `<section class="playlists-group">${head}
+    ${
+      // 这次读失败但留着上次的卡片时，把原因挂在卡片上方，别让人以为是最新的
+      showError ? `<p class="playlists-group-note is-stale">${esc(error)}</p>` : ''
+    }
     <div class="playlist-cards">
-      ${list.map((item) => playlistCardMarkup(item, platform, openDetail?.id === item.id)).join('')}
+      ${list.map((item) => playlistCardMarkup(item, platform, false)).join('')}
     </div>
-    ${playlistDetailMarkup(openDetail, platform)}
   </section>`;
 }
 
 /**
- * 「我的歌单」总面板：三个已登录平台的歌单一起列。
+ * 「我的歌单」总面板：所有已登录平台的歌单一起列。
  *
  * 登录入口只在右上角「账号」这一处（和「音乐账号」弹窗是同一个），
  * 不再在每个平台旁边各放一套「扫码登录」，避免和账号面板重复。
  */
 function allPlaylistsMarkup() {
   const groups = state.myPlaylists.groups || [];
-  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
+  const logged = ['netease', 'qq', 'kugou', 'kuwo'].filter(musicLoggedIn);
+
+  /*
+   * 钻取态：点开某张歌单后整块主区只显示这张歌单的曲目。
+   * 放在最前面判断，未登录时点开的广场歌单也走这里。
+   */
+  const detail = state.myPlaylists.detail;
+  if (detail) return playlistDetailMarkup(detail, detail.platform);
 
   if (!logged.length) {
-    return `<div class="song-empty">${icon('login')}<strong>还没有登录音乐账号</strong><span>登录后这里会按平台列出你账号里的歌单，整张歌单也能一键加入点歌队列。</span>
-      <button class="btn btn-primary btn-sm" data-action="music-accounts">${icon('login')}打开音乐账号</button></div>`;
+    /*
+     * 没登录也照常显示广场：热门公开歌单不用登录就能看曲目。
+     * 登录提示收窄成一条横幅，别再占整屏。
+     */
+    return `<div class="playlists-panel">
+      <div class="playlists-error">${icon('login', 'xs')}<span>登录后这里会列出你账号里的歌单；广场歌单不用登录，点开就能看。</span>
+        <button class="link-btn" data-action="music-accounts">去登录</button>
+      </div>
+      ${plazaSectionMarkup()}
+    </div>`;
   }
 
-  const shown = logged.map((key) => {
-    const found = groups.find((group) => group.platform === key);
-    if (found) return found;
-    return { platform: key, label: musicPlatformLabel(key), list: [], error: '', loading: true };
-  });
+  /*
+   * 酷狗账号歌单同步已被官方关掉，导入的歌单可能落在未登录（或没同步成功）的分组里。
+   * 已登录平台照常显示；没登录但分组里有歌单（只可能是链接导入的）也要画出来，
+   * 不然导入完一刷新歌单就「消失」，用户会以为导入失败了。
+   */
+  const extra = groups.filter(
+    (group) => group.platform && !logged.includes(group.platform) && (group.list || []).length
+  );
+  const shown = [...logged, ...extra.map((group) => group.platform)]
+    .filter(musicPlatformEnabled)
+    .map((key) => {
+      const found = groups.find((group) => group.platform === key);
+      if (found) return found;
+      return { platform: key, label: musicPlatformLabel(key), list: [], error: '', loading: true };
+    });
   const total = shown.reduce((sum, group) => sum + (group.list || []).length, 0);
-  const syncing = Boolean(state.myPlaylists.loadingAll) || shown.some((group) => group.loading);
-  const idle = ['netease', 'qq', 'kugou'].filter((key) => !logged.includes(key));
+  const syncing = Boolean(state.myPlaylists.loadingAll) || shown.some((group) => playlistSyncing(group.platform) || group.loading);
+  const idle = ['netease', 'qq', 'kugou', 'kuwo'].filter((key) => !logged.includes(key) && musicPlatformEnabled(key));
+
+  /*
+   * 平台 tab：登录的平台多了以后，四组卡片纵向堆叠要把页面滚很久。
+   * 改成一次只看一个平台（和下面歌单广场同一套 tab 交互），
+   * 默认停在有歌单的第一个平台上，切过的选择记在会话里。
+   */
+  const activeTab = shown.some((group) => group.platform === state.myPlaylists.activeTab)
+    ? state.myPlaylists.activeTab
+    : (shown.find((group) => (group.list || []).length)?.platform || shown[0]?.platform || '');
+  const activeGroup = shown.find((group) => group.platform === activeTab);
+  const tabCounts = new Map(shown.map((group) => [group.platform, (group.list || []).length]));
 
   return `<div class="playlists-panel">
     <div class="playlists-bar">
@@ -4826,25 +7708,37 @@ function allPlaylistsMarkup() {
         <span>${shown.length} 个平台 · ${syncing ? '同步中…' : `${total} 个歌单`}</span>
       </div>
       <div class="playlists-bar-actions">
-        <button class="playlists-chip" data-action="my-playlists-reload" ${syncing ? 'disabled' : ''}>${icon('refresh', 'xs')}${syncing ? '同步中' : '刷新'}</button>
+        <button class="playlists-chip" data-action="music-sync-all" ${state.myPlaylists.loadingAll ? 'disabled' : ''}>${icon('refresh', 'xs')}${state.myPlaylists.loadingAll ? '同步中' : '同步全部'}</button>
         <button class="playlists-chip" data-action="music-accounts">${icon('settings', 'xs')}账号</button>
       </div>
     </div>
     ${
       state.myPlaylists.error
         ? `<div class="playlists-error">${icon('alert', 'xs')}<span>${esc(state.myPlaylists.error)}</span>
-            <button class="link-btn" data-action="my-playlists-reload">重试</button>
+            <button class="link-btn" data-action="music-sync-all">重试</button>
           </div>`
         : ''
     }
-    <div class="playlists-groups">
-      ${shown.map(myPlaylistGroupMarkup).join('')}
+    <div class="song-chart-tabs playlists-platform-tabs">
+      ${shown
+        .map(
+          (group) =>
+            `<button class="song-chart-tab ${group.platform === activeTab ? 'active' : ''}" data-action="my-playlist-tab" data-value="${esc(group.platform)}">${esc(group.label || musicPlatformLabel(group.platform))}${tabCounts.get(group.platform) ? `<small>${tabCounts.get(group.platform)}</small>` : ''}</button>`
+        )
+        .join('')}
+      ${
+        idle.length
+          ? idle
+              .map(
+                (key) =>
+                  `<button class="song-chart-tab is-idle" data-action="music-accounts" title="去音乐账号里登录">${esc(musicPlatformLabel(key))}＋</button>`
+              )
+              .join('')
+          : ''
+      }
     </div>
-    ${
-      idle.length
-        ? `<p class="playlists-foot">${idle.map((key) => esc(musicPlatformLabel(key))).join(' / ')} 还没登录 · <button class="link-btn" data-action="music-accounts">去音乐账号里登录</button></p>`
-        : ''
-    }
+    ${activeGroup ? myPlaylistGroupMarkup(activeGroup) : ''}
+    ${plazaSectionMarkup()}
   </div>`;
 }
 
@@ -4940,179 +7834,54 @@ function gachaKindLabel(kind) {
   return { weapon: '武器', bangboo: '邦布', standard: '常驻' }[kind] || '';
 }
 
-/** 武器 / 邦布没有立绘时用的占位图标 */
-function gachaKindIcon(kind) {
-  return kind === 'weapon' || kind === 'bangboo' ? icon('wrench') : '';
-}
-
 /** 五星记录里「不是角色」的兜底名 */
 function gachaKindFallback(kind) {
   return { weapon: '未命名武器', bangboo: '未命名邦布' }[kind] || '未命名角色';
 }
 
-function gachaRecentRow(item, highLabel, gameKey = '') {
-  const pity = Number(item.pity) || 0;
+/** 五星头像：记录带 icon 就画圆形头像（Starward 风格），没有就回落到字牌 */
+function gachaAvatarHtml(item) {
   const isWeapon = item.itemType === 'weapon';
-  const kindLabel = gachaKindLabel(item.itemType);
-  const badge = pity > 0 ? `<span class="gacha-pity-badge" title="距离上一次出金用了 ${pity} 抽">${pity} 抽</span>` : '';
-  const fallback = isWeapon || item.itemType === 'bangboo' ? gachaKindIcon(item.itemType) : esc(initial(item.name));
-
-  // 异环官网给的是 138×278 的「上圆框 + 下圆形」两帧精灵图，直接当 <img> 会挤成小图，
-  // 所以用背景图按 200% 高度铺，只露出上半帧的正脸圆框。
-  const sprite = gameKey === 'neverness' && item.icon;
-  const iconMarkup = sprite
-    ? `<span class="gacha-icon-sprite" style="background-image:url('${esc(item.icon)}')"></span>`
-    : item.icon
-      ? `<img src="${esc(item.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-gacha-icon />`
-      : '';
-
-  return `
-    <div class="gacha-five-row">
-      <span class="gacha-five-icon ${isWeapon ? 'is-weapon' : ''} ${sprite ? 'is-sprite' : ''}">
-        ${iconMarkup}
-        <span>${fallback}</span>
-      </span>
-      <span class="gacha-five-star ${isWeapon ? 'is-weapon' : ''}">${highLabel}</span>
-      <div class="gacha-five-copy">
-        <strong>${esc(item.name || gachaKindFallback(item.itemType))}</strong>
-        <small>${kindLabel ? `${kindLabel} · ` : ''}${esc(item.banner)} · ${esc(String(item.time).slice(0, 10))}</small>
-      </div>
-      ${badge}
-    </div>`;
-}
-
-/** Starward 风格的五星清单：按角色 / 武器 / 邦布筛，每行直接标多少抽出。 */
-function gachaFiveRow(item, high, gameKey) {
-  const pity = Number(item.pity) || 0;
-  const isWeapon = item.itemType === 'weapon';
-  const kindLabel = gachaKindLabel(item.itemType);
-  const sprite = gameKey === 'neverness' && item.icon;
-  const iconMarkup = sprite
-    ? `<span class="gacha-icon-sprite" style="background-image:url('${esc(item.icon)}')"></span>`
-    : item.icon
-      ? `<img src="${esc(item.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-gacha-icon />`
-      : '';
-  return `
-    <div class="gacha-five-row is-table">
-      <span class="gacha-five-icon ${isWeapon ? 'is-weapon' : ''} ${sprite ? 'is-sprite' : ''}">
-        ${iconMarkup}
-        <span>${isWeapon || item.itemType === 'bangboo' ? gachaKindIcon(item.itemType) : esc(initial(item.name))}</span>
-      </span>
-      <div class="gacha-five-copy">
-        <strong>${esc(item.name || gachaKindFallback(item.itemType))}</strong>
-        <small>${esc(item.banner)} · ${esc(String(item.time).slice(0, 10))}</small>
-      </div>
-      <span class="gacha-five-rank-tag ${isWeapon ? 'is-weapon' : ''}">${kindLabel || high}</span>
-      <span class="gacha-five-pity">
-        <strong>${pity || '—'}</strong>
-        <em>${pity ? '抽' : '未知'}</em>
-      </span>
-    </div>`;
-}
-
-function gachaFiveList(user, game) {
-  const high = gachaHighLabel(game);
-  const all = user.fiveHistory || user.recentFive || [];
-  const filter = state.gachaFiveFilter || 'all';
-  const items = all.filter((item) => filter === 'all' || item.itemType === filter);
-  const charCount = all.filter((item) => item.itemType === 'character').length;
-  const weaponCount = all.filter((item) => item.itemType === 'weapon').length;
-  const bangbooCount = all.filter((item) => item.itemType === 'bangboo').length;
-  const values = all.map((item) => Number(item.pity) || 0).filter((value) => value > 0);
-  const average = values.length
-    ? Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10
-    : 0;
-  const best = values.length ? Math.min(...values) : 0;
-  const worst = values.length ? Math.max(...values) : 0;
-
-  // 按月分组，和 Starward 一样一眼能看出这个月出了什么
-  const groups = [];
-  for (const item of items) {
-    const month = String(item.time || '').slice(0, 7) || '未知时间';
-    let group = groups[groups.length - 1];
-    if (!group || group.month !== month) {
-      group = { month, items: [] };
-      groups.push(group);
-    }
-    group.items.push(item);
+  if (item.icon) {
+    return `<span class="gacha-avatar"><img data-gacha-avatar src="${esc(item.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`;
   }
+  const label = isWeapon ? '武' : item.itemType === 'bangboo' ? '邦' : '角';
+  return `<span class="gacha-avatar is-blank ${isWeapon ? 'is-weapon' : ''}">${label}</span>`;
+}
 
-  const chips = [
-    { key: 'all', label: '全部', count: all.length },
-    { key: 'character', label: '角色', count: charCount },
-    { key: 'weapon', label: '武器', count: weaponCount },
-    { key: 'bangboo', label: '邦布', count: bangbooCount },
-  ].filter((chip) => chip.key === 'all' || chip.count > 0);
-  // 「全部」下类型一目了然，那排小分类就不占地方了；切到具体类型时再出现，方便切回去
-  const showChips = filter !== 'all';
-
+/**
+ * 五星图块：大立绘 + 右上角抽数角标（欧金非红），下方小字日期，完整信息悬停可看。
+ * 全部顺序铺成一面图墙，不按月份分段。
+ */
+function gachaTileHtml(item, { cap = 90 } = {}) {
+  const pity = Number(item.pity) || 0;
+  const ratio = cap > 0 ? pity / cap : 0;
+  const luck = pity ? (ratio <= 0.35 ? ' is-lucky' : ratio >= 0.75 ? ' is-unlucky' : '') : '';
+  const isWeapon = item.itemType === 'weapon';
+  const kindLabel = gachaKindLabel(item.itemType);
+  const name = item.name || gachaKindFallback(item.itemType);
+  const date = esc(String(item.time).slice(0, 10));
+  const sub = `${name}${kindLabel ? ` · ${kindLabel}` : ''} · ${esc(item.banner)} · ${date}${pity ? ` · ${pity} 抽` : ''}`;
+  const inner = item.icon
+    ? `<img data-gacha-avatar src="${esc(item.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : `<span class="gacha-tile-blank ${isWeapon ? 'is-weapon' : ''}">${isWeapon ? '武' : item.itemType === 'bangboo' ? '邦' : '角'}</span>`;
   return `
-    <div class="gacha-five-toolbar">
-      ${
-        showChips
-          ? `<div class="gacha-five-chips">
-        ${chips
-          .map(
-            (chip) =>
-              `<button class="gacha-five-chip ${filter === chip.key ? 'active' : ''}" data-action="gacha-five-filter" data-value="${chip.key}">${chip.label}<em>${chip.count}</em></button>`
-          )
-          .join('')}
-      </div>`
-          : ''
-      }
-      <div class="gacha-five-stats">
-        <span>平均 <strong>${average || '—'}</strong> 抽</span>
-        <span>最快 <strong>${best || '—'}</strong></span>
-        <span>最慢 <strong>${worst || '—'}</strong></span>
+    <div class="gacha-tile-item" title="${sub}">
+      <div class="gacha-tile${item.icon ? '' : ' is-blank'}">
+        ${inner}
+        ${pity ? `<span class="gacha-tile-pity${luck}">${pity}</span>` : ''}
       </div>
-    </div>
-    ${
-      user.pityExact === false
-        ? '<p class="gacha-pity-note">这份记录里没有三星抽卡，抽数会把四星也算进去，只能当参考。</p>'
-        : ''
-    }
-    <div class="gacha-five-groups">
-      ${
-        groups.length
-          ? groups
-              .map(
-                (group) => `
-        <section class="gacha-five-group">
-          <header>${esc(group.month)}<span>${group.items.length} 个</span></header>
-          ${group.items.map((item) => gachaFiveRow(item, high, game.key)).join('')}
-        </section>`
-              )
-              .join('')
-          : '<p class="gacha-empty-line">这个筛选下还没有记录</p>'
-      }
+      <small>${date}</small>
     </div>`;
 }
 
-function gachaBannerRows(user, game) {
-  const pities = user.pities || [];
-  if (!pities.length) return '<p class="gacha-empty-line">还没有卡池记录</p>';
-  const cap = gachaPityCap(game);
-  const high = gachaHighLabel(game);
-  return pities
-    .map((item) => {
-      const percent = Math.min(100, (item.pity / cap) * 100);
-      const rate = item.pulls ? ((item.five / item.pulls) * 100).toFixed(2) : '0.00';
-      return `
-      <div class="gacha-banner-row">
-        <div class="gacha-banner-name">
-          <strong>${esc(item.name)}</strong>
-          <span>${item.pulls} 抽 · ${item.five} ${high} · 出率 ${rate}%</span>
-        </div>
-        <div class="gacha-banner-pity ${percent >= 80 ? 'near' : ''}">
-          <span>垫</span><strong>${item.pity}</strong><em>/${cap}</em>
-        </div>
-        <div class="gacha-pity-bar"><span style="width:${percent}%"></span></div>
-      </div>`;
-    })
-    .join('');
-}
+/**
+ * 概览即全部：没有「查看全部」的二次入口。
+ * 「全部」只留 KPI 大数字，下面按池子（角色/武器/常驻/邦布）分段把五星图墙全量铺开；
+ * 选了具体池时 KPI 换成该池口径，加垫数面板，再铺该池全部五星。
+ */
 
-function gachaOverview(user, game) {
+function gachaOverview(user, game, scope = 'all') {
   const high = gachaHighLabel(game);
   const mid = gachaMidLabel(game);
   const cap = gachaPityCap(game);
@@ -5124,6 +7893,38 @@ function gachaOverview(user, game) {
       : 0;
   const average = Number(user.averagePity) || 0;
   const luckiest = Number(user.luckiest) || 0;
+
+  const tileGrid = (items) =>
+    items.length
+      ? `<div class="gacha-tile-grid">${items.map((item) => gachaTileHtml(item, { cap })).join('')}</div>`
+      : `<p class="gacha-empty-line">这一池还没有出过${esc(high)}</p>`;
+
+  // 概览直接分段铺：角色池 / 武器池 / 常驻池 / 邦布池各一段，全部五星一次看完
+  const POOLS = [
+    ['character', '角色池'],
+    ['weapon', '武器池'],
+    ['standard', '常驻池'],
+    ['bangboo', '邦布池'],
+  ];
+  const bucket = user.breakdown || null;
+  const poolHead = (label, items) => `
+      <section class="gacha-pool-section">
+        <div class="gacha-overview-head">
+          <h4>${label}</h4>
+          <em>${items.length} 个${esc(high)}</em>
+        </div>
+        ${tileGrid(items)}
+      </section>`;
+  const sections = bucket
+    ? scope === 'all'
+      ? POOLS.filter(([key]) => bucket[key] && bucket[key].total > 0)
+          .map(([key, label]) => poolHead(label, bucket[key].fiveHistory || []))
+          .join('')
+      : poolHead((POOLS.find(([key]) => key === scope) || [])[1] || '当前卡池', user.fiveHistory || [])
+    : poolHead('五星记录', user.fiveHistory || []);
+  // 几个池子都没有五星记录时给一句提示，别让 KPI 下面空着
+  const body = sections || '<p class="gacha-empty-line">还没有出过' + esc(high) + '，出了会自动出现在这里。</p>';
+
   return `
     <div class="gacha-dashboard">
       <div class="gacha-kpi-grid">
@@ -5157,10 +7958,12 @@ function gachaOverview(user, game) {
             : ''
         }
       </div>
-      <div class="gacha-pity-panel">
+      ${
+        /* 「全部」界面只留总抽数/五星这些大数字；卡池统计只在选了具体池时出现 */
+        scope !== 'all'
+          ? `<div class="gacha-pity-panel">
         <div class="gacha-overview-head">
           <h4>卡池垫数</h4>
-          <button class="link-btn" data-action="gacha-tab" data-value="banners">全部 ${icon('chevron-right')}</button>
         </div>
         ${
           pities.length
@@ -5169,30 +7972,113 @@ function gachaOverview(user, game) {
                   const percent = Math.min(100, (item.pity / cap) * 100);
                   return `
                   <div class="gacha-pity-row">
-                    <div class="gacha-pity-title">
-                      <span>${esc(item.name)}</span>
-                      <strong>${item.pity}<em>/${cap}</em></strong>
-                    </div>
+                    <span class="gacha-pity-name" title="${esc(item.name)}">${esc(item.name)}</span>
                     <div class="gacha-pity-bar"><span style="width:${percent}%" class="${percent >= 80 ? 'near' : ''}"></span></div>
+                    <strong>${item.pity}<em>/${cap}</em></strong>
                   </div>`;
                 })
                 .join('')
             : '<p class="gacha-empty-line">还没有卡池记录</p>'
         }
+      </div>`
+          : ''
+      }
+    </div>
+    ${
+      user.pityExact === false
+        ? '<p class="gacha-pity-note">这份记录里没有三星抽卡，抽数会把四星也算进去，只能当参考。</p>'
+        : ''
+    }
+    ${body}`;
+}
+
+/**
+ * 渠道资源预下载进度窗：花筱灵按官方清单下载缺的文件，实时进度、可取消。
+ * B服/官服共用（切服后官方链路都可能要补几十 M），channel 决定文案。
+ * 完成后弹窗留在原地展示结果，用户手动关。
+ */
+function openNtePredownloadModal(serverId, channel = 'bilibili') {
+  const isB = channel === 'bilibili';
+  const label = isB ? 'B服' : '官服';
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div><h2>下载 ${label}资源</h2><p>按官方清单补齐本机缺的文件，已有的一律跳过。</p></div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <div class="nte-predl-status" id="nte-predl-status">正在读取版本清单…</div>
+          <div class="nte-predl-bar"><span id="nte-predl-fill" style="width:0%"></span></div>
+          <p class="form-hint" id="nte-predl-detail"></p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" id="nte-predl-cancel">取消</button>
+        </div>
       </div>
     </div>
-    <div class="gacha-overview-recent">
-      <div class="gacha-overview-head">
-        <h4>最近获得</h4>
-        <button class="link-btn" data-action="gacha-tab" data-value="recent">查看全部 ${icon('chevron-right')}</button>
-      </div>
-      ${(user.recentFive || []).slice(0, 4).map((item) => gachaRecentRow(item, high, game.key)).join('') || '<p class="gacha-empty-line">还没有记录</p>'}
-    </div>`;
+  `);
+  const status = document.querySelector('#nte-predl-status');
+  const fill = document.querySelector('#nte-predl-fill');
+  const detail = document.querySelector('#nte-predl-detail');
+  const cancelBtn = document.querySelector('#nte-predl-cancel');
+  let settled = false;
+
+  const unbind = api.neverness.onPredownload?.((progress) => {
+    if (settled || !progress) return;
+    if (progress.phase === 'download' && progress.total) {
+      const percent = Math.round((progress.current / progress.total) * 100);
+      fill.style.width = `${percent}%`;
+      status.textContent = `正在下载 ${progress.current}/${progress.total}`;
+      detail.textContent = progress.file || '';
+    } else if (progress.message) {
+      status.textContent = progress.message;
+    }
+  });
+
+  cancelBtn?.addEventListener('click', async () => {
+    if (settled) {
+      dom.modalRoot.innerHTML = '';
+      document.body.classList.remove('modal-open');
+      return;
+    }
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = '正在取消…';
+    await api.neverness.predownloadCancel().catch(() => {});
+  });
+
+  api.neverness
+    .predownload({ channel, serverId })
+    .then((result) => {
+      settled = true;
+      cancelBtn.textContent = '完成';
+      if (result?.failed?.length) {
+        status.textContent = `完成，但有 ${result.failed.length} 个文件失败`;
+        detail.textContent = result.failed
+          .slice(0, 3)
+          .map((item) => item.path)
+          .join('  ');
+        toast(`${label}资源下载完成，${result.failed.length} 个文件失败，可重试`, 'error');
+      } else {
+        fill.style.width = '100%';
+        fill.parentElement.classList.add('is-done');
+        status.textContent = `下载完成：新增 ${result?.downloaded ?? 0} 个文件，跳过 ${result?.skipped ?? 0} 个（本来就有）`;
+        detail.textContent = `${result?.version ? `官方版本 ${result.version} · ` : ''}现在从花筱灵点「启动」就能直接进${isB ? ' B服' : '游戏'}。`;
+        toast(`${label}资源已就绪，点「启动」直接开玩`, 'success');
+      }
+    })
+    .catch((error) => {
+      settled = true;
+      cancelBtn.textContent = '关闭';
+      status.textContent = /取消/.test(String(error)) ? '已取消下载' : `下载失败：${humanError(error)}`;
+    })
+    .finally(() => {
+      if (typeof unbind === 'function') unbind();
+    });
 }
 
 // 异环：显示识别到的账号 + 自动导入目录入口 + 自动抓取
-function renderNteCapture() {
-  const box = document.querySelector('#nte-capture-status');
+function renderNteCapture() {  const box = document.querySelector('#nte-capture-status');
   if (!box) return;
   const capture = state.nteCapture || {};
   const running = !!capture.running;
@@ -5253,6 +8139,7 @@ function nteSyncPanel() {
 function gachaView2() {
   const dbPath = state.settings.starwardDbPath || '';
   const head = `
+    ${toolsBackBar()}
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.gacha.eyebrow}</div>
@@ -5324,7 +8211,6 @@ function gachaView2() {
 
   const high = gachaHighLabel(game);
   const mid = gachaMidLabel(game);
-  const tab = state.gachaTab || 'overview';
   // 角色池 / 武器池 / 常驻池：统计口径全部跟随当前分类
   const bucket = user.breakdown || null;
   const scope = state.gachaScope || 'all';
@@ -5347,12 +8233,7 @@ function gachaView2() {
           )
           .join('')}</div>`
       : '';
-  const content =
-    tab === 'banners'
-      ? `<div class="gacha-banner-list">${gachaBannerRows(view, game)}</div>`
-      : tab === 'recent'
-        ? gachaFiveList(view, game)
-        : gachaOverview(view, game);
+  const content = gachaOverview(view, game, scope);
 
   return `
     <div class="page">
@@ -5404,17 +8285,10 @@ function gachaView2() {
           </select>
         </label>
       </div>
-      <div class="gacha-subtabs">
-        <button class="${tab === 'overview' ? 'active' : ''}" data-action="gacha-tab" data-value="overview">概览</button>
-        <button class="${tab === 'banners' ? 'active' : ''}" data-action="gacha-tab" data-value="banners">卡池统计</button>
-        <button class="${tab === 'recent' ? 'active' : ''}" data-action="gacha-tab" data-value="recent">五星记录</button>
-
-      </div>
-      ${scopeTabs}
+      ${scopeTabs ? `<div class="gacha-subtabs">${scopeTabs}</div>` : ''}
       <div class="gacha-content">${content}</div>
       <div class="gacha-footnote-bar">
-        <p class="gacha-footnote">
-      <p class="gacha-footnote">抽卡记录归游戏官方所有，统计只在本机计算，不会上传。</p>
+        <p class="gacha-footnote">抽卡记录归游戏官方所有，统计只在本机计算，不会上传。</p>
         <div class="gacha-meta-line">
           <span>
             ${icon('database')}
@@ -5482,8 +8356,17 @@ const GACHA_IMPORT_GUIDES = {
   },
   neverness: {
     name: '异环',
-    format: 'NTE_Gacha_Exporter 的 nte.list JSON',
-    tool: '异环没有公开接口，需要先用 NTE_Gacha_Exporter 抓包导出，再在这里导入。',
+    format: 'NTE_Gacha_Exporter 导出的 JSON',
+    tool: '异环官方没有公开抽卡记录接口（日志加密），在线同步做不到，只能先用社区抓包工具导出 JSON 再导入。',
+    repo: 'https://github.com/Anong0u0/NTE_Gacha_Exporter',
+    steps: [
+      '启动异环，进游戏后按 F3 打开抽卡页面，游戏窗口保持前台可见（别最小化，16:9 分辨率可自动翻页）。',
+      '点下方「下载导出工具」，启动器会自动查 GitHub 最新版并下载（连不上会自动换加速镜像），解压到你的下载目录。',
+      '右键 nte-gacha-exporter.exe →「以管理员身份运行」（抓包需要管理员权限；提示缺 WebView2 就先按提示安装）。',
+      '工具里语言选 zh-CN，点右上角「更新数据」——工具会自动操作游戏翻页抓包（默认增量，只抓新记录；期间别碰游戏窗口，按 Esc 中止）。',
+      '抓完后在工具里点「导出」存成 JSON（默认 nte.list 格式，启动器直接认）。',
+      '回到本弹窗，游戏选「异环」，选择刚导出的 JSON 导入。之后想补记录：重复第 1、4、5、6 步即可，导入永远只增不删。',
+    ],
   },
 };
 
@@ -5539,14 +8422,36 @@ function openGachaImportModal(presetGame = '') {
             <button class="btn btn-primary" id="gacha-import-pick">${icon('download')}选择 JSON 文件</button>
           </div>
 
-          ${guide ? `<div class="form-note">${icon('info')}<span>${esc(guide.tool)}</span></div>` : ''}
+          ${
+            guide?.steps
+              ? `<ol class="gacha-import-steps">${guide.steps.map((step) => `<li>${esc(step)}</li>`).join('')}</ol>
+          <div class="gacha-import-toolrow">
+            <button class="btn btn-primary" id="nte-tool-download">${icon('download')}下载导出工具</button>
+            <button class="btn btn-ghost" data-action="open-external" data-url="${esc(guide.repo || '')}">${icon('external')}打开发布页</button>
+          </div>
+          <div class="nte-tool-progress" id="nte-tool-progress" hidden>
+            <div class="nte-predl-bar"><span id="nte-tool-fill" style="width:0%"></span></div>
+            <div class="nte-tool-row">
+              <p class="form-hint" id="nte-tool-status">准备下载…</p>
+              <button class="link-btn" id="nte-tool-cancel" hidden>取消</button>
+            </div>
+          </div>`
+              : guide
+                ? `<div class="form-note">${icon('info')}<span>${esc(guide.tool)}</span></div>`
+                : ''
+          }
 
           <div class="gacha-import-result" id="gacha-import-result" hidden></div>
           <div class="field-error" id="gacha-import-error"></div>
         </div>
         <div class="modal-foot">
           <button class="btn btn-ghost" data-close>关闭</button>
-          <button class="btn btn-ghost" data-action="gacha-source" data-value="endfield">${icon('refresh')}改用在线同步</button>
+          ${
+            /* 异环没有公开接口、做不了在线同步，这条按钮对它没有意义；其他游戏跟随当前选择 */
+            selected !== 'neverness'
+              ? `<button class="btn btn-ghost" data-action="gacha-source" data-value="${selected || 'endfield'}">${icon('refresh')}改用在线同步</button>`
+              : ''
+          }
         </div>
       </div>
     </div>
@@ -5555,21 +8460,60 @@ function openGachaImportModal(presetGame = '') {
   const pick = document.querySelector('#gacha-import-pick');
   const error = document.querySelector('#gacha-import-error');
   const resultBox = document.querySelector('#gacha-import-result');
-  const guideText = document.querySelector('#gacha-import-guide');
   const chipsRoot = document.querySelector('#gacha-import-chips');
   if (!pick) return;
+
+  // 异环：一键下载导出工具（GitHub 直连 + 镜像加速，解压到系统下载目录后自动打开）
+  const toolBtn = document.querySelector('#nte-tool-download');
+  // 取消按钮只在弹窗生命周期内绑一次，放外面防止重复下载时叠加 handler
+  document.querySelector('#nte-tool-cancel')?.addEventListener('click', async function onCancel() {
+    this.disabled = true;
+    await api.gacha.nteToolCancel?.().catch(() => {});
+  });
+  toolBtn?.addEventListener('click', async () => {
+    const fill = document.querySelector('#nte-tool-fill');
+    const status = document.querySelector('#nte-tool-status');
+    const cancelBtn = document.querySelector('#nte-tool-cancel');
+    const box = document.querySelector('#nte-tool-progress');
+    if (!box || !status) return;
+    toolBtn.disabled = true;
+    box.hidden = false;
+    if (cancelBtn) {
+      cancelBtn.hidden = false;
+      cancelBtn.disabled = false;
+    }
+    status.textContent = '正在查询最新版本…';
+    const unbind = api.gacha.onNteTool?.((progress) => {
+      if (!progress) return;
+      if (progress.phase === 'meta' && progress.version) {
+        status.textContent = `最新版本 v${progress.version}，开始下载…`;
+      } else if (progress.phase === 'download' && progress.total) {
+        if (fill) fill.style.width = `${Math.round((progress.received / progress.total) * 100)}%`;
+        status.textContent = `正在下载 ${(progress.received / 1048576).toFixed(1)} / ${(progress.total / 1048576).toFixed(1)} MB`;
+      } else if (progress.phase === 'unzip') {
+        if (fill) fill.style.width = '100%';
+        status.textContent = '正在解压到下载目录…';
+      }
+    });
+    try {
+      const result = await api.gacha.nteToolDownload();
+      if (fill) fill.style.width = '100%';
+      if (cancelBtn) cancelBtn.hidden = true;
+      status.textContent = `已下载并解压 v${result?.version || ''} 到 ${result?.dir || '下载目录'}，文件夹已打开`;
+      toast('导出工具已就绪：解压文件夹里右键 nte-gacha-exporter.exe 以管理员身份运行', 'success');
+    } catch (error) {
+      status.textContent = `下载失败：${humanError(error)}，可以点「打开发布页」手动下载`;
+    } finally {
+      if (typeof unbind === 'function') unbind();
+      toolBtn.disabled = false;
+    }
+  });
 
   chipsRoot?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-import-game]');
     if (!button) return;
-    chipsRoot.querySelectorAll('.gacha-import-chip').forEach((chip) => {
-      chip.classList.toggle('active', chip === button);
-    });
     const key = button.dataset.importGame;
-    const next = GACHA_IMPORT_GUIDES[key];
-    if (guideText) {
-      guideText.textContent = next ? `${next.name}：${next.format}` : 'UIGF / SRGF / 异环导出 JSON';
-    }
+    if (key !== selected) openGachaImportModal(key);
   });
 
   pick.addEventListener('click', async () => {
@@ -6320,6 +9264,7 @@ function shotsView() {
   if (list.length) ensureShotThumbs(list);
 
   return `<div class="page">
+    ${toolsBackBar()}
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.screenshots.eyebrow}</div>
@@ -6332,22 +9277,800 @@ function shotsView() {
     </div>`;
 }
 
+/* ------------------------------ 插件（.hxl） ------------------------------ */
+
+/*
+ * 插件页的三个角色分得很清楚：
+ *
+ * - 主进程（electron/plugin-host.js）只管文件：列出、读出源码、导入、删除、存配置。
+ * - window.HXLPlugin.Render 只管把插件给的视图数据变成 HTML，它是纯函数。
+ * - window.HXLPlugin.Host 管 Worker：读源码 → 加沙箱前置代码 → 跑起来 → 仲裁权限。
+ *
+ * 这一层只做界面：拉列表、画卡片、把 Host 的状态记进 state 供重绘使用。
+ * 插件是用户手写的第三方代码，凡是它给的字符串都必须经 esc() 再进 DOM。
+ */
+
+/** 权限中文说明。要和 electron/plugin-host.js 的 PERMISSIONS 一一对应。 */
+const PLUGIN_PERMISSION_TEXT = {
+  ui: { label: '显示面板', desc: '把自己的内容画在插件页上' },
+  notify: { label: '弹出提示', desc: '在启动器右下角弹消息' },
+  state: { label: '读取启动器状态', desc: '只读游戏名、游玩时长、抽卡记录条数，拿不到账号和文件路径' },
+  storage: { label: '保存自己的配置', desc: '读写本插件自己的一份配置，上限 128 KB' },
+};
+
+/** 插件图标对应到 svg sprite 里的名字；插件写了个不认识的就回落到拼图块。 */
+const PLUGIN_ICON_MAP = {
+  sparkle: 'sparkle',
+  star: 'star',
+  clock: 'clock',
+  gamepad: 'gamepad',
+  chart: 'star',
+  list: 'type',
+  database: 'database',
+  music: 'music',
+  news: 'news',
+  image: 'image',
+  shield: 'shield',
+  wrench: 'wrench',
+  play: 'play',
+  folder: 'folder',
+  bolt: 'sparkle',
+};
+
+function pluginRuntime() {
+  return window.HXLPlugin && window.HXLPlugin.Host ? window.HXLPlugin : null;
+}
+
+/** 插件列表里挑一个能用的 id：优先上次看的，否则第一个没坏的。 */
+function pickPluginId() {
+  const list = state.plugins.list?.plugins || [];
+  const usable = list.filter((plugin) => !plugin.error);
+  const wanted = state.plugins.active;
+  if (wanted && usable.some((plugin) => plugin.id === wanted)) return wanted;
+  return usable[0]?.id || '';
+}
+
+function pluginById(id) {
+  return (state.plugins.list?.plugins || []).find((plugin) => plugin.id === id) || null;
+}
+
+/**
+ * 把一个插件跑起来。
+ *
+ * 权限要先塞进 Host（它拿不到 list() 的结果），再 start()。
+ * 失败只记错误，不抛 —— 一个坏插件不能让整页白掉。
+ */
+async function startPlugin(plugin) {
+  const runtime = pluginRuntime();
+  if (!runtime) {
+    state.plugins.errors[plugin.id] = '插件运行时没有加载（plugin-runtime.js 缺失）';
+    return false;
+  }
+  runtime.Host.setPermissions(plugin.id, plugin.permissions || []);
+  let result;
+  try {
+    result = await runtime.Host.start(plugin.id);
+  } catch (error) {
+    result = { ok: false, error: humanError(error) || '插件启动失败' };
+  }
+  if (!result || result.ok === false) {
+    state.plugins.errors[plugin.id] = result?.error || '插件启动失败';
+    return false;
+  }
+  state.plugins.running[plugin.id] = true;
+  return true;
+}
+
+/** 把 Host 的两个回调接到 state 上：插件更新了视图 / 插件出错了，都要重绘。 */
+function wirePluginHost() {
+  const runtime = pluginRuntime();
+  if (!runtime || runtime.Host.__hxlWired) return;
+  runtime.Host.__hxlWired = true;
+  runtime.Host.attach({
+    // Host 只读这里面的白名单字段，账号、路径、设置项都不会传出去
+    state: () => state,
+    notify: (pluginId, message) => {
+      const plugin = pluginById(pluginId);
+      toast(`${plugin?.name || '插件'}：${message}`, 'info');
+    },
+  });
+  runtime.Host.onUpdate((pluginId, view) => {
+    if (view) state.plugins.views[pluginId] = view;
+    else delete state.plugins.views[pluginId];
+    if (state.route === 'plugins') render({ preserveScroll: true });
+  });
+  runtime.Host.onError((pluginId, message) => {
+    state.plugins.errors[pluginId] = String(message || '插件出错了');
+    if (state.route === 'plugins') render({ preserveScroll: true });
+  });
+}
+
+/** 读插件列表。force 为真时强制重读（「刷新」按钮）。 */
+async function loadPlugins(force = false) {
+  if (state.plugins.loading && !force) return state.plugins.list;
+  const api = window.launcher?.plugins;
+  if (!api || typeof api.list !== 'function') {
+    state.plugins.error = '当前版本没有插件接口，请更新启动器';
+    state.plugins.list = { plugins: [] };
+    if (state.route === 'plugins') render({ preserveScroll: true });
+    return null;
+  }
+
+  state.plugins.loading = true;
+  if (force) state.plugins.error = '';
+  if (state.route === 'plugins') render({ preserveScroll: true });
+
+  try {
+    const result = await api.list();
+    if (!result || result.ok === false) throw new Error(result?.error || '读取插件列表失败');
+    state.plugins.list = { dir: result.dir || '', plugins: Array.isArray(result.plugins) ? result.plugins : [] };
+    state.plugins.error = '';
+    wirePluginHost();
+    // 坏掉的插件没有 id 或有 error，直接跳过；其余的按需启动
+    const runtime = pluginRuntime();
+    if (runtime) runtime.Host.reconcile(state.plugins.list.plugins.filter((p) => !p.error).map((p) => p.id));
+    state.plugins.active = pickPluginId();
+  } catch (error) {
+    state.plugins.error = humanError(error) || '读取插件列表失败';
+    state.plugins.list = { dir: '', plugins: [] };
+  } finally {
+    state.plugins.loading = false;
+  }
+
+  // 列表到手后把当前插件跑起来，视图会通过 onUpdate 回来
+  const activePlugin = pluginById(state.plugins.active);
+  if (activePlugin && !state.plugins.running[activePlugin.id] && state.route === 'plugins') {
+    await startPlugin(activePlugin);
+  }
+  if (state.route === 'plugins') render({ preserveScroll: true });
+  return state.plugins.list;
+}
+
+function stopAllPlugins() {
+  const runtime = pluginRuntime();
+  if (runtime) runtime.Host.stopAll();
+  state.plugins.running = {};
+  state.plugins.views = {};
+}
+
+/** 插件空状态里的示例代码。用 <pre> 显示，要经 esc() 转义。 */
+const PLUGIN_SAMPLE_SOURCE = `/* @hxl
+{
+  "id": "com.example.hello",
+  "name": "你好插件",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "description": "一个最小的示例插件",
+  "icon": "sparkle",
+  "permissions": ["ui", "state"]
+}
+*/
+
+// ---- 清单必须写在 /* @hxl ... */ 注释块里，JS 直接跟在后面，同一个文件 ----
+hxl.ready(async function (api) {
+  const data = await api.state.get();
+  await api.render('list', {
+    title: '本机游戏',
+    items: data.games.map(function (game) {
+      return {
+        title: game.name,
+        desc: '已玩 ' + Math.round(game.playSeconds / 60) + ' 分钟',
+        value: game.id,
+      };
+    }),
+  });
+});`;
+
+/** 单个插件卡片。坏掉的插件走红条 + 删除，不显示权限和按钮。 */
+function pluginCardMarkup(plugin) {
+  const broken = Boolean(plugin.error);
+  const selected = plugin.id === state.plugins.active && !broken;
+  if (broken) {
+    return `<div class="plugin-card is-broken">
+      <div class="plugin-card-main">
+        <div class="plugin-broken-title">${icon('alert', 'xs')}已损坏</div>
+        <div class="plugin-broken-file">${esc(plugin.file || '未知文件')}</div>
+        <p class="plugin-broken-why">${esc(plugin.error)}</p>
+      </div>
+      <button class="btn ghost plugin-broken-remove" data-action="plugin-remove" data-file="${esc(plugin.file || '')}" data-id="${esc(plugin.id || '')}">
+        ${icon('trash', 'xs')}删除
+      </button>
+    </div>`;
+  }
+
+  const running = Boolean(state.plugins.running[plugin.id]);
+  const failed = Boolean(state.plugins.errors[plugin.id]);
+  const statusText = failed ? '运行出错' : running ? '运行中' : '未运行';
+  const statusClass = failed ? 'bad' : running ? 'ok' : '';
+  const iconName = PLUGIN_ICON_MAP[String(plugin.icon || '').toLowerCase()] || 'grip';
+  const chips = (plugin.permissions || [])
+    .map((name) => {
+      const meta = PLUGIN_PERMISSION_TEXT[name];
+      return meta ? `<span class="plugin-chip" title="${esc(meta.desc)}">${esc(meta.label)}</span>` : '';
+    })
+    .join('');
+
+  return `<button class="plugin-card${selected ? ' is-active' : ''}" data-action="plugin-select" data-id="${esc(plugin.id)}">
+    <div class="plugin-card-top">
+      <span class="plugin-icon">${icon(iconName)}</span>
+      <div class="plugin-card-id">
+        <div class="plugin-card-name">${esc(plugin.name || plugin.id)}</div>
+        <div class="plugin-card-meta">v${esc(plugin.version || '0.0.0')}${plugin.author ? ` · ${esc(plugin.author)}` : ''}</div>
+      </div>
+      <span class="plugin-status${statusClass ? ` is-${statusClass}` : ''}"><i></i>${esc(statusText)}</span>
+    </div>
+    ${plugin.desc ? `<p class="plugin-card-desc">${esc(plugin.desc)}</p>` : ''}
+    <div class="plugin-card-foot">
+      ${chips || '<span class="plugin-chip is-plain">没有申请权限</span>'}
+      <span class="plugin-size">${esc(formatBytes(plugin.size || 0))}</span>
+    </div>
+  </button>`;
+}
+
+/** 右侧面板：当前插件的视图（已经在 Host 里渲染成 HTML 了）。 */
+function pluginPanelMarkup(plugin) {
+  if (!plugin) {
+    return `<div class="plugin-panel-empty">
+      ${icon('grip')}
+      <p>从左边选一个插件</p>
+    </div>`;
+  }
+  const error = state.plugins.errors[plugin.id];
+  const view = state.plugins.views[plugin.id];
+  const head = `<div class="plugin-panel-head">
+    <div>
+      <div class="plugin-panel-name">${esc(plugin.name || plugin.id)}</div>
+      <div class="plugin-panel-meta">${esc(plugin.file || plugin.id)} · 权限 ${(plugin.permissions || []).length} 项</div>
+    </div>
+    <button class="btn ghost" data-action="plugin-reload" data-id="${esc(plugin.id)}">${icon('refresh', 'xs')}重新运行</button>
+  </div>`;
+
+  let body = '';
+  if (error) {
+    body = `<div class="plugin-error">${icon('alert', 'xs')}<div><strong>插件运行出错</strong><p>${esc(error)}</p></div></div>`;
+  }
+  if (view && view.html) {
+    // view.html 由 HXLPlugin.Render 生成，里面所有插件内容都已转义
+    body += `<div class="plugin-view-host">${view.html}</div>`;
+  } else if (!error) {
+    body += `<div class="plugin-panel-empty">${icon('refresh')}<p>插件正在运行，还没有输出内容</p></div>`;
+  }
+  return `<div class="plugin-panel">${head}${body}</div>`;
+}
+
+function pluginsView() {
+  const meta = PAGE_META.plugins;
+  const plugins = state.plugins.list?.plugins || [];
+  const broken = plugins.filter((plugin) => plugin.error);
+  const good = plugins.filter((plugin) => !plugin.error);
+
+  let listBody = '';
+  if (state.plugins.error) {
+    listBody = `<div class="tools-empty">${icon('alert')}<strong>${esc(state.plugins.error)}</strong><p>插件目录可能被占用或没有权限。</p></div>`;
+  } else if (!state.plugins.list) {
+    listBody = `<div class="plugin-loading">${icon('refresh')}<span>正在读取插件目录…</span></div>`;
+  } else if (!plugins.length) {
+    listBody = `<div class="plugin-guide">
+      ${icon('grip')}
+      <h2>还没有安装任何插件</h2>
+      <p>插件是单个 <code>.hxl</code> 文件，前半段是 JSON 清单，后半段是 JavaScript。
+         它在隔离的 Worker 里运行，读不到你的文件，也上不了网，只能调用启动器开放的接口。</p>
+      <p>把下面这段存成 <code>hello.hxl</code>，然后点右上角「导入插件」。</p>
+      <pre class="plugin-code">${esc(PLUGIN_SAMPLE_SOURCE)}</pre>
+      <button class="btn btn-primary" data-action="plugin-import">${icon('plus', 'xs')}导入插件</button>
+    </div>`;
+  } else {
+    listBody = good.map(pluginCardMarkup).join('');
+    if (broken.length) {
+      listBody += `<div class="plugin-broken-group-title">已损坏（${broken.length}）</div>`;
+      listBody += broken.map(pluginCardMarkup).join('');
+    }
+  }
+
+  const active = pluginById(pickPluginId());
+  return `<div class="page page-plugins">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">${esc(meta.eyebrow)}</div>
+        <h1>插件</h1>
+        <p class="page-desc">插件是单个 .hxl 文件，在隔离的 Worker 里运行，只能调用启动器提供的接口。</p>
+      </div>
+      <div class="plugin-actions">
+        <button class="btn btn-primary" data-action="plugin-import">${icon('plus', 'xs')}导入插件</button>
+        <button class="btn ghost" data-action="plugin-open-dir">${icon('folder', 'xs')}打开插件目录</button>
+        <button class="btn ghost" data-action="plugin-refresh">${icon('refresh', 'xs')}刷新</button>
+        <button class="btn ghost" data-action="plugin-doc" title="打开插件开发说明">${icon('info', 'xs')}开发说明</button>
+      </div>
+    </div>
+    <div class="plugin-layout">
+      <div class="plugin-list">
+        ${state.plugins.loading && state.plugins.list ? `<div class="plugin-loading">${icon('refresh')}<span>刷新中…</span></div>` : ''}
+        ${listBody}
+      </div>
+      ${plugins.length ? `<div class="plugin-detail">${pluginPanelMarkup(active)}</div>` : ''}
+    </div>
+    ${state.plugins.list?.dir ? `<p class="plugin-dir-note">插件目录：${esc(state.plugins.list.dir)}</p>` : ''}
+  </div>`;
+}
+
+/** 导入后的权限确认。用户点「确认安装」才真正跑起来，取消就把刚落盘的文件删掉。 */
+function openPluginPermissionDialog(plugin) {
+  const permissions = Array.isArray(plugin.permissions) ? plugin.permissions : [];
+  const rows = permissions.length
+    ? permissions
+        .map((name) => {
+          const meta = PLUGIN_PERMISSION_TEXT[name];
+          return `<li class="plugin-perm-row">
+            <span class="plugin-perm-name">${esc(meta?.label || name)}</span>
+            <span class="plugin-perm-desc">${esc(meta?.desc || '未识别的权限，插件将无法使用它')}</span>
+          </li>`;
+        })
+        .join('')
+    : '<li class="plugin-perm-row"><span class="plugin-perm-name">没有申请任何权限</span><span class="plugin-perm-desc">它什么都做不了，只会显示一段固定的内容</span></li>';
+
+  openModal(`<div class="modal-backdrop" data-backdrop>
+    <div class="modal narrow" role="alertdialog" aria-modal="true">
+      <div class="modal-head">
+        <div><h2>安装「${esc(plugin.name || plugin.id)}」？</h2></div>
+        <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+      </div>
+      <div class="modal-body">
+        <p class="confirm-copy">这个插件要申请下面这些能力。确认后它会在一个隔离的 Worker 里运行，读不到你的文件和密码，也连不上网。</p>
+        <ul class="plugin-perm-list">${rows}</ul>
+        ${plugin.file ? `<p class="plugin-perm-file">文件：${esc(plugin.file)}</p>` : ''}
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-action="plugin-cancel-install">取消并撤销</button>
+        <button class="btn btn-primary" data-action="plugin-confirm-install">确认安装</button>
+      </div>
+    </div>
+  </div>`, {
+    onBackdrop: () => handleAction('plugin-cancel-install', undefined, modalPlaceholder),
+  });
+}
+
+
 /* ------------------------------ 画质配置 ------------------------------ */
 
-async function loadGraphics(gameKey) {
+/**
+ * 画质页里「一个游戏」的统一描述。
+ *
+ * gameKey 是 gameFeatures 的 key（genshin/starrail/zzz/bh3/endfield/neverness/arknights，
+ * 以后新加的内置游戏也在这里）；state.games 里的一条游戏靠 builtinKey 对到它上面，
+ * **不是** id（id 是 `builtin-genshin` 这种，自定义游戏则是 uuid）。
+ *
+ * 自定义游戏（手动添加的那种）没有 builtinKey，仍然给它一个 key：
+ * 用 `custom:<id>`，主进程 normalizeKey 认不出来就当未知游戏，走自动探测。
+ */
+function graphicsGameOf(entry) {
+  if (!entry) return null;
+  const key = entry.builtinKey || entry.gameKey || `custom:${entry.id || entry.name || ''}`;
+  return {
+    gameKey: key,
+    name: entry.name || shotGameLabel(entry.builtinKey) || key,
+    // target 是启动器里配的可执行文件 / 安装目录；servers 里第一条可用的也行
+    path: entry.target || (Array.isArray(entry.servers) && entry.servers[0] && entry.servers[0].path) || '',
+    exe: entry.exe || '',
+    installed: entry.installed !== false,
+  };
+}
+
+/** 按 gameKey 找到 state.games 里对应的游戏；找不到就退化成「只知道 key」。 */
+function graphicsGameEntry(gameKey) {
+  const key = String(gameKey || '');
+  const games = Array.isArray(state.games) ? state.games : [];
+  const hit = games.find((game) => game.builtinKey === key) || games.find((game) => game.id === key);
+  if (hit) return graphicsGameOf(hit);
+  return { gameKey: key, name: shotGameLabel(key), path: '', exe: '', installed: false };
+}
+
+/**
+ * 画质页顶部能选哪些游戏。
+ *
+ * 规则与主进程一致：
+ *   1. game-features 里带 graphics trait 的（四个米哈游游戏）—— 一定能读；
+ *   2. 启动器里装了、且有可执行路径的其它游戏 —— 交给主进程自动探测注册表项。
+ * 探测不到的只在页面上显示一句原因，不报错，也不会写坏别的东西。
+ * 以后 game-features 新加游戏（哪怕没写 graphics trait），这里自动就带出来了，
+ * 不需要再回来改这行代码。
+ */
+function graphicsGames() {
+  const list = [];
+  const seen = new Set();
+  const push = (gameKey, name, path = '', installed = false) => {
+    const key = String(gameKey || '');
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    list.push({ gameKey: key, name: name || shotGameLabel(key), path, exe: '', installed });
+  };
+
+  const known = Array.isArray(state.games) ? state.games : [];
+  const matrix = state.features?.matrix || null;
+  const graphicsCapable = (key) => (Array.isArray(matrix?.[key]) ? matrix[key].includes('graphics') : false);
+
+  // 先放 trait 里明确支持画质的（顺序跟 game-features 的登记顺序）
+  const featureKeys = Object.keys(matrix || {});
+  for (const key of featureKeys) {
+    if (!graphicsCapable(key)) continue;
+    const entry = known.find((game) => game.builtinKey === key);
+    push(key, entry?.name || shotGameLabel(key), entry?.target || '', Boolean(entry?.installed));
+  }
+  // 没有 trait 的：只有装好了才可能探测到，没装就不给空标签
+  for (const entry of known) {
+    const game = graphicsGameOf(entry);
+    if (!game) continue;
+    if (graphicsCapable(game.gameKey)) continue;
+    if (!entry.builtinKey) {
+      // 自定义游戏：装了就给个标签，靠路径去探测
+      if (game.installed && game.path) push(game.gameKey, game.name, game.path, true);
+      continue;
+    }
+    if (game.installed && game.path) push(game.gameKey, game.name, game.path, true);
+  }
+  // 一个也没有时至少保证页面上有个标签，不至于空白
+  if (!list.length) push('starrail', shotGameLabel('starrail'));
+  return list;
+}
+
+/**
+ * 画质页的数据缓存，按 gameKey 存。
+ *
+ * 用户的原话是「终末读取配置时间过长，第一次读取完成后如果没有变动就不二次读取了」。
+ * 一次自动探测 + 读值实测 1.2~3.3 秒，前端以前每次进画质页都重新 IPC，用户来回点
+ * 两下标签就要重新等一遍。现在分两层：
+ *
+ *   1. 本次会话里已经读成功过、并且没被写过（dirty=false）→ 直接复用，连 IPC 都不发；
+ *   2. 有旧数据但已经过期（超过 GRAPHICS_CACHE_TTL）→ 先把旧数据画出来，后台再读一遍，
+ *      回来之后静默替换 —— 前台不闪、不转圈、不丢滚动位置。
+ *
+ * 用户点「重新读取」时走 loadGraphics(key, { force: true })：显式刷新，绕过缓存。
+ */
+const GRAPHICS_CACHE_TTL = 10 * 60 * 1000;
+/** 刚进来就判定「不用再读过」的时长：短，但足够吃掉同一屏幕内的重复触发。 */
+const GRAPHICS_CACHE_FRESH = 60 * 1000;
+/** 后台刷新的去重表：同一个 gameKey 同时只有一个后台请求在飞。 */
+const graphicsRefreshing = new Set();
+/** 已经排进「延迟刷新」队列的游戏，避免排队期间被反复排。 */
+const graphicsPendingRefresh = new Set();
+/** 后台核对的延时：先让用户点击后的首帧画完，再去打主进程（同步读注册表，很重）。 */
+const GRAPHICS_REFRESH_IDLE_DELAY = 800;
+
+/** 缓存里的一条，没有就是 undefined。 */
+function graphicsCacheEntry(gameKey) {
+  const key = gameKey || '';
+  if (!key) return null;
+  return (state.graphicsCache && state.graphicsCache[key]) || null;
+}
+
+/** 缓存里的结果能不能直接显示：读过、没报错、也没被写入弄脏。 */
+function graphicsCacheFresh(entry, maxAge) {
+  if (!entry || !entry.result || entry.result.ok === false) return false;
+  if (entry.dirty) return false;
+  return Date.now() - (Number(entry.at) || 0) < maxAge;
+}
+
+/**
+ * 结果有没有变化。只比内容，不比取回来的时间：主进程每次都会带新的 timestamp，
+ * 拿整串 JSON 去比会永远「不相等」，页面上就等于每次都在重画。
+ */
+function graphicsResultSignature(result) {
+  if (!result) return '';
+  try {
+    return JSON.stringify({
+      ok: result.ok,
+      source: result.source,
+      detectKey: result.detectKey,
+      reason: result.reason,
+      key: result.key,
+      fields: result.fields,
+    });
+  } catch {
+    return String(Date.now());
+  }
+}
+
+/** 把一份读回来的结果写进缓存（成功才留，失败不留）。 */
+function rememberGraphics(gameKey, result) {
+  if (!gameKey || !state.graphicsCache) return;
+  if (result && result.ok !== false) {
+    state.graphicsCache[gameKey] = { at: Date.now(), result, dirty: false };
+    return;
+  }
+  // 读失败 / 探测失败的结论不缓存：下次进来要能重新试一次
+  delete state.graphicsCache[gameKey];
+}
+
+/**
+ * 把一份结果套到 state 上。当前看的是别的游戏时什么都不做 ——
+ * 后台刷新回来晚了不能把用户正在看的页面换掉。
+ */
+function applyGraphicsResult(gameKey, result) {
+  if (state.graphicsGame !== gameKey) return false;
+  if (result && result.ok !== false) {
+    state.graphics = result;
+    state.graphicsError = '';
+  } else {
+    state.graphics = null;
+    state.graphicsError = (result && result.reason) || '读取失败';
+  }
+  state.graphicsSource = (result && result.source) || '';
+  state.graphicsDetectKey = (result && result.detectKey) || '';
+  return true;
+}
+
+/**
+ * 静默读一次：只负责把结果读回来写进缓存（顺带更新 state），
+ * 不置 loading、不弹提示、也不自己 render —— 是否重画由调用方决定。
+ */
+async function loadGraphicsSilently(gameKey, force = false) {
+  const key = gameKey || '';
+  if (!key || !window.launcher?.graphics?.read) return state.graphics;
+  try {
+    const game = graphicsGameEntry(key);
+    const result = await window.launcher.graphics.read({
+      gameKey: game.gameKey,
+      name: game.name,
+      path: game.path,
+      exe: game.exe,
+      force: Boolean(force),
+    });
+    if (!result || result.ok === false) return null;
+    rememberGraphics(key, result);
+    if (state.graphicsGame === key) applyGraphicsResult(key, result);
+    return result;
+  } catch {
+    // 静默模式吞掉异常，界面保持原样
+    return null;
+  }
+}
+
+/**
+ * 后台读一遍并静默替换。全程不置 loading、不弹提示；
+ * 内容和缓存里完全一样就直接跳过 render（避免无意义的 DOM 重建把滚动位置弄丢）。
+ *
+ * 另外两个「不添乱」的保证：
+ *   1. 读回来时如果用户已经切到别的游戏，loadGraphicsSilently 里
+ *      `state.graphicsGame === key` 和这里的 applyGraphicsResult / route 判断
+ *      会拦住，绝不会把别的游戏的卡片摆到当前屏幕上；
+ *   2. 内容没变就完全不 render，滚动位置和输入框焦点都不动。
+ */
+/**
+ * 开机把画质配置拉进前端缓存。
+ *
+ * 主进程那边窗口建好后会串行预读（primeGraphicsCache），这里只是把结果取回来
+ * 塞进 state.graphicsCache，这样点进画质页走的是「命中新鲜缓存」分支：
+ *   - 不发 IPC、不置 loading、不闪「正在读取注册表」，首帧直接是数据。
+ *
+ * 顺序有讲究：先读用户上次停在的那款（或者启动页正显示的），再读其它。
+ * 用 silent 方式读，绝不打断当前页面；哪个游戏失败就跳过，点进去时会自己重试。
+ */
+async function primeGraphicsFrontend() {
+  const order = [];
+  if (state.graphicsGame) order.push(state.graphicsGame);
+  for (const item of graphicsGames()) {
+    if (item && item.gameKey && !order.includes(item.gameKey)) order.push(item.gameKey);
+  }
+  for (const gameKey of order) {
+    try {
+      // 已经有新鲜缓存就别重复读
+      const entry = graphicsCacheEntry(gameKey);
+      if (entry && Date.now() - (Number(entry.at) || 0) < GRAPHICS_CACHE_TTL) continue;
+      const result = await loadGraphicsSilently(gameKey, false);
+      if (!result || result.ok === false) continue;
+      // 不重画：此时用户多半停在别的页面，数据进缓存就够
+      state.graphicsCache[gameKey] = { at: Date.now(), result, dirty: false };
+    } catch {
+      // 预读失败无所谓
+    }
+  }
+}
+
+
+function refreshGraphicsInBackground(gameKey, force) {
+  const key = gameKey || '';
+  if (!key || graphicsRefreshing.has(key)) return null;
+  graphicsRefreshing.add(key);
+  const task = (async () => {
+    try {
+      const before = graphicsResultSignature((graphicsCacheEntry(key) || {}).result);
+      const result = await loadGraphicsSilently(key, force);
+      if (!result) return null;
+      if (before === graphicsResultSignature(result)) return result;
+      if (!applyGraphicsResult(key, result)) return result;
+      if (state.route === 'graphics') render({ preserveScroll: true });
+      return result;
+    } finally {
+      graphicsRefreshing.delete(key);
+    }
+  })();
+  return task;
+}
+
+/**
+ * 把「确实需要刷新」的后台核对推迟到用户点完这一下之后再做。
+ *
+ * 主进程读注册表是同步阻塞的（execFileSync 调 reg.exe），原神实测约 0.4 秒、
+ * 终末地约 1.5 秒，这期间主进程被占住，紧接着的下一次交互要排在它后面。
+ * 所以缓存命中时绝不「顺手」就发一次 IPC，而是：
+ *
+ *   - 立刻把 deferred 标记挂上，让同一款游戏在等待期内不会被重复排队；
+ *   - 用 requestIdleCallback（没有就退回 setTimeout）把真正的读放到
+ *     浏览器空闲 / 短暂延时之后，保证点击后的首帧先画出来；
+ *   - 用户在这期间切走了也没关系：结果回来时 applyGraphicsResult 的
+ *     `state.graphicsGame !== gameKey` 守卫会丢掉它，界面不会被换掉。
+ */
+function scheduleGraphicsRefresh(gameKey, force) {
+  const key = gameKey || '';
+  if (!key || graphicsRefreshing.has(key) || graphicsPendingRefresh.has(key)) return null;
+  graphicsPendingRefresh.add(key);
+
+  const run = () => {
+    graphicsPendingRefresh.delete(key);
+    // 排队期间用户已经切走：这次核对没必要做了，等下次真的切回来再说
+    if (state.graphicsGame !== key) return null;
+    const entry = graphicsCacheEntry(key);
+    if (!entry || !force) {
+      // 非强制刷新时再确认一次「确实过期了」，避免排队期间已经被别处刷新过
+      const age = Date.now() - (Number((entry || {}).at) || 0);
+      if (entry && !entry.dirty && age < GRAPHICS_CACHE_TTL) return null;
+    }
+    return refreshGraphicsInBackground(key, force);
+  };
+
+  // 延迟优先级：能等浏览器空闲就等空闲，等不到最多 GRAPHICS_REFRESH_IDLE_DELAY
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(() => run(), { timeout: GRAPHICS_REFRESH_IDLE_DELAY * 2 });
+  } else {
+    setTimeout(run, GRAPHICS_REFRESH_IDLE_DELAY);
+  }
+  return null;
+}
+
+/** 页面框架已经画出来了吗：拿到 #view 容器说明启动流程走过 render 了。 */
+function graphicsPagePainted() {
+  return Boolean(dom.view && dom.view.isConnected);
+}
+
+/**
+ * 读画质。options：
+ *   force   —— 用户点了「重新读取」，绕过缓存、显示 loading、主进程也重新探测
+ *   silent  —— 内部用：只更新缓存 / 数据，绝不置 loading、不做任何前台切换
+ *
+ * 三个分支：
+ *   命中新鲜缓存 → 什么都不发，直接返回；
+ *   命中旧缓存   → 先把旧数据摆上去（不置 loading），后台静默刷新；
+ *   没有缓存     → 走原来的流程：置 loading、渲染「正在读取注册表」、读到后渲染。
+ */
+async function loadGraphics(gameKey, options = {}) {
+  const { force = false, silent = false } = options || {};
   const key = gameKey || state.graphicsGame || 'starrail';
+  // 用户切了标签：上一个游戏的读取结果不要再套到当前页面上
+  const switched = state.graphicsGame !== key;
   state.graphicsGame = key;
-  state.graphicsLoading = true;
+
+  const entry = graphicsCacheEntry(key);
+
+  if (silent) {
+    // 静默模式只负责把数据读回来，界面由调用方决定要不要重画
+    return loadGraphicsSilently(key, Boolean(force));
+  }
+
+  if (!force && entry) {
+    /*
+     * 有缓存：先把旧数据直接画出来，前台不转圈。
+     * 只有「用户刚切到这个游戏」时才需要重画一次；同一屏内的重复调用什么也不用做。
+     */
+    const age = Date.now() - (Number(entry.at) || 0);
+    const stale = entry.dirty || !(age < GRAPHICS_CACHE_TTL);
+    /*
+     * 上一次摆到画质页上的不是这款游戏（含页面重载后 oldGraphicsGame 已重置）：
+     * 把缓存里的这份结果套上去并重画一次，让卡片换成这款游戏的。
+     *
+     * 注意这里**不能 early return**：以前这里在画完之后直接 return，后面的
+     * 「新鲜度判断 / 后台刷新」永远走不到，于是缓存既不会被复用也不会被刷新；
+     * 又因为每次切换都会走到这条分支以外的路径去重读注册表，rememberGraphics
+     * 把 at 重置成当前时间，缓存看起来「每次都失效」。画完继续往下走，
+     * 让新鲜度判断决定要不要静默刷新（不 await）。
+     */
+    if (oldGraphicsGame !== key) {
+      oldGraphicsGame = key;
+      /*
+       * 刚打开画质页 / 刚切到这个游戏：画质页原来可能显示的是别的游戏，
+       * 先把缓存内容摆上去再重画一次，避免「数据换了但界面没动」。
+       * 这里不置 loading，所以不会闪「正在读取注册表」。
+       *
+       * 判断依据只能是「页面真的画出来了没有」：以前这里用的是
+       * state.hasRenderedPage，而那个字段整个 app.js 里**从来没有任何地方赋值**，
+       * 永远是 undefined —— 于是这条分支永远走 else，只 loadGraphicsSilently
+       * 就 return：既不重画（卡片停在上一款游戏），又因为 return 得早，
+       * 后面的新鲜度判断永远走不到，缓存也就永远不复用。
+       */
+      applyGraphicsResult(key, entry.result);
+      state.graphicsLoading = false;
+      if (graphicsPagePainted()) {
+        if (state.route === 'graphics') render({ preserveScroll: true });
+      } else {
+        // 页面还没画出来（启动直接落到画质页）：先把内容备好再让首屏渲染
+        return loadGraphicsSilently(key, stale);
+      }
+    } else if (switched) {
+      applyGraphicsResult(key, entry.result);
+      state.graphicsLoading = false;
+    }
+    /*
+     * 新鲜度判断（注意：走到这里说明上面没 return，缓存一定被评估过）：
+     *
+     *   < GRAPHICS_CACHE_FRESH（60 秒）        → 直接复用，连 IPC 都不发；
+     *   60 秒 ~ GRAPHICS_CACHE_TTL（10 分钟）  → **也直接复用**，不打任何 IPC。
+     *     以前这里会「后台悄悄核对一遍」，结果几乎每切一次都在后台打一次注册表
+     *     （主进程同步 reg.exe，原神 0.4 秒 / 终末地 1.5 秒），把下一次交互挤慢。
+     *     画质设置本来就是「用户改了才会变」的东西，10 分钟内没有理由怀疑它变了。
+     *   > TTL 或者 dirty（写入过）           → 先把旧数据留在屏幕上，
+     *     再延时到浏览器空闲时后台重读一遍，await 不等它。
+     */
+    if (graphicsCacheFresh(entry, GRAPHICS_CACHE_FRESH)) return entry.result;
+    if (graphicsCacheFresh(entry, GRAPHICS_CACHE_TTL)) return entry.result;
+    // 记录太旧（或者被写入弄脏了）：后台重读一遍，前台继续显示旧数据
+    scheduleGraphicsRefresh(key, true);
+    return entry.result;
+  }
+
+  /*
+   * 用户强制刷新（「重新读取」）。
+   *
+   * 已经有这一屏的数据时也要**先把它留在屏幕上**、且不置 loading：
+   * 写入画质项之后 handleAction 的 finally 就是走这条路重读来拿新值，
+   * 以前这里会先把 state.graphics 清空、置 loading 再 await，
+   * 页面上就是一整屏「正在读取注册表」的转圈，读回来才重画。
+   * 现在画面保持不动，结果回来再一次性重画（真没变就连重画都省了）。
+   */
+  if (force && entry && graphicsPagePainted()) {
+    const before = graphicsResultSignature(entry.result);
+    oldGraphicsGame = key;
+    const result = await loadGraphicsSilently(key, true);
+    // 写坏了 / 读失败：缓存里那份已经没了，按真实结果显示，别硬留着旧值
+    if (!result && !graphicsCacheEntry(key)) applyGraphicsResult(key, null);
+    if (state.route === 'graphics' && before !== graphicsResultSignature((graphicsCacheEntry(key) || {}).result)) {
+      render({ preserveScroll: true });
+    }
+    return (graphicsCacheEntry(key) || {}).result || result || state.graphics;
+  }
+
+  // 没有缓存（或用户强制刷新）：走原来的「先转圈再出结果」流程
+  oldGraphicsGame = key;
+  state.graphics = null;
   state.graphicsError = '';
+  state.graphicsSource = '';
+  state.graphicsDetectKey = '';
+  state.graphicsLoading = true;
   render({ preserveScroll: true });
   try {
     if (!window.launcher?.graphics?.read) throw new Error('当前版本不支持读取画质配置');
-    const result = await window.launcher.graphics.read(key);
-    if (!result || result.ok === false) throw new Error(result?.reason || '读取失败');
+    // 新入参：把整个游戏对象传给主进程，trait 里没写注册表项的游戏靠它自动探测
+    const game = graphicsGameEntry(key);
+    const result = await window.launcher.graphics.read({
+      gameKey: game.gameKey,
+      name: game.name,
+      path: game.path,
+      exe: game.exe,
+      force: Boolean(force),
+    });
+    rememberGraphics(key, result);
+    // 探测失败不是异常：主进程会带着 reason 回来，这里照样把它显示在页面里，
+    // 不抛错（抛错会让整个画质页变成一条红色错误）
+    if (result && result.ok === false) {
+      state.graphics = null;
+      state.graphicsError = result.reason || '读取失败';
+      state.graphicsDetectKey = result.detectKey || '';
+      return null;
+    }
     state.graphics = result;
+    state.graphicsSource = result?.source || '';
+    state.graphicsDetectKey = result?.detectKey || '';
   } catch (error) {
     state.graphics = null;
     state.graphicsError = humanError(error) || '读取画质配置失败';
+    state.graphicsDetectKey = '';
   } finally {
     state.graphicsLoading = false;
     if (state.route === 'graphics') render({ preserveScroll: true });
@@ -6355,45 +10078,207 @@ async function loadGraphics(gameKey) {
   return state.graphics;
 }
 
+/** 上一次真正摆到画质页上的是哪款游戏（用来判断「切标签」还是「同屏重复调用」）。 */
+let oldGraphicsGame = '';
+
+
 /* 旧版在这里做过滤（graphicsEntries）。现在主进程读注册表时就只取画质相关的键，
    并把键名翻译成中文（electron/graphics-schema.js），前端不再重复判断。 */
 
+/**
+ * 星铁帧率：画质页唯一一处会**写**注册表的地方。
+ *
+ * 帧率本身也是写在 `GraphicsSettings_Model_*` 里的一个字段（`FPS`），
+ * 所以它天然属于画质页，放在设置页里反而要用户两头跑。
+ * 其它游戏的画质仍然只读，避免把游戏配置写坏。
+ *
+ * 主进程写帧率时会顺带把画质档位改成「自定义」——星铁的 FPS 只在自定义档位下生效。
+ */
+function starrailFpsCard() {
+  if (state.graphicsGame !== 'starrail') return '';
+  const current = Number(state.starrailFps) || 60;
+  return `
+    <article class="gfx-card gfx-card-writable">
+      <header>
+        <strong>星穹铁道帧率</strong>
+        <em>这一项可以改</em>
+      </header>
+      <ul>
+        <li class="gfx-row">
+          <span class="gfx-label">当前帧率上限</span>
+          <span class="gfx-value">${current} FPS</span>
+          <span class="gfx-range">30 / 60 / 120</span>
+        </li>
+      </ul>
+      <div class="gfx-actions">
+        <div class="segmented">
+          ${[30, 60, 120]
+            .map(
+              (fps) =>
+                `<button class="${current === fps ? 'active' : ''}" data-action="set-starrail-fps" data-value="${fps}">${fps} FPS</button>`
+            )
+            .join('')}
+        </div>
+        <p class="gfx-hint">
+          改 120 前请先退出游戏。写入会把游戏内的画质预设改成「自定义」，其余画质项保持原样。
+        </p>
+      </div>
+    </article>`;
+}
+
+/**
+ * 一项设置的可选档位 → 下拉项。
+ *
+ * 三个来源按优先级取：
+ *   options —— 预设枚举（0-4 的质量档、30/60/120 帧率、OFF/Low/High…）
+ *   choices —— 数值类字段的候选（分辨率给常见分辨率，其它给 min..max）
+ *   都没有 —— 不提供下拉，只有数字输入框
+ */
+function gfxOptionsOf(field) {
+  if (Array.isArray(field.options) && field.options.length) {
+    return field.options.map((value, index) => ({
+      value,
+      label: gfxOptionLabel(field, value, index),
+    }));
+  }
+  if (Array.isArray(field.choices) && field.choices.length) {
+    /*
+     * 候选值太多就不做下拉。
+     *
+     * 主进程给数值字段的 choices 是 `min..max 每 1 取一个`，终末地的四个分辨率字段
+     * schema 里没写 min/max，于是这里是 640..7680、360..4320，一个字段就能生成
+     * 7041 个 <option>：整页 HTML 83 万字符、2.2 万个 DOM 节点，
+     * 光布局就要 230ms，切到终末地必然卡。这种「连续区间」本来就不该做成下拉，
+     * 下面 gfxControl 会退回数字输入框（本来就能手填，功能一点没少）。
+     */
+    if (field.choices.length <= GFX_SELECT_MAX_OPTIONS) {
+      return field.choices.map((value) => ({
+        value,
+        label: field.unit ? `${value} ${field.unit}` : String(value),
+      }));
+    }
+  }
+  return [];
+}
+
+/**
+ * 一个数值字段最多给多少个下拉档位。
+ *
+ * 超过这个数就说明它是连续区间（分辨率宽度 640..7680 之类），
+ * 下拉里列出几千个档位对用户也没意义，交给数字输入框。
+ * 正常枚举（画质档 0-4、帧率 30/60/120、常见分辨率 12 个）远小于这个数。
+ */
+const GFX_SELECT_MAX_OPTIONS = 40;
+
+/** 单个档位的中文说明：数值档给「4 · 高」，文本档给「高（High）」。 */
+function gfxOptionLabel(field, value, index) {
+  const levels = Array.isArray(field.levels) ? field.levels : null;
+  const at = typeof index === 'number' ? index : (field.options || []).indexOf(value);
+  const word = levels && at >= 0 ? levels[at] || '' : '';
+  const unit = field.unit ? ` ${field.unit}` : '';
+  // 只显示中文档位名，不带括号里的原始值（「高（3）」→「高」）。
+  // 中文档位自带单位时（「60 fps」）不再重复拼单位；没有中文名时才退回原始值。
+  if (word) return word;
+  if (typeof value === 'string') return value;
+  return `${value}${unit}`;
+}
+
+/**
+ * 一项设置的控件。
+ *
+ * 所有控件都带 data-action="graphics-set"，把「哪条注册表值 / 哪个字段 / 写什么」
+ * 全塞进 data-* 里，由 handleAction 统一走 graphics:write。
+ * 布尔项直接渲染两个按钮，比下拉更少一次点击。
+ */
+function gfxControl(group, field) {
+  // data-field 要的是 JSON 里的字段名（field.key），不是 "值名.字段名" 的全名
+  const base = `data-game="${esc(state.graphicsGame)}" data-entry="${esc(group.name)}" data-field="${esc(field.key)}"`;
+  const current = field.value;
+
+  if (field.type === 'bool' || typeof current === 'boolean') {
+    const on = current === true || current === 'True' || current === 'true';
+    return `<div class="gfx-switch">
+      <button class="${on ? 'active' : ''}" data-action="graphics-set" ${base} data-value="true">开启</button>
+      <button class="${on ? '' : 'active'}" data-action="graphics-set" ${base} data-value="false">关闭</button>
+    </div>`;
+  }
+
+  const options = gfxOptionsOf(field);
+  // 当前值缺失时不能拼进 HTML —— 否则会出现 value="undefined" 这种假选项，用户点了必然写入失败。
+  // 崩坏3 在没启用对应画质档时，会往 JSON 里写字面量字符串 "undefined" / "null"，同样当无值处理。
+  const rawText = current === undefined || current === null ? '' : String(current);
+  const hasCurrent = rawText !== '' && rawText !== 'undefined' && rawText !== 'null';
+  if (options.length) {
+    const items = options
+      .map((item) => {
+        const active = hasCurrent && String(item.value) === String(current) ? ' selected' : '';
+        return `<option value="${esc(String(item.value))}"${active}>${esc(item.label)}</option>`;
+      })
+      .join('');
+    // 当前值不在预设里（游戏更新加了新档位）时补一条，免得下拉显示成第一个档位。
+    // 这种值我们没有中文名，直接显示原始数字，不加任何前缀。
+    const missing = hasCurrent && !options.some((item) => String(item.value) === String(current));
+    const extra = missing
+      ? `<option value="${esc(String(current))}" selected>${esc(String(current))}</option>`
+      : '';
+    return `<select class="gfx-select" data-action="graphics-set" ${base}>${extra}${items}</select>`;
+  }
+
+  if (!hasCurrent) {
+    return `<span class="gfx-missing">没读到这一项的值，点右上角「重新读取」</span>`;
+  }
+
+  return `<input class="gfx-input" type="number" step="any" value="${esc(String(current))}"
+    data-action="graphics-set" ${base} data-manual="1" />`;
+}
+
 function graphicsView() {
   const result = state.graphics;
-  const games = ['genshin', 'starrail', 'zzz', 'bh3'];
-  // 主进程已经把注册表项翻译成 fields（中文名 + 显示值 + 帮助文案），
-  // 这里只管排版，不再自己猜哪些键有用。
+  // 游戏标签不再是写死的四个：trait 里带画质的 + 装好且有路径的（靠自动探测），
+  // 以后 game-features 加游戏这里自动就有了。
+  const games = graphicsGames();
+  const gameKeys = games.map((game) => game.gameKey);
+  const currentGame = games.find((game) => game.gameKey === state.graphicsGame) || null;
+  // 主进程已经把注册表项翻译成 fields（中文名 + 显示值 + 类型 + 可选项），
+  // 这里只管排版与控件，不再自己猜哪些键有用。
   const groups = result && Array.isArray(result.fields) ? result.fields : [];
+  const pending = state.graphicsPending || null;
+  /*
+   * 页面上不再显示注册表路径 / 原始值名。
+   *
+   * 以前这里会挂一行「自动检测到画质设置位置：HKEY_CURRENT_USER\...」，
+   * 卡片头部那行小字也直接是 `WINDOWS_HDR_ON_h3132281285` 这种带哈希的原始值名。
+   * 对普通用户全是噪音，按要求整段去掉；结果里仍然保留 source / detectKey 字段，
+   * 排查问题时从调试脚本里读得到。 */
 
   let body = '';
   if (state.graphicsLoading) {
     body = `<div class="tools-empty">${icon('refresh')}<strong>正在读取注册表</strong><p>稍等一下。</p></div>`;
   } else if (state.graphicsError) {
-    body = `<div class="tools-empty">${icon('info')}<strong>${esc(state.graphicsError)}</strong><p>游戏启动过一次之后才会有画质配置。</p></div>`;
+    // 探测失败也走这里：主进程会把具体原因带回来，页面上只显示这句话，不报错
+    const hint = currentGame && !currentGame.path
+      ? '先在启动器里添加这个游戏、确认安装路径，再回来点「重新读取」。'
+      : '游戏启动过一次之后才会有画质配置。';
+    body = `<div class="tools-empty">${icon('info')}<strong>${esc(state.graphicsError)}</strong><p>${esc(hint)}</p></div>`;
   } else if (result) {
     const cards = groups
       .map((group) => {
         const rows = (group.fields || [])
           .map((field) => {
-            // 选项型参数：值 → 中文档位，鼠标悬停给解释
-            const levelText = field.type === 'enum' && Array.isArray(field.options)
-              ? `${field.value} / ${field.options[field.options.length - 1]}`
-              : '';
+            const busy = pending && pending.name === field.name ? ' is-pending' : '';
             return `
-              <li class="gfx-row" title="${esc(field.help || '')}">
+              <li class="gfx-row gfx-row-edit${busy}">
                 <span class="gfx-label">${esc(field.label)}</span>
-                <span class="gfx-value">${esc(field.display)}</span>
-                ${levelText ? `<span class="gfx-range">${esc(levelText)}</span>` : ''}
+                <span class="gfx-control">${gfxControl(group, field)}</span>
               </li>`;
           })
           .join('');
         // 字段多的卡片（星铁「画质细节」有 17 项）单独占满整行
         const wide = (group.fields || []).length > 4 ? ' is-wide' : '';
         return `
-          <article class="gfx-card${wide}">
+          <article class="gfx-card gfx-card-writable${wide}">
             <header>
               <strong>${esc(group.title)}</strong>
-              ${group.subtitle && group.subtitle !== group.title ? `<em>${esc(group.subtitle)}</em>` : ''}
             </header>
             <ul>${rows || '<li class="gfx-row"><span class="gfx-label">（没有可读字段）</span></li>'}</ul>
           </article>`;
@@ -6403,26 +10288,27 @@ function graphicsView() {
     body = `
       ${cards ? `<div class="gfx-grid">${cards}</div>` : `<p class="page-desc">这个游戏的画质配置还没有可读字段。</p>`}
       <p class="shots-note">
-        数据读自游戏写在注册表里的画质设置，鼠标停在每一项上能看到它是什么意思。
-        想改画质请进游戏内设置，启动器目前只读不写，避免把游戏配置写坏。
+        每一项都直接改游戏写进注册表里的画质设置，改完启动游戏即可生效；每次写入前都会把旧值备份到
+        userData/registry-backup.json。数值项可以直接填数字，带下拉的项选一个档位就会立刻写入。
       </p>
     `;
   }
 
   return `<div class="page">
+    ${toolsBackBar()}
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.graphics.eyebrow}</div>
         <h1>画质配置</h1>
-        <p class="page-desc">读取游戏写在注册表里的画质 / 分辨率设置。</p>
+        <p class="page-desc">读写游戏写在注册表里的画质 / 分辨率设置，每一项都可以直接改。</p>
       </div>
       <button class="btn ghost" data-action="graphics-refresh">${icon('refresh', 'xs')}重新读取</button>
     </div>
       <div class="shots-tabs">
         ${games
           .map(
-            (key) => `<button class="shots-tab${key === state.graphicsGame ? ' active' : ''}" data-action="graphics-game" data-value="${esc(key)}">
-              ${esc(shotGameLabel(key))}
+            (game) => `<button class="shots-tab${game.gameKey === state.graphicsGame ? ' active' : ''}" data-action="graphics-game" data-value="${esc(game.gameKey)}">
+              ${esc(game.name)}
             </button>`
           )
           .join('')}
@@ -6455,6 +10341,124 @@ function toolsSupportedMark(supported) {
   return supported
     ? `<span class="tools-badge ok">${icon('check', 'xs')}可用</span>`
     : `<span class="tools-badge">未支持</span>`;
+}
+
+/* ── 2.4.0 合并自对方分支：工具页 · 游戏 Wiki ────────────────────────── */
+
+/**
+ * 每个游戏的 Wiki 站。
+ *
+ * 优先选官方维护的：米家四款都在米游社体系下（观测枢、开拓者笔记、绳网情报站、
+ * 圣芙蕾雅档案馆），崩坏3 的 bbs.mihoyo.com/bh3/wiki/ 会 301 到 baike 下的同一份，
+ * 这里直接写最终地址，少一跳。
+ *
+ * 鹰角自己没有做图鉴站，明日方舟和终末地都用 PRTS —— 玩家维护、鹰角资助，
+ * 是目前中文社区公认最全的。《终末地》在 PRTS 上是独立词条页，不是独立站点。
+ *
+ * 异环用 B 站的 BWIKI：官方没有图鉴站，BWIKI 是内容最完整的中文站。
+ */
+const GAME_WIKI_SITES = {
+  genshin: {
+    name: '观测枢',
+    url: 'https://baike.mihoyo.com/ys/obc/',
+    desc: '原神官方图鉴：角色、武器、圣遗物、任务与活动',
+    /* intro 是收进游戏卡后的展开介绍：一句话说清游戏类型，再说明 wiki 能查什么 */
+    intro:
+      '《原神》是一款开放世界冒险 RPG。观测枢是米游社体系的官方百科，收录全部角色、武器、圣遗物与敌人的详细图鉴，主线与世界任务、限时活动的攻略，以及每个版本更新的内容说明都能在这里查到。',
+    official: true,
+  },
+  starrail: {
+    name: '开拓者笔记',
+    url: 'https://bbs.mihoyo.com/sr/wiki/',
+    desc: '星穹铁道官方 Wiki：角色、光锥、遗器、模拟宇宙',
+    intro:
+      '《崩坏：星穹铁道》是回合制 RPG。开拓者笔记是官方 Wiki，可以查角色、光锥、遗器的完整图鉴与育成材料，模拟宇宙等玩法说明和新版本角色攻略也会随版本同步更新。',
+    official: true,
+  },
+  zzz: {
+    name: '绳网情报站',
+    url: 'https://baike.mihoyo.com/zzz/wiki/',
+    desc: '绝区零官方 Wiki：代理人、音擎、驱动盘与空洞情报',
+    intro:
+      '《绝区零》是一款都市题材动作游戏。绳网情报站是官方 Wiki，收录代理人、音擎、驱动盘的完整图鉴与配装参考，空洞作战的机制说明和各版本活动情报也在这里整理。',
+    official: true,
+  },
+  bh3: {
+    name: '圣芙蕾雅档案馆',
+    url: 'https://baike.mihoyo.com/bh3/wiki/',
+    desc: '崩坏3 官方 Wiki：女武神、圣痕、武器与剧情档案',
+    intro:
+      '《崩坏3》是经典的动作游戏。圣芙蕾雅档案馆是官方 Wiki，可以查女武神、圣痕、武器的图鉴与推荐搭配，长线剧情的角色档案和版本活动资料也归档在内。',
+    official: true,
+  },
+  arknights: {
+    name: 'PRTS',
+    url: 'https://prts.wiki/w/%E9%A6%96%E9%A1%B5',
+    desc: '明日方舟中文 Wiki：干员、关卡、基建与剧情资料',
+    intro:
+      '《明日方舟》是策略塔防手游。PRTS 是玩家社区维护、鹰角官方资助的中文 Wiki，干员、敌人、关卡、基建与剧情资料公认最全，养成材料的掉落与效率查询也主要靠它。',
+    official: false,
+  },
+  endfield: {
+    name: 'PRTS · 终末地',
+    url: 'https://prts.wiki/w/%E6%98%8E%E6%97%A5%E6%96%B9%E8%88%9F%EF%BC%9A%E7%BB%88%E6%9C%AB%E5%9C%B0',
+    desc: '终末地在 PRTS 上的词条：干员、设施与剧情总览',
+    intro:
+      '《明日方舟：终末地》是鹰角旗下的 3D 策略 RPG。PRTS 为它开设了独立词条页，汇总已公开的干员、设施与世界观设定，内容随测试与版本推进持续更新，适合跟进最新情报。',
+    official: false,
+  },
+  neverness: {
+    name: 'BWIKI 异环',
+    url: 'https://wiki.biligame.com/yh/%E9%A6%96%E9%A1%B5',
+    desc: '异环中文 Wiki：角色图鉴、载具改装与配队攻略',
+    intro:
+      '《异环》是一款超自然都市开放世界游戏。BWIKI 异环站收录角色图鉴、载具改装与配队攻略，由 B 站 wiki 体系维护，是目前中文社区内容最完整的异环资料站。',
+    official: false,
+  },
+};
+
+/** 游戏 key 是 builtinKey，但用户自建的游戏没有，只能退回按名字猜。 */
+function wikiSiteOf(game) {
+  const key = String(game?.key || game?.builtinKey || '');
+  if (GAME_WIKI_SITES[key]) return GAME_WIKI_SITES[key];
+  const name = String(game?.name || '');
+  if (/星穹铁道/.test(name)) return GAME_WIKI_SITES.starrail;
+  if (/原神/.test(name)) return GAME_WIKI_SITES.genshin;
+  if (/绝区零/.test(name)) return GAME_WIKI_SITES.zzz;
+  if (/崩坏3/.test(name)) return GAME_WIKI_SITES.bh3;
+  if (/终末地/.test(name)) return GAME_WIKI_SITES.endfield;
+  if (/明日方舟/.test(name)) return GAME_WIKI_SITES.arknights;
+  if (/异环/.test(name)) return GAME_WIKI_SITES.neverness;
+  return null;
+}
+
+/**
+ * 游戏卡内的 Wiki 收缩框。
+ *
+ * wiki 不再是工具页底部的独立面板：每个游戏的资料站跟着游戏卡走，
+ * 展开游戏卡后在这里看到一段介绍和「在浏览器打开」的入口。
+ * 用原生 <details> 做折叠，不占 state——整卡重绘后会收回，
+ * 但对一个低频入口来说无伤大雅，换来的是零事件绑定。
+ * 打开行为仍是 data-action="tools-wiki"，case 里做 https 校验后走 openExternal。
+ */
+function gameWikiGroup(game) {
+  const site = wikiSiteOf(game);
+  if (!site) return '';
+  return `<details class="tg-wiki">
+    <summary>
+      ${icon('database', 'xs')}
+      <span>Wiki 资料</span>
+      <span class="tools-wiki-tag${site.official ? ' is-official' : ''}">${site.official ? '官方' : '社区'}</span>
+      <span class="tg-wiki-chevron">${icon('chevron-down', 'xs')}</span>
+    </summary>
+    <p class="tg-wiki-intro">${esc(site.intro || site.desc || '')}</p>
+    <div class="tg-wiki-row">
+      <span class="tg-wiki-site">${esc(site.name)}</span>
+      <button class="btn ghost" data-action="tools-wiki" data-url="${esc(site.url)}">
+        ${icon('external', 'xs')}在浏览器打开
+      </button>
+    </div>
+  </details>`;
 }
 
 /**
@@ -6501,6 +10505,22 @@ const RECORD_FEATURES = [
   'deadly-assault',
 ];
 
+/** 战绩功能各自的图标，工具页「按游戏查看」里跟着功能名一起显示。 */
+const RECORD_ICON = {
+  'daily-note': 'clock',
+  abyss: 'star',
+  theater: 'sparkle',
+  stygian: 'shield',
+  'ultra-endless': 'star',
+  'battle-field': 'shield',
+  'forgotten-hall': 'gamepad',
+  'pure-fiction': 'sparkle',
+  'apocalyptic-shadow': 'moon',
+  'simulated-universe': 'repeat',
+  'shiyu-defense': 'shield',
+  'deadly-assault': 'sparkle',
+};
+
 /** 哪些功能已经在界面上有独立页面，点侧栏能真的跳过去。 */
 const TOOLS_NAV_TARGET = {
   ...Object.fromEntries(RECORD_FEATURES.map((key) => [key, 'record'])),
@@ -6524,44 +10544,14 @@ const TOOLS_NAV_TARGET = {
 function renderNavToolsSub() {
   const sub = dom.navToolsSub;
   if (!sub) return;
-  const data = state.features;
-  if (!data || data.error || !Array.isArray(data.byCategory)) {
-    sub.innerHTML = `<span class="nav-sub-hint">${data?.error ? '读取失败' : '读取中…'}</span>`;
-    syncNavToolsOpen();
-    return;
-  }
-
-  const groups = data.byCategory;
-  const html = groups
-    .map((group) => {
-      const rows = group.items
-        .map((feature) => {
-          const target = TOOLS_NAV_TARGET[feature.key];
-          // 这个功能在几款游戏上真正可用，0 就直接标灰
-          const supportedCount = (data.games || []).filter((game) =>
-            (data.matrix?.[game.key] || []).includes(feature.key)
-          ).length;
-          const chip = `<span class="nav-sub-count">${supportedCount}</span>`;
-          if (!target) {
-            return `<div class="nav-sub-item is-idle" title="还没有独立页面">
-              <span class="nav-sub-dot"></span>
-              <span class="nav-sub-name">${esc(feature.name)}</span>${chip}
-            </div>`;
-          }
-          return `<button class="nav-sub-item" data-nav="${esc(target)}" data-feature="${esc(feature.key)}" title="${esc(feature.desc || feature.name)}">
-            <span class="nav-sub-dot"></span>
-            <span class="nav-sub-name">${esc(feature.name)}</span>${chip}
-          </button>`;
-        })
-        .join('');
-      return `<div class="nav-sub-group">
-        <div class="nav-sub-title">${esc(toolsCategoryLabel(group.category))}</div>
-        ${rows}
-      </div>`;
-    })
-    .join('');
-
-  sub.innerHTML = html || '<span class="nav-sub-hint">暂无功能</span>';
+  /*
+   * 侧栏不再展开工具的子项。
+   *
+   * 工具页自己已经是「左导航 + 右侧面板」的结构，战绩 12 个功能、插件入口、
+   * 各分类都在页内列得清清楚楚；侧栏再铺一遍会让整条侧栏长到要滚动，
+   * 反而不好找。点「工具」直接进工具页即可。
+   */
+  sub.innerHTML = '';
   syncNavToolsOpen();
 }
 
@@ -6570,10 +10560,10 @@ function syncNavToolsOpen() {
   const sub = dom.navToolsSub;
   const parent = dom.navToolsGroup?.querySelector('.nav-item-parent');
   if (!sub || !parent) return;
-  const open = Boolean(state.navToolsOpen);
-  sub.hidden = !open;
-  parent.setAttribute('aria-expanded', open ? 'true' : 'false');
-  dom.navToolsGroup.classList.toggle('is-open', open);
+  // 侧栏不再挂子项，这个折叠区永远收起、点「工具」直接进页面
+  sub.hidden = true;
+  parent.setAttribute('aria-expanded', 'false');
+  dom.navToolsGroup.classList.remove('is-open');
 }
 
 /** 侧栏的纵向滚动容器（新 DOM 是 .sidebar-scroll，老 DOM 回落到 .nav 自己）。 */
@@ -6665,41 +10655,86 @@ function initSidebarScroll() {
   );
 }
 
+/** 游戏卡内部的分类分组顺序与短标签。 */
+const TOOLS_CATEGORY_ORDER = ['record', 'gacha', 'local', 'system', 'info'];
+
 /**
- * 「按游戏查看」的单个游戏卡。
+ * 二级页面顶部的「返回工具页」条。
  *
- * 关键：只列这个游戏**真正支持**的功能。
- * 以前把 19 个功能全铺出来、只给支持的打绿点，结果崩坏3 / 终末地 / 异环
- * 的卡片里塞满了「深境螺旋 / 忘却之庭 / 式舆防卫战」这些属于别家游戏的玩法，
- * 看着像它们也支持。现在不支持的收成底部一行灰字，眼不见心不烦。
+ * 只有从工具页点功能入口进来时（state.fromTools）才渲染，
+ * 从侧栏直接进 record / gacha 这些页面不会多出按钮，原有返回行为不变。
+ * 放在 page-head 之前独立成一条，不挤占各页原本的头部操作区。
+ */
+function toolsBackBar() {
+  if (!state.fromTools || state.route === 'tools') return '';
+  return `<div class="tools-back-bar">
+    <button class="btn ghost" data-action="nav-tools">${icon('chevron-left', 'xs')}返回工具页</button>
+  </div>`;
+}
+const TOOLS_CATEGORY_SHORT = {
+  record: '战绩',
+  gacha: '抽卡',
+  local: '本机',
+  system: '设置',
+  info: '资讯',
+};
+
+/**
+ * 「按游戏查看」的单个游戏能力卡（重做版）。
+ *
+ * - 只列这个游戏**真正支持**的功能，按分类成组，全部可点直达；
+ * - 默认全部展开，点卡片头折叠 / 展开（折叠状态存 state.toolsCollapsed）；
+ * - 顶部一条游戏主题色（game.accent）光带，便于一眼区分游戏。
  */
 function toolsGameCard(game, supportOf) {
   const features = supportOf(game.key);
   const supported = features.filter((item) => item.supported);
+  // 默认收缩：只有被点开过的游戏才展开，展开状态存 state.toolsExpanded
+  const open = Boolean(state.toolsExpanded && state.toolsExpanded[game.key]);
+  const accent = game.accent || '#f0c674';
 
-  const rows = supported
-    .map(
-      (item) => `<li class="tools-feature on">
-        <span class="tools-feature-dot"></span>
-        <span class="tools-feature-name">${esc(item.name)}</span>
-        <span class="tools-feature-kind">${esc(toolsCategoryLabel(item.category))}</span>
-      </li>`
-    )
-    .join('');
-
-  return `<div class="tools-game-card">
-    <div class="tools-game-head">
-      <div>
-        <h3>${esc(game.name)}</h3>
-        <p>${esc(game.subtitle || '')}</p>
-      </div>
-      <div class="tools-game-count"><strong>${supported.length}</strong><span>/ ${features.length}</span></div>
-    </div>
-    ${
-      rows
-        ? `<ul class="tools-feature-list">${rows}</ul>`
-        : `<p class="tools-game-empty">这个游戏还没有可用的启动器功能，只能启动和记录游玩时长。</p>`
+  const featButton = (item) => {
+    const isRecord = RECORD_FEATURE_SET.has(item.key);
+    const target = TOOLS_NAV_TARGET[item.key];
+    const cls = `tg-feat${isRecord ? ' is-record' : ''}${item.needsLogin ? ' needs-login' : ''}`;
+    const dataGame = isRecord ? ` data-game="${esc(game.key)}"` : '';
+    const ico = isRecord ? RECORD_ICON[item.key] || 'star' : TOOLS_CATEGORY_ICONS[item.category] || 'wrench';
+    /* 没有直达页面的能力（理论上当前都有）降级成静态标记，不做假按钮 */
+    if (!target) {
+      return `<span class="${cls} is-static" title="${esc(item.desc || '')}">${icon(ico, 'xs')}<span>${esc(item.name)}</span></span>`;
     }
+    return `<button class="${cls}" data-action="tools-open" data-feature="${esc(item.key)}"${dataGame} title="${esc(item.desc || '')}">
+      ${icon(ico, 'xs')}<span>${esc(item.name)}</span>
+    </button>`;
+  };
+
+  const groups = TOOLS_CATEGORY_ORDER.map((category) => {
+    const items = supported.filter((item) => item.category === category);
+    if (!items.length) return '';
+    return `<div class="tg-group">
+      <span class="tg-group-label">${esc(TOOLS_CATEGORY_SHORT[category] || toolsCategoryLabel(category))}</span>
+      <div class="tg-feats">${items.map(featButton).join('')}</div>
+    </div>`;
+  }).join('');
+
+  /* wiki 收进卡内收缩框（3.x 改版：替代底部独立 wiki 面板） */
+  const wikiBlock = gameWikiGroup(game);
+  const bodyInner =
+    groups || wikiBlock
+      ? `${groups}${wikiBlock}`
+      : `<p class="tools-game-empty">这款游戏暂无可接入的能力。</p>`;
+
+  return `<div class="tg-card${open ? ' is-open' : ''}" style="--tg-accent:${esc(accent)}">
+    <button class="tg-head" data-action="tools-game-toggle" data-value="${esc(game.key)}" aria-expanded="${open ? 'true' : 'false'}">
+      <span class="tg-bar" aria-hidden="true"></span>
+      <span class="tg-head-copy">
+        <strong>${esc(game.name)}</strong>
+        <small>${esc(game.subtitle || '')}</small>
+      </span>
+      <span class="tg-count">${supported.length} 项</span>
+      <span class="tg-arrow">${icon('chevron-down', 'xs')}</span>
+    </button>
+    ${open ? `<div class="tg-body">${bodyInner}</div>` : ''}
   </div>`;
 }
 
@@ -6722,6 +10757,42 @@ function miyouLoginNote() {
   return `<p class="tools-feature-note">${icon('login', 'xs')}需要先登录账号</p>`;
 }
 
+const TOOLS_CATEGORY_ICONS = {
+  record: 'star',
+  gacha: 'sparkle',
+  local: 'image',
+  system: 'settings',
+  info: 'news',
+  account: 'login',
+  games: 'gamepad',
+  plugins: 'sparkle',
+};
+
+/** 工具页左侧的分组顺序：按游戏查看排第一（也是默认选中的），功能分类随后，账号登录收尾。 */
+function toolsTabs(groups) {
+  return [
+    ['games', '按游戏查看', 'gamepad', '每个游戏支持哪些能力，点开就能直接进对应的战绩页'],
+    ...groups.map((group) => [
+      group.category,
+      toolsCategoryLabel(group.category),
+      TOOLS_CATEGORY_ICONS[group.category] || 'wrench',
+      toolsCategoryHint(group.category),
+    ]),
+    ['account', '账号登录', 'login', '战绩类功能要先登录；抽卡记录走各自游戏的独立通道'],
+    /*
+     * 插件是独立页面，不在 game-features 的能力矩阵里，所以由这里手工挂一项。
+     * 没有这一项的话，插件页就只剩代码里的 navigate('plugins') 能进，
+     * 用户根本找不到入口（侧栏「工具」现在直接跳工具页，不再展开子项）。
+     */
+    ['plugins', '自定义插件', 'sparkle', '单个 .hxl 文件，在隔离的 Worker 里运行'],
+  ];
+}
+
+function toolsTab(tabs) {
+  const key = state.toolsTab;
+  return tabs.some((tab) => tab[0] === key) ? key : tabs[0][0];
+}
+
 function toolsView() {
   const data = state.features;
   if (!data) {
@@ -6733,109 +10804,64 @@ function toolsView() {
       <div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>读取失败</h3><p>${esc(data.error)}</p></div></div>`;
   }
 
-  const groups = data.byCategory || [];
   const games = data.games || [];
   const supportOf = toolsSupportOf(data);
   const totalGames = games.length;
   const totalFeatures = (data.features || []).length;
 
-  const summary = groups
-    .map(
-      (group) => `<div class="tools-summary-item">
-        <span class="tools-summary-count">${group.items.length}</span>
-        <span class="tools-summary-label">${esc(toolsCategoryLabel(group.category))}</span>
-      </div>`
-    )
-    .join('');
-
-  const featureSections = groups
-    .map(
-      (group) => `<section class="tools-section">
-        <div class="tools-section-head">
-          <h2>${esc(toolsCategoryLabel(group.category))}</h2>
-          <p>${esc(toolsCategoryHint(group.category))}</p>
-        </div>
-        <div class="tools-feature-grid">
-          ${group.items
-            .map((feature) => {
-              // 这个功能在哪些游戏上可用（matrix 只列已支持的）
-              const supported = games.filter((game) => supportOf(game.key).some(
-                (item) => item.key === feature.key && item.supported
-              ));
-              return `<div class="tools-feature-card">
-                <div class="tools-feature-card-head">
-                  <strong>${esc(feature.name)}</strong>
-                  <span class="tools-eyebrow">${esc(feature.eyebrow || '')}</span>
-                </div>
-                <p class="tools-feature-desc">${esc(feature.desc || '')}</p>
-                <div class="tools-feature-games">
-                  ${supported.length
-                    ? supported.map((game) => `<span class="tools-chip on">${esc(game.name)}</span>`).join('')
-                    : `<span class="tools-chip">所有游戏都还没有接入</span>`}
-                </div>
-                ${
-                  feature.needsLogin
-                    ? miyouLoginNote()
-                    : ''
-                }
-                ${
-                  // 只有游戏端已支持时，才给「去看」入口；否则点了也是空页。
-                  supported.length
-                    ? `<div class="tools-feature-actions">
-                        <button class="link-btn" data-action="tools-open" data-feature="${esc(feature.key)}">${icon('chevron-right', 'xs')}打开${esc(feature.name)}</button>
-                      </div>`
-                    : ''
-                }
-              </div>`;
-            })
-            .join('')}
-        </div>
-      </section>`
-    )
-    .join('');
-
+  /*
+   * 工具页不再放左侧功能分类导航：每张游戏卡内部已经按
+   * 战绩 / 抽卡 / 本机 / 设置 / 资讯分好组、标签直达，左栏再放一遍同样的
+   * 功能分类只是重复维度。现在整页就是一面全宽的游戏能力卡墙；
+   * 不按游戏走的两件事——账号登录、自定义插件——收进右上角。
+   */
   const gameCards = games.map((game) => toolsGameCard(game, supportOf)).join('');
 
-  return `<div class="page">
+  return `<div class="page page-tools">
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.tools.eyebrow}</div>
         <h1>工具</h1>
-        <p class="page-desc">所有游戏能力都登记在 electron/game-features.js，加新游戏只改这一处。</p>
+        <p class="page-desc">${totalGames} 个游戏 · ${totalFeatures} 项能力，按游戏分组，点标签直接进入对应功能</p>
       </div>
-      <button class="btn ghost" data-action="tools-refresh">${icon('refresh', 'xs')}重新读取</button>
-    </div>
-
-    <div class="tools-summary">${summary}
-      <div class="tools-summary-item">
-        <span class="tools-summary-count">${totalGames}</span>
-        <span class="tools-summary-label">游戏</span>
-      </div>
-      <div class="tools-summary-item">
-        <span class="tools-summary-count">${totalFeatures}</span>
-        <span class="tools-summary-label">功能</span>
+      <div class="tools-head-actions">
+        <button class="btn ghost" data-action="tools-accounts">${icon('login', 'xs')}账号登录</button>
+        <button class="btn ghost" data-action="nav-plugins">${icon('sparkle', 'xs')}自定义插件</button>
+        <button class="btn ghost" data-action="tools-refresh">${icon('refresh', 'xs')}重新读取</button>
       </div>
     </div>
 
-    ${featureSections}
-
-    <section class="tools-section">
-      <div class="tools-section-head">
-        <h2>账号登录</h2>
-        <p>战绩类功能要先登录；抽卡记录走各自游戏的独立通道</p>
-      </div>
-      ${hoyolabLoginCard()}
-      ${otherLoginCards(games)}
-    </section>
-
-    <section class="tools-section">
-      <div class="tools-section-head">
-        <h2>按游戏查看</h2>
-        <p>每个游戏支持哪些能力，一眼能看出缺什么</p>
-      </div>
-      <div class="tools-game-grid">${gameCards}</div>
-    </section>
+    <div class="tools-game-grid tg-grid-full">
+      ${gameCards || '<p class="tools-game-empty">暂时没有读取到游戏能力。</p>'}
+    </div>
   </div>`;
+}
+
+/* 工具页右上角「账号登录」弹窗：米游社一套号带四款米家游戏，其余发行方各自一卡。 */
+function openToolsAccountsModal() {
+  const games = (state.features && state.features.games) || [];
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal tools-accounts-modal" role="dialog" aria-modal="true" aria-labelledby="tools-accounts-title">
+        <div class="modal-head">
+          <div>
+            <h2 id="tools-accounts-title">账号登录</h2>
+            <p>战绩类功能要先登录；抽卡记录走各自游戏的独立通道。登录态只保存在本机，不会上传。</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <div class="tools-accounts-body">
+            ${hoyolabLoginCard()}
+            ${otherLoginCards(games)}
+          </div>
+        </div>
+        <div class="modal-foot">
+          <span style="flex:1"></span>
+          <button class="btn ghost" data-close>关闭</button>
+        </div>
+      </div>
+    </div>`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -7257,16 +11283,18 @@ function recordTabsHtml(data, feature, game) {
     .join('');
 
   const scheduleTabs = RECORD_SCHEDULE_FEATURES.includes(feature)
-    ? `<div class="record-tabs record-tabs-schedule">
-        <button class="record-tab${state.record.schedule === 1 ? ' is-active' : ''}" data-action="record-schedule" data-value="1">本期</button>
-        <button class="record-tab${state.record.schedule === 2 ? ' is-active' : ''}" data-action="record-schedule" data-value="2">上期</button>
-      </div>`
+    ? `<span class="record-tabs-sep"></span>
+       <button class="record-tab${state.record.schedule === 1 ? ' is-active' : ''}" data-action="record-schedule" data-value="1">本期</button>
+       <button class="record-tab${state.record.schedule === 2 ? ' is-active' : ''}" data-action="record-schedule" data-value="2">上期</button>`
     : '';
 
   return `
     ${gameTabs ? `<div class="record-tabs record-tabs-game">${gameTabs}</div>` : ''}
-    ${featureTabs ? `<div class="record-tabs record-tabs-feature">${featureTabs}</div>` : ''}
-    ${scheduleTabs}`;
+    ${
+      featureTabs || scheduleTabs
+        ? `<div class="record-tabs record-tabs-feature">${featureTabs}${scheduleTabs}</div>`
+        : ''
+    }`;
 }
 
 function recordView() {
@@ -7320,6 +11348,7 @@ function recordView() {
       : '';
 
   return `<div class="page record-page">
+    ${toolsBackBar()}
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.record.eyebrow}</div>
@@ -7491,36 +11520,188 @@ async function doPassportLogout(providerId) {
 /* news                                                                */
 /* ------------------------------------------------------------------ */
 
-function newsView() {
-  if (!state.news.length) {
-    return `<div class="page"><div class="page-head"><div><div class="eyebrow">${PAGE_META.news.eyebrow}</div><h1>动态</h1></div></div><div class="empty"><div class="empty-icon">${icon('news')}</div><h3>暂时没有内容</h3><p>稍后再来看看。</p></div></div>`;
-  }
-  const [feature, ...rest] = state.news;
+/* 动态页的分类：更新日志 / 使用指南。指南靠 tag 区分，其余都算版本更新。 */
+const NEWS_TABS = [
+  { key: 'all', label: '全部' },
+  { key: 'release', label: '更新日志' },
+  { key: 'guide', label: '使用指南' },
+];
+
+function isGuidePost(post) {
+  return String(post && post.tag) === '指南';
+}
+
+function newsTabsMarkup() {
+  const current = state.newsFilter || 'all';
+  return `<div class="segmented nd-tabs">${NEWS_TABS.map(
+    (tab) =>
+      `<button type="button" class="${current === tab.key ? 'active' : ''}" data-action="news-tab" data-value="${tab.key}">${tab.label}</button>`
+  ).join('')}</div>`;
+}
+
+/* 一条版本更新，做成左侧带版本章的时间线节点。最新的两条（当前大版本）高亮。 */
+function newsTimelineItem(post, highlight) {
+  const version = String(post.version || '').replace(/^v/i, '');
   return `
-    <div class="page">
-      <div class="page-head">
-        <div>
-          <div class="eyebrow">${PAGE_META.news.eyebrow}</div>
-          <h1>动态</h1>
-          <p class="sub">使用指南、功能说明，以及一些关于这个启动器的想法。</p>
+    <button class="nd-tl-item${highlight ? ' is-latest' : ''}" data-action="open-news" data-id="${esc(post.id)}">
+      <span class="nd-tl-node">
+        ${version ? `<strong>v${esc(version)}</strong>` : icon('news', 'xs')}
+      </span>
+      <span class="nd-tl-body">
+        <span class="nd-tl-head">
+          <h4>${esc(post.title)}</h4>
+          <span class="nd-tl-date">${formatDate(post.date)}</span>
+        </span>
+        <p>${esc(post.excerpt || '')}</p>
+        <span class="nd-tl-foot">
+          <span class="nd-tl-tag">${esc(post.tag)}</span>
+          ${post.readTime ? `<span class="nd-tl-read">${esc(post.readTime)} 阅读</span>` : ''}
+          <span class="nd-tl-go">阅读全文 ${icon('chevron-right', 'xs')}</span>
+        </span>
+      </span>
+    </button>`;
+}
+
+/* 更新日志默认只展开最新的几个版本，更早的折叠起来，避免长列表把使用指南挤下去。 */
+const NEWS_VISIBLE_RELEASES = 2;
+
+function newsTimeline(releases, opts = {}) {
+  if (!releases.length) return '';
+  // 最新的两个版本号点亮，提示「这就是你手里这一版」
+  const latestIds = new Set(releases.slice(0, 2).map((item) => item.id));
+  const collapsible = opts.collapsed && releases.length > NEWS_VISIBLE_RELEASES;
+  const hiddenCount = releases.length - NEWS_VISIBLE_RELEASES;
+  const shown = collapsible && !state.newsReleasesExpanded ? releases.slice(0, NEWS_VISIBLE_RELEASES) : releases;
+  const isCollapsed = collapsible && !state.newsReleasesExpanded;
+  const isExpanded = collapsible && state.newsReleasesExpanded;
+  return `
+    <div class="nd-timeline">
+      ${shown.map((post) => newsTimelineItem(post, latestIds.has(post.id))).join('')}
+    </div>
+    ${
+      isCollapsed
+        ? `<button type="button" class="nd-more-btn" data-action="news-toggle-releases">${icon('chevron-down', 'xs')} 查看更早的 ${hiddenCount} 个版本</button>`
+        : ''
+    }
+    ${
+      isExpanded
+        ? `<button type="button" class="nd-more-btn nd-more-btn--up" data-action="news-toggle-releases">${icon('chevron-up', 'xs')} 收起早期版本</button>`
+        : ''
+    }`;
+}
+
+function newsGuideGrid(guides) {
+  if (!guides.length) return '';
+  return `
+    <div class="nd-guide-grid">
+      ${guides
+        .map(
+          (post) => `
+        <button class="nd-guide-card" data-action="open-news" data-id="${esc(post.id)}">
+          <span class="nd-guide-icon">${icon('news')}</span>
+          <span class="nd-guide-text">
+            <h4>${esc(post.title)}</h4>
+            <p>${esc(post.excerpt || '')}</p>
+          </span>
+          ${icon('chevron-right', 'xs')}
+        </button>`
+        )
+        .join('')}
+    </div>`;
+}
+
+function newsSectionHead(title, sub) {
+  return `
+    <div class="nd-section-head">
+      <span class="nd-section-spark"></span>
+      <div>
+        <h3>${title}</h3>
+        ${sub ? `<p>${sub}</p>` : ''}
+      </div>
+    </div>`;
+}
+
+/** 兜底大框：没有官方动态可置顶时，回落为原来的「最新发布帖」。 */
+function newsFeatureRelease(feature) {
+  return `
+    <button class="news-feature" data-action="open-news" data-id="${esc(feature.id)}" style="text-align:left">
+      <div class="news-feature-main">
+        <span class="news-tag" style="align-self:flex-start">${esc(feature.tag)}</span>
+        <h2>${esc(feature.title)}</h2>
+        <p>${esc(feature.excerpt)}</p>
+        <div class="news-feature-meta">
+          <span>${formatDate(feature.date)}</span>
+          <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
+          <span>${esc(feature.readTime || '')}</span>
+          <span style="margin-left:auto;color:var(--accent)">阅读全文 ${icon('chevron-right', 'xs')}</span>
         </div>
       </div>
-      <button class="news-feature" data-action="open-news" data-id="${esc(feature.id)}" style="text-align:left">
+      <div class="news-feature-art" aria-hidden="true">
+        ${
+          feature.image
+            ? `<img src="${esc(feature.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+            : `<svg class="glyph" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="52" />
+          <circle cx="60" cy="60" r="34" opacity=".55" />
+          <path d="M60 8v104M8 60h104" opacity=".35" />
+          <path d="M60 26c6 22 12 28 34 34-22 6-28 12-34 34-6-22-12-28-34-34 22-6 28-12 34-34Z" />
+        </svg>`
+        }
+      </div>
+    </button>`;
+}
+
+/** 公告条目上要挂的游戏点缀色内联变量；accent 缺省时不输出，CSS 回落 var(--accent)。 */
+function noticeAccentStyle(game, extra = '') {
+  const accent = String(game?.accent || '').trim();
+  const parts = [extra.replace(/;\s*$/, ''), accent ? `--notice-accent:${accent}` : ''].filter(Boolean);
+  return parts.length ? ` style="${esc(parts.join(';'))}"` : '';
+}
+
+/** 置顶行列表的同步骨架。 */
+function newsPinnedSkeletonList() {
+  return `
+    <div class="news-pinned-list">
+      <div class="news-pinned-row news-pinned-row--skeleton"><span class="notice-skeleton"></span><span class="notice-skeleton short"></span></div>
+      <div class="news-pinned-row news-pinned-row--skeleton"><span class="notice-skeleton"></span><span class="notice-skeleton short"></span></div>
+    </div>`;
+}
+
+/** 置顶区：最新官方动态大框 + 置顶动态行列表。 */
+function newsPinnedMarkup(entries) {
+  const head = entries[0];
+  const { notice, game } = head;
+  const typeLabel = noticeTypeLabel(notice);
+  const cover = game.startCoverUrl || game.coverUrl || '';
+  // 动态页做减法：置顶行列表只留 3 条，再往下都是折叠区，避免"滑不停"
+  const rest = entries.slice(1, 4);
+  return `
+    <div class="news-pinned">
+      ${
+        state.noticeBoardError
+          ? `<div class="notice-error">${icon('info', 'xs')} ${esc(state.noticeBoardError)}</div>`
+          : ''
+      }
+      <button class="news-feature news-feature--notice" data-action="open-external" data-url="${esc(notice.link)}"${noticeAccentStyle(game, 'text-align:left')} title="${esc(notice.title)}">
         <div class="news-feature-main">
-          <span class="news-tag" style="align-self:flex-start">${esc(feature.tag)}</span>
-          <h2>${esc(feature.title)}</h2>
-          <p>${esc(feature.excerpt)}</p>
+          <span class="news-pinned-tags">
+            <span class="news-pinned-game">${esc(game.name)}</span>
+            ${typeLabel ? `<span class="news-pinned-type">${esc(typeLabel)}</span>` : ''}
+          </span>
+          <h2>${esc(notice.title)}</h2>
           <div class="news-feature-meta">
-            <span>${formatDate(feature.date)}</span>
+            <span>${esc(game.name)}</span>
             <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
-            <span>${esc(feature.readTime || '')}</span>
-            <span style="margin-left:auto;color:var(--accent)">阅读全文 ${icon('chevron-right', 'xs')}</span>
+            <span>${esc(noticeDate(notice.date) || '官方')}</span>
+            <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
+            <span>官方</span>
+            <span style="margin-left:auto;color:var(--notice-accent, var(--accent))">阅读原文 ${icon('chevron-right', 'xs')}</span>
           </div>
         </div>
         <div class="news-feature-art" aria-hidden="true">
           ${
-            feature.image
-              ? `<img src="${esc(feature.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+            cover
+              ? `<img src="${esc(cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`
               : `<svg class="glyph" viewBox="0 0 120 120">
             <circle cx="60" cy="60" r="52" />
             <circle cx="60" cy="60" r="34" opacity=".55" />
@@ -7530,24 +11711,71 @@ function newsView() {
           }
         </div>
       </button>
-      <div class="news-list">
-        ${rest
-          .map(
-            (post) => `
-          <button class="news-row" data-action="open-news" data-id="${esc(post.id)}">
-            <span class="news-date">${formatDate(post.date)}</span>
-            <span style="min-width:0">
-              <h4>${esc(post.title)}</h4>
-              <p>${esc(post.excerpt)}</p>
-            </span>
-            <span class="read">${esc(post.readTime || '')}</span>
-            ${icon('chevron-right')}
-          </button>`
-          )
-          .join('')}
-      </div>
-      ${newsUpdateSection()}
+      ${
+        rest.length
+          ? `<div class="news-pinned-list">
+              ${rest
+                .map(
+                  (entry, index) => `
+                <button class="notice-item news-pinned-row" data-action="open-external" data-url="${esc(entry.notice.link)}"${noticeAccentStyle(entry.game)} title="${esc(entry.notice.title)}">
+                  <span class="notice-item-dot"></span>
+                  <span class="news-pinned-chip">${esc(entry.game.name)}</span>
+                  ${noticeTypeLabel(entry.notice) ? `<span class="news-pinned-type">${esc(noticeTypeLabel(entry.notice))}</span>` : ''}
+                  <span class="news-pinned-title"><strong>${esc(entry.notice.title)}</strong></span>
+                  <span class="news-pinned-date">${esc(noticeDate(entry.notice.date) || '官方')}</span>
+                  ${index < 2 ? `<span class="news-pinned-badge">置顶</span>` : ''}
+                  ${icon('external', 'xs')}
+                </button>`
+                )
+                .join('')}
+            </div>`
+          : state.noticeBoardLoading
+            ? newsPinnedSkeletonList()
+            : ''
+      }
+    </div>`;
+}
+
+function newsView() {
+  if (!state.news.length) {
+    return `<div class="page"><div class="page-head"><div><div class="eyebrow">${PAGE_META.news.eyebrow}</div><h1>动态</h1></div></div><div class="empty"><div class="empty-icon">${icon('news')}</div><h3>暂时没有内容</h3><p>稍后再来看看。</p></div></div>`;
+  }
+  const filter = state.newsFilter || 'all';
+  const releases = state.news.filter((post) => !isGuidePost(post));
+  const guides = state.news.filter(isGuidePost);
+  const feature = releases[0];
+
+  let body = '';
+  if (filter === 'guide') {
+    body = newsGuideGrid(guides);
+  } else if (filter === 'release') {
+    body = newsTimeline(releases, { collapsed: true }) + newsUpdateSection();
+  } else {
+    const entries = noticeEntries();
+    body = `
+      ${
+        entries.length
+          ? newsPinnedMarkup(entries)
+          : newsFeatureRelease(feature) + (state.noticeBoardLoading ? newsPinnedSkeletonList() : '')
+      }
       ${newsNoticeSection()}
+      ${newsSectionHead('使用指南', '上手、各页面与设置开关，点开看详情')}
+      ${newsGuideGrid(guides)}
+      ${newsSectionHead('版本更新日志', '每一版改了什么，旧版本可展开')}
+      ${newsTimeline(releases.slice(1), { collapsed: true })}`;
+  }
+
+  return `
+    <div class="page nd-page">
+      <div class="page-head nd-head">
+        <div>
+          <div class="eyebrow">${PAGE_META.news.eyebrow}</div>
+          <h1>动态</h1>
+          <p class="sub">各游戏官方公告置顶更新，往下是公告面板、使用指南和版本更新日志。</p>
+        </div>
+        ${newsTabsMarkup()}
+      </div>
+      ${body}
     </div>`;
 }
 
@@ -7573,37 +11801,38 @@ function newsUpdateSection() {
 
 
 /**
- * 动态页底部内嵌的官方公告。
- * 原来是独立的一页，但两者都是「读一读最近发生了什么」，
- * 合并后少一个导航项，也不用在两个页面之间来回跳。
+ * 动态页的「各游戏动态面板」：想按游戏浏览全量公告时展开。
+ * 默认折叠成一行——置顶区已经露出最新动态，全量卡片只在需要时打开，
+ * 不然整页要滑很久。
  */
 function newsNoticeSection() {
   const games = state.games.filter((game) => game.builtinKey);
   if (!games.length) return '';
   const updated = state.noticeBoardUpdatedAt
-    ? `更新于 ${new Date(state.noticeBoardUpdatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+    ? `同步于 ${new Date(state.noticeBoardUpdatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
     : '等待首次同步';
   return `
-    <section class="news-notices">
-      <div class="section-head">
-        <div>
-          <h3>官方公告</h3>
-          <p>各游戏官网的最新公告，每 10 分钟自动同步</p>
-        </div>
-        <span class="news-notice-actions">
-          <span class="notice-sync-status"><span class="notice-sync-dot"></span>${updated}</span>
+    <details class="news-notices-box">
+      <summary>
+        <span class="news-notices-summary-main">${icon('news', 'xs')} 各游戏公告 · ${games.length} 款游戏</span>
+        <span class="news-notices-summary-side">${esc(updated)} · 展开按游戏浏览 ${icon('chevron-down', 'xs')}</span>
+      </summary>
+      <div class="news-notices-body">
+        ${
+          state.noticeBoardError
+            ? `<div class="notice-error">${icon('info', 'xs')} ${esc(state.noticeBoardError)}</div>`
+            : ''
+        }
+        <div class="news-notice-actions">
+          <span class="notice-sync-status"><span class="notice-sync-dot"></span>${esc(updated)} · 每 10 分钟自动同步</span>
           <button class="link-btn" data-action="refresh-notices" ${state.noticeBoardLoading ? 'disabled' : ''}>
             ${icon('refresh', 'xs')}${state.noticeBoardLoading ? '同步中' : '刷新'}
           </button>
-        </span>
+        </div>
+        <div class="notice-grid compact">${games.map((game) => noticeGameCard(game)).join('')}</div>
+        <p class="notice-footnote">公告来自各游戏官方网站，仅作浏览入口；内容与时间以官方页面为准。</p>
       </div>
-      ${
-        state.noticeBoardError
-          ? `<div class="notice-error">${icon('info', 'xs')} ${esc(state.noticeBoardError)}</div>`
-          : ''
-      }
-      <div class="notice-grid compact">${games.map((game) => noticeGameCard(game)).join('')}</div>
-    </section>`;
+    </details>`;
 }
 /* ------------------------------------------------------------------ */
 /* official announcements                                              */
@@ -7645,6 +11874,32 @@ function noticeMeta(notice) {
   if (date) return date;
   const type = String(notice.type || '').trim();
   return NOTICE_TYPE_LABELS[type] || (type && !type.startsWith('POST_TYPE_') ? type : '官方公告');
+}
+
+/** 公告的类型中文标签：POST_TYPE_* 走映射表，主进程已翻成中文的直接用。 */
+function noticeTypeLabel(notice) {
+  const type = String(notice?.type || '').trim();
+  return NOTICE_TYPE_LABELS[type] || (type && !type.startsWith('POST_TYPE_') ? type : '');
+}
+
+/** 公告可排序时间戳：date 形如 YYYY-MM-DD / YYYY.MM.DD；解析不出返回 0（排最后）。 */
+function noticeSortTime(notice) {
+  const match = String(notice?.date || '').match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if (!match) return 0;
+  const time = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+/** 把 noticeBoard 摊平成带游戏信息的公告条目，按日期倒序（缺日期排最后）。 */
+function noticeEntries() {
+  const entries = [];
+  for (const game of state.games.filter((item) => item.builtinKey)) {
+    const notices = Array.isArray(state.noticeBoard[game.builtinKey]) ? state.noticeBoard[game.builtinKey] : [];
+    for (const notice of notices) {
+      if (notice?.title && notice?.link) entries.push({ notice, game });
+    }
+  }
+  return entries.sort((a, b) => noticeSortTime(b.notice) - noticeSortTime(a.notice));
 }
 
 function noticeSite(game) {
@@ -7777,6 +12032,57 @@ function soundSwitchMarkup(key, value) {
   return `<button class="switch ${value ? 'on' : ''}" role="switch" aria-checked="${Boolean(value)}" data-action="toggle-sound" data-key="${key}" title="${value ? '关闭' : '开启'}"></button>`;
 }
 
+/**
+ * 就地刷新一个开关的视觉和语义状态。
+ *
+ * 以前点开关走的是「改状态 → 等主进程回推 state → onState 整页 innerHTML 重绘」：
+ * 重绘出来的按钮从出生起就是新状态，CSS transition 没有起点，滑块只会瞬移，
+ * 用户看着就是「点了没反应」。这里改成直接在原节点上切 on / aria-checked，
+ * 位移过渡才真的跑得起来。
+ */
+function paintSwitch(element, on) {
+  if (!element) return;
+  const next = Boolean(on);
+  element.classList.toggle('on', next);
+  element.setAttribute('aria-checked', next ? 'true' : 'false');
+  element.title = next ? '关闭' : '开启';
+}
+
+/** 同一个开关可能在界面上出现两处（设置页 / 点歌台），一起就地刷新。 */
+function paintSwitches(action, on) {
+  document.querySelectorAll(`[data-action="${action}"]`).forEach((node) => paintSwitch(node, on));
+}
+
+/** 设置对象的内容指纹：键名排序后再比，免得两边插入顺序不同就对不上。 */
+function settingsSignature(settings) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  return JSON.stringify(Object.keys(source).sort().map((key) => [key, source[key]]));
+}
+
+/*
+ * 开关就地改完之后，主进程会回推一份内容相同的设置。那份回推如果触发整页
+ * 重绘，刚跑起来的滑块动画会被掐断（新节点一出生就是终态），所以这里先记下
+ * 「这份设置是我自己改的」，onState 收到就用不着重绘了。
+ */
+let settingsEcho = null;
+
+function expectSettingsEcho(settings) {
+  settingsEcho = { signature: settingsSignature(settings), at: Date.now() };
+}
+
+function consumeSettingsEcho(settings) {
+  if (!settingsEcho) return false;
+  // 过期了就丢掉，别让一次登记长期压着重绘
+  if (Date.now() - settingsEcho.at >= 4000) {
+    settingsEcho = null;
+    return false;
+  }
+  // 不是这次的回推（例如下载进度的例行推送）：指纹留着，等真正那份回来
+  if (settingsEcho.signature !== settingsSignature(settings)) return false;
+  settingsEcho = null;
+  return true;
+}
+
 /** 真正落地一个缩放比例：写设置、写本地记忆、通知主进程。 */
 async function setUiScale(value, options = {}) {
   const scale = normalizeUiScale(value);
@@ -7829,11 +12135,19 @@ const SETTINGS_TABS = [
   ['appearance', '外观', 'sparkle', '主题、强调色、称呼、头像和界面缩放'],
   ['window', '窗口', 'image', '窗口材质、自定义背景与透明度'],
   ['sound', '音效', 'volume', '界面反馈音、试听与音乐行为'],
-  ['behavior', '行为', 'settings', '托盘、开机自启、帧率与自动同步'],
+  ['behavior', '行为', 'settings', '托盘、开机自启与自动同步'],
   ['storage', '存储', 'folder-open', '下载目录、运行时与终末地渠道包'],
   ['update', '更新', 'download', '更新源、自动检查与手动更新'],
+  ['community', '社区', 'link', '项目主页、发布页与问题反馈'],
   ['about', '关于', 'info', '版本信息与相关链接'],
 ];
+
+/** 把 process.platform 翻成人看的名字，写进反馈用的那段环境信息里。 */
+function platformText() {
+  const key = String((state.app && state.app.platform) || '').toLowerCase();
+  const map = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
+  return map[key] || key || '未知';
+}
 
 function settingsTab() {
   let key = state.settingsTab;
@@ -7845,6 +12159,28 @@ function settingsTab() {
     }
   }
   return SETTINGS_TABS.some((tab) => tab[0] === key) ? key : 'appearance';
+}
+
+/*
+ * 米哈游系游戏（原神 / 星穹铁道 / 绝区零 / 崩坏3）的语音包语言，顺序固定
+ * （和 electron/sophon.js 的 AUDIO_LANGUAGES 一致）。每种配音都要好几个 GB，
+ * 默认只要中文，想听其它配音再勾。
+ * 注意：终末地不适用这项设置——它的语音在 Unity bundle 里，官方清单没给可裁剪
+ * 粒度（实测 EndOfficial 清单 1688 个文件 / 63.58GB 全是 VFS .chk），只能整包下载。
+ */
+const AUDIO_LANGUAGE_LABELS = [
+  ['zh-cn', '中文'],
+  ['en-us', '英语'],
+  ['ja-jp', '日语'],
+  ['ko-kr', '韩语'],
+];
+
+function audioLanguagesOf() {
+  const raw = state.settings?.audioLanguages;
+  const list = Array.isArray(raw) ? raw.map((item) => String(item || '').toLowerCase()) : [];
+  const picked = AUDIO_LANGUAGE_LABELS.map(([key]) => key).filter((key) => list.includes(key));
+  // 没勾过或勾了不认识的，退回只要中文
+  return picked.length ? picked : ['zh-cn'];
 }
 
 function settingsView() {
@@ -7923,6 +12259,18 @@ function settingsView() {
               <span class="avatar avatar-preview">${avatarContent(settings)}</span>
               <button class="btn btn-ghost" data-action="change-avatar">${icon('image')}更换</button>
               ${settings.avatar ? `<button class="btn btn-quiet" data-action="reset-avatar">恢复默认</button>` : ''}
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>页面装饰挂饰</strong><span>在启动页以外的页面，角落悬挂花火狐面、火花礼帽，并漂浮烟花 / 火焰 / 星空小精灵。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.charms !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charms !== false}" data-action="toggle-charms" title="${state.settings.charms !== false ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>角色背景水印</strong><span>在页面右下角铺一层淡淡的火花角色立绘水印，很淡、不挡阅读；可单独关闭。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.charBg !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charBg !== false}" data-action="toggle-charbg" title="${state.settings.charBg !== false ? '关闭' : '开启'}"></button>
             </div>
           </div>
         </section>
@@ -8049,7 +12397,7 @@ function settingsView() {
 
         <section class="${group('behavior', true)}" ${groupAttr('behavior')}>
           <h2>${icon('settings')}行为</h2>
-          <p class="desc">托盘、开机自启、帧率、自动同步等。</p>
+          <p class="desc">托盘、开机自启、自动同步等。游戏帧率请到「工具 → 对应游戏 → 画质配置」调整。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>关闭时收进托盘</strong><span>点击关闭按钮后继续在后台运行，双击托盘图标可以回来。</span></div>
             <div class="setting-control">${switchMarkup('closeToTray', settings.closeToTray)}</div>
@@ -8065,19 +12413,6 @@ function settingsView() {
           <div class="setting-row">
             <div class="setting-copy"><strong>异环通过官方启动器启动</strong><span>默认点击后打开 NTELauncher.exe，由官方处理版本更新和登录；关闭后直接启动 HTGame.exe。</span></div>
             <div class="setting-control">${switchMarkup('nevernessUseOfficialLauncher', settings.nevernessUseOfficialLauncher !== false)}</div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>星穹铁道帧率</strong><span>写入星铁本地画质配置，可选 30 / 60 / 120 FPS。改 120 前请先退出游戏；游戏内画质预设会被改成自定义。</span></div>
-            <div class="setting-control">
-              <div class="segmented">
-                ${[30, 60, 120]
-                  .map(
-                    (fps) =>
-                      `<button class="${Number(state.starrailFps) === fps ? 'active' : ''}" data-action="set-starrail-fps" data-value="${fps}">${fps} FPS</button>`
-                  )
-                  .join('')}
-              </div>
-            </div>
           </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、星穹铁道、绝区零、终末地的启动程序。</span></div>
@@ -8096,6 +12431,33 @@ function settingsView() {
         <section class="${group('storage', true)}" ${groupAttr('storage')}>
           <h2>${icon('folder-open')}存储</h2>
           <p class="desc">下载、运行时、终末地渠道包与管理员权限。</p>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>语音包语言</strong><span>只下载勾中的配音，默认只要中文；改完下次更新或安装时生效，已经下好的不会立刻删。仅对原神 / 星穹铁道 / 绝区零 / 崩坏3 生效——终末地的语音藏在 Unity 资源包里，官方没有拆分粒度，只能跟着整包一起下。</span></div>
+            <div class="setting-control">
+              <div class="segmented">
+                ${(() => {
+                  const on = audioLanguagesOf();
+                  return AUDIO_LANGUAGE_LABELS
+                    .map(([key, label]) => `<button class="${on.includes(key) ? 'active' : ''}" data-action="toggle-audio-language" data-value="${key}">${label}</button>`)
+                    .join('');
+                })()}
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>剧情资源 / 主线动画（绝区零约 19.7GB）</strong>
+              <span>预下载和安装时把主线剧情、个人线、影像档案这些分类包一起下。<strong>不勾只是缺剧情动画，不影响进游戏</strong>；勾上要多占近 20GB。只对绝区零有意义——原神和星穹铁道的官方清单里实测分类包数为 0，这个开关对它们没有作用。</span>
+            </div>
+            <div class="setting-control">${switchMarkup('includeStoryResources', settings.includeStoryResources === true)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>更新时用本地补丁省流（LDIFF）</strong>
+              <span>原神 / 星穹铁道更新时，官方会额外给一份「从你当前版本到新版本」的差分补丁。开启后先用补丁就地修补本地文件，剩下的才走分块下载——实测原神 7.0.0 → 7.1.0 能省约 75% 流量。代价是它会在更新过程中直接改写游戏文件，如果中途断网会留下「补了一半」的状态，重新更新一次能自动接上，也可以用「检查完整资源」修复。绝区零官方没开这个能力，对它无效。</span>
+            </div>
+            <div class="setting-control">${switchMarkup('enableLdiff', settings.enableLdiff !== false)}</div>
+          </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
             <div class="setting-control">
@@ -8200,6 +12562,36 @@ function settingsView() {
           ${state.update && state.update.downloading ? `<div class="update-progress"><div class="update-progress-bar"><span style="width:${Number(state.update.percent) || 0}%"></span></div><small>正在下载 ${Number(state.update.percent) || 0}%</small></div>` : ''}
         </section>
 
+        <section class="${group('community')}" ${groupAttr('community')}>
+          <h2>${icon('link')}项目主页与反馈</h2>
+          <p class="desc">源码、版本说明、已知问题都放在项目仓库里；有 bug 或者想要新功能，从下面的「问题反馈」进去写，会直接带上你现在用的版本号。</p>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>项目主页</strong>
+              <span>GitHub 仓库，README 里有上手说明，发版页能翻到每一个版本的更新内容。</span>
+            </div>
+            <div class="setting-control update-action-control">
+              <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_URL}" title="${REPO_URL}">${icon('external')}打开项目主页</button>
+              <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_RELEASES_URL}" title="${REPO_RELEASES_URL}">${icon('external')}打开发布页</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>问题反馈</strong>
+              <span>写一个 issue：说清楚哪一步出的问题、期望是什么、实际是什么。带上启动器的版本和系统版本，定位会快很多。</span>
+            </div>
+            <div class="setting-control update-action-control">
+              <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_FEEDBACK_URL()}" title="${REPO_NEW_ISSUE_URL}">${icon('external')}提交问题</button>
+            </div>
+          </div>
+          <div class="setting-row" style="border-bottom:0">
+            <div class="setting-copy">
+              <strong>反馈时附上这些信息</strong>
+              <span>启动器版本 <code>${esc((state.app && state.app.version) || '未知')}</code> · Electron <code>${esc((state.app && state.app.electron) || '未知')}</code> · 系统 <code>${esc(platformText())}</code>。上面那段可以直接复制进 issue 里。</span>
+            </div>
+          </div>
+        </section>
+
         <section class="${group('about', true)}" ${groupAttr('about')}>
           <h2>${icon('info')}关于</h2>
           <p class="desc">一个本地优先的桌面游戏书架。</p>
@@ -8257,9 +12649,6 @@ function bindView() {
       { once: true }
     );
   });
-  document.querySelectorAll('img[data-gacha-icon]').forEach((img) => {
-    img.addEventListener('error', () => img.remove(), { once: true });
-  });
   // 战绩页的角色头像是外链，挂掉时留一个占位方块而不是显示破图标
   document.querySelectorAll('img[data-record-avatar]').forEach((img) => {
     img.addEventListener(
@@ -8267,6 +12656,24 @@ function bindView() {
       () => {
         img.classList.add('is-broken');
         img.removeAttribute('src');
+      },
+      { once: true }
+    );
+  });
+  // 抽卡记录的五星头像同样是外链，挂掉时隐藏图片，露出底下的字牌
+  document.querySelectorAll('img[data-gacha-avatar]').forEach((img) => {
+    img.addEventListener(
+      'error',
+      () => {
+        const holder = img.closest('.gacha-avatar') || img.closest('.gacha-tile');
+        if (!holder) return;
+        if (holder.classList.contains('gacha-tile')) {
+          holder.classList.add('is-blank');
+          holder.innerHTML = '<span class="gacha-tile-blank">星</span>';
+        } else {
+          holder.classList.add('is-blank');
+          holder.textContent = '星';
+        }
       },
       { once: true }
     );
@@ -8312,6 +12719,27 @@ function bindView() {
       }
     });
   }
+
+  /*
+   * 队列过滤框：输入即过滤。这里只重绘 .song-list 这一小块，
+   * 输入框和焦点原地不动；折叠状态在过滤时会被忽略（一律全展开）。
+   */
+  const queueFilterInput = document.querySelector('#song-queue-filter');
+  if (queueFilterInput) {
+    queueFilterInput.addEventListener('input', () => {
+      state.queueFilter = queueFilterInput.value;
+      const list = document.querySelector('#song-queue .song-list');
+      if (list) {
+        list.innerHTML = songQueueRowsMarkup() ||
+          `<div class="song-empty">${icon('search')}<strong>没有匹配的队列歌曲</strong><span>换个关键字，或者点右侧的 × 清空过滤。</span></div>`;
+        bindCoverFallbacks(list);
+      }
+      // 过滤词出现/消失会切换清除按钮，重绘过滤条之外不动输入框
+      const wrap = document.querySelector('#song-queue');
+      const clearBtn = wrap?.querySelector('.song-queue-filter-clear');
+      if (clearBtn) clearBtn.hidden = !state.queueFilter;
+    });
+  }
   const songSearchPlatform = document.querySelector('#song-search-platform');
   if (songSearchPlatform) {
     songSearchPlatform.addEventListener('change', () => {
@@ -8353,7 +12781,6 @@ function bindView() {
   if (accountSelect) {
     accountSelect.addEventListener('change', () => {
       state.gachaUid = accountSelect.value;
-      state.gachaTab = 'overview';
       state.gachaScope = 'all';
       render({ preserveScroll: true });
     });
@@ -8452,6 +12879,7 @@ function bindView() {
   syncVolumeUi();
   applyAudioFx();
   restoreStartVideoState();
+  startStartRunningTimer();
   bindSongLyrics();
 }
 
@@ -8503,6 +12931,8 @@ async function handleAction(action, id, element, event = null) {
       const next = element.dataset.value || 'queue';
       state.songTab = next;
       localStorage.setItem('vela:song-tab', next);
+      // 离开「我的歌单」时退出钻取态：再切回来应该看到卡片墙，而不是上次那张歌单
+      if (next !== 'mine') state.myPlaylists.detail = null;
       render({ preserveScroll: true });
       if (next === 'charts' && !(state.charts.list || []).length && !state.charts.loading) {
         handleAction('chart-platform', { dataset: { value: state.charts.platform || 'all' } });
@@ -8510,14 +12940,22 @@ async function handleAction(action, id, element, event = null) {
       if (next === 'mine') {
         // 「我的歌单」按平台分区显示所有已登录平台的歌单，不再只挑一个平台。
         // 已经有缓存就别重新拉：切走再切回还触发一次全量读取，卡顿又浪费。
-        // 登录成功或手动点刷新会自己清缓存（见 syncPlaylistsAfterLogin / my-playlists-reload）。
-        if (!state.myPlaylists.groups?.length) loadAllPlaylists();
+        // 登录成功或手动点「同步全部」会自己重拉（见 syncPlaylistsAfterLogin / syncAllPlaylists）。
+        if (!state.myPlaylists.groups?.length) {
+          /*
+           * 内存空有两种情况：第一次用（盘上也没缓存），或者 refreshMusicLogin 还没跑完
+           * 把磁盘缓存灌进来。先问一次缓存，真没有才去拉四家平台。
+           */
+          hydratePlaylistsFromCache().then((filled) => {
+            if (!filled) loadAllPlaylists();
+          });
+        }
       }
       break;
     }
     case 'music-account-login': {
       const platform = element.dataset.platform || 'qq';
-      const label = platform === 'qq' ? 'QQ 音乐' : '酷狗';
+      const label = platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '酷狗';
       closeModal();
       toast(`${label} 登录窗口已打开，扫码后会自动保存`, 'info');
       try {
@@ -8541,13 +12979,15 @@ async function handleAction(action, id, element, event = null) {
     }
     case 'music-account-logout': {
       const platform = element.dataset.platform || 'qq';
-      const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : '酷狗';
+      const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '酷狗';
       try {
         await api.musicLogout(platform);
         await refreshMusicLogin();
         invalidateAllPlaylists();
         toast(`已退出 ${label}`, 'success');
         if (state.route === 'song') render({ preserveScroll: true });
+        // 账号弹窗还开着的话，把它刷回最新状态（否则那一行还写着「已登录」）
+        refreshMusicAccountsModal();
       } catch (error) {
         toast(humanError(error), 'error');
       }
@@ -8556,46 +12996,15 @@ async function handleAction(action, id, element, event = null) {
     case 'netease-login':
       openMusicAccountsModal('netease');
       break;
-    case 'import-netease': {
-      const defaultApi = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
-      openModal(`
-        <div class="modal-head"><div><h2>导入网易云歌单</h2><p>需要本机运行兼容 NeteaseCloudMusicApi 的本地服务，并先在服务里登录。</p></div><button class="icon-btn" data-close>${icon('x')}</button></div>
-        <form class="modal-body" id="netease-form">
-          <label class="field"><span>本地 API 地址</span><input class="text-input" name="apiBase" value="${esc(defaultApi)}" placeholder="http://127.0.0.1:3100" required /></label>
-          <label class="field"><span>歌单链接</span><input class="text-input" name="url" placeholder="https://music.163.com/#/playlist?id=..." required /></label>
-          <p class="form-hint">只读取歌单和可播放地址，不保存网易云账号密码；VIP/版权歌曲可能没有地址。</p>
-          <div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>取消</button><button class="btn btn-primary" type="submit">导入</button></div>
-        </form>
-      `);
-      const form = document.querySelector('#netease-form');
-      form?.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const data = new FormData(form);
-        const apiBase = String(data.get('apiBase') || '').trim();
-        const url = String(data.get('url') || '').trim();
-        const submit = form.querySelector('button[type="submit"]');
-        if (submit) submit.disabled = true;
-        try {
-          localStorage.setItem('vela:netease-api', apiBase);
-          const result = await api.neteasePlaylist({ apiBase, url, level: state.songQuality });
-          state.songs.push(...result.songs);
-          state.songIndex = Math.max(0, state.songs.length - result.songs.length);
-          saveSongs();
-          closeModal();
-          render({ preserveScroll: true });
-          toast(
-            `已导入「${result.playlist}」${result.songs.length} 首${result.skipped ? `，跳过 ${result.skipped} 首无版权/无地址` : ''}`,
-            'success'
-          );
-          playCurrentSong();
-        } catch (error) {
-          toast(`网易云歌单导入失败：${error.message}`, 'error');
-          if (submit) submit.disabled = false;
-        }
-      });
+    case 'import-playlist-link': {
+      // 从别的弹窗（比如酷狗登录面板那条兜底说明）点进来时，先把那层收掉，别叠两个
+      if (document.body.classList.contains('modal-open')) closeModal();
+      openImportPlaylistModal();
       break;
     }
     case 'add-song-file': {
+      // 从「添加歌曲」弹窗里点进来的，先把弹窗收掉，别让选文件对话框和弹窗叠在一起
+      if (document.body.classList.contains('modal-open')) closeModal();
       const source = await api.pick.audio();
       if (!source) break;
       const url = await api.mediaUrl(source);
@@ -8607,32 +13016,20 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'add-song-link': {
-      openModal(`
-        <div class="modal-head"><div><h2>添加歌曲链接</h2><p>支持 http / https 音频直链。</p></div><button class="icon-btn" data-close>${icon('x')}</button></div>
-        <form class="modal-body" id="song-link-form">
-          <label class="field"><span>歌名</span><input class="text-input" name="title" placeholder="例如：夜航星" required /></label>
-          <label class="field"><span>音频地址</span><input class="text-input" name="url" placeholder="https://.../song.mp3" required /></label>
-          <div class="modal-actions"><button type="button" class="btn btn-ghost" data-close>取消</button><button class="btn btn-primary" type="submit">加入歌单</button></div>
-        </form>
-      `);
-      const form = document.querySelector('#song-link-form');
-      form?.addEventListener('submit', (event) => {
-        event.preventDefault();
-        const data = new FormData(form);
-        const title = String(data.get('title') || '').trim();
-        const url = String(data.get('url') || '').trim();
-        if (!title || !/^https?:\/\//i.test(url)) return;
-        state.songs.push({ title, url });
-        state.songIndex = state.songs.length - 1;
-        saveSongs();
-        closeModal();
-        render({ preserveScroll: true });
-        playCurrentSong();
-      });
+      openAddSongLinkModal();
       break;
     }
     case 'my-playlist-open': {
       await openMyPlaylist(element.dataset.platform || '', element.dataset.id || '');
+      break;
+    }
+    case 'my-playlist-tab': {
+      state.myPlaylists.activeTab = element.dataset.value || '';
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'my-playlist-play': {
+      await playPlaylist(element.dataset.platform || '', element.dataset.id || '');
       break;
     }
     case 'my-playlist-close': {
@@ -8644,22 +13041,98 @@ async function handleAction(action, id, element, event = null) {
       const index = Number(element.dataset.index) || 0;
       const song = (state.myPlaylists.detail?.songs || [])[index];
       if (!song) break;
-      const ok = await addChartSongToQueue(song, { silent: true });
+      const ok = await addChartSongToQueue(song, { silent: true, platform: element.dataset.platform || '' });
       toast(ok ? `已加入：${song.title}` : `「${song.title}」暂时找不到可播放版本`, ok ? 'success' : 'info');
       break;
     }
     case 'my-playlist-import': {
-      const songs = (state.myPlaylists.detail?.songs || []).slice(0, 10);
+      const groupPlatform = element.dataset.platform || '';
+      const songs = state.myPlaylists.detail?.songs || [];
       if (!songs.length) break;
-      toast(`正在把 ${songs.length} 首加进点歌队列…`, 'info');
-      let added = 0;
-      for (const song of songs) {
-        if (await addChartSongToQueue(song, { silent: true })) added += 1;
-      }
+      const added = await addSongsToQueue(songs, {
+        platform: groupPlatform,
+        label: '加入点歌队列',
+        origin: 'playlist',
+        from: state.myPlaylists.detail?.name || '歌单',
+      });
       toast(
         added ? `已加入 ${added} 首（其余在网易云没有可播版本）` : '这些曲目在网易云没有可播版本',
         added ? 'success' : 'info'
       );
+      break;
+    }
+    /* 语音包语言：多选，但至少留一种 —— 一种都不下游戏里就是哑的 */
+    case 'toggle-audio-language': {
+      const lang = String(element?.dataset?.value || '').toLowerCase();
+      if (!lang) break;
+      const on = audioLanguagesOf();
+      let next;
+      if (on.includes(lang)) {
+        if (on.length === 1) {
+          toast('至少要留一种语音包', 'info');
+          break;
+        }
+        next = on.filter((item) => item !== lang);
+      } else {
+        // 按固定顺序排回去，免得数组顺序随点击变、界面上按钮跳来跳去
+        next = AUDIO_LANGUAGE_LABELS.map(([key]) => key).filter((key) => key === lang || on.includes(key));
+      }
+      state.settings.audioLanguages = next;
+      await api.updateSettings({ audioLanguages: next });
+      if (state.route === 'settings') render({ preserveScroll: true });
+      break;
+    }
+    /* 点歌台音源：内置音源开关 / 第三方音源启停与删除
+     * 点击委托只把 data-action 和 data-id 解出来传进来，所以这里一律用 data-id。 */
+    case 'toggle-music-source': {
+      const sourceKey = String(id || '');
+      const next = Object.assign({}, musicSourceFlags());
+      next[sourceKey] = !next[sourceKey];
+      await applySettingLocally({ musicSources: next });
+      if (state.route === 'song') render({ preserveScroll: true });
+      const label = (MUSIC_SOURCE_LABELS.find((item) => item[0] === sourceKey) || [sourceKey, sourceKey])[1];
+      toast(next[sourceKey] ? `已启用 ${label} 音源` : `已停用 ${label} 音源`, 'success');
+      break;
+    }
+    case 'toggle-music-custom': {
+      const customId = String(id || '');
+      const list = musicCustomSources().map((def) =>
+        def.id === customId ? { ...def, enabled: def.enabled === false } : def
+      );
+      await applySettingLocally({ musicCustomSources: list });
+      if (state.route === 'song') render({ preserveScroll: true });
+      break;
+    }
+    case 'music-source-remove': {
+      const removeId = String(id || '');
+      const list = musicCustomSources().filter((def) => def.id !== removeId);
+      await applySettingLocally({ musicCustomSources: list });
+      if (state.route === 'song') render({ preserveScroll: true });
+      toast('已删除这个音源', 'success');
+      break;
+    }
+    case 'music-source-pick': {
+      const picker = document.querySelector('#music-source-file');
+      if (picker) picker.click();
+      else toast('找不到文件选择框，刷新一下点歌台', 'error');
+      break;
+    }
+    case 'music-source-subscribe': {
+      const row = document.querySelector('#song-source-url-row');
+      if (!row) break;
+      row.hidden = false;
+      const field = row.querySelector('#music-source-url');
+      if (field) field.focus();
+      break;
+    }
+    case 'music-source-url-go': {
+      const field = document.querySelector('#music-source-url');
+      const url = String(field?.value || '').trim();
+      if (!url) {
+        toast('先填订阅地址', 'info');
+        break;
+      }
+      await importMusicSource({ url });
       break;
     }
     case 'toggle-auto-resume': {
@@ -8669,7 +13142,8 @@ async function handleAction(action, id, element, event = null) {
       } catch {
         /* 可选记忆 */
       }
-      render({ preserveScroll: true });
+      // 就地切状态：整页重绘会让滑块直接从终点出现，看不到位移过程
+      paintSwitches('toggle-auto-resume', state.autoResumeSong);
       toast(
         state.autoResumeSong
           ? '已开启：打开启动器会自动继续上次的音乐'
@@ -8679,8 +13153,30 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'my-playlists-reload': {
-      invalidateAllPlaylists();
-      await loadAllPlaylists(true);
+      // 老按钮走同一条路：一次请求拉全部平台，不再只刷某一个
+      await syncAllPlaylists();
+      break;
+    }
+    case 'music-sync-one': {
+      // 只同步按钮所在的那一个平台，其它平台的数据一动不动
+      await syncOnePlaylist(element.dataset.platform || '');
+      break;
+    }
+    case 'music-sync-all': {
+      await syncAllPlaylists();
+      break;
+    }
+    case 'plaza-platform': {
+      state.myPlaylists.plazaPlatform = element.dataset.value || 'netease';
+      await ensurePlaza(state.myPlaylists.plazaPlatform);
+      break;
+    }
+    case 'plaza-more': {
+      await plazaMore(element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease');
+      break;
+    }
+    case 'plaza-retry': {
+      await ensurePlaza(element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease', true);
       break;
     }
     case 'chart-platform': {
@@ -8731,6 +13227,7 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'chart-to-netease': {
+      const chartPlatform = state.charts.platform && state.charts.platform !== 'all' ? state.charts.platform : (state.charts.detail?.platform || element.dataset.platform || '');
       const index = Number(element.dataset.index) || 0;
       const chartSongs = state.charts.detail?.songs || [];
       const song = chartSongs[index];
@@ -8741,7 +13238,7 @@ async function handleAction(action, id, element, event = null) {
       const base = state.songs.length;
       let added = 0;
       for (const item of rest) {
-        if (await addChartSongToQueue(item, { silent: true })) added += 1;
+        if (await addChartSongToQueue(item, { silent: true, platform: item.platform || chartPlatform })) added += 1;
       }
       if (added) {
         state.songIndex = base;
@@ -8759,18 +13256,15 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'chart-import': {
-      const songs = (state.charts.detail?.songs || []).slice(0, 10);
+      const songs = state.charts.detail?.songs || [];
       if (!songs.length) break;
-      toast(`正在把 ${songs.length} 首转成网易云曲目…`, 'info');
-      let added = 0;
-      for (const song of songs) {
-        if (await addChartSongToQueue(song, { silent: true })) added += 1;
-      }
+      const added = await addSongsToQueue(songs, { label: '转成网易云曲目' });
       toast(added ? `已加入 ${added} 首（其余在网易云没有可播版本）` : '这些曲目在网易云没有可播版本', added ? 'success' : 'info');
       break;
     }
     case 'live-connect': {
-      const url = document.querySelector('#live-room-input')?.value?.trim() || '';
+      // 历史芯片自带 data-url（点击直接重连）；普通「连接」按钮读输入框
+      const url = element.dataset.url || document.querySelector('#live-room-input')?.value?.trim() || '';
       if (!url) {
         toast('先粘贴直播间链接或房间号（B站 / 斗鱼 / 虎牙 / 抖音 / 快手等）', 'info');
         break;
@@ -8779,7 +13273,27 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'live-disconnect':
+      // 卡片上的「断开」：只关这一路（房间 id 放在 data-id 上）
+      disconnectLiveRoom(id);
+      break;
+    case 'bili-login': {
+      // B站登录窗口：登录 cookie 落在主会话里，弹幕鉴权马上能用；成功后重连即可
+      const loginResult = await api.live.biliLogin().catch((error) => ({ ok: false, reason: humanError(error) }));
+      if (loginResult?.ok) {
+        toast('B站账号已登录，重新连接直播间即可', 'success');
+      } else if (loginResult?.reason && loginResult.reason !== '窗口已关闭') {
+        toast(loginResult.reason, 'info');
+      }
+      if (state.route === 'song') render({ preserveScroll: true });
+      break;
+    }
+    case 'live-disconnect-all':
       disconnectBiliLive();
+      break;
+    case 'live-song-mode':
+      localStorage.setItem('vela:live-song-mode', id === 'now' ? 'now' : 'next');
+      toast(`观众点歌将${id === 'now' ? '立即切过去播放' : '排在当前歌曲后面当下一个放'}`, 'info');
+      render({ preserveScroll: true });
       break;
     case 'mini-expand':
       setMiniExpanded(true);
@@ -8832,13 +13346,16 @@ async function handleAction(action, id, element, event = null) {
       }
       // 关掉就等于关掉总开关：不然切一趟点歌台再回来，它又会自己冒出来
       setMiniEnabled(false);
+      // 总开关被关了，界面上的小播放器开关也要跟着回到关位
+      paintSwitches('toggle-mini-player', false);
       toast('小播放器已关闭，可在「设置 → 声音」或点歌台重新打开', 'info');
       break;
     }
     case 'toggle-mini-player': {
       const next = !isMiniEnabled();
       setMiniEnabled(next);
-      if (state.route === 'settings' || state.route === 'song') render({ preserveScroll: true });
+      // 就地切状态：整页重绘会让滑块直接从终点出现，看不到位移过程
+      paintSwitches('toggle-mini-player', next);
       toast(next ? '小播放器已打开' : '小播放器已关闭', next ? 'success' : 'info');
       break;
     }
@@ -8864,6 +13381,32 @@ async function handleAction(action, id, element, event = null) {
       await ensureSongQuality(state.songs[state.songIndex]);
       render({ preserveScroll: true });
       playCurrentSong();
+      break;
+    }
+    case 'queue-seg-toggle': {
+      /*
+       * 队列段的展开 / 收起。段序号在队列增删后会漂移，但折叠只是显示层
+       * 的记忆，漂了也不影响行号映射（data-index 始终是全局真实下标）。
+       *
+       * 展开与否要看「实际生效值」再取反：含当前播放的段默认是展开的
+       * （state 里还没记），这时点一下应该是收起，而不是把 undefined 取反成 true。
+       */
+      const segIdx = Number(element.dataset.seg) || 0;
+      const segments = songQueueSegments();
+      const seg = segments[segIdx];
+      if (!seg) break;
+      let start = 0;
+      for (let i = 0; i < segIdx; i += 1) start += segments[i].items.length;
+      const hasCurrent = state.songIndex >= start && state.songIndex < start + seg.items.length;
+      const effective =
+        state.queueExpanded[segIdx] !== undefined ? state.queueExpanded[segIdx] : hasCurrent;
+      state.queueExpanded[segIdx] = !effective;
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'queue-filter-clear': {
+      state.queueFilter = '';
+      render({ preserveScroll: true });
       break;
     }
     case 'song-play': {
@@ -8999,6 +13542,21 @@ async function handleAction(action, id, element, event = null) {
         openStartServerManager(gameId);
         break;
       }
+      /*
+       * 异环的「服务器」其实是同一个客户端的渠道（官服/B服），真正生效的是
+       * Config.ini 里的渠道配置——所以在 dock 里点服务器时要顺手把渠道也切了，
+       * 不用再钻进服务器管理面板。
+       */
+      if (
+        game.builtinKey === 'neverness' &&
+        ['official', 'bilibili'].includes(String(server.channel || ''))
+      ) {
+        const switched = await switchNteChannel(game, server, server.channel);
+        if (!switched) {
+          render({ preserveScroll: true });
+          break;
+        }
+      }
       try {
         await api.servers.activate({ gameId, serverId });
         toast(`已切换到 ${server.name}`, 'success');
@@ -9054,6 +13612,8 @@ async function handleAction(action, id, element, event = null) {
       closeModal();
       break;
     case 'start-detect': {
+      // 从启动页进来时先收起菜单：检测完页面会重绘，菜单留着会挡住新的服务器列表
+      closeStartServerMenu();
       const result = await api.games.detect(element.dataset.game || undefined);
       if (result.ok) toast('检测完成，服务器路径已更新', 'success');
       else toast(result.error || '没有检测到新的客户端', 'info');
@@ -9062,11 +13622,24 @@ async function handleAction(action, id, element, event = null) {
     case 'start-link': {
       const gameId = element.dataset.game;
       if (!gameId) break;
+      closeStartServerMenu();
       openLinkModal(gameId);
       break;
     }
     case 'back-home':
       navigate('home');
+      break;
+    /* 启动页唤出原生侧栏：窗口态把窗口向左外扩一块放它，扩不出去就浮在上面 */
+    case 'toggle-start-nav':
+      setStartNavOpen(!state.startNavOpen).catch(() => {});
+      break;
+    case 'close-start-nav':
+      setStartNavOpen(false).catch(() => {});
+      break;
+    /* 主页 hero「启动页」按钮升级：直接回到该游戏的启动页 */
+    case 'continue-game':
+      state.startGameId = id;
+      navigate('start');
       break;
     case 'minimize-window':
       await api.minimizeWindow();
@@ -9119,6 +13692,21 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
+    // 启动页「下载游戏」：打开一键下载弹窗（渠道 / 目录 / 空间预估 / 进度）
+    case 'download-game':
+      closeStartServerMenu();
+      openGameDownloadModal(id);
+      break;
+    // 启动页「路径选择」：复用服务器编辑弹窗，给当前（或第一个）服务器指启动程序
+    case 'start-pick-path': {
+      const game = state.games.find((item) => item.id === id);
+      const servers = (game && game.servers) || [];
+      const server = servers.find((item) => item.id === game.activeServerId) || servers[0];
+      if (!game || !server) break;
+      closeStartServerMenu();
+      openServerModal(game.id, server.id);
+      break;
+    }
     case 'detect-all': {
       const result = await api.games.detect();
       if (result.ok) {
@@ -9148,6 +13736,10 @@ async function handleAction(action, id, element, event = null) {
       if (source === 'endfield') {
         state.gachaGameKey = 'endfield';
         openGachaSyncModal();
+      } else if (source && source !== 'all') {
+        // 从具体游戏的「+」芯片进来，直接预选该游戏，导入教程立即可见
+        state.gachaGameKey = source;
+        openGachaImportModal(source);
       } else {
         openGachaImportModal();
       }
@@ -9244,21 +13836,12 @@ async function handleAction(action, id, element, event = null) {
     case 'gacha-game':
       state.gachaGameKey = element.dataset.value;
       state.gachaUid = '';
-      state.gachaTab = 'overview';
       state.gachaScope = 'all';
       gachaEnsureSelection();
       render({ preserveScroll: true });
       break;
-    case 'gacha-tab':
-      state.gachaTab = element.dataset.value || 'overview';
-      render({ preserveScroll: true });
-      break;
     case 'gacha-scope':
       state.gachaScope = element.dataset.value || 'all';
-      render({ preserveScroll: true });
-      break;
-    case 'gacha-five-filter':
-      state.gachaFiveFilter = element.dataset.value || 'all';
       render({ preserveScroll: true });
       break;
     case 'choose-gacha-db': {
@@ -9280,16 +13863,32 @@ async function handleAction(action, id, element, event = null) {
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
       if (!game || !server) break;
       if (game.builtinKey === 'endfield' && server.channel !== 'official') {
+        // 终末地：只有非官服渠道才「生成」运行时（官服直接指定官服客户端即可，见下）
         await handleAction('prepare-endfield', element.dataset.server, element);
       } else if (
         ['genshin', 'starrail', 'zzz'].includes(game.builtinKey) &&
-        ['bilibili', 'global'].includes(server.channel)
+        ['official', 'bilibili', 'global'].includes(server.channel)
       ) {
-        openSophonModal(game.id, server.id, 'prepare');
+        /*
+         * 官服也能以其它已装渠道（B服 / 国际服）当基础硬链接生成了：没官服客户端的人
+         * 再也不用卡在「只能选官服路径」的死循环上。但本机一个其它渠道都没装时，
+         * 没有可当基础的客户端，就退回「选路径」（用户已经装好官服的情况）。
+         */
+        if (server.channel === 'official' && !hasOtherInstalledServer(game, server)) {
+          openServerModal(game.id, server.id);
+        } else {
+          openSophonModal(game.id, server.id, 'prepare');
+        }
       } else {
         openServerModal(game.id, server.id);
       }
       break;
+    }
+    /** 同一游戏里，除了自己之外，还有没有别的渠道客户端（已配置 path）可当硬链接基础。 */
+    function hasOtherInstalledServer(game, server) {
+      return (game.servers || []).some(
+        (item) => item.id !== server.id && item.path && item.channel !== server.channel
+      );
     }
     case 'activate-server': {
       const result = await api.servers.activate({
@@ -9334,6 +13933,109 @@ async function handleAction(action, id, element, event = null) {
     case 'update-sophon':
       openSophonModal(element.dataset.game, element.dataset.server, 'update');
       break;
+    /* ── 预下载 ───────────────────────────────────────────────── */
+    case 'open-predownload': {
+      const game = state.games.find((item) => item.id === id);
+      const server = game && (game.servers || []).find((item) => item.id === game.activeServerId);
+      if (!game || !server) {
+        toast('这个游戏还没有可用的服务器', 'info');
+        break;
+      }
+      openPredownloadModal(game.id, server.id);
+      break;
+    }
+    case 'predownload-open':
+      openPredownloadModal(element.dataset.game, element.dataset.server);
+      break;
+    case 'predownload-check':
+      await runPredownloadCheck(element.dataset.game, element.dataset.server);
+      break;
+    case 'predownload-clear': {
+      const gameId = element.dataset.game;
+      const serverId = element.dataset.server;
+      const game = state.games.find((item) => item.id === gameId);
+      const server = game && (game.servers || []).find((item) => item.id === serverId);
+      if (!game || !server) break;
+      const ok = await confirmDialog({
+        title: '清除预下载内容',
+        message: `会删掉「${server.name}」已经下好的预下载内容（${predownloadSizeText(predownloadInfo(server)) || '预下载目录'}），游戏文件不受影响。清掉后要重新下载。`,
+        confirmText: '清除',
+        danger: true,
+      });
+      if (!ok) break;
+      try {
+        await predownloadApi().clear({ gameId, serverId });
+        toast('预下载内容已清除', 'success');
+      } catch (error) {
+        toast(humanError(error), 'error');
+      }
+      repaintServerRows();
+      if (pdModalRepaint) pdModalRepaint();
+      break;
+    }
+    /*
+     * 单个服务器覆盖「剧情分类资源包」。
+     * 就地切开关（paintSwitch）而不是整页重绘：重绘出的按钮一出生就是终态，
+     * 滑块没有起点，看着就像点了没反应。
+     */
+    case 'toggle-pd-story': {
+      const gameId = element.dataset.game;
+      const serverId = element.dataset.server;
+      const game = state.games.find((item) => item.id === gameId);
+      const server = game && (game.servers || []).find((item) => item.id === serverId);
+      if (!game || !server) break;
+      const override = storyOverride(server);
+      const on = override === null ? state.settings.includeStoryResources === true : override;
+      const next = !on;
+      paintSwitch(element, next);
+      try {
+        await predownloadApi().setStoryResources({ gameId, serverId, enabled: next });
+      } catch (error) {
+        paintSwitch(element, on);
+        toast(humanError(error), 'error');
+        break;
+      }
+      // 标签和「跟随全局」按钮就地显隐，不重建开关节点
+      const story = element.closest('.pd-story');
+      const tag = story ? story.querySelector('.pd-story-tag') : null;
+      if (tag) {
+        tag.textContent = '已单独设置';
+        tag.classList.add('is-over');
+      }
+      const reset = story ? story.querySelector('[data-action="reset-pd-story"]') : null;
+      if (reset) reset.hidden = false;
+      if (pdModalRepaint) pdModalRepaint();
+      break;
+    }
+    case 'reset-pd-story': {
+      const gameId = element.dataset.game;
+      const serverId = element.dataset.server;
+      try {
+        await predownloadApi().setStoryResources({ gameId, serverId, enabled: null });
+        toast('已改回跟随全局设置', 'info');
+      } catch (error) {
+        toast(humanError(error), 'error');
+        break;
+      }
+      // 点的是按钮不是开关，这里整块重建没问题；重建后开关落在终态，下次点仍有动画
+      if (pdModalStoryRepaint) pdModalStoryRepaint();
+      if (pdModalRepaint) pdModalRepaint();
+      break;
+    }
+    /*
+     * 异环官服 / B服：切到 B服之前必须弹一次确认，把流程四步原样摆出来，不默默切。
+     */
+    case 'nte-set-channel': {
+      const gameId = element.dataset.game;
+      const serverId = element.dataset.server;
+      const channel = element.dataset.channel || 'official';
+      const game = state.games.find((item) => item.id === gameId);
+      const server = game && (game.servers || []).find((item) => item.id === serverId);
+      if (!server) break;
+      await switchNteChannel(game, server, channel);
+      refreshNtePanel();
+      break;
+    }
     case 'restore-sophon':
       if (sophonUi) sophonUi.restore();
       break;
@@ -9417,6 +14119,25 @@ async function handleAction(action, id, element, event = null) {
       // 火花卡：去点歌台
       navigate('song');
       break;
+    case 'duo-toggle':
+      // 火花卡上的播放/暂停键：点击落在键上，不会再冒泡去开点歌台
+      playCurrentSong(true);
+      break;
+    case 'duo-next':
+    case 'duo-prev': {
+      // 火花卡上的上一首/下一首：复用点歌台的切歌逻辑，但不整页重绘
+      if (!state.songs.length) break;
+      const forward = action === 'duo-next';
+      const options = { skipRender: state.route !== 'song' };
+      if (forward && state.playMode === 'shuffle') {
+        await playSongAt(randomSongIndex(), options);
+        break;
+      }
+      const step = forward ? 1 : -1;
+      const next = (state.songIndex + step + state.songs.length) % state.songs.length;
+      await playSongAt(next, options);
+      break;
+    }
     case 'launch-game': {
       const game = state.games.find((g) => g.id === id);
       const result = await api.games.launch(id);
@@ -9590,6 +14311,55 @@ async function handleAction(action, id, element, event = null) {
     case 'open-data-folder':
       await api.openDataFolder();
       break;
+    /*
+     * 「查看日志 / 打开文件」这两个按钮以前完全没有处理分支——
+     * markup 里写了 data-action，switch 里没有 case，点下去一点反应都没有，
+     * 而设置项文案还写着「把这里的日志发回来就能定位」，等于承诺了一个不存在的功能。
+     * 主进程侧 app:open-update-log / app:read-update-log 早就写好了，缺的只是这一层接线。
+     */
+    case 'open-update-log':
+      await api.openUpdateLog();
+      break;
+    case 'view-update-log': {
+      let payload = null;
+      try {
+        payload = await api.readUpdateLog();
+      } catch (error) {
+        toast(`读取更新日志失败：${humanError(error)}`, 'error');
+        break;
+      }
+      const sections = [
+        ['update-log.txt', payload?.log],
+        ['self-heal.log', payload?.selfHeal],
+        ['update-error.json', payload?.error],
+      ].filter(([, text]) => String(text || '').trim());
+      const logBody = sections.length
+        ? sections
+            .map(
+              ([name, text]) =>
+                `<section class="ulog-block"><h3>${esc(name)}</h3><pre class="ulog-pre">${esc(String(text).trim())}</pre></section>`
+            )
+            .join('')
+        : '<p class="ulog-empty">还没有日志。只有真正跑过一次自更新（检查到新版本并覆盖过程序文件）才会有内容。</p>';
+      openModal(`
+        <div class="modal-backdrop" data-backdrop>
+          <div class="modal ulog-modal" role="dialog" aria-modal="true">
+            <div class="modal-head">
+              <div>
+                <h2>更新日志</h2>
+                <p class="ulog-path" title="${esc(payload?.dir || '')}">${esc(payload?.dir || '')}</p>
+              </div>
+              <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+            </div>
+            <div class="modal-body ulog-body">${logBody}</div>
+            <div class="modal-foot">
+              <button class="btn btn-ghost" data-action="open-update-log">${icon('folder')}打开所在文件夹</button>
+              <button class="btn btn-primary" data-close>关闭</button>
+            </div>
+          </div>
+        </div>`);
+      break;
+    }
     case 'check-update': {
       try {
         toast('正在检查更新…', 'info');
@@ -9862,7 +14632,14 @@ async function handleAction(action, id, element, event = null) {
       if (!key || !(key in state.sound)) break;
       state.sound[key] = !state.sound[key];
       saveSoundSettings();
-      render({ preserveScroll: true });
+      // 就地切状态：整页重绘出来的按钮一出生就是终态，滑块看不到位移过程
+      paintSwitch(element, state.sound[key]);
+      // 总开关关掉后「试听」三个按钮要一起置灰，同样只改这几个节点
+      if (key === 'enabled') {
+        document.querySelectorAll('[data-action="preview-sound"]').forEach((button) => {
+          button.disabled = !state.sound.enabled;
+        });
+      }
       if (key === 'enabled' && state.sound.enabled) {
         playUiSound('click', true);
       } else if (key !== 'enabled' && state.sound.enabled && state.sound[key]) {
@@ -9918,10 +14695,46 @@ async function handleAction(action, id, element, event = null) {
       const key = element.dataset.key;
       if (!key) break;
       const next = !state.settings[key];
+      state.settings = { ...state.settings, [key]: next };
+      /*
+       * 先就地切状态，再记下这份设置的指纹。主进程随后回推的同内容设置
+       * 就不整页重绘了——重绘会把刚跑起来的滑块动画掐断（新节点一出生就是终态）。
+       */
+      paintSwitch(element, next);
+      expectSettingsEcho(state.settings);
       await api.updateSettings({ [key]: next });
       if (key === 'autoUpdateEndfieldPacks' && !next) {
         toast('已关闭后台自动更新；手动更新、切换服务器和启动游戏仍然可用', 'info');
       }
+      break;
+    }
+    case 'toggle-charms': {
+      const next = !(state.settings.charms !== false);
+      paintSwitch(element, next);
+      expectSettingsEcho({ ...state.settings, charms: next });
+      await applySettingLocally({ charms: next });
+      toast(next ? '装饰挂饰已开启' : '装饰挂饰已关闭', next ? 'success' : 'info');
+      break;
+    }
+    case 'toggle-charbg': {
+      const next = !(state.settings.charBg !== false);
+      paintSwitch(element, next);
+      expectSettingsEcho({ ...state.settings, charBg: next });
+      await applySettingLocally({ charBg: next });
+      toast(next ? '角色背景水印已开启' : '角色背景水印已关闭', next ? 'success' : 'info');
+      break;
+    }
+    case 'news-tab': {
+      const next = element.dataset.value || 'all';
+      if (next !== state.newsFilter) {
+        state.newsFilter = next;
+        render({ preserveScroll: false });
+      }
+      break;
+    }
+    case 'news-toggle-releases': {
+      state.newsReleasesExpanded = !state.newsReleasesExpanded;
+      render({ preserveScroll: true });
       break;
     }
     case 'open-news':
@@ -10011,6 +14824,20 @@ async function handleAction(action, id, element, event = null) {
       await loadFeatures(true);
       if (!state.features?.error) toast('功能列表已刷新');
       break;
+    /* 2.4.0 合并自对方分支：游戏 Wiki 卡片点击，https 校验后走外部浏览器 */
+    case 'tools-wiki': {
+      const url = String(element.dataset.url || '');
+      if (!/^https:\/\//i.test(url)) {
+        toast('这个 Wiki 地址不可用', 'error');
+        break;
+      }
+      if (!window.launcher?.openExternal) {
+        toast('当前环境打不开外部浏览器', 'error');
+        break;
+      }
+      await window.launcher.openExternal(url);
+      break;
+    }
     case 'tools-open': {
       const key = element.dataset.feature || '';
       /*
@@ -10022,16 +14849,29 @@ async function handleAction(action, id, element, event = null) {
         toast('这个能力需要在游戏里或官方平台查看', 'info');
         break;
       }
+      /*
+       * 所有跳转都带上 fromTools：目标二级页的 page-head 之前会渲染
+       * 「返回工具页」条，用户不用再回侧栏找「工具」。
+       */
       if (target === 'record') {
-        // 战绩页要知道具体看哪个功能；看哪款游戏由 navigate 里按登录态自动挑
-        navigate('record', { feature: key });
+        /*
+         * 战绩页要知道具体看哪个功能；看哪款游戏由 navigate 里按登录态自动挑。
+         * 工具页「按游戏查看」点进来时带了 data-game，就按那个游戏开，
+         * 否则按游戏分别收起的分组点了也没用，还是会跳回上次的游戏。
+         */
+        const picked = element?.dataset?.game || '';
+        navigate('record', picked ? { feature: key, game: picked, fromTools: true } : { feature: key, fromTools: true });
         break;
       }
-      navigate(target);
+      navigate(target, { fromTools: true });
       if (target === 'screenshots') loadScreenshots(false);
       if (target === 'graphics') loadGraphics(state.graphicsGame);
       break;
     }
+    /* 二级页顶部「返回工具页」条的入口 */
+    case 'nav-tools':
+      navigate('tools');
+      break;
     case 'install-open-miyoushe': {
       const result = await window.launcher.install.open({ what: 'miyoushe' });
       if (!result?.ok) toast(result?.reason || '打开失败');
@@ -10078,6 +14918,280 @@ async function handleAction(action, id, element, event = null) {
       if (target) await api.screenshots.reveal(target);
       break;
     }
+    /*
+     * 画质页改一项设置。
+     *
+     * 数据全在 data-* 里：data-entry 是注册表值名，data-field 是 JSON 里的字段名
+     * （单值项时两者相同），data-value 是要写入的新值。
+     * 布尔项是按钮（data-value="true"），下拉在 change 时触发，
+     * 数字输入框先在本地记下（data-manual），按回车或离开输入框才写。
+     */
+    case 'graphics-set': {
+      const game = element.dataset.game || state.graphicsGame;
+      const entry = element.dataset.entry || '';
+      const field = element.dataset.field || '';
+      // 下拉框选完新值后，DOM 上的 value 变了但 data-value 还是渲染时的旧值，
+      // 所以 SELECT 必须读 element.value，其余控件才读 data-value。
+      const raw = element.tagName === 'SELECT' ? element.value : element.dataset.value;
+      if (!entry || !field) break;
+      /*
+       * 兜底：按钮是上一款游戏渲染出来的，而页面已经切到别的游戏了。
+       * 这条路径曾经把原神的注册表项名写进终末地的注册表项里 —— 卡片还留在 DOM 上
+       * （比如异步刷新回来晚了一拍），用户点下去就会跨游戏误写，必须直接拦掉。
+       */
+      if (element.dataset.game && element.dataset.game !== state.graphicsGame) {
+        toast('页面已切换，请重新点击', 'info');
+        break;
+      }
+      if (raw === undefined || raw === null || raw === '') {
+        toast('没有读到要写入的值，请重试', 'error');
+        break;
+      }
+
+      let value = raw;
+      if (element.tagName === 'SELECT') {
+        // 下拉的 option.value 是字符串，按字段原本的类型还原成数字 / 布尔
+        value = raw;
+        if (/^-?\d+(\.\d+)?$/.test(raw)) value = Number(raw);
+        else if (raw === 'true') value = true;
+        else if (raw === 'false') value = false;
+      } else if (element.type === 'number') {
+        const typed = Number(element.value);
+        if (!Number.isFinite(typed)) {
+          toast('这一项要填数字', 'error');
+          break;
+        }
+        value = typed;
+      } else if (raw === 'true') {
+        value = true;
+      } else if (raw === 'false') {
+        value = false;
+      }
+
+      // 给人看的名字：单值项时 field 就是注册表值名，JSON 项要翻成中文
+      const hit = (() => {
+        const groups = state.graphics && Array.isArray(state.graphics.fields) ? state.graphics.fields : [];
+        const group = groups.find((item) => item.name === entry);
+        return (group?.fields || []).find((item) => item.key === field) || null;
+      })();
+      const shown = hit?.label || field;
+      // 提示里说中文档位名，不说注册表原始数字（「超分方式 已设为 DLSS」而不是「已设为 3000」）
+      const spoken = hit ? gfxOptionLabel(hit, value) : String(value);
+
+      /*
+       * 下拉框不能在这里立刻 render。
+       *
+       * change 事件是在用户点完选项、原生下拉刚要收起的瞬间触发的，
+       * 此时同步 render 会把整个 DOM 换掉，下拉被销毁 → 看起来「一点开就关掉」；
+       * 更糟的是写入的 await 回来后状态已被重绘覆盖。
+       * 所以先把「正在写入」的标记记下来，写入与重读都完成后再统一重画一次。
+       */
+      state.graphicsPending = { name: field, value };
+      // 只给当前这一行挂个「写入中」的样式，不重建 DOM（重建会把下拉/焦点全弄没）
+      const pendingRow = element.closest('.gfx-row');
+      if (pendingRow) pendingRow.classList.add('is-pending');
+      try {
+        // 与读取同源：把游戏对象一起传过去，主进程才知道该往哪个注册表项写
+        // （trait 里没写 key 的游戏要靠 path 自动探测；探测不到主进程会拒绝写）
+        const target = graphicsGameEntry(game);
+        const result = await api.graphics.write({
+          gameKey: target.gameKey,
+          name: target.name,
+          path: target.path,
+          exe: target.exe,
+          entry,
+          field,
+          value,
+        });
+        if (!result || result.ok === false) throw new Error(result?.reason || '写入失败');
+        if (result.unchanged) {
+          toast(`${shown} 已经是「${spoken}」了`, 'info');
+        } else {
+          toast(`${shown} 已设为 ${spoken}，启动游戏后生效`, 'success');
+        }
+      } catch (error) {
+        toast(`写入失败：${error.message}`, 'error');
+      } finally {
+        state.graphicsPending = null;
+        if (pendingRow) pendingRow.classList.remove('is-pending');
+        /*
+         * 重新读一遍注册表，界面上显示的就是游戏里真实的当前值。
+         *
+         * 必须 force：写入成功后缓存里的那份就是旧值，而它在 60 秒新鲜期内
+         * 会被 loadGraphics 直接复用 —— 用户会看到「刚点完的开关自己弹回去了」。
+         * force 路径在 loadGraphics 里走的是「保留旧画面、不置 loading、读完再按
+         * 签名比对决定要不要重画」，所以这里既拿得到新值，也不会闪「正在读取注册表」。
+         */
+        if (state.route === 'graphics') await loadGraphics(game, { force: true });
+      }
+      break;
+    }
+
+    /*
+     * 插件页。
+     *
+     * 导入是个两步流程：主进程先弹系统选择框、把文件拷进插件目录，
+     * 然后这里再弹一次权限确认；用户取消的话要把刚落盘的文件删掉，
+     * 不能留下一份「已安装但从没被允许运行」的孤儿文件。
+     */
+    case 'plugin-refresh':
+      await loadPlugins(true);
+      if (!state.plugins.error) toast('插件列表已刷新');
+      break;
+    case 'plugin-open-dir':
+      // 只读一层：没有 reveal(dir) 接口，先开数据目录，插件都在它的 plugins 子目录里
+      await api.openDataFolder();
+      break;
+    case 'plugin-doc': {
+      const result = await api.plugins.openDoc();
+      // 系统里没关联 .md 的打开方式时会失败，这时退回打开插件目录，别让用户卡住
+      if (!result || !result.ok) {
+        toast('系统没有关联 .md 文件，已帮你打开插件目录', 'info');
+        await api.openDataFolder();
+      }
+      break;
+    }
+    case 'plugin-select': {
+      const target = element?.dataset?.id || '';
+      if (!target) break;
+      state.plugins.active = target;
+      delete state.plugins.errors[target];
+      render({ preserveScroll: true });
+      await startPlugin(pluginById(target) || { id: target, permissions: [] });
+      break;
+    }
+    case 'plugin-reload': {
+      const target = element?.dataset?.id || state.plugins.active;
+      const plugin = pluginById(target);
+      if (!plugin) break;
+      const runtime = pluginRuntime();
+      if (runtime) runtime.Host.stop(target);
+      delete state.plugins.errors[target];
+      delete state.plugins.views[target];
+      state.plugins.running[target] = false;
+      render({ preserveScroll: true });
+      await startPlugin(plugin);
+      break;
+    }
+    case 'plugin-import': {
+      let result;
+      try {
+        result = await window.launcher.plugins.importFile();
+      } catch (error) {
+        toast(humanError(error) || '导入失败', 'error');
+        break;
+      }
+      // 用户自己点了取消，不算出错，也不用提示
+      if (!result || (result.ok === false && result.cancelled)) break;
+      if (!result.ok) {
+        toast(result.error || '导入失败', 'error');
+        break;
+      }
+      state.plugins.pending = result.id || result.file || '';
+      await loadPlugins(true);
+      const imported =
+        pluginById(result.id) ||
+        (state.plugins.list?.plugins || []).find((plugin) => plugin.file === result.file) ||
+        { id: '', file: result.file, name: result.name, permissions: [] };
+      openPluginPermissionDialog(imported);
+      break;
+    }
+    case 'plugin-confirm-install': {
+      state.plugins.pending = '';
+      closeModal();
+      const activeNow = state.plugins.active;
+      await loadPlugins(true);
+      state.plugins.active = activeNow;
+      const plugin = pluginById(activeNow) || pluginById(pickPluginId());
+      if (plugin) {
+        state.plugins.active = plugin.id;
+        await startPlugin(plugin);
+        toast(`「${plugin.name || plugin.id}」已启用`, 'success');
+      }
+      if (state.route === 'plugins') render({ preserveScroll: true });
+      break;
+    }
+    case 'plugin-cancel-install': {
+      // 取消 = 撤销这次导入：文件刚写进插件目录，还没被允许运行，删掉最干净
+      const target = state.plugins.pending || '';
+      state.plugins.pending = '';
+      closeModal();
+      if (!target) break;
+      const plugin = (state.plugins.list?.plugins || []).find(
+        (item) => item.id === target || item.file === target
+      );
+      try {
+        if (plugin?.id) {
+          await window.launcher.plugins.remove(plugin.id);
+        } else if (plugin?.file) {
+          await window.launcher.plugins.remove(plugin.file);
+        }
+        toast('已撤销导入');
+      } catch (error) {
+        toast(humanError(error) || '撤销导入失败', 'error');
+      }
+      await loadPlugins(true);
+      break;
+    }
+    case 'plugin-remove': {
+      const pluginId = element?.dataset?.id || '';
+      const fileName = element?.dataset?.file || '';
+      const target = pluginId || fileName;
+      if (!target) break;
+      const ok = await confirmDialog({
+        title: '删除这个插件？',
+        message: '插件文件会从插件目录里删掉，它保存的配置也会一起清空，这一步不能撤销。',
+        confirmText: '删除',
+        danger: true,
+      });
+      if (!ok) break;
+      try {
+        const result = await window.launcher.plugins.remove(target);
+        if (!result || result.ok === false) throw new Error(result?.error || '删除失败');
+        const runtime = pluginRuntime();
+        if (runtime) runtime.Host.stop(pluginId || target);
+        delete state.plugins.running[pluginId];
+        delete state.plugins.views[pluginId];
+        delete state.plugins.errors[pluginId];
+        if (state.plugins.active === pluginId) state.plugins.active = '';
+        toast('插件已删除');
+      } catch (error) {
+        toast(humanError(error) || '删除失败', 'error');
+      }
+      await loadPlugins(true);
+      break;
+    }
+
+    case 'tools-tab': {
+      const key = element.dataset.value || '';
+      if (!key || key === state.toolsTab) break;
+      state.toolsTab = key;
+      render({ preserveScroll: true });
+      break;
+    }
+    /* 工具页右上角：账号登录弹窗（米游社 + 其它发行方通行证） */
+    case 'tools-accounts':
+      openToolsAccountsModal();
+      break;
+    /* 工具页里的「自定义插件」是独立页面，直接跳过去 */
+    case 'nav-plugins':
+      navigate('plugins');
+      break;
+    /*
+     * 「按游戏查看」里点游戏名：默认全部收起，点谁展开谁，再点一次收回去。
+     * 不用 <details> 是因为卡片结构里还有「其它已接入」列表，收起来时要连它一起收，
+     * 状态放在 state 里才能在 render 后保留。
+     */
+    case 'tools-game-toggle': {
+      const key = element.dataset.value || '';
+      if (!key) break;
+      // 每张游戏卡默认收缩，点谁展开谁，再点一次收回；展开表存 state.toolsExpanded
+      state.toolsExpanded = state.toolsExpanded || {};
+      state.toolsExpanded[key] = !state.toolsExpanded[key];
+      render({ preserveScroll: true });
+      break;
+    }
+
     case 'graphics-refresh':
       await loadGraphics(state.graphicsGame);
       break;
@@ -10547,6 +15661,586 @@ function openServerModal(gameId, serverId = null) {
   });
 }
 
+/*
+ * ── 一键下载弹窗（未安装游戏） ─────────────────────────────────────────
+ * 启动页「下载游戏」按钮走这里：选渠道 → 选目录 → 空间预估 → 开始下载。
+ * 进度复用 sophon:progress 通道，任务面板 / 暂停 / 停止 / 最小化都和硬链接任务同一套。
+ */
+/** 支持一键下载的内置游戏 → 下载引擎（与主进程 DOWNLOADABLE_KEYS 保持一致）。 */
+const DOWNLOAD_GAME_ENGINES = {
+  genshin: 'sophon',
+  starrail: 'sophon',
+  zzz: 'sophon',
+  bh3: 'sophon',
+  endfield: 'endfield',
+  arknights: 'endfield',
+};
+
+/** 暂不支持自动下载的游戏 → 官网入口（弹窗里如实说明后跳转）。 */
+const DOWNLOAD_UNSUPPORTED_SITES = {
+  neverness: 'https://yh.wanmei.com/',
+};
+
+/*
+ * 接入了一键下载、但只实测过部分渠道的游戏 → 允许下载的渠道白名单。
+ * 崩坏3 只有官服在 HoYoPlay 分发体系里（B服走 B 站自有启动器、国际服 game_id
+ * 无法唯一定位）；明日方舟只实测了官服分发接口。渠道行本身还在，只是下载弹窗
+ * 里不列出，避免用户选了才在 estimate 阶段报错。
+ */
+const DOWNLOAD_CHANNELS_OK = {
+  bh3: ['official'],
+  arknights: ['official'],
+};
+
+/**
+ * 未安装游戏的默认安装目录：跟随现有游戏安装盘。
+ * 哪个内置游戏已经装好了，就把它的安装盘借过来（比如原神装在 D 盘，新游戏默认
+ * D:\HuaXiaoLingGames\<builtinKey>）；一个都没装时退回 C 盘。
+ * 目录名用 builtinKey 而不是中文名，避免个别老游戏对中文路径的兼容问题。
+ */
+function defaultDownloadDir(game) {
+  const installedRoot = ((state.games || []).map((item) =>
+    (item.servers || []).find((server) => server.exists && server.root)
+  ).find(Boolean) || {}).root || '';
+  // 盘符必须用正则整体取出（含冒号），再一次性拼接。
+  // 之前 slice(0,2)+' 截取后重新拼 ':' 的写法会拼出 "G:\:\..." 这种坏路径，
+  // 直接导致 mkdir ENOENT、空间预估失败。
+  const m = /^([a-zA-Z]:)[\\/]/.exec(installedRoot);
+  const drive = m ? m[1] : 'C:';
+  return `${drive}\\HuaXiaoLingGames\\${game.builtinKey || 'game'}`;
+}
+
+function openGameDownloadModal(gameId) {
+  const game = state.games.find((item) => item.id === gameId);
+  if (!game) return;
+
+  // 没接入下载管线的游戏（异环）：如实说明 + 官网入口，不假装能下
+  if (!DOWNLOAD_GAME_ENGINES[game.builtinKey]) {
+    const site = DOWNLOAD_UNSUPPORTED_SITES[game.builtinKey] || '';
+    openModal(`
+      <div class="modal-backdrop" data-backdrop>
+        <div class="modal narrow" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div>
+              <h2>暂不支持自动下载</h2>
+              <p>${esc(game.name)} 还没有接入一键下载。</p>
+            </div>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
+          <div class="modal-body">
+            <p class="sw-note">${icon('info', 'xs')}<span>这款游戏暂时不能在启动器里直接下载安装：官方没有开放的版本清单接口。请先前往官网下载安装，装好后再用启动页的「自动检测」或「路径选择」把客户端指进来。</span></p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-ghost" data-close>关闭</button>
+            ${site ? `<button class="btn btn-primary" data-action="open-external" data-url="${esc(site)}">${icon('external')}打开官网</button>` : ''}
+          </div>
+        </div>
+      </div>`);
+    return;
+  }
+
+  // 已有硬链接 / 更新 / 下载任务在跑时不再叠加：下载队列和硬链接队列共用一套任务面板，
+  // 这里不排队，避免排到的下载任务被 openSophonModal 顶成硬链接弹窗。
+  if (activeSophonJob || sophonJobs.some((job) => ['starting', 'running', 'queued'].includes(job.status))) {
+    toast('已有下载 / 硬链接任务在进行，请先等它完成再下载新游戏', 'info');
+    return;
+  }
+
+  const servers = (game.servers || []).filter((server) => !server.exists || server.incomplete);
+  const allChoices = servers.length ? servers : game.servers || [];
+  // 只实测过的渠道才列进下载弹窗（崩坏3 / 明日方舟只有官服），其余渠道不出现
+  const allowedChannels = DOWNLOAD_CHANNELS_OK[game.builtinKey];
+  const choices = allowedChannels ? allChoices.filter((server) => allowedChannels.includes(server.channel)) : allChoices;
+  if (!choices.length) {
+    toast('这个游戏还没有可用的服务器渠道', 'error');
+    return;
+  }
+  const jobId = `dl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const channelOptions = choices
+    .map(
+      (server, index) => `
+      <label class="dl-channel${index === 0 ? ' is-active' : ''}">
+        <input type="radio" name="dl-channel" value="${esc(server.channel)}" ${index === 0 ? 'checked' : ''} />
+        <span class="dl-channel-dot"></span>
+        <span class="dl-channel-copy">
+          <strong>${esc(server.name)}</strong>
+          <small>${esc(serverChannelTag(game, server) || server.channel)}</small>
+        </span>
+      </label>`
+    )
+    .join('');
+
+  const html = `
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>下载游戏 · ${esc(game.name)}</h2>
+            <p>从官方清单完整下载安装，装完自动填好服务器路径。</p>
+          </div>
+          <div class="modal-head-actions">
+            <button class="modal-close" id="dl-minimize" style="display:none" title="最小化到任务面板">−</button>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <p class="sw-note">${icon('info', 'xs')}<span>下载使用官方渠道的版本清单与分块，逐文件校验后落盘；整个过程保持游戏关闭。</span></p>
+          <div class="field">
+            <label>下载渠道</label>
+            <div class="dl-channels">${channelOptions}</div>
+          </div>
+          <div class="field">
+            <label>安装目录</label>
+            <div class="input-group">
+              <input id="dl-dir" value="${esc(defaultDownloadDir(game))}" spellcheck="false" />
+              <button type="button" class="btn btn-ghost" id="dl-detect" title="扫描注册表和常见目录，找已经装好的客户端">${icon('refresh')}自动检测</button>
+              <button type="button" class="btn btn-ghost" id="dl-browse" title="选择安装目录">${icon('folder')}浏览</button>
+            </div>
+            <span class="hint">默认跟随现有游戏的安装盘；也可以直接输入一个不存在的目录，下载时会自动创建。</span>
+          </div>
+          <div class="sw-sum">
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">目标版本</span>
+              <span class="sw-sum-v" id="dl-sum-tag">统计中…</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">需要下载</span>
+              <span class="sw-sum-v" id="dl-sum-size">统计中…</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">目标盘剩余</span>
+              <span class="sw-sum-v" id="dl-sum-free">统计中…</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">空间判断</span>
+              <span class="sw-sum-v" id="dl-sum-space">统计中…</span>
+            </div>
+            <p class="sw-sum-hint" id="dl-sum-hint">体积来自官方清单，语音包按设置里勾选的语言计算。</p>
+          </div>
+          <ol class="sw-stages" id="dl-stages">
+            ${SOPHON_STAGES.map(
+              (stage, index) => `
+              <li class="sw-stage" data-index="${index}">
+                <span class="sw-stage-dot">${index + 1}</span>
+                <span class="sw-stage-label">${esc(stage.label)}</span>
+              </li>`
+            ).join('')}
+          </ol>
+          <div class="link-progress" id="dl-progress" style="display:none">
+            <div class="link-progress-head">
+              <strong id="dl-phase">准备中…</strong>
+              <span id="dl-count"></span>
+            </div>
+            <div class="progress-bar"><span id="dl-bar" style="width:0%"></span></div>
+            <div class="link-progress-meta">
+              <span id="dl-stats"></span>
+              <span id="dl-current"></span>
+            </div>
+          </div>
+          <div class="sw-result" id="dl-result" hidden>
+            <strong class="sw-result-title">下载完成</strong>
+            <div class="sw-result-grid" id="dl-result-grid"></div>
+            <p class="sw-result-note" id="dl-result-note"></p>
+          </div>
+          <div class="field-error" id="dl-error"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" data-close>关闭</button>
+          <button class="btn btn-ghost" id="dl-pause" style="display:none">暂停</button>
+          <button class="btn btn-ghost" id="dl-cancel" style="display:none">停止</button>
+          <button class="btn btn-primary" id="dl-start">${icon('download')}开始下载</button>
+        </div>
+      </div>
+    </div>`;
+
+  openModal(html, {
+    onClose: () => {
+      if (running) {
+        // 窗口在跑任务时被关掉：不取消下载，缩进任务面板继续跑
+        minimized();
+      } else {
+        sophonJobs = sophonJobs.filter((item) => item !== job);
+        renderTaskDock();
+      }
+      if (finishedOk) {
+        // 关窗后按最新状态重绘启动页：已装好的游戏这里会变回「开始游戏」
+        render({ preserveScroll: true });
+      }
+    },
+    onBackdrop: () => {
+      if (running) minimized();
+      else closeModal();
+    },
+  });
+
+  const start = document.querySelector('#dl-start');
+  const cancel = document.querySelector('#dl-cancel');
+  const pause = document.querySelector('#dl-pause');
+  const minimizeBtn = document.querySelector('#dl-minimize');
+  const progress = document.querySelector('#dl-progress');
+  const errorBox = document.querySelector('#dl-error');
+  const dirInput = document.querySelector('#dl-dir');
+  const backdrop = document.querySelector('.modal-backdrop');
+
+  const job = {
+    id: jobId,
+    gameId,
+    serverId: choices[0].id,
+    gameName: game.name,
+    serverName: choices[0].name,
+    mode: 'download',
+    status: 'starting',
+    percent: 0,
+    phase: '准备中…',
+    stats: '',
+  };
+  // 任务面板立刻可见：打开弹窗就算挂上任务，最小化后左下角能看到它
+  sophonJobs.push(job);
+  renderTaskDock();
+
+  let running = false;
+  let paused = false;
+  let cancelled = false;
+  let finishedOk = false;
+  let unsubscribe = null;
+
+  const hideDock = () => {
+    if (activeSophonJob === job) activeSophonJob = null;
+    sophonUi = null;
+    document.body.classList.remove('sophon-minimized');
+    renderTaskDock();
+  };
+
+  // 最小化：弹窗藏起来，任务留在左下角任务面板里继续跑
+  const minimized = () => {
+    if (!running) return;
+    if (backdrop) backdrop.style.display = 'none';
+    document.body.classList.remove('modal-open');
+    document.body.classList.add('sophon-minimized');
+    job.status = 'running';
+    activeSophonJob = job;
+    renderTaskDock();
+    sophonUi = {
+      restore: () => {
+        if (backdrop) backdrop.style.display = '';
+        document.body.classList.add('modal-open');
+        document.body.classList.remove('sophon-minimized');
+        renderTaskDock();
+      },
+      cancel: () => {
+        cancelled = true;
+        running = false;
+        job.status = 'cancelled';
+        api.servers.cancelSophon(jobId).catch(() => {});
+        closeModal();
+        hideDock();
+      },
+    };
+  };
+
+  minimizeBtn.addEventListener('click', minimized);
+
+  // 右上角 ✕ 在跑任务时改成最小化，别让人误触把窗口关了以为任务没了
+  const closeX = document.querySelector('.modal-head [data-close]');
+  if (closeX) {
+    closeX.addEventListener(
+      'click',
+      (event) => {
+        if (running) {
+          event.preventDefault();
+          event.stopPropagation();
+          minimized();
+        }
+      },
+      true
+    );
+  }
+
+  const updateDock = (phaseLabel, percent, stats, current, stage) => {
+    job.phase = phaseLabel;
+    job.percent = Math.max(0, Math.min(100, percent));
+    job.stats = stats;
+    job.current = current || '';
+    if (stage !== undefined) job.stage = stage;
+    if (activeSophonJob === job) renderTaskDock();
+  };
+
+  /* 阶段条只往前走：复用硬链接弹窗那套 SOPHON_STAGES，两处说法保持一致 */
+  const stageBox = document.querySelector('#dl-stages');
+  let stageIndex = -1;
+  const paintStages = (index) => {
+    if (!stageBox) return;
+    if (index >= 0) stageIndex = Math.max(stageIndex, index);
+    const finishedAll = stageIndex >= SOPHON_STAGES.length - 1;
+    [...stageBox.querySelectorAll('.sw-stage')].forEach((node, i) => {
+      const isDone = finishedAll || i < stageIndex;
+      node.classList.toggle('is-done', isDone);
+      node.classList.toggle('is-active', !finishedAll && i === stageIndex);
+      node.querySelector('.sw-stage-dot').textContent = isDone ? '✓' : String(i + 1);
+    });
+  };
+
+  const sumTag = document.querySelector('#dl-sum-tag');
+  const sumSize = document.querySelector('#dl-sum-size');
+  const sumFree = document.querySelector('#dl-sum-free');
+  const sumSpace = document.querySelector('#dl-sum-space');
+  const resultBox = document.querySelector('#dl-result');
+
+  const selectedChannel = () => {
+    const checked = document.querySelector('input[name="dl-channel"]:checked');
+    return checked ? checked.value : choices[0].channel;
+  };
+
+  const restoreStart = () => {
+    if (running || finishedOk) return;
+    start.disabled = false;
+    start.innerHTML = `${icon('download')}开始下载`;
+  };
+
+  /*
+   * 空间预估：读官方清单拿全量体积，和目标盘剩余空间对比。
+   * 换渠道或换目录都要重算 —— 渠道清单可能不同，目录换盘后剩余空间也变了。
+   */
+  const refreshEstimate = async () => {
+    sumTag.textContent = '统计中…';
+    sumSize.textContent = '统计中…';
+    sumFree.textContent = '统计中…';
+    sumSpace.textContent = '统计中…';
+    sumSpace.classList.remove('is-warn', 'is-ok');
+    errorBox.textContent = '';
+    try {
+      const result = await api.servers.downloadEstimate({
+        gameId,
+        channel: selectedChannel(),
+        installDir: dirInput.value.trim(),
+      });
+      sumTag.textContent = result.version || '未知';
+      sumSize.textContent = Number(result.totalBytes)
+        ? `约 ${formatSize(result.totalBytes)}${result.storyResources?.count ? `（含可选剧情资源 ${formatSize(result.storyResources.bytes)}）` : ''}`
+        : '未知';
+      const free = Number(result.freeBytes) || 0;
+      const need = Number(result.totalBytes) || 0;
+      sumFree.textContent = free ? `${formatSize(free)}` : '读不到磁盘信息';
+      if (!free || !need) {
+        sumSpace.textContent = '判断不了，先按默认目录继续也可以';
+      } else if (need > free) {
+        sumSpace.textContent = '不够：请换个安装目录或先清理空间';
+        sumSpace.classList.add('is-warn');
+      } else {
+        sumSpace.textContent = '够用';
+        sumSpace.classList.add('is-ok');
+      }
+      restoreStart();
+    } catch (error) {
+      sumTag.textContent = '未知';
+      sumSize.textContent = '未知';
+      sumFree.textContent = '未知';
+      sumSpace.textContent = humanError(error);
+      sumSpace.classList.add('is-warn');
+      errorBox.textContent = humanError(error);
+      if (!running && !finishedOk) {
+        start.disabled = true;
+        start.textContent = '先按提示处理再开始';
+      }
+    }
+  };
+
+  document.querySelectorAll('input[name="dl-channel"]').forEach((input) => {
+    input.addEventListener('change', () => {
+      document.querySelectorAll('.dl-channel').forEach((node) => node.classList.remove('is-active'));
+      input.closest('.dl-channel')?.classList.add('is-active');
+      // 换渠道后 job 面板显示的名字也跟着换
+      const server = choices.find((item) => item.channel === input.value);
+      if (server) {
+        job.serverId = server.id;
+        job.serverName = server.name;
+      }
+      refreshEstimate();
+    });
+  });
+
+  // 打开弹窗先算一遍：默认目录 + 第一个未安装渠道
+  refreshEstimate();
+
+  document.querySelector('#dl-browse').addEventListener('click', async () => {
+    if (running) return;
+    const dir = await api.pick.directory();
+    if (!dir) return;
+    dirInput.value = dir;
+    refreshEstimate();
+  });
+
+  document.querySelector('#dl-detect').addEventListener('click', async () => {
+    if (running) return;
+    const result = await api.games.detect(gameId);
+    if (result.ok) {
+      toast('已找到已安装的客户端，路径已填进对应服务器', 'success');
+      // 主进程已把路径写回服务器并回推状态；这里同步一份，关窗后启动页直接可开始
+      await api.getState().then(onState).catch(() => {});
+      closeModal();
+      // 弹窗开着时 onState 不重绘，检测成功后手动刷一次启动页（变回「开始游戏」）
+      render({ preserveScroll: true });
+    } else {
+      toast(result.error || '没有自动检测到，可以手动选目录后点「开始下载」', 'info');
+    }
+  });
+
+  pause.addEventListener('click', async () => {
+    paused = !paused;
+    await api.servers.pauseSophon({ jobId, paused }).catch(() => {});
+    pause.textContent = paused ? '继续' : '暂停';
+    const phase = document.querySelector('#dl-phase');
+    if (phase) phase.textContent = paused ? '已暂停（点继续恢复）' : '恢复中…';
+    if (paused) updateDock('已暂停', job.percent, '点任务条恢复窗口');
+  });
+
+  const finishClose = () => {
+    // onClose（openModal 的回调）里已经负责关窗后重绘，这里只关窗
+    closeModal();
+  };
+
+  start.addEventListener('click', async () => {
+    // 跑完之后这个按钮就是「完成」：关窗并重绘启动页
+    if (finishedOk) {
+      finishClose();
+      return;
+    }
+    const channel = selectedChannel();
+    const installDir = dirInput.value.trim();
+    if (!installDir) {
+      errorBox.textContent = '请先填写或选择安装目录。';
+      return;
+    }
+    running = true;
+    cancelled = false;
+    job.status = 'running';
+    activeSophonJob = job;
+    sophonUi = {
+      restore: () => {
+        if (backdrop) backdrop.style.display = '';
+        document.body.classList.add('modal-open');
+        document.body.classList.remove('sophon-minimized');
+        renderTaskDock();
+      },
+      cancel: () => {
+        cancelled = true;
+        running = false;
+        job.status = 'cancelled';
+        api.servers.cancelSophon(jobId).catch(() => {});
+        closeModal();
+        hideDock();
+      },
+    };
+    renderTaskDock();
+    start.disabled = true;
+    start.textContent = '正在下载…';
+    cancel.style.display = '';
+    minimizeBtn.style.display = '';
+    pause.style.display = '';
+    progress.style.display = 'block';
+    errorBox.textContent = '';
+    paintStages(0);
+    unsubscribe = api.onSophonProgress((event) => {
+      if (event.jobId !== jobId) return;
+      const total = Number(event.total) || 0;
+      const processed = Number(event.processed) || 0;
+      const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+      const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
+      const phases = {
+        start: '读取官方清单',
+        version: `目标版本 ${event.tag || ''}`,
+        manifest: '读取清单与分块索引',
+        install: '写入文件',
+        download: '下载分块',
+        done: '完成',
+      };
+      if (event.tag && sumTag) sumTag.textContent = event.tag;
+      paintStages(percent >= 100 && stage === 2 ? 3 : stage);
+      document.querySelector('#dl-phase').textContent = phases[event.phase] || '处理中…';
+      document.querySelector('#dl-count').textContent = total ? `${processed} / ${total}` : '';
+      document.querySelector('#dl-bar').style.width = `${event.phase === 'done' ? 100 : percent}%`;
+      const stats = sophonProgressStats(event);
+      document.querySelector('#dl-stats').textContent = stats;
+      document.querySelector('#dl-current').textContent = event.current || '';
+      updateDock(
+        phases[event.phase] || '处理中…',
+        event.phase === 'done' ? 100 : percent,
+        sophonProgressStats(event, true),
+        event.current || '',
+        stage
+      );
+    });
+
+    try {
+      const result = await api.servers.downloadGame({ gameId, channel, installDir, jobId });
+      if (unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
+      }
+      if (result.cancelled || cancelled) {
+        job.status = 'cancelled';
+        toast('下载已取消', 'info');
+        closeModal();
+        hideDock();
+        return;
+      }
+      if (!result.ok) throw new Error(result.error || '下载失败');
+      finishedOk = true;
+      running = false;
+      job.status = 'done';
+      job.percent = 100;
+      // 最小化到任务面板时完成的：先把窗口恢复出来给用户看结果
+      if (document.body.classList.contains('sophon-minimized') && sophonUi) sophonUi.restore();
+      hideDock();
+      if (cancel) cancel.style.display = 'none';
+      if (pause) pause.style.display = 'none';
+      if (minimizeBtn) minimizeBtn.style.display = 'none';
+      start.disabled = false;
+      start.textContent = '完成';
+      paintStages(SOPHON_STAGES.length - 1);
+      if (resultBox) {
+        resultBox.hidden = false;
+        resultBox.querySelector('#dl-result-grid').innerHTML = [
+          { k: '目标版本', v: result.version || '—' },
+          { k: '安装目录', v: result.targetRoot || installDir },
+          { k: '启动程序', v: result.path || '—' },
+        ]
+          .map(
+            (item) =>
+              `<div class="sw-result-item"><span>${esc(item.k)}</span><strong>${esc(item.v)}</strong></div>`
+          )
+          .join('');
+        resultBox.querySelector('#dl-result-note').textContent = '服务器路径已写好，回到启动页就能直接开始游戏。';
+      }
+      toast(`${game.name} 下载完成`, 'success');
+      // 主进程在完成时已 pushState；弹窗开着时 onState 不重绘，这里主动同步一份最新状态
+      await api.getState().then(onState).catch(() => {});
+    } catch (error) {
+      if (unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
+      }
+      running = false;
+      job.status = 'error';
+      // 最小化状态下出错的：先恢复窗口，错误信息才看得见
+      if (document.body.classList.contains('sophon-minimized') && sophonUi) sophonUi.restore();
+      hideDock();
+      if (cancelled) {
+        toast('下载已取消', 'info');
+        closeModal();
+        return;
+      }
+      errorBox.textContent = humanError(error);
+      start.disabled = false;
+      start.innerHTML = `${icon('download')}重新开始`;
+      cancel.style.display = 'none';
+      pause.style.display = 'none';
+      minimizeBtn.style.display = 'none';
+    }
+  });
+}
+
 function formatSize(bytes) {
   const value = Number(bytes) || 0;
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`;
@@ -10554,7 +16248,62 @@ function formatSize(bytes) {
   return `${Math.max(0, Math.round(value / 1024))} KB`;
 }
 
+/*
+ * 硬链接安装 / 更新的阶段表。
+ *
+ * 任务坞和弹窗共用这一份：以前两处各写一套文案（「写入文件」对「处理中…」），
+ * 用户在弹窗里看到的和缩到角落时看到的不是同一句话，会以为任务被换掉了。
+ */
+const SOPHON_STAGES = [
+  { key: 'manifest', label: '读清单' },
+  { key: 'ldiff', label: '补丁修补' },
+  { key: 'write', label: '写入 / 下载' },
+  { key: 'verify', label: '校验收尾' },
+  { key: 'done', label: '完成' },
+];
+
+/** 主进程推的 phase → 阶段下标。B服 走的 'link' 也是纯硬链接复用，归到写入阶段。 */
+const SOPHON_PHASE_STAGE = {
+  start: 0,
+  version: 0,
+  manifest: 0,
+  ldiff: 1,
+  install: 2,
+  download: 2,
+  patch: 2,
+  link: 2,
+  done: 4,
+};
+
+/** 阶段下标 → 「第 N/5 步 · 阶段名」，弹窗与任务坞都从这里取。 */
+function sophonStageText(index) {
+  const clamped = Math.max(0, Math.min(SOPHON_STAGES.length - 1, Number(index) || 0));
+  return `第 ${clamped + 1}/${SOPHON_STAGES.length} 步 · ${SOPHON_STAGES[clamped].label}`;
+}
+
+/**
+ * 进度事件 → 一行数字。
+ *
+ * ldiff 阶段没有 linked / bytesDone，套统一模板会显示成「硬链接 0 · 下载 0 · 0 B」，
+ * 看着像卡死；这里单独给它一句「已修补 N 个 · 省流 X」。
+ */
+function sophonProgressStats(event, compact = false) {
+  if (!event) return '';
+  if (event.phase === 'ldiff') {
+    // 任务坞里前面已经有「第 2/5 步 · 补丁修补」，再带一次前缀就成了复读
+    const head = compact ? '' : '本地补丁修补：';
+    return `${head}已修补 ${event.applied || 0} 个 · 省流 ${formatSize(event.saveBytes || 0)}${
+      event.failed ? ` · ${event.failed} 个改用下载` : ''
+    }`;
+  }
+  if (event.phase === 'done') return '';
+  return `硬链接 ${event.linked || 0} · 下载 ${event.downloaded || 0} · ${formatSize(
+    event.bytesDone
+  )} / ${formatSize(event.totalBytes)}`;
+}
+
 function renderTaskDock() {
+  // 一键下载的任务也走这个坞：mode=download 显示「下载」，别混进「生成」
   const dock = document.querySelector('#task-dock');
   const list = document.querySelector('#task-dock-list');
   if (!dock || !list) return;
@@ -10578,13 +16327,16 @@ function renderTaskDock() {
               <button class="task-dock-stop" data-action="remove-sophon-queue" data-id="${esc(job.id)}" title="取消排队">✕</button>
             </div>`;
         }
+        // 阶段文案和弹窗里的阶段条同源，缩到任务坞里也不会换一套说法
+        const stepText = job.stage === undefined ? '' : `${sophonStageText(job.stage)}`;
+        const phaseText = job.percent >= 100 ? '完成' : stepText || job.phase || '准备中…';
         return `
           <div class="task-dock-item">
             <button class="task-dock-main" data-action="restore-sophon" title="展开任务">
               <span class="task-dock-icon">${icon('download')}</span>
               <span class="task-dock-copy">
-                <strong>${job.mode === 'update' ? '更新' : '生成'} ${esc(job.serverName)}</strong>
-                <small>${esc(job.percent >= 100 ? '完成' : job.phase || '准备中…')}${job.stats ? ` · ${esc(job.stats)}` : ''}</small>
+                <strong>${job.mode === 'update' ? '更新' : job.mode === 'download' ? '下载' : '生成'} ${esc(job.serverName)}</strong>
+                <small>${esc(phaseText)}${job.stats ? ` · ${esc(job.stats)}` : ''}</small>
                 <span class="task-dock-bar"><span style="width:${Math.max(0, Math.min(100, job.percent || 0))}%"></span></span>
               </span>
             </button>
@@ -10644,6 +16396,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   renderTaskDock();
   let running = false;
   let cancelled = false;
+  // 跑成功之后按钮会变成「完成」，finally 里不能再用「重新尝试」把它改回去
+  let finishedOk = false;
   let unsubscribe = null;
 
   const html = `
@@ -10652,7 +16406,7 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         <div class="modal-head">
           <div>
             <h2>${isUpdate ? '更新' : '硬链接安装'} ${esc(server.name)} 客户端</h2>
-            <p>${esc(game.name)} · ${isUpdate ? '检查并安装官方更新' : '以官服为源，硬链接相同文件，只下载差异分块'}</p>
+            <p>${esc(game.name)} · ${isUpdate ? '检查并安装官方更新' : '以你已安装的客户端为源，硬链接相同文件，只下载差异分块'}</p>
           </div>
           <div class="modal-head-actions">
             <button class="modal-close" id="sophon-minimize" style="display:none" title="最小化">−</button>
@@ -10660,20 +16414,54 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
           </div>
         </div>
         <div class="modal-body">
-          <div class="form-note form-note-warn">${icon('alert')}<span>${
+          <p class="sw-note">${icon('info', 'xs')}<span>${
             isUpdate
-              ? '会对现有客户端逐文件校验，只下载版本不同或缺失的分块；启动器不会处理官方清单之外的删除项。更新期间不要启动游戏。'
-              : '会先和官服客户端逐文件比较：完全相同的文件用硬链接复用，只下载不同或缺失的分块。目标版本可能需要数 GB 到数十 GB，请确认磁盘空间。过程中不要启动游戏。'
-          }</span></div>
+              ? '只下载和当前版本不一样的分块，其余文件就地校验保留。'
+              : '内容相同的文件直接复用，只下载差异分块。'
+          }</span></p>
+          <details class="sw-note-more">
+            <summary>这一步具体会做什么</summary>
+            <p>${
+              isUpdate
+                ? '会对现有客户端逐文件校验，只下载版本不同或缺失的分块；官方清单之外的删除项不会动。有本地补丁的渠道会先就地修补，再补齐剩下的分块。'
+                : '先和你已有的客户端逐文件比较：完全相同的文件建立硬链接复用，只下载不同或缺失的分块，所以实际新增占用通常远小于客户端总体积。'
+            }整个过程都要保持游戏关闭。</p>
+          </details>
+          <div class="sw-sum">
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">目标版本</span>
+              <span class="sw-sum-v" id="sw-sum-tag">读清单后确定</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">可复用上限</span>
+              <span class="sw-sum-v" id="sw-sum-reuse">统计中…</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">目标盘剩余</span>
+              <span class="sw-sum-v" id="sw-sum-free">统计中…</span>
+            </div>
+            <div class="sw-sum-row">
+              <span class="sw-sum-k">空间判断</span>
+              <span class="sw-sum-v" id="sw-sum-space">统计中…</span>
+            </div>
+            <p class="sw-sum-hint" id="sw-sum-hint">
+              要下载多少得等读完官方清单才知道，进度区会边跑边显示；「可复用上限」是基础客户端的体积，内容一致的部分不用再下一遍。
+            </p>
+          </div>
           <div class="sophon-target">
             <span>目标目录</span>
             <code id="sophon-target-dir">${esc(server.root || '自动：游戏盘\\VelaRuntimes')}</code>
             <button type="button" class="btn btn-ghost btn-sm" id="sophon-pick-dir">选择目录</button>
           </div>
-          <div class="sophon-estimate" id="sophon-estimate">
-            <span class="sophon-estimate-label">${icon('database', 'xs')}空间预估</span>
-            <span class="sophon-estimate-body" id="sophon-estimate-body">正在结算磁盘和客户端体积…</span>
-          </div>
+          <ol class="sw-stages" id="sophon-stages">
+            ${SOPHON_STAGES.map(
+              (stage, index) => `
+              <li class="sw-stage" data-index="${index}">
+                <span class="sw-stage-dot">${index + 1}</span>
+                <span class="sw-stage-label">${esc(stage.label)}</span>
+              </li>`
+            ).join('')}
+          </ol>
           <div class="link-progress" id="sophon-progress" style="display:none">
             <div class="link-progress-head">
               <strong id="sophon-phase">准备中…</strong>
@@ -10684,6 +16472,12 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
               <span id="sophon-stats"></span>
               <span id="sophon-current"></span>
             </div>
+          </div>
+          <p class="sw-ldiff" id="sophon-ldiff" hidden></p>
+          <div class="sw-result" id="sophon-result" hidden>
+            <strong class="sw-result-title" id="sophon-result-title">已完成</strong>
+            <div class="sw-result-grid" id="sophon-result-grid"></div>
+            <p class="sw-result-note" id="sophon-result-note"></p>
           </div>
           <div class="field-error" id="sophon-error"></div>
         </div>
@@ -10705,6 +16499,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         sophonJobs = sophonJobs.filter((item) => item !== job);
         renderTaskDock();
       }
+      // 队列在「完成」时没有被放行（那时窗口还开着看结果），关窗这一步才轮到下一个
+      if (finishedOk) startNextSophonJob();
     },
     onBackdrop: () => {
       if (running) minimizeTask();
@@ -10757,24 +16553,104 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
     };
   };
 
-  const updateDock = (phaseLabel, percent, stats, current) => {
+  const updateDock = (phaseLabel, percent, stats, current, stage) => {
     job.phase = phaseLabel;
     job.percent = Math.max(0, Math.min(100, percent));
     job.stats = stats;
     job.current = current || '';
+    // stage 只在真正拿到进度事件时写，暂停 / 排队这类状态不该把阶段条往回退
+    if (stage !== undefined) job.stage = stage;
     if (activeSophonJob === job) renderTaskDock();
   };
 
   minimize.addEventListener('click', minimizeTask);
 
+  // 开始按钮带了图标，恢复默认态必须还原 innerHTML，直接写 textContent 会把图标弄丢
+  const startIdleHtml = start.innerHTML;
+  const restoreStart = () => {
+    if (running || finishedOk) return;
+    start.disabled = false;
+    start.innerHTML = startIdleHtml;
+  };
+
+  /* 阶段条：只往前走，不往回退。中途重试也从当前阶段继续，免得看着像回到原点。 */
+  const stageBox = document.querySelector('#sophon-stages');
+  let stageIndex = -1;
+  let ldiffSeen = false;
+  const paintStages = (index) => {
+    if (!stageBox) return;
+    if (index >= 0) stageIndex = Math.max(stageIndex, index);
+    const finishedAll = stageIndex >= SOPHON_STAGES.length - 1;
+    [...stageBox.querySelectorAll('.sw-stage')].forEach((node, i) => {
+      const isDone = finishedAll || i < stageIndex;
+      // 走到写入阶段还没见过 ldiff 事件，说明这个渠道没有本地补丁，第 2 步标成「跳过」而不是让它一直空着
+      const isSkipped = !ldiffSeen && i === 1 && stageIndex > 1;
+      node.classList.toggle('is-done', isDone && !isSkipped);
+      node.classList.toggle('is-active', !finishedAll && i === stageIndex);
+      node.classList.toggle('is-skipped', isSkipped);
+      node.querySelector('.sw-stage-dot').textContent = isDone && !isSkipped ? '✓' : String(i + 1);
+      node.querySelector('.sw-stage-label').textContent = isSkipped
+        ? `${SOPHON_STAGES[i].label}（跳过）`
+        : SOPHON_STAGES[i].label;
+    });
+  };
+
+  const sumTag = document.querySelector('#sw-sum-tag');
+  const sumReuse = document.querySelector('#sw-sum-reuse');
+  const sumFree = document.querySelector('#sw-sum-free');
+  const sumSpace = document.querySelector('#sw-sum-space');
+  const ldiffLine = document.querySelector('#sophon-ldiff');
+  const resultBox = document.querySelector('#sophon-result');
+
   /*
-   * 空间预估：安装前先让用户看到「目标盘还剩多少、要装的东西有多大」，
-   * 而不是等跑到一半才发现盘满了。只读本地信息，不走网络，不阻塞界面。
+   * 结果卡：把「省了多少、哪些没走补丁」摆出来。
+   *
+   * 主进程只回数量（applied / failed / downloaded），没有失败文件的路径清单，
+   * 所以这里如实写「N 个改用下载」，不假装能列出文件名。
    */
-  const estimateBody = document.querySelector('#sophon-estimate-body');
+  const showResult = (result) => {
+    if (!resultBox) return;
+    const ldiff = result.ldiff || null;
+    const items = [
+      { k: '目标版本', v: result.tag || '—' },
+      { k: '硬链接复用', v: `${result.linked || 0} 个文件` },
+      { k: '实际下载', v: `${result.downloaded || 0} 个文件` },
+    ];
+    if (ldiff && ldiff.applied > 0) {
+      items.push({ k: '本地补丁修补', v: `${ldiff.applied} 个 · 省流 ${formatSize(ldiff.saveBytes || 0)}` });
+    }
+    resultBox.querySelector('#sophon-result-title').textContent = isUpdate ? '更新完成' : '生成完成';
+    resultBox.querySelector('#sophon-result-grid').innerHTML = items
+      .map(
+        (item) =>
+          `<div class="sw-result-item"><span>${esc(item.k)}</span><strong>${esc(item.v)}</strong></div>`
+      )
+      .join('');
+    const notes = [];
+    if (result.targetRoot) notes.push(`目录：${result.targetRoot}`);
+    if (ldiff && ldiff.failed) {
+      notes.push(`${ldiff.failed} 个文件的补丁没能应用（可能被占用或校验不通过），已改走下载补齐。`);
+    }
+    if (!ldiff) {
+      notes.push('这次没有走本地补丁（这个渠道没有启用，或没有对应的旧版本补丁），全部按分块校验补齐。');
+    }
+    resultBox.querySelector('#sophon-result-note').textContent = notes.join(' ');
+    resultBox.hidden = false;
+  };
+
+  /*
+   * 结论卡：安装前先回答四个问题 —— 装哪个版本、能复用多少、目标盘还剩多少、够不够。
+   *
+   * 数据全部来自 prepareSophon 的 estimate 分支（freeBytes / baseBytes / drive / partial）。
+   * 那个分支不返回「这次要下载多少字节」，所以这里不编数字：复用上限用基础客户端体积
+   * 表述，下载量交给进度区边跑边显示。
+   */
   const refreshEstimate = async () => {
-    if (!estimateBody) return;
-    estimateBody.textContent = '正在结算磁盘和客户端体积…';
+    if (!sumReuse) return;
+    sumReuse.textContent = '统计中…';
+    sumFree.textContent = '统计中…';
+    sumSpace.textContent = '统计中…';
+    sumSpace.classList.remove('is-warn', 'is-ok');
     try {
       const result = await api.servers.prepareSophon({
         gameId,
@@ -10783,24 +16659,55 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         runtimeRoot: selectedRuntimeRoot || undefined,
       });
       if (!result || !result.ok) {
-        estimateBody.textContent = (result && result.error) || '拿不到空间信息，直接开始也可以。';
+        const reason = (result && result.error) || '拿不到空间信息';
+        sumReuse.textContent = '未知';
+        sumFree.textContent = '未知';
+        sumSpace.textContent = reason;
+        sumSpace.classList.add('is-warn');
+        // 这些前置条件（基础客户端、同盘运行时）不满足时真跑也会立刻失败，不如当场拦住
+        if (errorBox) errorBox.textContent = reason;
+        if (!running && !finishedOk) {
+          start.disabled = true;
+          start.textContent = '先按提示处理再开始';
+        }
         return;
       }
       const free = Number(result.freeBytes) || 0;
       const base = Number(result.baseBytes) || 0;
-      const parts = [];
-      if (free) parts.push(`目标盘（${result.drive || '未知'}）剩余 ${formatSize(free)}`);
-      if (base) {
-        parts.push(`官服客户端约 ${formatSize(base)}${result.partial ? '（还在继续统计）' : ''}`);
+      sumFree.textContent = free ? `${formatSize(free)}（${result.drive || '目标盘'}）` : '读不到磁盘信息';
+      sumReuse.textContent = base
+        ? `约 ${formatSize(base)}${result.partial ? '（还在统计）' : ''}`
+        : '没有可复用的基础客户端';
+      if (!free) {
+        sumSpace.textContent = '判断不了，先按默认目录继续也可以';
+      } else if (!base) {
+        sumSpace.textContent = '没有基础客户端，全部要下载';
+        sumSpace.classList.add('is-warn');
+      } else if (base > free) {
+        // 硬链接只是省掉「内容相同」的那部分，不能承诺一定装得下
+        sumSpace.textContent = '可能不够：基础客户端比剩余空间大，相同文件会复用，仍建议先腾些空间';
+        sumSpace.classList.add('is-warn');
+      } else {
+        sumSpace.textContent = '够用';
+        sumSpace.classList.add('is-ok');
       }
-      if (free && base && base > free) {
-        parts.push('⚠ 客户端比剩余空间大，硬链接通常能省掉大部分，但仍建议先腾点空间');
-      } else if (base) {
-        parts.push('相同的文件会直接硬链接复用，实际新增占用通常远小于这个数');
-      }
-      estimateBody.textContent = parts.join(' · ') || '拿不到空间信息，直接开始也可以。';
+      // 上一次可能因为缺基础客户端被拦住，条件补齐后要把按钮还回去
+      if (errorBox) errorBox.textContent = '';
+      restoreStart();
     } catch (error) {
-      estimateBody.textContent = '拿不到空间信息，直接开始也可以。';
+      /*
+       * estimate 遇到「没有基础客户端」「运行时目录不在同一个盘」这类硬性条件会直接抛错，
+       * 那不是「读不到空间」，而是根本装不了 —— 原文透出，别糊成一句「直接开始也可以」。
+       */
+      sumReuse.textContent = '未知';
+      sumFree.textContent = '未知';
+      sumSpace.textContent = humanError(error);
+      sumSpace.classList.add('is-warn');
+      if (errorBox) errorBox.textContent = humanError(error);
+      if (!running && !finishedOk) {
+        start.disabled = true;
+        start.textContent = '先按提示处理再开始';
+      }
     }
   };
   refreshEstimate();
@@ -10841,6 +16748,11 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   });
 
   start.addEventListener('click', async () => {
+    // 跑完之后这个按钮变成「完成」：只负责关窗并放行队列里的下一个任务
+    if (finishedOk) {
+      closeModal();
+      return;
+    }
     running = true;
     cancelled = false;
     job.status = 'running';
@@ -10870,27 +16782,49 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
     pause.style.display = '';
     progress.style.display = 'block';
     errorBox.textContent = '';
+    paintStages(0);
     unsubscribe = api.onSophonProgress((event) => {
       if (event.jobId !== jobId) return;
       const total = Number(event.total) || 0;
       const processed = Number(event.processed) || 0;
       const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+      const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
         version: `目标版本 ${event.tag || ''}`,
-        manifest: '下载清单',
+        manifest: '读取清单与分块索引',
         install: '写入文件',
         download: '下载分块',
         patch: '应用补丁',
+        // ldiff 预修补阶段：先把能就地补的文件补掉，再进 chunk 校验，界面上要能看出这一步在干什么
+        ldiff: '本地补丁修补（省流）',
+        link: '硬链接复用文件',
         done: '完成',
       };
+      // 目标版本一读出来就填进结论卡，别让用户猜这次要装哪个版本
+      if (event.tag && sumTag) sumTag.textContent = event.tag;
+      if (event.phase === 'ldiff') {
+        ldiffSeen = true;
+        if (ldiffLine) {
+          ldiffLine.hidden = false;
+          ldiffLine.textContent = sophonProgressStats(event);
+        }
+      }
+      // 文件都写完了但还没收到 done，说明在收尾校验，阶段条前进一格
+      paintStages(percent >= 100 && stage === 2 ? 3 : stage);
       document.querySelector('#sophon-phase').textContent = phases[event.phase] || '处理中…';
       document.querySelector('#sophon-count').textContent = total ? `${processed} / ${total}` : '';
       document.querySelector('#sophon-bar').style.width = `${event.phase === 'done' ? 100 : percent}%`;
-      const stats = `硬链接 ${event.linked || 0} · 下载 ${event.downloaded || 0} · ${formatSize(event.bytesDone)} / ${formatSize(event.totalBytes)}`;
+      const stats = sophonProgressStats(event);
       document.querySelector('#sophon-stats').textContent = stats;
       document.querySelector('#sophon-current').textContent = event.current || '';
-      updateDock(phases[event.phase] || '处理中…', event.phase === 'done' ? 100 : percent, stats, event.current || '');
+      updateDock(
+        phases[event.phase] || '处理中…',
+        event.phase === 'done' ? 100 : percent,
+        sophonProgressStats(event, true),
+        event.current || '',
+        stage
+      );
     });
 
     try {
@@ -10912,13 +16846,26 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       job.percent = 100;
       sophonJobs = sophonJobs.filter((item) => item !== job);
       hideDock();
-      if (unsubscribe) unsubscribe();
-      closeModal();
+      if (unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
+      }
+      /*
+       * 完成后不自动关窗：这一屏里有「省了多少、哪些文件没走补丁」，
+       * 只发一条几秒就消失的 toast 等于让用户自己猜。改成留在弹窗里，
+       * 用户点「完成」再关，关的时候才放行队列里的下一个任务。
+       */
+      finishedOk = true;
+      paintStages(SOPHON_STAGES.length - 1);
+      showResult(result);
+      const ldiffNote =
+        result.ldiff && result.ldiff.applied > 0
+          ? `，其中 ${result.ldiff.applied} 个由本地补丁修好、省流 ${formatSize(result.ldiff.saveBytes || 0)}`
+          : '';
       toast(
-        `${isUpdate ? '更新' : '生成'}完成（${result.tag}）→ ${result.targetRoot}：硬链接 ${result.linked}，下载 ${result.downloaded} 个文件`,
+        `${isUpdate ? '更新' : '生成'}完成（${result.tag}）：硬链接 ${result.linked} 个 · 下载 ${result.downloaded} 个${ldiffNote}`,
         'success'
       );
-      startNextSophonJob();
     } catch (error) {
       job.status = cancelled ? 'cancelled' : 'error';
       sophonJobs = sophonJobs.filter((item) => item !== job);
@@ -10933,7 +16880,7 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       running = false;
       hideDock();
       start.disabled = false;
-      start.textContent = '重新尝试';
+      start.textContent = finishedOk ? '完成' : '重新尝试';
       cancel.style.display = 'none';
       minimize.style.display = 'none';
       pause.style.display = 'none';
@@ -10957,74 +16904,133 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   }
 }
 
+/** 两个服务器是否共用同一个安装目录（官服/B服 常见）。 */
+function sameRoot(a, b) {
+  if (!a || !b) return false;
+  const left = String(a.root || '').replace(/[\\/]+$/, '').toLowerCase();
+  const right = String(b.root || '').replace(/[\\/]+$/, '').toLowerCase();
+  return Boolean(left) && left === right;
+}
+
 function openLinkModal(gameId) {
   const game = state.games.find((item) => item.id === gameId);
   if (!game) return;
   const servers = game.servers || [];
   const usable = servers.filter((server) => server.exists);
+  /*
+   * 这里不再拿「至少两个已配置的服务器」当门槛。
+   * 玩家没有官服客户端、但本机有完整游戏目录时，靠自定义文件夹照样能合并；
+   * 以前那种「还需要两个客户端」的空状态会把人直接挡在门外。
+   */
   const option = (server) =>
-    `<option value="${esc(server.id)}" ${server.exists ? '' : 'disabled'}>${esc(server.name)}${server.exists ? '' : ' · 未配置'}</option>`;
-  const defaultSource = usable.find((server) => server.active) || usable[0];
-  const defaultTarget = usable.find((server) => server.id !== (defaultSource && defaultSource.id)) || null;
-  const canLink = usable.length >= 2;
+    `<option value="${esc(server.id)}">${esc(server.name)}${
+      server.exists ? '' : ' · 未配置启动程序'
+    }</option>`;
+  const defaultSource = usable.find((server) => server.active) || usable[0] || servers[0] || null;
+  /*
+   * 官服和 B 服常常装在同一目录（只是启动程序不同），这种组合压根没法建硬链接。
+   * 默认目标优先挑一个目录不同的，免得用户一打开就撞上「源目录和目标目录相同」。
+   */
+  const defaultTarget =
+    servers.find(
+      (server) =>
+        server.id !== (defaultSource && defaultSource.id) &&
+        server.exists &&
+        !sameRoot(server, defaultSource)
+    ) ||
+    servers.find((server) => server.id !== (defaultSource && defaultSource.id)) ||
+    null;
 
   const html = `
     <div class="modal-backdrop" data-backdrop>
-      <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal sw-link-modal" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div>
             <h2>硬链接去重</h2>
-            <p>${esc(game.name)} · 把两个客户端中完全相同的文件合并为同一份数据。</p>
+            <p>${esc(game.name)} · 把两个客户端里完全相同的文件合成同一份，不多删、不改内容。</p>
           </div>
           <button class="modal-close" data-close title="关闭">${icon('x')}</button>
         </div>
         <div class="modal-body">
-          <div class="form-note form-note-warn">${icon('alert')}<span>开始前请关闭游戏和官方启动器。只处理两边都存在、大小一致且内容哈希相同的文件；不同文件、独有文件和游戏存档都不会被修改或删除。首次建议使用“完整校验”。</span></div>
           ${
-            canLink
-              ? `<div class="field-row" style="margin-bottom:14px">
-                  <div class="field" style="margin-bottom:0">
-                    <label>源客户端 <span class="req">*</span></label>
-                    <select class="select" id="link-source" style="width:100%">${usable.map(option).join('')}</select>
-                  </div>
-                  <div class="field" style="margin-bottom:0">
-                    <label>目标客户端 <span class="req">*</span></label>
-                    <select class="select" id="link-target" style="width:100%">${usable.map(option).join('')}</select>
-                  </div>
-                </div>
-                <div class="field">
-                  <label>校验方式</label>
-                  <div class="mode-options">
-                    <label class="mode-card">
-                      <input type="radio" name="link-mode" value="full" checked />
-                      <span><strong>完整校验</strong><small>逐文件 SHA-256，最可靠；大型客户端需要一些时间。</small></span>
-                    </label>
-                    <label class="mode-card">
-                      <input type="radio" name="link-mode" value="fast" />
-                      <span><strong>快速比较</strong><small>大小 + 首尾各 1MB，速度更快，适合先试跑。</small></span>
-                    </label>
-                  </div>
-                </div>
-                <details class="link-custom" style="margin-top:14px">
-                  <summary><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg> 自定义文件夹（可选）</summary>
-                  <div class="field-row" style="margin-top:10px">
-                    <div class="field" style="margin-bottom:0">
-                      <label>源目录</label>
-                      <div class="input-group">
-                        <input id="link-source-root" placeholder="留空则使用源客户端的安装目录" spellcheck="false" />
-                        <button type="button" class="btn btn-ghost" id="pick-link-source-root"><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>浏览</button>
-                      </div>
-                    </div>
-                    <div class="field" style="margin-bottom:0">
-                      <label>目标目录</label>
-                      <div class="input-group">
-                        <input id="link-target-root" placeholder="留空则使用目标客户端的安装目录" spellcheck="false" />
-                        <button type="button" class="btn btn-ghost" id="pick-link-target-root"><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>浏览</button>
-                      </div>
-                    </div>
-                  </div>
-                  <p class="hint">有些客户端没有对应渠道的 .exe，但本机有完整游戏目录。指定两个目录后，硬链接只比较这两个文件夹，不受已配置服务器的限制。</p>
+            servers.length
+              ? `<ol class="sw-steps" id="sw-link-steps">
+                  <li class="sw-step is-active"><span>1</span><strong>选对象</strong></li>
+                  <li class="sw-step"><span>2</span><strong>预检</strong></li>
+                  <li class="sw-step"><span>3</span><strong>执行</strong></li>
+                </ol>
+                <p class="sw-note">${icon(
+                  'alert',
+                  'xs'
+                )}<span>开工前关掉游戏和官方启动器。只合并两边<b>大小和内容都相同</b>的文件；内容不同、目标端独有、游戏存档都不会被改动。</span></p>
+                <details class="sw-note-more">
+                  <summary>注意</summary>
+                  <p>终末地的 <code>U8Data</code> 与 <code>sdkdata</code> 存的是渠道登录态，会自动跳过——合并了会让一边登录改写另一边的配置。第一次用建议选「完整校验」，确认没问题后再用快速比较。</p>
                 </details>
+                <section class="sw-link-step" id="link-step-1">
+                  <div class="link-pair">
+                    <div class="field" style="margin-bottom:0">
+                      <label>源客户端（文件从这里复用）</label>
+                      <select class="select" id="link-source" style="width:100%">${servers
+                        .map(option)
+                        .join('')}</select>
+                    </div>
+                    <button type="button" class="link-swap" id="link-swap" title="交换源和目标" aria-label="交换源和目标">${icon(
+                      'shuffle'
+                    )}</button>
+                    <div class="field" style="margin-bottom:0">
+                      <label>目标客户端（被合并的一方）</label>
+                      <select class="select" id="link-target" style="width:100%">${servers
+                        .map(option)
+                        .join('')}</select>
+                    </div>
+                  </div>
+                  <p class="sw-link-dirs" id="link-dirs" hidden></p>
+                  <p class="sw-link-same" id="link-same" hidden></p>
+                  <div class="sw-link-custom">
+                    <div class="sw-link-custom-head">自定义文件夹（可选）· 没有对应渠道的 exe 也能用</div>
+                    <div class="field-row">
+                      <div class="field" style="margin-bottom:0">
+                        <label>源目录</label>
+                        <div class="input-group">
+                          <input id="link-source-root" placeholder="留空则用源客户端的安装目录" spellcheck="false" />
+                          <button type="button" class="btn btn-ghost" id="pick-link-source-root">${icon(
+                            'folder'
+                          )}浏览</button>
+                        </div>
+                      </div>
+                      <div class="field" style="margin-bottom:0">
+                        <label>目标目录</label>
+                        <div class="input-group">
+                          <input id="link-target-root" placeholder="留空则用目标客户端的安装目录" spellcheck="false" />
+                          <button type="button" class="btn btn-ghost" id="pick-link-target-root">${icon(
+                            'folder'
+                          )}浏览</button>
+                        </div>
+                      </div>
+                    </div>
+                    <p class="hint">两个目录要么都填、要么都留空。填了就只比较这两个文件夹，不再要求服务器配好 exe。</p>
+                  </div>
+                  <div class="field">
+                    <label>比对方式</label>
+                    <div class="mode-options">
+                      <label class="mode-card">
+                        <input type="radio" name="link-mode" value="full" checked />
+                        <span><strong>完整校验</strong><small>逐文件比对 SHA-256，最可靠；大客户端会慢一些。</small></span>
+                      </label>
+                      <label class="mode-card">
+                        <input type="radio" name="link-mode" value="fast" />
+                        <span><strong>快速比较</strong><small>大小 + 首尾各 1MB，快很多，适合先试跑。</small></span>
+                      </label>
+                    </div>
+                  </div>
+                </section>
+                <section class="sw-link-step" id="link-step-2" hidden>
+                  <div class="link-preview" id="link-preview" style="display:none"></div>
+                </section>
+                <section class="sw-link-step" id="link-step-3" hidden>
+                  <div class="sw-result" id="link-result" hidden></div>
+                </section>
                 <div class="link-progress" id="link-progress" style="display:none">
                   <div class="link-progress-head">
                     <strong id="link-phase">准备中…</strong>
@@ -11039,39 +17045,45 @@ function openLinkModal(gameId) {
                 <div class="field-error" id="link-error"></div>`
               : `<div class="empty" style="padding:38px 20px">
                   <div class="empty-icon">${icon('link')}</div>
-                  <h3>还需要两个客户端</h3>
-                  <p>至少配置两个服务器，并且都选择好启动程序，才能比较并建立硬链接。</p>
-                  <button class="btn btn-ghost" data-close>先去配置</button>
+                  <h3>这个游戏还没有服务器</h3>
+                  <p>先去服务器管理里添加一个客户端；如果你只是想让两个目录合并，也可以先添加任意一个再回来用自定义文件夹。</p>
+                  <button class="btn btn-ghost" data-close>知道了</button>
                 </div>`
           }
         </div>
         <div class="modal-foot">
+          <button class="btn btn-ghost" id="link-back" style="display:none">上一步</button>
           <button class="btn btn-ghost" data-close>关闭</button>
           ${
-            canLink
+            servers.length
               ? `<button class="btn btn-ghost" id="link-cancel" style="display:none">停止</button>
-                 <button class="btn btn-primary" id="link-start">${icon('link')}开始建立硬链接</button>`
+                 <button class="btn btn-primary" id="link-start">${icon('search')}下一步：预检</button>`
               : ''
           }
         </div>
       </div>
     </div>`;
 
+  let step = 1;
   let running = false;
-  let finished = false;
+  // 预检和真正的合共用同一个进度区，靠这个标记区分事件归属
+  let previewing = false;
+  // 两步流程：先检测出可合并的文件，用户确认后才真的建链接
+  let previewResult = null;
   let currentJobId = null;
+  let merged = false;
   let unsubProgress = null;
-  let unsubDone = null;
+  let unsubPreview = null;
 
   openModal(html, {
     onClose: () => {
       if (unsubProgress) unsubProgress();
-      if (unsubDone) unsubDone();
+      if (unsubPreview) unsubPreview();
       if (running && currentJobId) api.servers.cancelLink(currentJobId).catch(() => {});
     },
   });
 
-  if (!canLink) return;
+  if (!servers.length) return;
 
   const sourceSelect = document.querySelector('#link-source');
   const targetSelect = document.querySelector('#link-target');
@@ -11084,65 +17096,169 @@ function openLinkModal(gameId) {
   const saved = document.querySelector('#link-saved');
   const current = document.querySelector('#link-current');
   const error = document.querySelector('#link-error');
+  const previewBox = document.querySelector('#link-preview');
+  const resultBox = document.querySelector('#link-result');
+  const sameNote = document.querySelector('#link-same');
+  const dirsNote = document.querySelector('#link-dirs');
+  const backButton = document.querySelector('#link-back');
+  const stepNodes = [1, 2, 3].map((index) => document.querySelector(`#link-step-${index}`));
+  const stepDots = [...document.querySelectorAll('#sw-link-steps .sw-step')];
+  const linkSourceRoot = document.querySelector('#link-source-root');
+  const linkTargetRoot = document.querySelector('#link-target-root');
 
   if (defaultSource) sourceSelect.value = defaultSource.id;
   if (defaultTarget) targetSelect.value = defaultTarget.id;
 
+  const modeOf = () => document.querySelector('input[name="link-mode"]:checked').value;
+
+  /* 路径比较统一走「正斜杠转反斜杠 + 去尾斜杠 + 小写」，否则 G:/X 和 G:\X\ 会被当成两个目录 */
+  const normalizeDir = (dir) =>
+    String(dir || '')
+      .replace(/\//g, '\\')
+      .replace(/\\+$/, '')
+      .trim()
+      .toLowerCase();
+  const driveOf = (dir) => {
+    const matched = String(dir || '')
+      .replace(/\//g, '\\')
+      .match(/^([a-zA-Z]):/);
+    return matched ? matched[1].toUpperCase() : '';
+  };
+
+  /*
+   * 第一步就在本地判一次能不能合并。
+   *
+   * 以前是点到最后一步才由后端抛「源目录和目标目录相同」，用户要重来一遍；
+   * 官服和 B 服装在同一文件夹又是最常见的情况，所以这里当场说清楚并禁用下一步。
+   */
+  function checkDirs() {
+    const customSource = linkSourceRoot.value.trim();
+    const customTarget = linkTargetRoot.value.trim();
+    const source = servers.find((item) => item.id === sourceSelect.value) || null;
+    const target = servers.find((item) => item.id === targetSelect.value) || null;
+
+    if (customSource || customTarget) {
+      if (!customSource || !customTarget) {
+        return { problem: '自定义文件夹需要同时指定源目录和目标目录。' };
+      }
+      if (normalizeDir(customSource) === normalizeDir(customTarget)) {
+        return { problem: '源目录和目标目录填的是同一个文件夹，没有可合并的内容。' };
+      }
+      if (driveOf(customSource) && driveOf(customTarget) && driveOf(customSource) !== driveOf(customTarget)) {
+        return { problem: '两个目录不在同一个磁盘分区，Windows 无法创建硬链接。' };
+      }
+      return { ok: true, custom: true, sourceRoot: customSource, targetRoot: customTarget, source, target };
+    }
+
+    if (!source || !target) return { problem: '请选择源客户端和目标客户端。' };
+    if (source.id === target.id) {
+      // 只有一行服务器的游戏（自建游戏常见）拿自己和自己比没有意义，直接把人引到自定义文件夹
+      return {
+        problem:
+          servers.length < 2
+            ? '这个游戏只有一行服务器，没法拿它和自己比。请在下面「自定义文件夹」里分别填源目录和目标目录。'
+            : '源客户端和目标客户端不能是同一个。',
+      };
+    }
+    const missing = [source, target].find((item) => !item.exists);
+    if (missing) {
+      return {
+        problem: `${missing.name} 还没有配置启动程序（.exe）。可以先去服务器管理里选好，或者直接在下面的「自定义文件夹」里填两个完整目录。`,
+      };
+    }
+    if (!source.root || !target.root) {
+      return { problem: '读不到安装目录，请在「自定义文件夹」里手动填两个目录。' };
+    }
+    if (normalizeDir(source.root) === normalizeDir(target.root)) {
+      return {
+        problem:
+          '这两个客户端装在同一个文件夹里（官服和 B 服常常是这样），没有可合并的内容。换一个目录不同的客户端，或者在下面「自定义文件夹」里分别填两个目录。',
+      };
+    }
+    if (driveOf(source.root) !== driveOf(target.root)) {
+      return { problem: '两个目录不在同一个磁盘分区，Windows 无法创建硬链接。' };
+    }
+    return { ok: true, custom: false, sourceRoot: source.root, targetRoot: target.root, source, target };
+  }
+
+  /* 第一步的实时反馈：能合并就把两个真实目录摊开给用户看，不能就说明原因并禁用下一步 */
+  function paintStep1() {
+    if (!startButton) return;
+    const check = checkDirs();
+    if (dirsNote) {
+      dirsNote.hidden = !check.ok;
+      dirsNote.textContent = check.ok ? `将比较：${check.sourceRoot} → ${check.targetRoot}` : '';
+    }
+    if (sameNote) {
+      sameNote.hidden = Boolean(check.ok);
+      sameNote.textContent = check.ok ? '' : check.problem;
+    }
+    if (step === 1) {
+      startButton.disabled = !check.ok;
+      startButton.textContent = '下一步：预检';
+    }
+    return check;
+  }
+
+  function paintStep() {
+    stepNodes.forEach((node, index) => {
+      if (node) node.hidden = index + 1 !== step;
+    });
+    stepDots.forEach((node, index) => {
+      node.classList.toggle('is-active', index + 1 === step);
+      node.classList.toggle('is-done', index + 1 < step);
+      node.querySelector('span').textContent = index + 1 < step ? '✓' : String(index + 1);
+    });
+    if (backButton) backButton.style.display = step > 1 && !running && !merged ? '' : 'none';
+    if (step === 1) {
+      paintStep1();
+    } else if (step === 2) {
+      startButton.disabled = running || !previewResult || !previewResult.matchable;
+      startButton.textContent =
+        previewResult && previewResult.matchable
+          ? `开始合并（省 ${fmtBytes(previewResult.matchableBytes || 0)}）`
+          : '重新预检';
+    } else {
+      startButton.disabled = running;
+      startButton.textContent = merged ? '完成' : '正在合并…';
+    }
+  }
+
+  /* 交换源 / 目标：常用操作，别让用户把两个下拉各点一遍 */
+  document.querySelector('#link-swap').addEventListener('click', () => {
+    if (running) return;
+    const sourceId = sourceSelect.value;
+    sourceSelect.value = targetSelect.value;
+    targetSelect.value = sourceId;
+    const sourceDir = linkSourceRoot.value;
+    linkSourceRoot.value = linkTargetRoot.value;
+    linkTargetRoot.value = sourceDir;
+    resetPreview();
+    paintStep1();
+  });
+
   function setProgress(p) {
     progress.style.display = 'block';
     const percent = p.total > 0 ? Math.min(100, (p.processed / p.total) * 100) : 0;
-    bar.style.width = `${percent}%`;
+    bar.style.width = `${p.phase === 'done' ? 100 : percent}%`;
     count.textContent = p.total > 0 ? `${p.processed} / ${p.total} 个候选` : '';
-    saved.textContent = `已链接 ${p.linked || 0} 个 · 节省 ${fmtBytes(p.savedBytes || 0)}`;
+    saved.textContent = `已合并 ${p.linked || 0} 个 · 节省 ${fmtBytes(p.savedBytes || 0)}`;
     current.textContent = p.current || '';
-    if (p.phase === 'scan') phase.textContent = '正在扫描两个客户端…';
-    else if (p.phase === 'compare') phase.textContent = '正在比较文件内容…';
+    if (p.phase === 'scan') phase.textContent = '正在扫描两个目录…';
+    else if (p.phase === 'compare') phase.textContent = '正在比对文件内容…';
     else if (p.phase === 'link') phase.textContent = '正在建立硬链接…';
     else if (p.phase === 'done') phase.textContent = p.cancelled ? '已停止' : '正在收尾…';
   }
 
   unsubProgress = api.onLinkProgress((payload) => {
-    if (!payload || payload.gameId !== gameId) return;
+    // 预检和合并共用同一个进度区，previewing 期间不能让合并事件串进来
+    if (!payload || payload.gameId !== gameId || previewing) return;
     if (running) {
       currentJobId = payload.jobId || currentJobId;
       cancelButton.style.display = '';
     }
     setProgress(payload);
   });
-
-  unsubDone = api.onLinkDone((payload) => {
-    if (!payload || payload.gameId !== gameId) return;
-    finished = true;
-    running = false;
-    currentJobId = null;
-    cancelButton.style.display = 'none';
-    progress.style.display = 'block';
-    bar.style.width = '100%';
-    if (payload.ok) {
-      phase.textContent = payload.cancelled ? '已停止' : '硬链接完成';
-      count.textContent = `${payload.linked || 0} 个文件已合并`;
-      saved.textContent = `节省约 ${fmtBytes(payload.savedBytes || 0)} 空间`;
-      current.textContent = `检查 ${payload.total || 0} 个候选，跳过 ${payload.skipped || 0} 个${
-        payload.errors && payload.errors.length ? `，${payload.errors.length} 个文件因占用失败` : ''
-      }。`;
-      startButton.textContent = '完成';
-      startButton.disabled = true;
-      toast(
-        payload.cancelled
-          ? '硬链接已停止，已经完成的文件保持合并'
-          : `硬链接完成，节省约 ${fmtBytes(payload.savedBytes || 0)}`,
-        'success'
-      );
-    } else {
-      phase.textContent = '未能完成';
-      current.textContent = payload.error || '未知错误';
-      startButton.disabled = false;
-      startButton.textContent = '重试';
-    }
-  });
-
-  const linkSourceRoot = document.querySelector('#link-source-root');
-  const linkTargetRoot = document.querySelector('#link-target-root');
 
   /* 每个游戏各自记住上次选的自定义目录，下次打开自动填回 */
   const linkRootsKey = `vela:link-roots:${gameId}`;
@@ -11151,10 +17267,6 @@ function openLinkModal(gameId) {
     if (savedRoots && typeof savedRoots === 'object') {
       if (savedRoots.source) linkSourceRoot.value = savedRoots.source;
       if (savedRoots.target) linkTargetRoot.value = savedRoots.target;
-      if (savedRoots.source || savedRoots.target) {
-        const details = document.querySelector('.link-custom');
-        if (details) details.open = true;
-      }
     }
   } catch {
     /* optional recollection */
@@ -11176,59 +17288,288 @@ function openLinkModal(gameId) {
 
   document.querySelector('#pick-link-source-root').addEventListener('click', async () => {
     const picked = await api.pick.directory();
-    if (picked) { linkSourceRoot.value = picked; }
+    if (picked) {
+      linkSourceRoot.value = picked;
+      resetPreview();
+      paintStep1();
+    }
   });
   document.querySelector('#pick-link-target-root').addEventListener('click', async () => {
     const picked = await api.pick.directory();
-    if (picked) { linkTargetRoot.value = picked; }
+    if (picked) {
+      linkTargetRoot.value = picked;
+      resetPreview();
+      paintStep1();
+    }
   });
 
-  startButton.addEventListener('click', async () => {
-    if (running) return;
-    if (sourceSelect.value === targetSelect.value) {
-      error.textContent = '源客户端和目标客户端不能相同。';
+  /* 预检结果：先说人话（能合并多少、省多少、哪些不动），再看数字 */
+  function renderPreview(result, mode) {
+    // 几百 MB 摊在 100 多 GB 上四舍五入就成了 0%，显示「<1%」比「0%」诚实
+    const raw = result.targetBytes ? (result.matchableBytes / result.targetBytes) * 100 : 0;
+    const percent = raw > 0 && raw < 1 ? '<1' : Math.round(raw);
+    previewBox.innerHTML = `
+      <div class="link-preview-head">
+        <strong>预检完成</strong>
+        <span>${mode === 'fast' ? '快速比较' : '完整校验'}</span>
+      </div>
+      <p class="sw-preview-line">
+        完全相同的文件 <b>${result.matchable || 0}</b> 个可以合并，省下约 <b>${fmtBytes(
+          result.matchableBytes || 0
+        )}</b>；内容不同的 <b>${result.different || 0}</b> 个、只在目标端存在的 <b>${
+          result.targetOnly || 0
+        }</b> 个会原样保留。
+      </p>
+      <div class="link-preview-grid">
+        <div class="link-stat is-accent">
+          <span class="link-stat-num">${fmtBytes(result.matchableBytes || 0)}</span>
+          <span class="link-stat-label">可以合并 · ${result.matchable || 0} 个文件</span>
+        </div>
+        <div class="link-stat">
+          <span class="link-stat-num">${fmtBytes(result.alreadyLinkedBytes || 0)}</span>
+          <span class="link-stat-label">已经合并过 · ${result.alreadyLinked || 0} 个</span>
+        </div>
+        <div class="link-stat">
+          <span class="link-stat-num">${fmtBytes(result.differentBytes || 0)}</span>
+          <span class="link-stat-label">内容不同（不动）· ${result.different || 0} 个</span>
+        </div>
+        <div class="link-stat">
+          <span class="link-stat-num">${fmtBytes(result.targetOnlyBytes || 0)}</span>
+          <span class="link-stat-label">目标端独有（保留）· ${result.targetOnly || 0} 个</span>
+        </div>
+      </div>
+      <p class="link-preview-note">目标目录共 ${fmtBytes(result.targetBytes || 0)}，合并后大约省下 ${percent}%。</p>
+    `;
+    previewBox.style.display = 'block';
+  }
+
+  /* 换了源/目标/比对方式，之前的预检结果就作废，得重新检一遍 */
+  function resetPreview() {
+    previewResult = null;
+    previewBox.style.display = 'none';
+    previewBox.innerHTML = '';
+    if (resultBox) resultBox.hidden = true;
+  }
+
+  [sourceSelect, targetSelect].forEach((select) =>
+    select.addEventListener('change', () => {
+      if (running) return;
+      resetPreview();
+      paintStep1();
+    })
+  );
+  document.querySelectorAll('input[name="link-mode"]').forEach((input) =>
+    input.addEventListener('change', () => {
+      if (running) return;
+      resetPreview();
+      paintStep1();
+    })
+  );
+  [linkSourceRoot, linkTargetRoot].forEach((input) =>
+    input.addEventListener('input', () => {
+      if (running) return;
+      resetPreview();
+      paintStep1();
+    })
+  );
+
+  unsubPreview = api.onLinkPreviewProgress((payload) => {
+    if (!payload || payload.gameId !== gameId || !previewing) return;
+    currentJobId = payload.jobId || currentJobId;
+    progress.style.display = 'block';
+    const percent = payload.total > 0 ? Math.min(100, (payload.processed / payload.total) * 100) : 0;
+    bar.style.width = `${percent}%`;
+    phase.textContent = payload.phase === 'scan' ? '正在扫描两个目录…' : '正在比对文件内容…';
+    count.textContent = payload.total > 0 ? `${payload.processed} / ${payload.total} 个候选` : '';
+    saved.textContent = `已找到 ${payload.matchable || 0} 个可合并 · ${fmtBytes(payload.matchableBytes || 0)}`;
+    current.textContent = payload.current || '';
+  });
+
+  /*
+   * 后端约定：sourceRoot / targetRoot 要么同时给、要么同时不给。
+   * 只给一个会被直接抛「自定义文件夹需要同时指定源目录和目标目录」，
+   * 所以这里按 check.custom 统一决定传还是传空串。
+   */
+  function buildPayload(check) {
+    return {
+      gameId,
+      sourceId: sourceSelect.value,
+      targetId: targetSelect.value,
+      mode: modeOf(),
+      sourceRoot: check.custom ? check.sourceRoot : '',
+      targetRoot: check.custom ? check.targetRoot : '',
+    };
+  }
+
+  /* 第 2 步：只读检测，不改任何文件 */
+  async function runPreview(check) {
+    running = true;
+    previewing = true;
+    error.textContent = '';
+    progress.style.display = 'block';
+    bar.style.width = '0%';
+    count.textContent = '';
+    saved.textContent = '';
+    current.textContent = '';
+    phase.textContent = '正在准备…';
+    cancelButton.style.display = '';
+    cancelButton.disabled = false;
+    startButton.disabled = true;
+    startButton.textContent = '正在预检…';
+    try {
+      const result = await api.servers.linkPreview(buildPayload(check));
+      currentJobId = result.jobId || currentJobId;
+      if (result.cancelled) {
+        phase.textContent = '已停止预检';
+        startButton.disabled = false;
+        startButton.textContent = '重新预检';
+        return;
+      }
+      previewResult = result;
+      renderPreview(result, modeOf());
+      progress.style.display = 'none';
+      if (!result.matchable) {
+        startButton.disabled = true;
+        startButton.textContent = '没有可合并的文件';
+        error.textContent =
+          '这两个目录里没有内容完全相同的文件：要么之前已经合并过，要么两边的文件都不一样。换一组目录再试。';
+        return;
+      }
+      startButton.disabled = false;
+      startButton.textContent = `开始合并（省 ${fmtBytes(result.matchableBytes || 0)}）`;
+      toast(`预检完成：可合并 ${result.matchable} 个文件`, 'info');
+    } catch (err) {
+      // 后端的中文错误原样透出（同盘校验、启动程序不存在、目录相同……），不自己改写成模糊说法
+      error.textContent = humanError(err);
+      phase.textContent = '预检没完成';
+      startButton.disabled = false;
+      startButton.textContent = '重新预检';
+    } finally {
+      running = false;
+      previewing = false;
+      currentJobId = null;
+      cancelButton.style.display = 'none';
+    }
+  }
+
+  function showLinkResult(result, cancelled) {
+    if (!resultBox) return;
+    resultBox.hidden = false;
+    resultBox.innerHTML = `
+      <strong class="sw-result-title">${cancelled ? '已停止合并' : '合并完成'}</strong>
+      <div class="sw-result-grid">
+        <div class="sw-result-item"><span>合并文件</span><strong>${result.linked || 0} 个</strong></div>
+        <div class="sw-result-item"><span>节省空间</span><strong>${fmtBytes(result.savedBytes || 0)}</strong></div>
+        <div class="sw-result-item"><span>跳过</span><strong>${result.skipped || 0} 个</strong></div>
+      </div>
+      <p class="sw-result-note">检查了 ${result.total || 0} 个候选${
+        result.errors && result.errors.length
+          ? `；${result.errors.length} 个文件被占用或读取失败，已跳过`
+          : ''
+      }。${cancelled ? '已经合并的文件保持合并状态，不会回退。' : '两边的游戏存档和不同文件都没有改动。'}</p>`;
+  }
+
+  /* 第 3 步：真的建立硬链接 */
+  async function runLink() {
+    const check = checkDirs();
+    if (!check.ok) {
+      error.textContent = check.problem;
       return;
     }
-    error.textContent = '';
     running = true;
-    finished = false;
-    startButton.disabled = true;
-    startButton.textContent = '处理中…';
-    cancelButton.style.display = '';
+    merged = false;
+    error.textContent = '';
     progress.style.display = 'block';
+    bar.style.width = '0%';
+    count.textContent = '';
+    saved.textContent = '';
+    current.textContent = '';
     phase.textContent = '正在准备…';
-    rememberLinkRoots();
+    cancelButton.style.display = '';
+    cancelButton.disabled = false;
+    startButton.disabled = true;
+    startButton.textContent = '正在合并…';
     try {
-      const mode = document.querySelector('input[name="link-mode"]:checked').value;
-      const result = await api.servers.link({
-        gameId,
-        sourceId: sourceSelect.value,
-        targetId: targetSelect.value,
-        mode,
-        sourceRoot: linkSourceRoot.value.trim(),
-        targetRoot: linkTargetRoot.value.trim(),
-      });
-      if (!finished) {
-        finished = true;
-        running = false;
-        currentJobId = null;
-        cancelButton.style.display = 'none';
-        phase.textContent = result.cancelled ? '已停止' : '硬链接完成';
-        current.textContent = `检查 ${result.total} 个候选，链接 ${result.linked} 个，跳过 ${result.skipped} 个。`;
-        startButton.textContent = '完成';
-        startButton.disabled = true;
+      const result = await api.servers.link(buildPayload(check));
+      merged = true;
+      showLinkResult(result, Boolean(result.cancelled));
+      startButton.disabled = false;
+      startButton.textContent = '完成';
+      if (result.cancelled) {
+        toast('已停止合并，已经合并的文件保持不变', 'info');
+      } else {
+        toast(`合并完成：${result.linked || 0} 个文件，省下 ${fmtBytes(result.savedBytes || 0)}`, 'success');
       }
     } catch (err) {
-      if (!finished) {
-        running = false;
-        cancelButton.style.display = 'none';
-        startButton.disabled = false;
-        startButton.textContent = '重试';
-        phase.textContent = '未能完成';
-        error.textContent = humanError(err);
+      error.textContent = humanError(err);
+      phase.textContent = '合并没能完成';
+      startButton.disabled = false;
+      startButton.textContent = '重试合并';
+    } finally {
+      running = false;
+      currentJobId = null;
+      cancelButton.style.display = 'none';
+      // 失败时保留「上一步」，让用户回去改目录或换客户端，而不是只剩一个重试按钮
+      if (merged && backButton) backButton.style.display = 'none';
+    }
+  }
+
+  startButton.addEventListener('click', async () => {
+    if (step === 1) {
+      const check = checkDirs();
+      if (!check.ok) {
+        error.textContent = check.problem;
+        paintStep1();
+        return;
       }
+      error.textContent = '';
+      rememberLinkRoots();
+      previewResult = null;
+      resetPreview();
+      step = 2;
+      paintStep();
+      await runPreview(check);
+      return;
+    }
+    if (step === 2) {
+      if (running) return;
+      const check = checkDirs();
+      if (!check.ok) {
+        error.textContent = check.problem;
+        step = 1;
+        paintStep();
+        return;
+      }
+      if (!previewResult || !previewResult.matchable) {
+        await runPreview(check);
+        return;
+      }
+      step = 3;
+      paintStep();
+      await runLink();
+      return;
+    }
+    if (step === 3) {
+      if (running) return;
+      // 失败后停在第三步，按钮是「重试合并」，别把它当成「完成」直接关窗
+      if (!merged) {
+        await runLink();
+        return;
+      }
+      closeModal();
     }
   });
+
+  if (backButton) {
+    backButton.addEventListener('click', () => {
+      if (running || merged) return;
+      step = 1;
+      error.textContent = '';
+      progress.style.display = 'none';
+      resetPreview();
+      paintStep();
+    });
+  }
 
   cancelButton.addEventListener('click', async () => {
     if (!currentJobId) return;
@@ -11237,6 +17578,8 @@ function openLinkModal(gameId) {
     await api.servers.cancelLink(currentJobId).catch(() => {});
     cancelButton.disabled = false;
   });
+
+  paintStep();
 }
 
 function openNewsModal(id) {
@@ -11281,6 +17624,9 @@ function openNewsModal(id) {
 
 function toast(message, type = 'info') {
   if (!dom.toastRoot) return;
+  // 后端偶尔会返回一个没有 error 字段的结果对象，直接 toast(undefined) 会弹一个空提示；
+  // 这里兜底成一句能看懂的话，避免「点了没反应」。
+  if (message === undefined || message === null || message === '') message = '操作失败，请重试';
   playUiSound('notify');
   const node = document.createElement('div');
   node.className = `toast ${type}`;
@@ -11343,13 +17689,19 @@ function onState(next) {
     settings: state.settings,
     stats: state.stats,
   };
+  /*
+   * charms / charBg 是渲染进程自己用的两个开关，主进程的设置白名单里没有这两个键，
+   * 每次状态回推都会把它们抹掉——开关刚点下去就被刷回旧值，看着也像「点了不动」。
+   * 覆盖 state.settings 之前先把这两个值捞回来。
+   */
+  const incomingSettings = keepRendererSettings(next.settings, state.settings);
   const gamesChanged = JSON.stringify(previous.games) !== JSON.stringify(next.games || []);
-  const settingsChanged = JSON.stringify(previous.settings) !== JSON.stringify(next.settings || {});
+  const settingsChanged = JSON.stringify(previous.settings) !== JSON.stringify(incomingSettings);
   const statsChanged = JSON.stringify(previous.stats) !== JSON.stringify(next.stats || {});
   const structuralChanged = gamesChanged || settingsChanged || statsChanged;
 
   state.games = next.games || [];
-  state.settings = next.settings || {};
+  state.settings = incomingSettings;
   state.stats = next.stats || state.stats;
   state.nteAccount = next.nteAccount || null;
   state.downloads = next.downloads || [];
@@ -11368,6 +17720,12 @@ function onState(next) {
 
   // 只有下载进度变化时，不重绘其他页面，避免闪烁和打断输入。
   if (!structuralChanged && state.route !== 'downloads') return;
+
+  /*
+   * 开关是就地切状态的（见 paintSwitch）：点完之后主进程会回推一份内容相同的
+   * 设置，这次重绘只会把刚跑起来的滑块动画掐断，内容一致就跳过它。
+   */
+  if (!gamesChanged && !statsChanged && consumeSettingsEcho(incomingSettings)) return;
 
   const focus = captureFocus();
   render({ preserveScroll: true });
@@ -11390,6 +17748,22 @@ document.addEventListener(
   true,
 );
 
+/* 点歌台音源文件导入：<input type="file"> 的 change 不走点击委托，
+ * 而且整页重绘会把这个 input 换掉，所以挂在 document 上按 id 认。 */
+document.addEventListener('change', async (event) => {
+  const picker = event.target;
+  if (!picker || picker.id !== 'music-source-file') return;
+  const file = picker.files && picker.files[0];
+  if (!file) return;
+  const text = await musicSourceFileText(file).catch(() => '');
+  picker.value = '';
+  if (!text) {
+    toast('这个文件读不出内容', 'error');
+    return;
+  }
+  await importMusicSource({ text });
+});
+
 document.addEventListener('click', async (event) => {
   const feedback = event.target.closest('button, [data-nav], [data-action]');
   if (
@@ -11410,27 +17784,25 @@ document.addEventListener('click', async (event) => {
   /* 点在下拉外面就把它收起来 */
   if (!event.target.closest('.song-pop')) closeSongPops();
 
+  /* 启动页唤出的侧栏：点在侧栏和菜单按钮之外的任意位置就收回 */
+  if (
+    state.startNavOpen &&
+    !event.target.closest('.sidebar') &&
+    !event.target.closest('.chrome-menu')
+  ) {
+    setStartNavOpen(false).catch(() => {});
+  }
+
   const nav = event.target.closest('[data-nav]');
   if (nav) {
     /*
-     * 「工具」父项同时是折叠开关：点它先展开/收起，
-     * 并且在收起时也顺带跳到工具页（用户点「工具」多半就是想进去看看）。
-     * 已展开状态下再点，只收起来，不重复跳转。
+     * 「工具」现在只是一条普通导航：侧栏不再挂子项，
+     * 点了直接进工具页（工具页自己是左导航 + 右侧面板）。
      */
     if (nav.dataset.action === 'nav-tools-toggle') {
-      const opening = !state.navToolsOpen;
-      state.navToolsOpen = opening;
+      state.navToolsOpen = false;
       syncNavToolsOpen();
-      if (opening) {
-        /*
-         * 展开后整个分组会变高，必须先等布局落地再量位置：
-         * 直接读 getBoundingClientRect 会把「展开前」的旧高度算进去，
-         * 结果滚动量偏小，工具组自己被顶到视口上方看不见。
-         */
-        const group = dom.navToolsGroup || nav;
-        requestAnimationFrame(() => revealInSidebar(group));
-        navigate('tools');
-      }
+      navigate('tools');
       return;
     }
     /*
@@ -11457,12 +17829,54 @@ document.addEventListener('click', async (event) => {
   event.preventDefault();
   const { action, id } = actionElement.dataset;
   if (!action || actionElement.disabled) return;
+  /*
+   * 下拉框不算「点一下就执行」的按钮。
+   *
+   * select 也带 data-action="graphics-set"，如果在这里同步执行，
+   * 用户只是点开看看有哪些档位就会被写一次；选完选项再触发 change 又写一次，
+   * 于是「点开切一次、选完再切一次」，弹出两条提示。
+   * 下拉统一交给下面的 change 委托处理。
+   */
+  if (actionElement.tagName === 'SELECT') return;
+  // 数字输入框同理：点进去只是想改数字，写入交给失焦 / 回车那条路径
+  if (actionElement.tagName === 'INPUT') return;
   try {
     await handleAction(action, id, actionElement, event);
   } catch (error) {
     toast(humanError(error), 'error');
   }
 });
+
+/*
+ * 画质页的下拉与数字框。
+ *
+ * 全部走一个委托监听：下拉在 change 时立刻写入，数字框按回车或失焦才写入，
+ * 免得每敲一个字符就打一次注册表。
+ */
+document.addEventListener('change', (event) => {
+  const target = event.target;
+  if (!target || target.dataset?.action !== 'graphics-set') return;
+  if (target.tagName !== 'SELECT') return;
+  handleAction('graphics-set', undefined, target, event).catch((error) => {
+    toast(humanError(error), 'error');
+  });
+});
+
+document.addEventListener(
+  'blur',
+  (event) => {
+    const target = event.target;
+    if (!target || target.dataset?.action !== 'graphics-set') return;
+    if (target.tagName !== 'INPUT' || target.type !== 'number') return;
+    if (target.dataset.manual !== '1') return;
+    const changed = String(target.value) !== String(target.defaultValue);
+    if (!changed) return;
+    handleAction('graphics-set', undefined, target, event).catch((error) => {
+      toast(humanError(error), 'error');
+    });
+  },
+  true
+);
 
 document.addEventListener(
   'error',
@@ -11474,8 +17888,24 @@ document.addEventListener(
 );
 
 document.addEventListener('keydown', (event) => {
+  const target = event.target;
+  if (target && target.dataset?.action === 'graphics-set' && target.tagName === 'INPUT' && event.key === 'Enter') {
+    event.preventDefault();
+    handleAction('graphics-set', undefined, target, event).catch((error) => {
+      toast(humanError(error), 'error');
+    });
+    return;
+  }
   if (event.key === 'Escape' && dom.modalRoot.childElementCount) {
     closeModal();
+  }
+  /* Esc：启动页上先收侧栏；侧栏没收起时就回主界面（原返回键的承诺） */
+  if (event.key === 'Escape' && !dom.modalRoot.childElementCount && !event.target.closest?.('input, textarea, select')) {
+    if (state.route === 'start' && state.startNavOpen) {
+      setStartNavOpen(false).catch(() => {});
+    } else if (state.route === 'start') {
+      navigate('home');
+    }
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !dom.modalRoot.childElementCount) {
     event.preventDefault();
@@ -11638,6 +18068,15 @@ async function boot() {
      * 失败了也无所谓，renderNavToolsSub 会显示错误提示，工具页自己还会重试。
      */
     loadFeatures().catch(() => {});
+    /*
+     * 开机就把画质配置读进渲染层缓存。
+     *
+     * 用户的原话是「打开软件的时间直接去读取」：主进程会在窗口建好后自己
+     * 串行预读一遍（primeGraphicsCache），这里再按启动页顺序把结果灌进
+     * state.graphicsCache，用户点进画质页时首帧直接就是数据，连 loading 都没有。
+     * 失败无所谓：点进画质页会走正常的读取路径。
+     */
+    primeGraphicsFrontend().catch(() => {});
     api.onToast((payload) => {
       if (payload && payload.message) toast(payload.message, payload.type || 'info');
     });
@@ -11646,6 +18085,18 @@ async function boot() {
       if (state.update && state.update.downloading) return;
       openUpdateModal(info);
     });
+    /*
+     * 窗口全屏状态。
+     *
+     * Electron 的原生全屏（F11 / 窗口按钮）不会让 CSS 的 :fullscreen 伪类生效，
+     * 那是 HTML5 Fullscreen API 专用的，所以只能由主进程把状态推过来，
+     * 这里落成 body.is-fullscreen 供样式判断（启动页侧栏的展开方向靠它区分）。
+     */
+    if (typeof api.onFullscreenChange === 'function') {
+      api.onFullscreenChange((value) => {
+        document.body.classList.toggle('is-fullscreen', !!value);
+      });
+    }
 
     /*
      * 更新公告弹窗：等主进程开机后那次自动检查（15 秒）把清单读完。

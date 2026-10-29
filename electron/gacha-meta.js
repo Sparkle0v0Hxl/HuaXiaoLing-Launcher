@@ -21,6 +21,11 @@ const BROWSER_UA =
 const META_TTL = 24 * 60 * 60 * 1000;
 
 const ENDFIELD_OPERATOR_PAGE = 'https://endfield.hypergryph.com/operator';
+// 官网只有干员页，武器图鉴用社区维护的 itemid→图标 仓库补齐。
+// cdn.jsdelivr.net 会把 PNG 301 到被墙的 raw.githubusercontent，
+// gcore 边缘节点可以直接出图，所以这里固定走 gcore。
+const ENDFIELD_ITEM_CDN =
+  'https://gcore.jsdelivr.net/gh/BoxCatTeam/endfield-cat-metadata@master';
 const NTE_MAIN_PAGE = 'https://yh.wanmei.com/main.html';
 const NTE_MAPS_BASE =
   'https://cdn.jsdelivr.net/gh/Anong0u0/NTE_Gacha_Exporter@main/crates/nte-assets/resources/maps/';
@@ -96,6 +101,34 @@ async function fetchEndfieldCharacters() {
     if (item.name) byName[item.name] = item;
   }
   return { bySlug, byCharId, byName };
+}
+
+/* ------------------------------------------------------------------ */
+/* 终末地武器：社区图鉴仓库（itemid → 名称 + 图标 + 稀有度）            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 武器记录的 ItemId 形如 wpn_lance_0004，官网干员页完全覆盖不到，
+ * 用 endfield-cat 项目的元数据仓库补：weapon.json 给名称，
+ * 图标按约定放 images/weapon/icon/<itemid>.png，直接拼 URL 即可。
+ */
+async function fetchEndfieldWeapons() {
+  const list = await withRetry(
+    () => fetchJson(`${ENDFIELD_ITEM_CDN}/locale/zh-CN/weapon.json`),
+    '终末地武器表'
+  );
+  const weapons = {};
+  for (const item of Array.isArray(list) ? list : []) {
+    const id = String(item?.itemid || '');
+    if (!id.startsWith('wpn_')) continue;
+    weapons[id] = {
+      name: String(item.name || '').trim(),
+      icon: `${ENDFIELD_ITEM_CDN}/images/weapon/icon/${id}.png`,
+      rarity: Number(item.rarity) || 0,
+    };
+  }
+  if (!Object.keys(weapons).length) throw new Error('终末地武器表没有解析到数据');
+  return weapons;
 }
 
 /* ------------------------------------------------------------------ */
@@ -240,7 +273,7 @@ let memory = null;
 function emptyMeta() {
   return {
     updatedAt: 0,
-    endfield: { bySlug: {}, byCharId: {}, byName: {} },
+    endfield: { bySlug: {}, byCharId: {}, byName: {}, weapons: {} },
     neverness: { items: {}, byName: {}, matched: 0 },
     errors: [],
   };
@@ -266,9 +299,13 @@ async function refresh(cachePath) {
   const meta = emptyMeta();
   const errors = [];
 
-  const [endfield, neverness] = await Promise.all([
+  const [endfield, endfieldWeapons, neverness] = await Promise.all([
     fetchEndfieldCharacters().catch((error) => {
       errors.push(`终末地：${error.message}`);
+      return null;
+    }),
+    fetchEndfieldWeapons().catch((error) => {
+      errors.push(`终末地武器表：${error.message}`);
       return null;
     }),
     fetchNevernessItems().catch((error) => {
@@ -277,13 +314,25 @@ async function refresh(cachePath) {
     }),
   ]);
 
-  if (endfield) meta.endfield = endfield;
+  // 干员页和武器表是两个独立来源，谁成功就单独落谁
+  if (endfield) {
+    if (endfieldWeapons) endfield.weapons = endfieldWeapons;
+    if (!endfield.weapons) endfield.weapons = {};
+    meta.endfield = endfield;
+  } else if (endfieldWeapons) {
+    // 干员页失败时保留旧的角色数据，只追加武器表
+    const cached = await readCache(cachePath);
+    meta.endfield = {
+      ...(cached?.endfield || {}),
+      weapons: endfieldWeapons,
+    };
+  }
   if (neverness) meta.neverness = neverness;
   meta.errors = errors;
   meta.updatedAt = Date.now();
 
   // 一个都没抓到就别覆盖旧缓存
-  if (!endfield && !neverness) {
+  if (!endfield && !neverness && !endfieldWeapons) {
     const cached = await readCache(cachePath);
     if (cached) return cached;
     return meta;

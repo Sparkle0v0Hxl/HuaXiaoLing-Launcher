@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; connect-src wss://broadcastlv.chat.bilibili.com wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
+      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self'; connect-src wss://broadcastlv.chat.bilibili.com wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>花筱灵启动器</title>
@@ -13,6 +13,8 @@
   <body>
     <svg xmlns="http://www.w3.org/2000/svg" class="sprite" aria-hidden="true">
       <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <!-- 启动页左上「打开导航」用的汉堡图标 -->
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /></symbol>
       <symbol id="i-maximize" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.4" /></symbol>
       <symbol id="i-restore" viewBox="0 0 24 24"><path d="M8 8h10v10H8z" /><path d="M5 5h9v3M5 5v9h3" /></symbol>
       <symbol id="i-home" viewBox="0 0 24 24">
@@ -212,9 +214,7 @@
     <div class="app">
       <aside class="sidebar">
         <div class="brand" data-nav="start" role="button" tabindex="0" title="进入启动页" aria-label="进入启动页">
-          <div class="brand-mark" aria-hidden="true">
-            <img src="assets/character-face.png" alt="" />
-          </div>
+          <img class="brand-mark" src="assets/character-face.png" alt="" aria-hidden="true">
           <div class="brand-text">
             <span class="brand-name">花筱灵</span>
             <span class="brand-en">HANABI STAGE</span>
@@ -281,7 +281,7 @@
         </button>
 
         <div class="sidebar-char" aria-hidden="true">
-          <img src="assets/sparxie.png" alt="" />
+          <img src="assets/sparxie-fullbody.png" alt="" />
         </div>
 
         <button class="profile" id="profile-btn" title="打开设置" aria-label="打开设置">
@@ -302,7 +302,7 @@
             <span>花筱灵启动器</span>
           </div>
           <div class="titlebar-right">
-            <span id="tb-version">v2.1.9</span>
+            <span id="tb-version">v2.4.0</span>
             <div class="window-controls">
               <button class="window-control" data-action="window-minimize" title="最小化"><svg class="icon"><use href="#i-minus"></use></svg></button>
               <button class="window-control" data-action="window-maximize" title="最大化"><svg class="icon"><use href="#i-maximize"></use></svg></button>
@@ -311,6 +311,15 @@
           </div>
         </header>
         <div class="view" id="view"></div>
+        <!-- 除启动页外所有页面常驻的装饰层：花火 / 火花挂饰 + 淡角色背景。pointer-events:none 不挡操作 -->
+        <div class="page-deco" id="page-deco" aria-hidden="true">
+          <div class="page-deco-bg"><img src="assets/sparxie-fullbody.png" alt="" draggable="false" /></div>
+          <span class="page-deco-charm page-deco-charm--sparkle"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
+          <span class="page-deco-charm page-deco-charm--sparxie"><img src="assets/sparxie-charm.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--fireworks"><img src="assets/charm-fireworks.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--flame"><img src="assets/charm-flame.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--stars"><img src="assets/charm-stars.png" alt="" draggable="false" /></span>
+        </div>
       </main>
     </div>
 
@@ -367,6 +376,13 @@
     <script src="song-ui.js"></script>
     <!-- 战绩数据归一化：必须早于 app.js，app.js 渲染时会直接读 window.HXLRecord -->
     <script src="record-model.js"></script>
+    <!-- 插件运行时：视图渲染（纯函数）+ Worker 宿主，必须早于 app.js -->
+    <script src="plugin-runtime.js"></script>
 <script src="app.js"></script>
+    <!--
+      插件页样式单独成文件：合并上游版本时不用再往几万行的 styles.css 里追加。
+      这里用静态 link 而不是脚本动态创建 —— CSP 的 script-src 是 'self'，内联脚本会被拦掉。
+    -->
+    <link rel="stylesheet" href="plugin-ui.css" />
   </body>
 </html>

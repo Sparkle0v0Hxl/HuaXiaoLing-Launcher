@@ -33,12 +33,22 @@ const CHANNELS = {
     bilibili: { launcher: 'xV0f4r1GT0', game: 'HXAFlmYa17', server: 'cn' },
     global: { launcher: 'VYTpXlbWo8', game: 'U5hbdsT9W7', server: 'global' },
   },
+  /*
+   * 崩坏3 官服：同一个 HoYoPlay 启动器接口体系，game_id 从
+   * getAllGameBasicInfo(launcher_id=jGHBHlcOq1) 的 biz=bh3_cn 条目实测拿到。
+   * B服不在 HoYoPlay 分发体系里（走 B 站自有启动器），国际服 game_id 在
+   * sg-hyp-api 里有多条 bh3_global 无法唯一定位 —— 一键下载只接官服。
+   */
+  bh3: {
+    official: { launcher: 'jGHBHlcOq1', game: 'osvnlOc0S8', server: 'cn' },
+  },
 };
 
 const EXE_NAMES = {
   genshin: ['YuanShen.exe', 'GenshinImpact.exe'],
   starrail: ['StarRail.exe'],
   zzz: ['ZenlessZoneZero.exe'],
+  bh3: ['BH3.exe'],
 };
 
 const UA =
@@ -204,12 +214,115 @@ async function fetchBuild(info, branchPackage, tag = '') {
   return fetchJson(`${base}?${query}`);
 }
 
-function pickManifests(build) {
+/*
+ * launcher_config 是官方启动器自己的配置，跟 getBuild 不是同一个接口：
+ *   default_download_mode —— 实测原神/星铁/绝区零九个渠道全是 DOWNLOAD_MODE_CHUNK
+ *   enable_ldiff          —— 原神 6 个渠道、星铁 6 个渠道为 true，绝区零 3 个渠道为 false
+ * 也就是说 ldiff 不是「另一套下载模式」，而是叠在 chunk 之上的加速层：
+ * 只有 enable_ldiff 为 true 的游戏才值得在更新前跑一遍 hdiff 预处理，否则纯属白算一遍 md5。
+ * 接口失败时返回 enableLdiff:false —— 拿不到配置就不冒险，退回纯 chunk 行为。
+ */
+async function fetchLauncherConfig(gameKey, channel) {
+  const info = CHANNELS[gameKey]?.[channel];
+  const fallback = { defaultDownloadMode: '', enableLdiff: false };
+  if (!info) return fallback;
+  const base = info.server === 'global' ? API.global : API.cn;
+  try {
+    const data = await fetchJson(
+      `${base}/getGameConfigs?launcher_id=${info.launcher}&language=zh-cn&game_ids[]=${info.game}`
+    );
+    const config = (data.launch_configs || [])[0] || {};
+    return {
+      defaultDownloadMode: String(config.default_download_mode || ''),
+      enableLdiff: config.enable_ldiff === true,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/*
+ * 官方一份 build 里带多份清单，按 matching_field 分三类：
+ *   game   —— 游戏本体，必须有
+ *   zh-cn / en-us / ja-jp / ko-kr —— 语音包，按语言勾选
+ *   mini-zh-cn 等 —— 语音包的「登录资源小包」视图
+ *   其余（绝区零那 106 份纯数字 10108/10202/30102002/10301/20101…，
+ *        category_name 是「任务▶主线▶第六章」「空洞▶棋盘事件」这类）
+ *        —— 按剧目分类的补充剧情资源，合计约 19.7GB
+ *
+ * 语音包动辄好几个 GB，四种全下就是白占空间，所以这里只取设置里勾中的那几种。
+ * matching_field 是枚举值（不是任意字符串），所以直接按白名单取，不做模糊匹配。
+ *
+ * mini-* 永远排除：实测 mini-zh-cn 的文件 100% 就是 zh-cn 那 80 个文件（连体积都一样），
+ * 包含它只会让每种语言的体积被算两遍（4.25GB 变 8.5GB），实际不会多下一份数据。
+ *
+ * 分类剧情资源默认排除（options.includeStory 为 false 时），保持和以前一致的安装行为。
+ */
+const AUDIO_LANGUAGES = [
+  ['zh-cn', '中文'],
+  ['en-us', '英语'],
+  ['ja-jp', '日语'],
+  ['ko-kr', '韩语'],
+];
+
+const AUDIO_LANGUAGE_KEYS = new Set(AUDIO_LANGUAGES.map(([key]) => key));
+
+const MINI_PREFIX = 'mini-';
+
+function normalizeAudioLanguages(languages) {
+  const list = Array.isArray(languages) ? languages : [];
+  const picked = list
+    .map((item) => String(item || '').toLowerCase())
+    .filter((item) => AUDIO_LANGUAGE_KEYS.has(item));
+  // 一种都不勾就退回中文：完全没语音包的话游戏里是哑的，比多下几个 GB 更难受
+  return picked.length ? [...new Set(picked)] : ['zh-cn'];
+}
+
+function classifyMatchingField(field) {
+  const key = String(field || '').toLowerCase();
+  if (key === 'game') return 'game';
+  if (AUDIO_LANGUAGE_KEYS.has(key)) return 'audio';
+  if (key.startsWith(MINI_PREFIX)) return 'mini';
+  // 剩下的就是按剧目分类的剧情/任务资源（绝区零的纯数字清单）
+  return 'story';
+}
+
+/** 分类剧情资源的份数与体积，用于界面上单独显示「剧情资源 / 主线动画 约 19.7GB」。 */
+function storyResourceSummary(build) {
+  let count = 0;
+  let bytes = 0;
+  for (const manifest of build?.manifests || []) {
+    // 崩坏3 的 asb 清单是必装数据包（已在 pickManifests 里计入总量），不按可选资源重复展示
+    if (manifest.matching_field === ASB_FIELD) continue;
+    if (classifyMatchingField(manifest.matching_field) !== 'story') continue;
+    count += 1;
+    bytes += Number(manifest.stats?.uncompressed_size || 0);
+  }
+  return { count, bytes };
+}
+
+/*
+ * 崩坏3 的 build 里只有两份清单：game（BH3.exe + 引擎，约 1.5GB）和
+ * asb（BH3_Data/StreamingAssets/Asb 数据包，约 31.8GB，matching_field 是 'asb'）。
+ * asb 是必装本体的一部分，不是可选的剧情资源 —— pickManifests 把它和 game
+ * 一起无条件带上；storyResourceSummary 则把它排除，避免体积被算成可选资源。
+ * 米哈游三游的 build 里没有 asb 清单，这条规则对它们没有影响。
+ */
+const ASB_FIELD = 'asb';
+
+function pickManifests(build, languages, options = {}) {
   const manifests = build.manifests || [];
   const game = manifests.find((item) => item.matching_field === 'game');
-  const audio = manifests.find((item) => item.matching_field === 'zh-cn');
   if (!game) throw new Error('官方清单缺少游戏资源');
-  return [game, audio].filter(Boolean);
+  const asb = manifests.find((item) => item.matching_field === ASB_FIELD);
+  const wanted = normalizeAudioLanguages(languages);
+  const includeStory = options.includeStory === true;
+  const audio = manifests.filter((item) => wanted.includes(String(item.matching_field || '').toLowerCase()));
+  if (!includeStory) {
+    return [game, ...(asb ? [asb] : []), ...audio];
+  }
+  const story = manifests.filter((item) => classifyMatchingField(item.matching_field) === 'story');
+  return [game, ...(asb ? [asb] : []), ...story, ...audio];
 }
 
 async function ensureManifest(manifest, cacheDir, onProgress) {
@@ -255,6 +368,8 @@ async function loadLocalChunkIndex({
   cacheDir,
   onProgress,
   signal,
+  audioLanguages,
+  includeStory = false,
 }) {
   const version = readGameVersion(baseRoot);
   if (!version) return new Map();
@@ -266,7 +381,9 @@ async function loadLocalChunkIndex({
   } catch {
     return new Map();
   }
-  const manifests = pickManifests(localBuild);
+  // 本地版本清单必须和目标版本清单用同一个 includeStory 取值，否则两边的文件集合对不上，
+  // chunk 级别的去重就会错位（该复用的 chunk 找不到源，白白重下）。
+  const manifests = pickManifests(localBuild, audioLanguages, { includeStory });
   const index = new Map();
   for (const manifest of manifests) {
     if (signal?.cancelled) break;
@@ -391,11 +508,23 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
  *   - B服      ：cps=bilibili,        channel=14, sub_channel=0
  *   - 国际服   ：cps=hyp_hoyoverse,   channel=1
  */
+/*
+ * 往运行时目录写文件时要先删再写。
+ * 运行时里的文件多半是 hardlinkTree 从基础客户端硬链接过来的（同一个 inode），
+ * 直接 writeFile 会原地截断，把玩家的基础客户端也改掉。
+ */
+async function writeFileIsolated(target, content) {
+  await fsp.rm(target, { force: true });
+  await fsp.writeFile(target, content, 'utf8');
+}
+
 function channelConfig(gameKey, channel, tag, sdkVersion = '') {
   const biz = {
     genshin: channel === 'global' ? 'hk4e_global' : 'hk4e_cn',
     starrail: channel === 'global' ? 'hkrpg_global' : 'hkrpg_cn',
     zzz: channel === 'global' ? 'nap_global' : 'nap_cn',
+    // 崩坏3 一键下载只接官服，固定 bh3_cn
+    bh3: 'bh3_cn',
   }[gameKey];
 
   let cps = 'hyp_mihoyo';
@@ -451,7 +580,7 @@ async function prepareBilibiliRuntime({
   onProgress,
   signal,
 }) {
-  if (!fs.existsSync(baseRoot)) throw new Error('官服目录不存在');
+  if (!fs.existsSync(baseRoot)) throw new Error('基础客户端目录不存在');
   await fsp.rm(targetRoot, { recursive: true, force: true });
   await fsp.mkdir(targetRoot, { recursive: true });
   const linked = await hardlinkTree({
@@ -471,10 +600,9 @@ async function prepareBilibiliRuntime({
   const info = CHANNELS[gameKey].bilibili;
   const sdkVersion = await installChannelSdk(info, targetRoot, cacheDir, onProgress, signal);
   const tag = readGameVersion(baseRoot) || '0.0.0';
-  await fsp.writeFile(
+  await writeFileIsolated(
     path.join(targetRoot, 'config.ini'),
-    channelConfig(gameKey, 'bilibili', tag, sdkVersion),
-    'utf8'
+    channelConfig(gameKey, 'bilibili', tag, sdkVersion)
   );
   const executable = EXE_NAMES[gameKey]
     .map((name) => path.join(targetRoot, name))
@@ -503,6 +631,8 @@ async function prepareSophon({
   dryRun = false,
   limitFiles = 0,
   maxFileSize = 0,
+  audioLanguages,
+  includeStoryResources = false,
 }) {
   if (!CHANNELS[gameKey]?.[channel]) throw new Error('这个服务器没有 Sophon 清单');
   if (!fs.existsSync(baseRoot)) throw new Error('基础客户端目录不存在');
@@ -510,7 +640,7 @@ async function prepareSophon({
   const tag = branch.main.tag;
   onProgress?.({ phase: 'version', tag, current: `目标版本 ${tag}` });
   const build = await fetchBuild(info, branch.main);
-  const manifests = pickManifests(build);
+  const manifests = pickManifests(build, audioLanguages, { includeStory: includeStoryResources });
   const files = new Map();
   for (const manifest of manifests) {
     const list = await ensureManifest(manifest, cacheDir, onProgress);
@@ -529,6 +659,8 @@ async function prepareSophon({
       : await loadLocalChunkIndex({
           gameKey,
           info: CHANNELS[gameKey]?.[detectLocalChannel(baseRoot)] || info,
+          audioLanguages,
+          includeStory: includeStoryResources,
           branchPackage: branch.main,
           baseRoot,
           cacheDir,
@@ -555,7 +687,17 @@ async function prepareSophon({
   const localHandles = new Map();
 
   if (dryRun) {
-    return { ok: true, dryRun: true, tag, files: total, totalBytes, targetRoot };
+    // storyResources 单独列出去：这部分是可选的补充剧情资源（约 19.7GB），
+    // 界面要能单独显示「剧情资源 / 主线动画」，不能混进基础的 totalBytes。
+    return {
+      ok: true,
+      dryRun: true,
+      tag,
+      files: total,
+      totalBytes,
+      storyResources: storyResourceSummary(build),
+      targetRoot,
+    };
   }
 
   await fsp.mkdir(targetRoot, { recursive: true });
@@ -667,10 +809,9 @@ async function prepareSophon({
   if (channel === 'bilibili') {
     sdkVersion = await installChannelSdk(info, targetRoot, cacheDir, onProgress, signal);
   }
-  await fsp.writeFile(
+  await writeFileIsolated(
     path.join(targetRoot, 'config.ini'),
-    channelConfig(gameKey, channel, tag, sdkVersion),
-    'utf8'
+    channelConfig(gameKey, channel, tag, sdkVersion)
   );
   const exe = EXE_NAMES[gameKey].map((name) => path.join(targetRoot, name)).find((file) => fs.existsSync(file));
   return {
@@ -678,6 +819,9 @@ async function prepareSophon({
     tag,
     files: total,
     totalBytes,
+    // 实际生效值回给调用方：界面要能显示「本服务器已单独设置」，
+    // 也方便安装/更新后核对口径（预下载那边必须和这里用同一个值）。
+    includeStoryResources: includeStoryResources === true,
     linked,
     downloaded,
     skipped,
@@ -692,4 +836,9 @@ module.exports = {
   prepareBilibiliRuntime,
   CHANNELS,
   decodeManifest,
+  AUDIO_LANGUAGES,
+  normalizeAudioLanguages,
+  pickManifests,
+  storyResourceSummary,
+  fetchLauncherConfig,
 };

@@ -142,6 +142,12 @@ function decryptManifest(encrypted) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
+/** 与 decryptManifest 配对：鹰角本地的 config.ini 也是同一套 AES 加密。 */
+function encryptManifest(text) {
+  const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, AES_IV);
+  return Buffer.concat([cipher.update(Buffer.from(String(text), 'utf8')), cipher.final()]);
+}
+
 function parseManifest(text) {
   const files = [];
   for (const line of text.split(/\r?\n/)) {
@@ -557,5 +563,8 @@ module.exports = {
   fetchLatest,
   downloadAndExtractSplit,
   findSevenZip,
+  decryptManifest,
+  encryptManifest,
+  profileForChannel,
   PROFILES,
 };

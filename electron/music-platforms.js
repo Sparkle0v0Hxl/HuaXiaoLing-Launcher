@@ -40,7 +40,11 @@ async function getJson(url, headers = {}) {
 }
 
 function httpsify(url) {
-  return String(url || '').replace(/^http:/i, 'https:');
+  let out = String(url || '').replace(/^http:/i, 'https:');
+  // 酷我图片的 kwcdn 子域不提供 https（实测 img1.kwcdn.kuwo.cn 的 https 直接握手失败，
+  // 但同资源在 img1.kuwo.cn 的 https 上是 200）。把 imgN.kwcdn.kuwo.cn 主机换回 imgN.kuwo.cn。
+  out = out.replace(/\/\/(img\d+)\.kwcdn\.kuwo\.cn\//i, '//$1.kuwo.cn/');
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -249,6 +253,23 @@ async function neteaseSearch(apiBase, keyword, limit = 30) {
  * 三平台并发搜索。任一平台失败不影响其它平台，
  * 只把失败原因收集到 errors 里，界面可以按需提示。
  */
+/**
+ * 酷我搜索（search.kuwo.cn 免登录）。
+ * 它的 rid 就是后面换直链要用的 key，所以这里映射成 mid。
+ */
+async function kuwoSearchSongs(keyword, limit = 30) {
+  const list = await kuwoSearch(keyword, limit);
+  return list.map((item) => ({
+    title: item.title,
+    artist: item.artist,
+    album: item.album,
+    cover: '',
+    mid: item.rid,
+    platform: 'kuwo',
+    sourceLabel: '酷我',
+  }));
+}
+
 async function searchSongs(platform, keyword, apiBase, limit = 30) {
   const query = String(keyword || '').trim();
   if (!query) return { keyword: '', songs: [], errors: [] };
@@ -258,12 +279,15 @@ async function searchSongs(platform, keyword, apiBase, limit = 30) {
     sources.push(['QQ 音乐', () => qqSearch(query, limit)]);
     sources.push(['酷狗', () => kugouSearch(query, limit)]);
     sources.push(['网易云', () => neteaseSearch(apiBase, query, limit)]);
+    sources.push(['酷我', () => kuwoSearchSongs(query, limit)]);
   } else if (platform === 'qq') {
     sources.push(['QQ 音乐', () => qqSearch(query, limit)]);
   } else if (platform === 'kugou') {
     sources.push(['酷狗', () => kugouSearch(query, limit)]);
   } else if (platform === 'netease') {
     sources.push(['网易云', () => neteaseSearch(apiBase, query, limit)]);
+  } else if (platform === 'kuwo') {
+    sources.push(['酷我', () => kuwoSearchSongs(query, limit)]);
   } else {
     throw new Error('未知平台');
   }
@@ -300,10 +324,17 @@ async function musicCharts(platform, apiBase) {
 }
 
 async function chartSongs(platform, chartId, limit, apiBase) {
-  if (platform === 'qq') return qqToplistSongs(chartId, limit);
-  if (platform === 'kugou') return kugouRankSongs(chartId, limit);
-  if (platform === 'netease') return neteaseChartSongs(apiBase, chartId, limit);
-  throw new Error('未知平台');
+  let detail;
+  if (platform === 'qq') detail = await qqToplistSongs(chartId, limit);
+  else if (platform === 'kugou') detail = await kugouRankSongs(chartId, limit);
+  else if (platform === 'netease') detail = await neteaseChartSongs(apiBase, chartId, limit);
+  else throw new Error('未知平台');
+  /*
+   * 给每首标上来源：解析播放地址时要靠 platform 决定能不能直连原生接口，
+   * 少了这个字段，会员曲目就只能去网易云碰运气。
+   */
+  detail.songs = (detail.songs || []).map((song) => ({ ...song, platform }));
+  return detail;
 }
 
 /* ------------------------------------------------------------------ */
@@ -354,6 +385,7 @@ async function neteaseChartSongs(apiBase, chartId, limit = 30) {
 /* 三家合并                                                            */
 /* ------------------------------------------------------------------ */
 
+const { kuwoSearch } = require('./music-source');
 const { mergeChartsBySource, chartSourceLabel, mergeSongs } = require('./chart-merge');
 
 /**

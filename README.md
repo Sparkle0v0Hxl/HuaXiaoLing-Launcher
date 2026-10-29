@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.3.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.4.2-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -15,7 +15,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.3.0**
+**当前版本：v2.4.2**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -50,6 +50,10 @@
 
 > 跨盘会直接拒绝（Windows 硬链接限制）。更新前建议保留官方启动器兜底。
 
+### 异环官服 / B服直切
+
+异环不需要装两份客户端：启动器直接改写官方启动器的渠道配置完成切换，并按官方 CDN 清单把目标渠道缺的资源**提前下好**（只下缺的文件，已有的一律跳过）。切换、启动、退出全程不弹官方启动器，游戏退出后连托盘残留一起清理。
+
 ### 启动页
 
 - **官方动态背景**：终末地取官网首屏视频，异环直接读本机官方启动器里的 `bg.mp4`；
@@ -60,7 +64,7 @@
 
 ### 抽卡记录
 
-五个游戏统一成同一套界面：概览 KPI、卡池垫数、卡池统计、最近获得，出金带「X 抽」垫数徽章与角色立绘。
+五个游戏统一成同一套界面：总抽数等概览 KPI 下面，角色池 / 武器池 / 常驻池 / 邦布池分段铺成整面五星图墙，出金带「X 抽」垫数角标（欧金非红配色）、大立绘与日期；选中具体卡池时切换成该池的 KPI、垫数面板与全部记录。
 
 数据来源：
 
@@ -70,7 +74,7 @@
 | 明日方舟：终末地 | 官方 `ef-webview` 接口 | 网页登录后自动从游戏日志取 Token，角色池 + 武器池一起拉 |
 | 异环 | NTE_Gacha_Exporter 导出 JSON | 导入后自动补全名称与头像 |
 
-**图鉴自动更新**：终末地角色名与立绘取自官网干员页，异环取自官网角色头像 + 社区名称表；缓存 24 小时，新版本上线后下次刷新就会带上新角色，不需要改代码。抓取失败一律回退旧缓存，抽卡页不会因为网络问题打不开。
+**图鉴自动更新**：终末地角色名与立绘取自官网干员页、武器取自社区图鉴仓库（名称 + 图标按 ItemId 匹配），异环取自官网角色头像 + 社区名称表；缓存 24 小时，新版本上线后下次刷新就会带上新角色，不需要改代码。抓取失败一律回退旧缓存，抽卡页不会因为网络问题打不开。
 
 ### 点歌台
 
@@ -120,7 +124,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.1.9-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.4.2-Portable.zip`（或运行安装版 Setup.exe），整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -155,7 +159,7 @@
 - **硬链接**仅限同盘；官方启动器如果原地覆盖文件，可能同时影响两边。
 - **原神 / 星铁 / 绝区零 抽卡**只读取本机已同步的数据库，不代替游戏登录。
 - **异环抽卡**没有公开接口，只能导入 Exporter 导出的 JSON。
-- **异环图鉴**只能匹配官网已公布的角色（约 19 位），未公布的会用首字兜底。
+- **异环图鉴**只能匹配官网已公布的角色（约 19 位），未公布的会用首字兜底；武器图标取自社区图鉴仓库，个别刚上线的武器要等图鉴收录后自动补上。
 - **终末地武器池**已接入同步，但界面暂未按武器类型分组。
 - **弹幕点歌**：B 站最稳（官方协议）；斗鱼 / 虎牙 / 抖音 / 快手 等平台靠后台隐藏窗口读页面聊天区，平台改版或需要登录时可能抓不到，状态栏会如实说明。
 - **无损音质**需要网易云会员，未登录通常返回 320kbps。
@@ -166,23 +170,23 @@
 ## 开发
 
 ```powershell
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
-打包 unpacked 目录：
+打包（NSIS 安装包 + zip 便携包，输出到 `H:\HXL-pack\dist\`）：
 
 ```powershell
-pnpm pack
+node H:\HXL-pack\pack.js
 ```
 
-注意 `build.files` 只包含 `electron/`、`src/`、图标和文档，**不包含** `resources/netease-api` 与 `resources/endfield-packs`，打包后需要手动补进 `resources/`。
+注意 asar 只包含 `electron/`、`src/`、图标和文档，**不包含** `resources/netease-api` 与 `resources/endfield-packs`，这两个运行时资源目录随发布包（便携 zip / 安装包）分发。
 
 ### 技术栈
 
-- Electron 45，主进程 `electron/main.js`（约 7800 行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
-- 渲染层通过 `preload.js` 暴露的 `window.launcher` 调用 IPC，开启 `contextIsolation` 与 `sandbox`；
-- 领域模块：`link.js`（硬链接）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
+- Electron 45，主进程 `electron/main.js`（约 1.1 万行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
+- 渲染层通过 `preload.js` 暴露的 IPC 调用接口，开启 `contextIsolation` 与 `sandbox`；
+- 领域模块：`link.js`（硬链接）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`neverness-channels.js` / `neverness-predownload.js`（异环渠道切换与资源直下）、`nte-tool.js`（导出工具获取）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
 
 测试钩子：`HX_SMOKE=1` 启动冒烟、`HX_CAPTURE=1` 生成页面截图、`HX_USER_DATA` 隔离数据目录。
 
@@ -192,8 +196,44 @@ pnpm pack
 
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
+<details open>
+<summary><b>v2.4.2</b></summary>
+
+**抽卡一面墙，异环随便切**
+
+- **抽卡页全展开**：「查看全部」入口取消，总抽数等大数字下面，角色池 / 武器池 / 常驻池 / 邦布池分段铺满整面五星图墙——大立绘、抽数角标（欧金非红配色）、图下日期，一段一个池子。
+- **异环官服 ↔ B 服一键互切**：逆向官方 CDN 分发体系，B 服资源由花筱灵按官方清单直接下载（只下缺的文件），全程不弹官方启动器；切回官服同理，提前下完官方链路就不再临时补几十 M。
+- **异环启动直达**：跳过官方启动器主界面直接弹登录窗，登录窗上的「开始游戏」也帮忙自动点（界面认不出时自动放弃）；退出游戏自动把官方启动器和托盘残留一起退掉；游戏计时按进程 PID 精确监听。
+- **异环抽卡导出工具一键获取**：导入弹窗里直接下载 NTE_Gacha_Exporter（连不上自动换加速镜像）、自动解压、打开文件夹。
+- **异环服务器管理重做**：渠道改成卡片，点卡片即切，当前渠道高亮；「国服」统一为「官服」，老存档自动纠正。
+- **终末地武器池补图**：接入社区图鉴（BoxCatTeam/endfield-cat-metadata），武器五星按 ItemId 匹配名称与图标，个别新武器等图鉴收录后自动补上。
+- 修复异环误删启动器入口导致的 UE 报错弹窗、切服双重提示；崩坏3 启动页背景换成官方启动器同款无字大图；点歌台网易云歌单补全歌名封面、详情缓存、队列分段折叠加过滤。
+
+</details>
+
 <details>
-<summary><b>展开版本历史</b>（v2.3.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.4.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.4.1</b></summary>
+
+**点歌台全面提速，侧栏外扩，任务栏图标归位**
+
+- **点歌台不再卡顿**：音源解析全部同时开跑、谁先出地址用谁，整轮 12 秒封顶（原来最坏干等一分多钟）；解析结果缓存 20 分钟。
+- **音源自己说了算**：内置音源改成勾选开关（网易云、咪咕默认开，酷狗、QQ 需要时自己开）；新增「第三方音源」导入，JSON 描述或订阅链接一键接入。
+- **会员歌兜底**：本地换源接口自动找可以完整播放的替代音源，只有试听片段的不算数。
+- **启动页侧栏往外扩**：不再挤画面，窗口整体跟着扩；修好任务栏和托盘小图标认不出的问题。
+
+</details>
+
+<details>
+<summary><b>v2.4.0</b></summary>
+
+- **明日方舟完整接入**：自动探测本机客户端，官服、B 服、国际服（英/日/韩）与台服渠道切换，复用终末地那套渠道运行时；启动页背景用官方 PV 动态视频，公告直读鹰角官网。
+- **崩坏3 完整接入**：官服 / B 服 / 国际服，公告与背景接入官方启动器内容接口，动态背景用官方同款 webm。
+- 点歌台：酷狗歌单改走链接导入，导入的歌单自动进「我的歌单」；官服也能借 B 服生成硬链接；修好启动页模糊、遮罩与正在播放封面。
+
+</details>
 
 <details>
 <summary><b>v2.3.0</b></summary>

@@ -516,11 +516,14 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
           for (const row of rows) {
             const id = String(row.ItemId || '');
             if (!id) continue;
+            // 角色：chr_0009_azrila → 剥出 slug 查官网干员页索引；
+            // 武器：wpn_lance_0004 → 直接查社区图鉴仓库的武器表
             const slug = id.replace(/^chr_\d+_/, '');
             const hit =
               endfieldMeta.bySlug?.[slug] ||
               endfieldMeta.bySlug?.[ENDFIELD_SLUG_ALIAS[slug] || ''] ||
-              endfieldMeta.byName?.[String(row.Name || '')];
+              endfieldMeta.byName?.[String(row.Name || '')] ||
+              (id.startsWith('wpn_') ? endfieldMeta.weapons?.[id] : null);
             if (!hit) continue;
             const existing = infoMap.get(id) || {};
             infoMap.set(id, {

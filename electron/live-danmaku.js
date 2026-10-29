@@ -109,7 +109,12 @@ const PLATFORM_PICKERS = {
 
 const MEDIA_PATTERN = /\.(flv|m3u8|ts|mp4|m4s|aac|mp3)(\?|$)/i;
 
-let current = null;
+/*
+ * 多房间并存：id → handle。点歌台可以同时挂 B 站（官方 WS，不在这）+
+ * 抖音 + 斗鱼…，每路隐藏窗口独立开关、独立轮询。
+ */
+const handles = new Map();
+let handleSeq = 1;
 
 function normalizeText(value) {
   return String(value || '')
@@ -150,10 +155,15 @@ function scanScript(picker) {
 })()`;
 }
 
-function stopDanmaku() {
-  const handle = current;
-  current = null;
+function stopDanmaku(id) {
+  // 不带 id：全部关掉（应用退出时用）
+  if (!id) {
+    for (const key of Array.from(handles.keys())) stopDanmaku(key);
+    return { ok: true };
+  }
+  const handle = handles.get(String(id));
   if (!handle) return { ok: true };
+  handles.delete(String(id));
   try {
     if (handle.timer) clearInterval(handle.timer);
   } catch {
@@ -170,16 +180,18 @@ function stopDanmaku() {
 /**
  * 开一个隐藏窗口去抓某个直播间的弹幕。
  *
- * @param {{ url: string, platform: string }} input
- * @returns {Promise<{ok:boolean, platform:string, status:string, note?:string}>}
+ * @param {{ url: string, platform: string, id?: string }} input
+ * @returns {Promise<{ok:boolean, id:string, platform:string, status:string, note?:string}>}
  */
 async function startDanmaku(input) {
   const url = String(input?.url || '').trim();
   const platform = String(input?.platform || '').trim();
+  const id = String(input?.id || `bridge-${handleSeq++}`);
   const picker = PLATFORM_PICKERS[platform] || PLATFORM_PICKERS.generic;
   if (!url) throw new Error('没有直播间地址');
 
-  stopDanmaku();
+  // 同 id 重连：先把旧的关干净
+  stopDanmaku(id);
 
   const partition = `persist:live-${platform}`;
   const ses = session.fromPartition(partition);
@@ -225,6 +237,7 @@ async function startDanmaku(input) {
 
   const handle = {
     win,
+    id,
     platform,
     status: '正在加载直播间…',
     messages: [],
@@ -232,7 +245,7 @@ async function startDanmaku(input) {
     seenOrder: [],
     ready: false,
   };
-  current = handle;
+  handles.set(id, handle);
 
   win.webContents.on('did-fail-load', (_event, code, description) => {
     handle.status = `页面加载失败（${code} ${description}）`;
@@ -257,20 +270,20 @@ async function startDanmaku(input) {
     handle.status = `打开直播间失败：${error.message}`;
   }
 
-  return { ok: true, platform, status: handle.status, pageTitle: handle.pageTitle || '' };
+  return { ok: true, id, platform, status: handle.status, pageTitle: handle.pageTitle || '' };
 }
 
 /**
- * 取一次新弹幕。
+ * 取一次指定房间的新弹幕。
  * 页面里每次返回最近 80 条，这里按「用户+正文」去重，只把没见过的返回给渲染层。
  */
-async function pollDanmaku() {
-  const handle = current;
-  if (!handle) return { messages: [], status: '未连接', alive: false };
+async function pollDanmaku(id) {
+  const handle = handles.get(String(id || ''));
+  if (!handle) return { messages: [], status: '未连接', alive: false, id: String(id || '') };
 
   if (handle.win.isDestroyed()) {
-    current = null;
-    return { messages: [], status: '窗口已关闭', alive: false };
+    handles.delete(String(id));
+    return { messages: [], status: '窗口已关闭', alive: false, id: String(id || '') };
   }
 
   let items = [];
@@ -313,6 +326,7 @@ async function pollDanmaku() {
     messages: fresh,
     status: handle.status,
     alive: true,
+    id: handle.id,
     pageTitle: handle.pageTitle || '',
     captured: handle.seen.size,
   };

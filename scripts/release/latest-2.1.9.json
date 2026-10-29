@@ -1,0 +1,11 @@
+{
+  "version": "2.1.9",
+  "channel": "stable",
+  "date": "2026-10-27",
+  "title": "花筱灵启动器 2.1.9",
+  "notes": "· 官方更新源内置进包，装好就能自己检查更新，不用再手填地址。\n· 启动器根目录自带 latest.json（指针式），跟着 ZIP 一起发出去。\n· 检查更新改成取版本最高的那一份：以前目录里留着上个版本的清单，会一直显示「已是最新」。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.1.9/HuaXiaoLing-2.1.9-Portable.zip",
+  "sha256": "3cb55ba693a3f07ca72789121205c2b284d55ad1a2bc22c4a7ae2c3a131a3408",
+  "size": 300635703,
+  "portable": true
+}
