@@ -5,27 +5,37 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-function findPlatformProcess(root, maxDepth = 3) {
-  const queue = [{ dir: root, depth: 0 }];
-  while (queue.length) {
-    const current = queue.shift();
-    const candidate = path.join(current.dir, 'PlatformProcess.exe');
-    try {
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      /* continue */
-    }
-    if (current.depth >= maxDepth) continue;
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current.dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.vela-linked-runtime')) continue;
-      queue.push({ dir: path.join(current.dir, entry.name), depth: current.depth + 1 });
+/**
+ * decoy 父进程候选。PlatformProcess.exe 是官方标准父进程（游戏根目录），
+ * 但参照 Xel-Launcher（GameDecoyParentBridge.CandidateNames）加两个鹰角签名
+ * 兜底：官方未来挪动/删除 PlatformProcess.exe 时，任何本地鹰角签名 exe 都能
+ * 当签名父进程用（endfield-decoy.ps1 会再校验一次 Authenticode）。
+ */
+const DECOY_PARENT_NAMES = ['PlatformProcess.exe', 'UnityCrashHandler64.exe', 'Endfield.exe'];
+
+function findDecoyParent(root, maxDepth = 3) {
+  for (const name of DECOY_PARENT_NAMES) {
+    const queue = [{ dir: root, depth: 0 }];
+    while (queue.length) {
+      const current = queue.shift();
+      const candidate = path.join(current.dir, name);
+      try {
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch {
+        /* continue */
+      }
+      if (current.depth >= maxDepth) continue;
+      let entries = [];
+      try {
+        entries = fs.readdirSync(current.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.vela-linked-runtime')) continue;
+        queue.push({ dir: path.join(current.dir, entry.name), depth: current.depth + 1 });
+      }
     }
   }
   return null;
@@ -57,9 +67,9 @@ function cleanStaleTempDirs() {
 function launchEndfield(gameRoot, gameExe, args = '') {
   return new Promise((resolve) => {
     cleanStaleTempDirs();
-    const platformProcess = findPlatformProcess(gameRoot);
+    const platformProcess = findDecoyParent(gameRoot);
     if (!platformProcess) {
-      resolve({ ok: false, error: '没有找到终末地官方 PlatformProcess.exe' });
+      resolve({ ok: false, error: '没有找到可用的鹰角签名父进程（PlatformProcess.exe）' });
       return;
     }
 
@@ -182,9 +192,9 @@ function launchEndfield(gameRoot, gameExe, args = '') {
 
 function launchEndfieldElevated(gameRoot, gameExe, args = '') {
   return new Promise((resolve) => {
-    const platformProcess = findPlatformProcess(gameRoot);
+    const platformProcess = findDecoyParent(gameRoot);
     if (!platformProcess) {
-      resolve({ ok: false, error: '没有找到终末地官方 PlatformProcess.exe' });
+      resolve({ ok: false, error: '没有找到可用的鹰角签名父进程（PlatformProcess.exe）' });
       return;
     }
     let tempDir;
@@ -198,27 +208,32 @@ function launchEndfieldElevated(gameRoot, gameExe, args = '') {
       return;
     }
 
-    const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
-    const argsList = [
+    /*
+     * 给内层 powershell 传参必须整体拼成一个「预先加好引号的字符串」再交给
+     * -ArgumentList。PS 5.1 的 Start-Process 对数组参数只做空格拼接、不加引号，
+     * 路径里带空格（比如官方客户端目录 G:\Arknights Endfield）会把参数撕碎，
+     * 内层脚本根本跑不起来，外层只能干等 180 秒超时（10-29 官服直启后踩中）。
+     */
+    const dq = (value) => `"${String(value)}"`;
+    const innerArgs = [
       '-NoProfile',
       '-NonInteractive',
       '-ExecutionPolicy',
       'Bypass',
       '-File',
-      path.join(__dirname, 'endfield-decoy.ps1'),
+      dq(path.join(__dirname, 'endfield-decoy.ps1')),
       '-ParentExe',
-      path.join(tempDir, 'Games.exe'),
+      dq(path.join(tempDir, 'Games.exe')),
       '-GameExe',
-      gameExe,
+      dq(gameExe),
       '-WorkDir',
-      gameRoot,
+      dq(gameRoot),
     ];
-    if (args && args.trim()) argsList.push('-GameArgs', args);
-    argsList.push('-TempDir', tempDir, '-PidFile', pidFile);
-    const command = [
-      `$arguments = @(${argsList.map(quote).join(',')})`,
-      `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments`,
-    ].join('; ');
+    if (args && args.trim()) innerArgs.push('-GameArgs', dq(args));
+    innerArgs.push('-TempDir', dq(tempDir), '-PidFile', dq(pidFile));
+    const command = `Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList '${innerArgs
+      .join(' ')
+      .replace(/'/g, "''")}'`;
     const encoded = Buffer.from(command, 'utf16le').toString('base64');
     const outer = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
       windowsHide: true,

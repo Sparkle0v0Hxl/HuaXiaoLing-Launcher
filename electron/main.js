@@ -177,6 +177,21 @@ function writeCrashLog(label, error) {
   }
 }
 
+/*
+ * 崩溃处理器必须挂在模块最顶部：启动器启动早期（store 初始化、提权重启分支）
+ * 就有可能抛异常或收到子进程异步 error，注册晚了的话进程直接静默消失，
+ * 用户看到的是「双击没反应」，crash.log 里却一个字都没有（真实事故，2026-10-29）。
+ */
+process.on('uncaughtException', (error) => {
+  writeCrashLog('uncaughtException', error);
+  console.error('Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (error) => {
+  writeCrashLog('unhandledRejection', error);
+  console.error('Unhandled rejection:', error);
+});
+
 /**
  * 便携模式：数据、下载、缓存全部放在启动器 exe 所在目录。
  *
@@ -2481,22 +2496,60 @@ function walkExecutables(root, names, depth = 3) {
  * → U8SDK 选错 provider → 切回官服不弹登录 / 循环报缺失。
  * 规则：只删「已知渠道 SDK 特征、且目标渠道包里没有」的文件/目录，绝不碰普通游戏资源文件。
  */
+/*
+ * 把 srcDir 里的文件按 mtime 同步到 dstDir：目标缺少或源文件更新时才复制。
+ * 用于官服运行时跟随基础客户端刷新平台状态（U8Data / sdkdata），
+ * 只增改不删除，单个文件失败不影响整体。
+ */
+async function syncNewerFiles(srcDir, dstDir) {
+  let entries;
+  try {
+    entries = await fsp.readdir(srcDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let synced = 0;
+  for (const entry of entries) {
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(dstDir, entry.name);
+    if (entry.isDirectory()) {
+      synced += await syncNewerFiles(src, dst);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    try {
+      const sb = await fsp.stat(src);
+      const sr = await fsp.stat(dst).catch(() => null);
+      if (sr && sb.mtimeMs <= sr.mtimeMs) continue;
+      await fsp.mkdir(path.dirname(dst), { recursive: true });
+      await fsp.copyFile(src, dst);
+      synced += 1;
+    } catch {
+      /* 单个文件被占用或复制失败，跳过 */
+    }
+  }
+  return synced;
+}
+
 async function reconcileEndfieldRuntime(runtimeRoot, packDir, channel) {
   const KNOWN = new Set([
     'gfsdk.dll',
     'glfoundation.dll',
     'glextra.dll',
-    'hgsdk.dll',
     'pcgamesdk.dll',
     'steam_api64.dll',
     'steam_appid.txt',
     'play_pc_sdk.dll',
-    'onechannellc.dll',
-    'webviewsdk.dll',
     'game_security_protection.exe',
-    'platformprocess.exe',
     'manifest.xml',
   ]);
+  // 注意：以下文件不能进上面这个删除清单（都是官方基础客户端自带的全渠道通用
+  // 文件，两个渠道的官方安装都有，渠道差异包里不一定带，删了官方完整性校验直接
+  // 报「检查资源完整性时发现异常，请重新下载缺失的文件」）：
+  //   - platformprocess.exe：官方平台进程，decoy/UAC 启动链的父进程（10-29 报障根因一）。
+  //   - webviewsdk.dll：内嵌 WebView，登录/活动页依赖（10-29 报障根因二，完整性校验报缺失）。
+  //   - hgsdk.dll：鹰角官方 SDK，B服差异包不带，误删后 B服同样报完整性异常。
+  //   - onechannellc.dll：官方 OneChannel 组件，两渠道包虽都带，但保底不能靠包。
   const KNOWN_DIRS = new Set(['blplatform64']);
   // 目标渠道包自己携带的 SDK 特征（首层 basename + 首层目录），这些是目标权威文件，必须保留。
   const keepArtifacts = new Set();
@@ -2580,8 +2633,10 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
 
   // 官服记住的是它自己的原始安装目录；其它渠道优先用官服/别的完整客户端当基础。
   let baseRoot = '';
+  let ownOfficialBase = '';
   if (channel === 'official') {
     baseRoot = endfieldBaseRoot(server);
+    ownOfficialBase = baseRoot;
     // 官服自己没装客户端时，退回用别的已装渠道（如国际服）当基础强制重建运行时，
     // 否则「国际服切官服」会因找不到基础客户端而反复失败（见 Bug 1）。
     if (!baseRoot) {
@@ -2596,6 +2651,34 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     throw new Error(
       `没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`
     );
+  }
+
+  // 官服渠道直接从基础客户端启动（XelLauncher 已验证的做法，见它的 app.log：
+  // 官服每次都是 staged G:\Arknights Endfield\PlatformProcess.exe 后直启本体）。
+  // 基础客户端由官方启动器持续维护，verify_files.json / U8Data / eld 下载库等
+  // 平台状态永远自洽。克隆运行时 + 渠道包覆盖后，U8SDK.dll / U8CoreUI.dll /
+  // U8Data / config.ini 与官方校验清单出现错位（包和克隆都是旧快照），游戏
+  // 平台层启动自检就报「检查资源完整性时发现异常，请重新下载缺失的文件」
+  // （10-29 报障根因四，实测修补 U8Data 也不够）。
+  // 注意：只在官服自己装了客户端时直启；fallback 借用别渠道客户端当基础时，
+  // 直启会开错渠道的游戏，那种情况仍走链接运行时。B服渠道不受影响。
+  if (channel === 'official' && ownOfficialBase && !options.forceRuntime) {
+    const baseLaunch = path.join(ownOfficialBase, 'Endfield.exe');
+    if (fs.existsSync(baseLaunch)) {
+      server.originalRoot = ownOfficialBase;
+      server.path = baseLaunch;
+      server.root = ownOfficialBase;
+      server.runtimeLinked = false;
+      server.legacyRuntime = false;
+      server.incomplete = false;
+      return {
+        ok: true,
+        built: false,
+        runtimeRoot: ownOfficialBase,
+        launchPath: baseLaunch,
+        directBase: true,
+      };
+    }
   }
 
   const runtime = runtimePaths(baseRoot, 'endfield', channel, options.runtimeRoot || '');
@@ -2675,6 +2758,37 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     await reconcileEndfieldRuntime(runtimeRoot, packDir, channel);
 
     await fsp.writeFile(marker, new Date().toISOString(), 'utf8');
+  }
+
+  // 官方启动器会持续刷新基础客户端里的平台状态（U8Data/config、sdkdata，
+  // 还有 10-28 出现的 U8Data/config/Launcher.meta），而渠道包里的同名快照
+  // 停在打包当天。运行时若一直用旧快照，游戏平台层校验资源时会报
+  // 「检查资源完整性时发现异常，请重新下载缺失的文件」（10-29 报障根因三）。
+  // 官服渠道以基础客户端为准：按 mtime 把更新的平台状态同步进运行时。
+  // 注意：B服渠道的 U8Data 是 B 服渠道配置，基础客户端里是官服的，不能这样同步。
+  if (channel === 'official') {
+    for (const dirName of ['U8Data', 'sdkdata']) {
+      await syncNewerFiles(path.join(baseRoot, dirName), path.join(runtimeRoot, dirName));
+    }
+  }
+
+  // 旧版本 reconcile 会把这几个全渠道通用的官方文件误删，而已建好的
+  // 运行时带着 v2 标记不会触发重建，所以这里统一补缺：缺了就从基础客户端
+  // 硬链接（跨盘/被占用时退回复制；基础客户端也没有就跳过）。
+  //   - PlatformProcess.exe：decoy 启动链的签名父进程（10-29 根因一）。
+  //   - webviewsdk.dll：登录/活动页 WebView，官方完整性校验必查（10-29 根因二）。
+  //   - hgsdk.dll：鹰角官方 SDK，B服差异包不带，只能从基础客户端补。
+  //   - onechannellc.dll：官方 OneChannel 组件，保底不能靠包。
+  for (const name of ['PlatformProcess.exe', 'webviewsdk.dll', 'hgsdk.dll', 'onechannellc.dll']) {
+    const runtimeFile = path.join(runtimeRoot, name);
+    if (fs.existsSync(runtimeFile)) continue;
+    const baseFile = path.join(baseRoot, name);
+    if (!fs.existsSync(baseFile)) continue;
+    try {
+      await fsp.link(baseFile, runtimeFile);
+    } catch {
+      await fsp.copyFile(baseFile, runtimeFile).catch(() => {});
+    }
   }
 
   let launchPath = null;
@@ -4372,10 +4486,28 @@ function currentElevation() {
   return elevatedCache;
 }
 
+/** 本机 powershell.exe 绝对路径：PATH 被安全软件/定制系统改坏的机器上，
+ * 裸写 'powershell.exe' 会 ENOENT，提权链整条瘫痪，所以直接按 SystemRoot 定位。 */
+function powershellExe() {
+  const candidate = path.join(
+    process.env.SystemRoot || process.env.windir || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  );
+  try {
+    if (fs.existsSync(candidate)) return candidate;
+  } catch {
+    /* fall through */
+  }
+  return 'powershell.exe';
+}
+
 function isElevated() {
   try {
     const output = execFileSync(
-      'powershell.exe',
+      powershellExe(),
       [
         '-NoProfile',
         '-NonInteractive',
@@ -4412,32 +4544,55 @@ function spawnElevatedSelf(delayMs = 2500) {
     "$ErrorActionPreference='Stop'",
     `Start-Sleep -Milliseconds ${delayMs}`,
     `try { Wait-Process -Id ${process.pid} -Timeout 30 -ErrorAction Stop } catch { }`,
+    '$elevated = $null',
     'try {',
-    `  Start-Process -FilePath ${psQuote(process.execPath)} -Verb RunAs -PassThru | Out-Null`,
+    `  $elevated = Start-Process -FilePath ${psQuote(process.execPath)} -Verb RunAs -PassThru`,
+    '  Start-Sleep -Seconds 6',
+    '  if ($elevated.HasExited) { throw "elevated instance exited immediately" }',
     '} catch {',
     '  Start-Sleep -Milliseconds 400',
     `  Start-Process -FilePath ${psQuote(process.execPath)} -ArgumentList '--no-elevate'`,
     '}',
   ].join("\n");
-  const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], {
+  const child = spawn(powershellExe(), ['-NoProfile', '-Command', script], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
-  child.unref();
   return child;
 }
 
 function relaunchElevated() {
   if (!app.isPackaged) return false;
   try {
-    spawnElevatedSelf(1500);
+    writeLaunchLog('alwaysAdmin: 当前非管理员，调度提权重启（UAC 拒绝或新实例未存活会自动回退普通权限）');
+    const child = spawnElevatedSelf(1500);
+    /*
+     * 关键：只有确认提权脚本进程真的起来了，才退出当前实例。
+     * 之前是先 app.quit() 再祈祷——spawn 一失败（powershell 被拦、PATH 异常），
+     * 脚本没跑、老实例已退，用户看到的就是「双击没反应」且 crash.log 无记录。
+     * 现在 spawn 失败就吞掉事件继续以普通权限跑；脚本起来了它自己会兜底
+     * （UAC 拒绝 / 提权实例 6 秒内退出 → 自动拉起 --no-elevate 实例）。
+     */
+    let spawnSettled = false;
+    child.on('error', () => {
+      spawnSettled = true;
+      writeLaunchLog('alwaysAdmin: 提权脚本进程启动失败，继续以普通权限运行');
+    });
+    child.on('spawn', () => {
+      spawnSettled = true;
+      child.unref();
+      setTimeout(() => {
+        quitting = true;
+        app.quit();
+      }, 400);
+    });
     setTimeout(() => {
-      quitting = true;
-      app.quit();
-    }, 400);
+      if (!spawnSettled) writeLaunchLog('alwaysAdmin: 提权脚本 5 秒未启动，继续以普通权限运行');
+    }, 5000);
     return true;
-  } catch {
+  } catch (error) {
+    writeLaunchLog(`alwaysAdmin: 提权重启调度失败，继续以普通权限运行: ${error.message}`);
     return false;
   }
 }
@@ -11698,16 +11853,6 @@ app.on('before-quit', () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && !store?.data?.settings?.closeToTray) app.quit();
-});
-
-process.on('uncaughtException', (error) => {
-  writeCrashLog('uncaughtException', error);
-  console.error('Uncaught exception:', error);
-});
-
-process.on('unhandledRejection', (error) => {
-  writeCrashLog('unhandledRejection', error);
-  console.error('Unhandled rejection:', error);
 });
 
 app.on('child-process-gone', (_event, details) => {

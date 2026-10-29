@@ -5,9 +5,12 @@
     homepage:"https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest",
     topics:["electron","windows","launcher","genshin-impact","honkai-star-rail","zenless-zone-zero","honkai-impact-3rd","arknights-endfield","neverness-to-everness","portable","hardlink"]
   };
-  const r=await fetch("https://api.github.com/repos/"+R,{method:"PATCH",headers:{"user-agent":"hx","accept":"application/vnd.github+json",authorization:"Bearer "+T,"content-type":"application/json"},body:JSON.stringify(body)});
+  // PATCH /repos 管 description 和 homepage（topics 字段会被忽略，单独走 /topics 端点）
+  const r=await fetch("https://api.github.com/repos/"+R,{method:"PATCH",headers:{"user-agent":"hx","accept":"application/vnd.github+json",authorization:"Bearer "+T,"content-type":"application/json"},body:JSON.stringify({description:body.description,homepage:body.homepage})});
   const j=await r.json();
-  console.log("status:",r.status);
-  if(r.ok){console.log("description:",j.description);console.log("homepage:",j.homepage);console.log("topics:",(j.topics||[]).join(", "));}
-  else console.log("err:",JSON.stringify(j).slice(0,300));
+  console.log("repo:", r.status, j.description, "|", j.homepage);
+  // PATCH /repos 会忽略 topics 字段，topics 必须走专门端点
+  const t = await fetch("https://api.github.com/repos/"+R+"/topics",{method:"PUT",headers:{"user-agent":"hx","authorization":"Bearer "+T,"content-type":"application/json"},body:JSON.stringify({names:body.topics})});
+  const tj = await t.json();
+  console.log("topics:", t.status, (tj.names||[]).join(", "));
 })();

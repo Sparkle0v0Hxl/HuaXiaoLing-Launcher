@@ -1,9 +1,9 @@
 {
-  "version": "2.4.2",
-  "title": "花筱灵启动器 2.4.2",
+  "version": "2.4.3",
+  "title": "花筱灵启动器 2.4.3",
   "date": "2026-10-29",
-  "notes": "· 抽卡页全展开：取消「查看全部」，总抽数下面角色池/武器池/常驻池/邦布池分段铺满整面五星图墙。\n· 异环官服↔B服一键互切：B服资源由花筱灵按官方清单直接下载，全程不弹官方启动器；直达登录窗、自动点「开始游戏」、退出自动清官方启动器。\n· 异环抽卡导出工具一键获取：导入弹窗直接下载 NTE_Gacha_Exporter（连不上自动换加速镜像）并解压打开。\n· 异环服务器管理改成渠道卡片，当前渠道高亮；「国服」统一为「官服」，老存档自动纠正。\n· 修复异环误删启动器入口后的 UE 报错弹窗、切服双重提示、游戏计时不停。\n· 崩坏3 启动页背景换官方启动器同款无字大图（webm 优先）。\n· 点歌台：网易云歌单补全歌名封面、详情缓存 10 分钟、播放队列分段折叠加过滤。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.4.2/HuaXiaoLing-2.4.2-Portable.zip",
-  "sha256": "bf4bc2000c3ea34fca9d015773139631c7b17480a5d61540bf337e9959a011bd",
-  "size": 165942151
+  "notes": "· 修复开启「始终管理员启动」后启动器双击无反应的问题：提权链三重加固，提权失败自动回退普通权限继续运行，崩溃兜底日志提前注册。\n· 终末地官服改为直接从官方安装目录启动，不再克隆链接运行时；B服链接运行时自动补齐 PlatformProcess.exe 等官方关键文件，避免被清理后无法启动。\n· 修复 UAC 提权启动在带空格的安装路径（如 G:\\Arknights Endfield）下参数被撕碎、卡三分钟超时的问题。\n· 终末地完整性校验清单不再误删全渠道通用的官方文件（webviewsdk.dll / hgsdk.dll 等），老用户切服后不再连环弹「资源完整性异常」。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.4.3/HuaXiaoLing-2.4.3-Portable.zip",
+  "sha256": "32ded6e9200d6ead7899290658c32ebd2feb6a082839b670d9051f8f7ae3623b",
+  "size": 165946434
 }
