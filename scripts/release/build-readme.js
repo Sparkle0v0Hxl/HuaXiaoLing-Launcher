@@ -83,6 +83,11 @@ let t = fs.readFileSync(SRC, 'utf8');
 const OLD_NOTICE = /原创实现[^\n]*花火[^\n]*。\n?/;
 t = t.replace(OLD_NOTICE, '原创实现，与米哈游 / HoYoverse、Hypergryph、完美世界 / Hotta Studio、Starward 均无隶属关系。界面与代码为原创，启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有；封面与动态背景在联网时从官方页面获取并缓存到本机。\n');
 
+// 版本徽章跟 package.json 走（底稿里硬编码的 v2.0.4 停更过好几版，2026-10-30 用户发现）
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'));
+t = t.replace(/版本-v\d+\.\d+\.\d+/g, `版本-v${pkg.version}`);
+t = t.replace(/(当前版本[：:]\s*)v?\d+\.\d+\.\d+/g, `$1v${pkg.version}`);
+
 const HEAD = '<summary><b>展开版本历史</b>（v2.0.4 → v1.0.0）</summary>';
 if (!t.includes(HEAD)) throw new Error('README 里没找到展开版本历史那一行');
 t = t.replace(HEAD, '<summary><b>展开版本历史</b>（v2.1.9 → v1.0.0）</summary>');
