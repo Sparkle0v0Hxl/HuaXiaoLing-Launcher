@@ -1,9 +1,11 @@
 // 用 v2.1.8 那份「能展开」的 README 作底，补上 2.1.0 ~ 2.1.9 的更新日志
 const fs = require('fs');
+const path = require('path');
 
+// 输出到源码仓库根（老工作区 vela-launcher 已弃用）；底稿 README-218.md 只在老工作区有，保留绝对路径
 const WS = 'C:\\Users\\Administrator\\Documents\\deepseek-harness\\default-workspace';
 const SRC = `${WS}\\.tmp\\README-218.md`;
-const OUT = `${WS}\\vela-launcher\\README.md`;
+const OUT = path.join(__dirname, '..', '..', 'README.md');
 
 const ENTRIES = [
   ['v2.1.9', [
@@ -76,6 +78,10 @@ const blocks = ENTRIES.map(([ver, items]) => [
 ].join('\n')).join('\n');
 
 let t = fs.readFileSync(SRC, 'utf8');
+
+// 版权声明随实情更新（2026-10-30 用户确认：界面确实用了花火/火花官方立绘，「原创几何」的旧说法早已过时）
+const OLD_NOTICE = /原创实现[^\n]*花火[^\n]*。\n?/;
+t = t.replace(OLD_NOTICE, '原创实现，与米哈游 / HoYoverse、Hypergryph、完美世界 / Hotta Studio、Starward 均无隶属关系。界面与代码为原创，启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有；封面与动态背景在联网时从官方页面获取并缓存到本机。\n');
 
 const HEAD = '<summary><b>展开版本历史</b>（v2.0.4 → v1.0.0）</summary>';
 if (!t.includes(HEAD)) throw new Error('README 里没找到展开版本历史那一行');

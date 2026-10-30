@@ -24,6 +24,10 @@ const SONG_TABS = [
   ['mine', '我的歌单'],
   ['search', '搜索'],
 ];
+const TAB_LABELS = new Map(SONG_TABS);
+/* 左栏两项最容易混：队列是「你点过的歌」，我的歌单是「平台上收藏的整张歌单」。
+ * 名字下面挂一行小字，比任何 tooltip 都直接。 */
+const NAV_SUBTITLES = { queue: '点过的歌都在这', mine: '各平台收藏的歌单' };
 
 /* ── 搜索 ─────────────────────────────────────────────────── */
 
@@ -581,15 +585,37 @@ function krNavMarkup() {
   // 后端返回的 syncedAt / durationMs：同步慢的时候用户得知道上次是什么时候、花了多久
   const syncMeta = playlistSyncSummary();
 
-  const items = SONG_TABS.map(([key, label]) => {
+  /*
+   * 左栏分两组，不再是一排平铺：
+   *   · 音乐库 = 你手里有的（队列里的歌、各平台收藏的歌单）
+   *   · 发现   = 找新歌的（榜单、搜索）
+   * 原来四项混在「浏览」下，用户反馈「分不清我的歌在哪」——
+   * 队列和我的歌单被榜单/搜索夹在中间，看名字也分不出哪个是本地、哪个是云端。
+   * 顺带给这两项挂一行小字，把「这是什么」写在名字下面。
+   */
+  const tabItem = (key) => {
+    const label = TAB_LABELS.get(key) || key;
     const count = counts[key] || 0;
+    const sub = NAV_SUBTITLES[key];
     return `
-      <button class="kr-nav-item ${tab === key ? 'is-active' : ''}" data-action="song-tab" data-value="${key}">
+      <button class="kr-nav-item ${tab === key ? 'is-active' : ''}" data-action="song-tab" data-value="${key}" title="${esc(sub || label)}">
         <span class="kr-nav-icon">${icon(KR_NAV_ICONS[key] || 'music', 'xs')}</span>
-        <span class="kr-nav-text">${label}</span>
+        <span class="kr-nav-text">${label}${sub ? `<small>${sub}</small>` : ''}</span>
         ${count ? `<span class="kr-nav-count">${count}</span>` : ''}
       </button>`;
-  }).join('');
+  };
+  const navGroups = [
+    ['音乐库', ['queue', 'mine']],
+    ['发现', ['charts', 'search']],
+  ]
+    .map(
+      ([label, keys]) => `
+      <div class="kr-nav-block">
+        <p class="kr-nav-label">${label}</p>
+        ${keys.filter((key) => TAB_LABELS.has(key)).map(tabItem).join('')}
+      </div>`
+    )
+    .join('');
 
   const syncBody = logged.length
     ? `<div class="kr-sync-list">${logged.map(krSyncRow).join('')}</div>`
@@ -597,11 +623,8 @@ function krNavMarkup() {
        <button class="kr-nav-login" data-action="music-accounts">${icon('login', 'xs')}去登录</button>`;
 
   return `
-    <nav class="kr-nav" aria-label="点歌台导航">
-      <div class="kr-nav-block">
-        <p class="kr-nav-label">浏览</p>
-        ${items}
-      </div>
+    <nav class="kr-nav" aria-label="音乐导航">
+      ${navGroups}
       <div class="kr-nav-block kr-nav-sync">
         <p class="kr-nav-label"><span>平台歌单</span><span class="kr-nav-label-hint">点 ↻ 只同步这一个</span></p>
         <button class="kr-sync-all" data-action="music-sync-all" ${syncingAll ? 'disabled' : ''}>
@@ -676,9 +699,10 @@ function queueFilterActive() {
  *
  * 行号映射规则（最要紧的一处）：
  * data-index 永远是 state.songs 里的全局真实下标 —— flat 从 0 起、
- * 遍历每个段的每一首（含被过滤掉的）逐个 +1 得到。折叠和过滤都只是
- * 「少画几行」，不改变任何行的 index，song-select / song-remove
- * 拿到的下标和没折叠时完全一致。
+ * 遍历每个段的每一首（含被过滤掉的）逐个 +1 得到。
+ * 2.4.5：段头「展开/收起」整段砍掉 —— 段条点不动还占地方，列表直接
+ * 平铺所有歌；段的先后顺序与下标映射保持不变，song-select /
+ * song-remove 拿到的下标和旧版完全一致。
  */
 function songQueueRowsMarkup() {
   const segments = songQueueSegments();
@@ -696,24 +720,7 @@ function songQueueRowsMarkup() {
     const visible = filter
       ? all.filter(({ song }) => `${song.title || ''} ${song.artist || ''}`.toLowerCase().includes(filter))
       : all;
-    if (!visible.length) continue;
-    const hasCurrent = visible.some(({ index }) => index === state.songIndex);
-    /*
-     * 展开状态：用户点过按钮的按记忆来；没点过的段里含当前播放的默认展开，
-     * 其余默认折叠。搜索过滤时一律全展开（搜都搜了，就该看到全部命中）。
-     */
-    const expanded = filter
-      ? true
-      : state.queueExpanded[segIdx] !== undefined
-        ? state.queueExpanded[segIdx]
-        : hasCurrent;
-    rows.push(
-      `<div class="song-queue-seg-head"><span>${esc(seg.label)}</span><small>${visible.length} 首</small>
-        <button class="song-queue-seg-toggle" data-action="queue-seg-toggle" data-seg="${segIdx}" title="${expanded ? '收起这一段' : '展开这一段'}">${expanded ? '收起' : `展开全部 ${visible.length} 首`}</button>
-      </div>`
-    );
-    const shown = expanded ? visible : visible.slice(0, QUEUE_SEGMENT_PREVIEW);
-    for (const { song, index } of shown) {
+    for (const { song, index } of visible) {
       rows.push(`
               <div class="song-row ${index === state.songIndex ? 'active' : ''}">
                 <button class="song-row-main" data-action="song-select" data-index="${index}">
@@ -726,12 +733,6 @@ function songQueueRowsMarkup() {
                 </button>
                 <button class="song-row-remove" data-action="song-remove" data-index="${index}" title="移除">${icon('x')}</button>
               </div>`);
-    }
-    if (!expanded && visible.length > QUEUE_SEGMENT_PREVIEW) {
-      const more = visible.length - QUEUE_SEGMENT_PREVIEW;
-      rows.push(
-        `<button class="song-queue-seg-more" data-action="queue-seg-toggle" data-seg="${segIdx}">展开其余 ${more} 首（共 ${visible.length} 首）</button>`
-      );
     }
   }
   return rows.join('');

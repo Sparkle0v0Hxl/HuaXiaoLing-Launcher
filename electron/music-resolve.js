@@ -80,6 +80,47 @@ function pickBest(candidates, song) {
 }
 
 /**
+ * 歌名主体：去掉括号后缀（Live / 重制 / 伴奏）、标点、空格和大小写，
+ * 只留能判定「是不是同一首歌」的那部分。
+ */
+function songCoreName(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[（(【\[].*?[)）】\]]/g, ' ')
+    .replace(/[\s\-_/、,.·'"!?·・。，、！？：:；;]+/g, '');
+}
+
+/** 歌手串拆成名字数组，"A / B"、"A、B"、"A feat. B" 都算多人。 */
+function artistNameList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item?.name || item || '')).filter(Boolean);
+  }
+  return String(value || '')
+    .split(/[\/、,&;；·]|feat\.?/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 换源候选是不是「原来那首」：歌名主体对得上，歌手还要有交集。
+ *
+ * 换源最怕的不是失败，是「换成了另一首」：地址能放、也没有任何提示，
+ * 但唱的是同名不同曲或者别人的翻唱，等用户发现已经听了好几首。
+ * 所以宁可这次不放，也不放错歌。
+ */
+function sameSongEnough(wantTitle, wantArtist, gotTitle, gotArtist) {
+  const wantCore = songCoreName(wantTitle);
+  const gotCore = songCoreName(gotTitle);
+  if (!wantCore || !gotCore) return false;
+  if (!(gotCore === wantCore || gotCore.includes(wantCore) || wantCore.includes(gotCore))) return false;
+  const wantNames = artistNameList(wantArtist).map(songCoreName).filter(Boolean);
+  const gotNames = artistNameList(gotArtist).map(songCoreName).filter(Boolean);
+  // 有一边拿不到歌手，就不卡这一层：歌名主体对得上就认
+  if (!wantNames.length || !gotNames.length) return true;
+  return wantNames.some((want) => gotNames.some((got) => got === want || got.includes(want) || want.includes(got)));
+}
+
+/**
  * 解析一首歌的可播放地址。
  * 返回 { url, title, artist, cover, neteaseId, level } 或 null。
  */
@@ -91,7 +132,20 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
   const songs = search?.result?.songs || [];
   if (!songs.length) return null;
 
-  const best = pickBest(songs, song);
+  /*
+   * 先按「歌名 + 歌手对得上」筛一遍再挑。
+   * pickBest 在一条都不沾边时会把第一条兜底返回，等于「搜出来谁就给谁」——
+   * 那样建出来的队列项地址能放、也不会报错，但放的根本不是用户点的那首。
+   */
+  const candidates = songs.filter((item) =>
+    sameSongEnough(
+      song?.title || song?.name,
+      song?.artist,
+      item?.name,
+      (item?.ar || item?.artists || []).map((a) => a.name).filter(Boolean).join(' / ')
+    )
+  );
+  const best = pickBest(candidates, song);
   if (!best?.id) return null;
 
   // 先试换源接口：会员曲目只有它会返回完整音源
@@ -152,4 +206,4 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
   };
 }
 
-module.exports = { resolvePlayableUrl, searchKeyword, pickBest };
+module.exports = { resolvePlayableUrl, searchKeyword, pickBest, sameSongEnough };

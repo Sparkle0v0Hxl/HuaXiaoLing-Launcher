@@ -412,6 +412,21 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
     // 新的在前，供「五星记录」列表直接渲染
     fiveDetails.sort((a, b) => String(b.time).localeCompare(String(a.time)));
 
+    // 四星明细：合并版抽卡页的「4★」一栏要按名字聚合出次数榜
+    const fourDetails = [];
+    for (const pulls of byType.values()) {
+      for (const row of pulls) {
+        if (Number(row.RankType) !== def.fourRank) continue;
+        const info = infoMap.get(String(row.ItemId));
+        fourDetails.push({
+          name: (info && info.name) || row.Name,
+          icon: (info && info.icon) || null,
+          time: row.Time,
+          itemType: categoryOf(def, row),
+        });
+      }
+    }
+
     // 记录里没有低于四星的抽卡时（很多 UIGF 导出只存四星以上），
     // 垫数会把四星也算进去，只能当参考值。
     const pityExact = list.some((row) => Number(row.RankType) < def.fourRank);
@@ -427,6 +442,10 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
       total: list.length,
       five: five.length,
       four: four.length,
+      // 低于四星的抽数（绝区零是 B 级，原神/铁道是 3★）
+      low: list.filter((row) => Number(row.RankType) < def.fourRank).length,
+      // 这个分类里当前攒下的垫抽：各卡池类型取最大（铁道/原神的 400 集录一般没抽，主池就是它）
+      currentPity: pities.length ? Math.max(...pities.map((item) => item.pity || 0)) : 0,
       fiveRate: list.length ? (five.length / list.length) * 100 : 0,
       fourRate: list.length ? (four.length / list.length) * 100 : 0,
       averagePity,
@@ -440,6 +459,7 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
       pities,
       pityExact,
       fiveHistory: fiveDetails.slice(0, 300),
+      fourHistory: fourDetails.slice(0, 600),
       recentFive: fiveDetails.slice(0, 12),
       breakdown: withBreakdown ? buildBreakdown(def, list, infoMap) : null,
     });

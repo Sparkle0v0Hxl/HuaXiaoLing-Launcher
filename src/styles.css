@@ -246,6 +246,9 @@ button.recent-row {
   border-right: 1px solid var(--line);
   background: var(--sidebar-bg);
   backdrop-filter: blur(20px);
+  /* 收起 / 展开是硬切宽度，整页内容会「啪」地跳一下；给个短过渡顺过去 */
+  transition: width 0.22s cubic-bezier(0.22, 0.8, 0.3, 1), flex-basis 0.22s cubic-bezier(0.22, 0.8, 0.3, 1),
+    padding 0.22s cubic-bezier(0.22, 0.8, 0.3, 1);
 }
 
 .brand {
@@ -387,6 +390,9 @@ button.recent-row {
   border-radius: 12px;
   text-align: left;
   transition: background 0.16s ease;
+  /* 和 .sidebar-scroll 同层：不被底部装饰立绘盖住 */
+  position: relative;
+  z-index: 1;
 }
 .profile:hover {
   background: var(--surface-2);
@@ -2435,6 +2441,8 @@ button.recent-row {
   color: var(--text-2);
   font-size: 14.5px;
   line-height: 1.75;
+  /* 确认文案里会带换行的补充说明（例如「官服共用同一个目录」那段警告） */
+  white-space: pre-line;
 }
 .confirm-copy strong {
   color: var(--text);
@@ -2471,6 +2479,11 @@ button.recent-row {
 }
 .toast.leaving {
   animation: toastOut 0.2s ease both;
+}
+/* 切换服务器这类要等一会儿的操作：图标转起来，表示「在动」而不是「点了没反应」 */
+.toast.is-busy .icon {
+  animation: spin 1.1s linear infinite;
+  color: var(--gold);
 }
 .toast .icon {
   width: 15px;
@@ -2899,6 +2912,9 @@ button.recent-row {
   border-right: 1px solid var(--line);
   background: var(--sidebar-bg);
   backdrop-filter: blur(20px);
+  /* 收起 / 展开是硬切宽度，整页内容会「啪」地跳一下；给个短过渡顺过去 */
+  transition: width 0.22s cubic-bezier(0.22, 0.8, 0.3, 1), flex-basis 0.22s cubic-bezier(0.22, 0.8, 0.3, 1),
+    padding 0.22s cubic-bezier(0.22, 0.8, 0.3, 1);
 }
 
 /* 侧栏滚动区：
@@ -2910,6 +2926,9 @@ button.recent-row {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
+  /* 导航永远画在侧栏底部那张装饰立绘之上（立绘 z-index:0） */
+  position: relative;
+  z-index: 1;
   /* 上边距放在容器上而不是 .nav 上：滚动时这段留白会跟着滚掉，
    * 结果列表滚到顶部时第一个导航项被上沿削掉一截 */
   margin: 0 -6px;
@@ -2921,27 +2940,29 @@ button.recent-row {
   overflow-anchor: none;
 }
 .sidebar-scroll::-webkit-scrollbar {
-  width: 6px;
+  /* 6px 太细，展开后要滚的时候几乎抓不住；给到 9px，配合常显的半透明滑块 */
+  width: 9px;
 }
 .sidebar-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
-/* 滑块平时收起来，鼠标进侧栏 / 真的在滚时才显形，免得常驻一条灰杠 */
+/* 滑块改成「常驻淡显 + 操作时加深」：
+ * 以前默认完全透明，只在鼠标进侧栏才出现，用户根本不知道这里能滚。 */
 .sidebar-scroll::-webkit-scrollbar-thumb {
-  background: var(--surface-3);
+  background: var(--line-strong);
   border: 2px solid transparent;
   border-radius: 6px;
   background-clip: padding-box;
-  opacity: 0;
+  opacity: 0.42;
   transition: opacity 0.18s ease;
 }
 .sidebar:hover .sidebar-scroll::-webkit-scrollbar-thumb,
 .sidebar-scroll.is-scrolling::-webkit-scrollbar-thumb,
 .sidebar-scroll::-webkit-scrollbar-thumb:hover {
-  opacity: 1;
+  opacity: 0.9;
 }
 .sidebar-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--line-strong);
+  background: var(--muted);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
@@ -3094,6 +3115,9 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   border-radius: 12px;
   text-align: left;
   transition: background 0.16s ease;
+  /* 和 .sidebar-scroll 同层：不被底部装饰立绘盖住 */
+  position: relative;
+  z-index: 1;
 }
 .profile:hover {
   background: var(--surface-2);
@@ -5142,6 +5166,8 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   color: var(--text-2);
   font-size: 14.5px;
   line-height: 1.75;
+  /* 确认文案里会带换行的补充说明（例如「官服共用同一个目录」那段警告） */
+  white-space: pre-line;
 }
 .confirm-copy strong {
   color: var(--text);
@@ -5178,6 +5204,11 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
 }
 .toast.leaving {
   animation: toastOut 0.2s ease both;
+}
+/* 切换服务器这类要等一会儿的操作：图标转起来，表示「在动」而不是「点了没反应」 */
+.toast.is-busy .icon {
+  animation: spin 1.1s linear infinite;
+  color: var(--gold);
 }
 .toast .icon {
   width: 15px;
@@ -6031,6 +6062,16 @@ html[data-theme="light"] body {
   font-weight: 600;
   letter-spacing: 0.08em;
 }
+/*
+ * 「与官服共用目录」这枚徽标是警告，不是褒义标签：
+ * 用户删掉这个文件夹会连带另一个渠道一起失效，颜色必须和「当前」区分开。
+ */
+.server-badge.is-shared {
+  border-color: rgba(255, 176, 96, 0.42);
+  color: #ffb765;
+  background: rgba(255, 167, 76, 0.13);
+  letter-spacing: 0.02em;
+}
 .server-path {
   margin-top: 3px;
   color: var(--muted);
@@ -6375,6 +6416,17 @@ body.sidebar-collapsed .sidebar-toggle .icon {
 }
 body.sidebar-collapsed .sidebar-toggle span {
   display: none;
+}
+/* 收起态那个箭头是唯一能「展开导航栏」的入口，给它一圈主题色描边，
+ * 别藏成一个不起眼的灰点——以前不少人收起来之后就找不到怎么展开。 */
+body.sidebar-collapsed .sidebar-toggle {
+  color: var(--gold);
+  border: 1px solid color-mix(in srgb, var(--gold) 42%, transparent);
+  background: color-mix(in srgb, var(--gold) 9%, transparent);
+}
+body.sidebar-collapsed .sidebar-toggle:hover {
+  color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 17%, transparent);
 }
 
 /* minimized download task */
@@ -8205,7 +8257,9 @@ body.sidebar-collapsed .sidebar-toggle {
 }
 
 /* start screen: last game full window, game picker below */
-body.start-mode .sidebar,
+/* 侧栏不能在这里 display:none：启动页唤出它靠 transform 滑动，
+   display 一切换过渡就没了。隐藏交给下面 start-mode 里的
+   translateX(-100%) + visibility:hidden。 */
 body.start-mode .titlebar {
   display: none;
 }
@@ -8691,7 +8745,7 @@ body.start-mode .view {
 }
 
 .task-dock-queued {
-  padding: 5px 4px 5px 7px;
+  padding: 0 2px 0 0;
   opacity: 0.78;
 }
 
@@ -8702,6 +8756,34 @@ body.start-mode .view {
 .task-dock-queued .task-dock-icon {
   width: 24px;
   height: 24px;
+}
+
+/*
+ * 已结束的任务留在坞里，点一下能重新打开那个界面。
+ * 视觉上必须一眼看出「这条已经不在跑了」，否则会和进行中的条目混成一堆。
+ */
+.task-dock-ended {
+  opacity: 0.9;
+}
+
+.task-dock-ended .task-dock-icon {
+  color: var(--muted);
+  background: var(--surface-3);
+}
+
+.task-dock-ended.is-done .task-dock-icon {
+  color: #7bd88f;
+  background: rgba(123, 216, 143, 0.13);
+}
+
+.task-dock-ended.is-error .task-dock-icon {
+  color: var(--danger, #ff7b8a);
+  background: rgba(255, 123, 138, 0.13);
+}
+
+.task-dock-ended .task-dock-copy strong {
+  color: var(--text-2);
+  font-weight: 500;
 }
 
 /* start screen game notices */
@@ -11715,9 +11797,11 @@ select {
   font-size: 14.5px;
 }
 
-/* 旧的次级按钮和分隔线不再使用 */
+/* 旧的次级按钮和分隔线不再使用。
+   注意 start-dock-secondary 不在这条里：它现在是「自动检测 / 路径选择」两枚按钮
+   的样式，跟着这条一起 display:none 的话，未安装游戏时只剩一个「下载游戏」，
+   用户根本找不到手动选路径的入口。 */
 .start-dock-buttons,
-.start-dock-secondary,
 .start-dock-servers,
 .start-dock-link {
   display: none;
@@ -14562,23 +14646,38 @@ body.start-mode .start-games {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 18px;
 }
 
 .song-app-title {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-right: auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  flex: none;
+  min-width: 0;
 }
+/* 与 .page-head h1 同一套字号 / 字距：音乐页之前是 26px、无 eyebrow，
+ * 跟主页、动态、工具页摆在一起明显不是一套标题。 */
 .song-app-title h1 {
-  margin: 0;
+  margin: 6px 0 0;
   font-family: var(--font-display);
-  font-size: 26px;
+  font-size: 36px;
   font-weight: 650;
-  letter-spacing: 0.2px;
+  letter-spacing: -0.025em;
+  line-height: 1.12;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
 }
-.song-app-title span {
+.song-app-title h1 .count {
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.song-app-title > span {
   font-size: 12.5px;
   color: var(--muted);
 }
@@ -21731,29 +21830,69 @@ body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge)::after {
   }
 }
 
-/* 侧栏底部：火花的立绘水印，收在角落不抢导航 */
-.sidebar {
-  position: relative;
-}
+/* 侧栏底部：火花立绘
+ * 上一版是 absolute 水印（96×132、opacity 0.07），为了不压导航把它压到几乎看不见，
+ * 结果既小又糊。现在改成 flex 里真实占位的一块：导航滚自己的，立绘占底部固定高度，
+ * 两者不再重叠，所以敢给到不透明度 1 和完整尺寸，也不用再为「挡住图标」让路。
+ */
 .sidebar-char {
-  position: absolute;
-  right: -6px;
-  bottom: 56px;
-  width: 116px;
-  z-index: 0;
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+  /* 150~230 那档会把导航挤到必须滚动才看得到「设置」；
+   * 收到 140~196：常规窗口（≥800 高）里导航能整块放下，矮窗口才需要滚。 */
+  height: clamp(140px, 20vh, 196px);
+  margin: 8px 0 0;
+  overflow: hidden;
   pointer-events: none;
-  opacity: 0.14;
-  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95) 8%, transparent 88%);
-  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95) 8%, transparent 88%);
+  z-index: 0;
+  /* 上沿融进侧栏底色：人物像从面板里浮出来，而不是贴了一张图 */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgba(0, 0, 0, 0.5) 13%,
+    #000 36%,
+    #000 100%
+  );
+  mask-image: linear-gradient(to bottom, transparent 0, rgba(0, 0, 0, 0.5) 13%, #000 36%, #000 100%);
+}
+/* 下沿只压很薄一层：这张素材是倒挂姿势，脸在下部，
+ * 之前压 26% 的侧栏色正好糊在脸上——「看不清」的主因就是它。 */
+.sidebar-char::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 9%;
+  background: linear-gradient(to top, var(--sidebar-bg) 6%, transparent 100%);
+  pointer-events: none;
 }
 .sidebar-char img {
   display: block;
   width: 100%;
-  height: auto;
-  filter: drop-shadow(0 12px 26px rgba(0, 0, 0, 0.55));
+  height: 100%;
+  /* 素材 689×820 是完整的「倒挂比耶」构图，contain 保完整、不裁脸；
+   * 用 cover 会优先裁掉下半身，而这幅图的脸恰恰在下半部 */
+  object-fit: contain;
+  object-position: 50% 50%;
+  filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.34));
 }
 body.sidebar-collapsed .sidebar-char {
   display: none;
+}
+/* 设置里关掉「侧栏立绘」：整块不占位，导航直接多出这一截高度 */
+body.no-sidebar-char .sidebar-char {
+  display: none;
+}
+/* 窗口矮的时候把高度让给导航，立绘缩一档；再矮就整块收掉，不跟导航抢地方 */
+@media (max-height: 780px) {
+  .sidebar-char {
+    height: 132px;
+  }
+}
+@media (max-height: 640px) {
+  .sidebar-char {
+    display: none;
+  }
 }
 
 /* 空状态：花火的脸做底 */
@@ -25457,6 +25596,24 @@ body.charms-on .page-deco-sprite { display: block; }
   width: 100%;
 }
 
+/* 歌单里正在播的那一首：左边一道强调条 + 序号变 ♪，
+   几十首往下放的时候一眼能看出放到哪儿了 */
+.kr-detail-song.is-current {
+  border-bottom-color: transparent;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.kr-detail-song.is-current .song-chart-index,
+.kr-detail-song.is-current .song-chart-copy strong {
+  color: var(--accent);
+}
+
+.kr-detail-song.is-current > .icon {
+  opacity: 1;
+}
+
 /* 窄屏：左栏折成顶部一条横向导航（可横向滚动），不能把主区挤爆 */
 @media (max-width: 1100px) {
   .kr-body {
@@ -28290,48 +28447,218 @@ body.is-subpage .page-deco {
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
 }
 /* ═══ 2.4.x 启动页菜单键 = 唤出主页那个原生侧栏 ═══════════════
-   不另造面板、不改造侧栏自身形态（收缩/展开、图标条宽度全部沿用主页），
-   只控制它「推」出来的方向：
-     · 窗口态：主进程把窗口整体向左外扩出侧栏那么宽的一块，侧栏回到正常布局流
-               里站在那块新区域中；画面在屏幕上的尺寸和位置都不变（不缩窄、
-               不右移被裁），不压暗、不加遮罩；
-     · 浮层态（全屏 / 最大化 / 窗口已贴显示器左边缘，扩不出去）：侧栏改为浮在
-               画面上方从左侧滑入往内展开，并补一层暗遮罩。
-   点侧栏外 / Esc / 跳转后收回（窗口一并还原）；唤出时顶部按钮压在遮罩之上仍可点。 */
+   不另造面板、不改造侧栏自身形态（收缩/展开、图标条宽度全部沿用主页）。
+   侧栏以浮层身份从左侧滑入，画面被同一节奏向右推开 56px——推开的那条缝
+   正好压在侧栏底下，右侧溢出由 .view 的 overflow:hidden 裁掉。
 
-/* 窗口态：侧栏站在布局流里，靠窗口外扩出来的那块空间显示，画面尺寸不受影响 */
-body.start-mode.start-nav-open .sidebar {
-  display: flex;
-  animation: start-nav-push 0.24s cubic-bezier(0.22, 0.9, 0.3, 1);
-}
+   以前窗口态是让主进程 setBounds 把窗口向左外扩 238px：画面虽不缩不裁，
+   但窗口尺寸是系统一次性跳变的，CSS 动画跟它没法同步——侧栏的滑入曲线
+   还在跑，窗口已经「啪」地变宽了，看起来就是窗口猛地一跳、侧栏从半路
+   冒出来。全屏模式没有这层窗口操作、全程纯 CSS，所以反而顺。
+   现在两种模式统一走纯 CSS：只有 transform 与 opacity 在动，不碰窗口尺寸。
 
-@keyframes start-nav-push {
-  from { transform: translateX(-100%); }
-  to { transform: none; }
-}
+   点侧栏外 / Esc / 跳转后收回；唤出时顶部按钮压在遮罩之上仍可点。 */
 
-/* 浮层态：扩不出去才浮在画面上，并加暗遮罩 */
-body.start-mode.start-nav-overlay .sidebar {
+/* 启动页的侧栏 = 一块抽屉，钉在窗口左边缘，靠窗口往外长把它「抽」出来。
+
+   关键：抽屉自己不做位移。以前是 translateX(-100%) → 0 滑进来，看着就像
+   侧栏从窗口里面往里挤。现在抽屉固定在 window 坐标 left:0，窗口宽度一帧帧
+   长出来，抽屉就在新露出的那一条里逐渐显形；画面「宽度减掉同样一段 + 右移
+   同样一段」抵回去，所以在屏幕上一像素都不动。
+
+   窗口和这段补偿由同一个 requestAnimationFrame 循环驱动（见 setStartNavOpen），
+   同一条缓动、同一帧落地 —— 不会出现「窗口先跳一下，画面再追过去」的顿挫，
+   那正是你说的「拉伸一下整个窗口」。
+
+   抽屉层级压在画面之下：窗口还没长出来时它被画面完全盖住，只在露出的那一条
+   里出现，点开的瞬间不会「啪」一下糊在插画上。 */
+body.start-mode .sidebar {
   position: fixed;
   left: 0;
   top: 0;
   bottom: 0;
-  z-index: 120;
-  box-shadow: 22px 0 56px rgba(0, 0, 0, 0.38);
+  z-index: 0;
+  /* 常驻可见、靠画面盖住：画面没让开时它本来就在画面下面（z-index 0 < 1），
+     看起来和不显示一模一样。以前用 visibility 切换，收起时摘类是一瞬间，
+     侧栏会先「闪没」、画面再滑回来，中间露出 0.18s 的空档。 */
+  visibility: visible;
+  /* 实底而不是 backdrop-filter：220px 宽的一条每帧重算背后插画的模糊太吃 GPU，
+     滑动时会肉眼可见地掉帧 */
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: var(--bg-deep);
+  transition:
+    width 0.22s cubic-bezier(0.22, 0.8, 0.3, 1),
+    padding 0.22s cubic-bezier(0.22, 0.8, 0.3, 1);
 }
 
-body.start-mode.start-nav-overlay .start-screen::before {
+body.start-mode.start-nav-open .sidebar {
+  visibility: visible;
+}
+
+/* 画面必须盖在抽屉之上，抽屉才只在新露出的那一条里可见 */
+body.start-mode .main {
+  position: relative;
+  z-index: 1;
+}
+
+/* 画面补偿：内推模式用（窗口扩不出去、只能把画面往右推再裁掉右边）。
+   transform 是**常驻**的，只由 --start-nav-push 驱动 —— 收起时把变量归零，画面
+   自己滑回去；如果还挂在 start-nav-open 类上，摘类瞬间规则失效、画面会直接弹回。
+   只补 transform —— 宽度不进过渡，外扩时它是恒定像素值，逐帧变宽就会逐帧重排。
+   图层在启动页一渲染就提起来（不是等点开侧栏才提）：blur(3px) 的背景层和 video
+   都是重活，留到动画第一帧才提层，那一下就是肉眼可见的「拖」。 */
+body.start-mode .start-screen {
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  transform: translateX(var(--start-nav-push, 0px));
+  will-change: transform;
+}
+
+/*
+ * 外扩（窗口真的往左长了）：画面**钉在窗口右边缘**，不做任何位移补偿。
+ *
+ * 以前这里是「宽度锁 base + translateX(push)」来抵消窗口左移，数学上画面在
+ * 屏幕上应该纹丝不动 —— 但抵消要靠渲染层写 transform 和主进程 setBounds 严丝
+ * 合缝地对齐，这是两个进程，永远差一两帧。差的那一两帧里画面相对屏幕先走了一
+ * 段，就是用户看到的「背景明显挪过去一下」。
+ *
+ * 改成 fixed right:0 之后，窗口左边缘怎么长、长多快，画面都自动跟着右边缘走：
+ * 屏幕上绝对静止，不需要任何同步。背景图 / blur 层 / video 全程连位图都不用挪。
+ */
+body.start-mode.start-nav-outward.start-nav-open .start-screen {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: var(--start-nav-base-w, 100%);
+  height: 100%;
+  transform: none;
+  will-change: auto;
+}
+
+/* fixed 的画面脱离了 .view 的流，父级高度会塌；顺手把页面滚动也关掉，
+   免得窗口逐帧变宽时冒出滚动条跟着抖 */
+body.start-mode.start-nav-open {
+  overflow: hidden;
+}
+
+/*
+ * 抽屉里的按钮点不动 —— 全是 .main 这个壳挡的。
+ *
+ * .main 是整窗大小的定位元素、z-index 1，压在抽屉（z-index 0）上面。它自己
+ * 没有背景，看着是「透明」，但透明元素照样吃点击：抽屉那一条上的每一次点击都
+ * 落在 .main 身上，底下的导航、收起侧栏、头像全都收不到。所以抽屉打开时把壳
+ * 让开，只让画面本体（.start-screen，刚好铺在右半屏）接事件。
+ */
+body.start-mode.start-nav-open .main {
+  pointer-events: none;
+}
+
+body.start-mode.start-nav-open .start-screen {
+  pointer-events: auto;
+}
+
+/*
+ * 窗口一步张开之后，抽屉**立刻整条在位**，不做位移、也不做透明变化。
+ *
+ * 以前这里是 translateX(-100%) → 0 的 170ms 滑入：窗口已经变宽了，抽屉却还在
+ * 窗口外面往回收，新露出的那一条先是空的、再被填上 —— 那一百多毫秒就是「闪一下」。
+ * 抽屉本来就是实底、钉在 left:0，窗口一宽它自己就落在那一条里，根本不用滑进来。
+ * 想让它不至于太生硬，只给里面的内容和导航项做一点 8px 的微滑（底板不动，不会露底）。
+ */
+body.start-mode.start-nav-outward.start-nav-open .sidebar {
+  animation: none;
+}
+
+@keyframes startNavItemsIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+body.start-mode.start-nav-outward.start-nav-open .sidebar .brand,
+body.start-mode.start-nav-outward.start-nav-open .sidebar .sidebar-scroll {
+  animation: startNavItemsIn 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 收起不再两段式：以前是「抽屉先退 120ms、窗口后收」，那一百多毫秒里窗口还宽着、
+   抽屉在往外走，左边同样空出一条。现在直接一步收回。 */
+
+/* 内推时这两个跟着画面反向走，才不会一起被推出可视区。
+   同样常驻，只由变量驱动（收起时变量归零就跟着回来）。 */
+body.start-mode .start-video-tools,
+body.start-mode .start-top .start-window-controls {
+  transform: translateX(calc(var(--start-nav-push, 0px) * -1));
+}
+
+/* 外扩时画面在屏幕上是静止的，窗口按钮本来就跟窗口右边缘走，再反向抵消
+   反而会跑到抽屉底下去 */
+body.start-mode.start-nav-outward .start-video-tools,
+body.start-mode.start-nav-outward .start-top .start-window-controls {
+  transform: none;
+}
+
+/* start-video-tools 本来就是 absolute 定位，只提层级、不改定位方式，
+   免得它跳回 start-top 的流里（打开侧栏瞬间按钮位移） */
+body.start-mode.start-nav-open .start-video-tools {
+  z-index: 119;
+}
+
+/* 逐帧补间期间必须把 CSS 过渡压住：--start-nav-push 每帧都在变，
+   再叠一条过渡，画面会一路追着窗口跑，比不做动画还糊。 */
+body.start-mode.start-nav-anim .start-screen,
+body.start-mode.start-nav-anim .start-video-tools,
+body.start-mode.start-nav-anim .start-top .start-window-controls {
+  transition: none;
+}
+
+/* 兜底：极少数情况下（上面那个 rAF 被打断）画面补偿要能立刻对齐 */
+body.start-mode.start-nav-collapsing .start-screen,
+body.start-mode.start-nav-collapsing .start-video-tools,
+body.start-mode.start-nav-collapsing .start-top .start-window-controls {
+  transition: none;
+}
+
+/* 画面被推出来之后，左上角那颗菜单键和「花筱灵 / HANABI STAGE」就重复了——
+   侧栏里本来就有一份同样的品牌名，两个并排看着像复制粘贴出错。
+   这两块随画面推开一起淡出（点画面任意处、Esc 照样能收回）。 */
+body.start-mode .start-top .chrome-menu,
+body.start-mode .start-brand {
+  transition: opacity 0.2s ease;
+}
+body.start-mode.start-nav-open .start-top .chrome-menu,
+body.start-mode.start-nav-open .start-brand {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 遮罩：同一条时长淡入；打开后吃掉画面上的点击，点哪儿都只在收侧栏。
+   画面已经被整块推开、不再被侧栏压着，所以这里只留很淡的一层压暗，
+   够区分主次、又不至于让插画发灰。 */
+.start-screen::before {
   content: '';
   position: absolute;
   inset: 0;
   z-index: 118;
-  background: rgba(10, 8, 14, 0.35);
+  background: rgba(10, 8, 14, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+body.start-mode.start-nav-open .start-screen::before {
+  opacity: 1;
+  pointer-events: auto;
 }
 
-/* 唤出时按钮仍可点：压在遮罩之上 */
+/* 唤出时窗口按钮仍可点：压在遮罩之上。
+   这里不能带上 .start-video-tools——它是 position:absolute 钉在右下角的，
+   一旦被改成 relative 就会跳回 start-top 的流里（打开侧栏瞬间按钮位移）。 */
 body.start-mode.start-nav-open .start-top .chrome-menu,
-body.start-mode.start-nav-open .start-top .start-window-controls,
-body.start-mode.start-nav-open .start-top .start-video-tools {
+body.start-mode.start-nav-open .start-top .start-window-controls {
   position: relative;
   z-index: 119;
 }
@@ -28581,4 +28908,4060 @@ body.start-mode.start-nav-open .start-top .start-video-tools {
   font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/* 工具页：左侧游戏列表 + 右侧能力面板                                  */
+/*                                                                     */
+/* 原来是一面可折叠卡片墙，点开一张、其余仍收起，同一行里高矮不齐、      */
+/* 中间空一大块，看着像没对齐。改成主从布局：左边选游戏，右边整块铺开    */
+/* 这个游戏的能力，视线有落点，页面也不会被撑得很长。                    */
+/* ------------------------------------------------------------------ */
+.tg-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.tg-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+}
+.tg-rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  text-align: left;
+  color: var(--text-2);
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.tg-rail-item:hover {
+  background: color-mix(in srgb, var(--tg-accent) 8%, transparent);
+  color: var(--text);
+}
+.tg-rail-item.is-active {
+  background: color-mix(in srgb, var(--tg-accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--tg-accent) 32%, transparent);
+  color: var(--text);
+}
+/* 左侧竖光带：选中才亮，未选中只留一点主题色暗示 */
+.tg-rail-item .tg-bar {
+  width: 2px;
+  height: 22px;
+  margin: 0;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--tg-accent), color-mix(in srgb, var(--tg-accent) 20%, transparent));
+  opacity: 0.45;
+}
+.tg-rail-item.is-active .tg-bar {
+  opacity: 1;
+}
+.tg-rail-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.tg-rail-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.tg-rail-copy small {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tg-rail-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tg-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 380px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--tg-accent) 6%, transparent), transparent 55%),
+    var(--surface);
+}
+.tg-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tg-panel-head strong {
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--text);
+}
+.tg-panel-head small {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.tg-panel-head .tg-count {
+  margin-left: auto;
+}
+.tg-panel-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1 1 auto;
+}
+/* 能力标签在面板里要有实体感：卡片墙时代是纯文字（为了降噪），
+   铺满一整个面板时纯文字会显得散、像没做完，加淡底和描边才站得住。 */
+.tg-panel .tg-feat {
+  border-color: color-mix(in srgb, var(--line-strong) 62%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  padding: 7px 11px;
+}
+.tg-panel .tg-feat:hover {
+  border-color: color-mix(in srgb, var(--tg-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--tg-accent) 13%, transparent);
+}
+/* wiki 贴底：能力少的游戏，面板下半截不会空一大块 */
+.tg-panel-groups > .tg-wiki {
+  margin-top: auto;
+}
+
+/* 窗口窄了改成上下：游戏列表横过来当标签条，别把面板挤成一条缝 */
+@media (max-width: 900px) {
+  .tg-shell {
+    grid-template-columns: 1fr;
+  }
+  .tg-rail {
+    flex-direction: row;
+    overflow-x: auto;
+  }
+  .tg-rail-item {
+    flex: none;
+    width: auto;
+  }
+  .tg-rail-copy small {
+    display: none;
+  }
+}
+
+/* ================================================================== */
+/* 交互打磨层：按下回收 / 涟漪 / 指针 / 焦点                            */
+/*                                                                     */
+/* 这一层是覆盖式的——只补反馈，不动布局和配色。放在最后，是为了压过     */
+/* 前面各模块零散的 :active（那些多是 scale(0.995) 这种几乎看不出来的     */
+/* 数值，按下去像没按）。                                               */
+/* 节奏：按下 120ms 出形（要快，慢一点就会觉得按钮"黏"），              */
+/*       松手 180ms 回位（稍慢，回弹才有质感）。                        */
+/* ================================================================== */
+:root {
+  /* 按钮压 2.5%，卡片压 1.2%——卡片面积大，同样的比例压下去会像塌陷 */
+  --tap-scale: 0.975;
+  --tap-scale-soft: 0.988;
+}
+
+/* ---- 涟漪宿主：必须自己定 context，否则绝对定位的闪光会跑出去 ---- */
+.btn,
+.btn-primary,
+.btn-ghost,
+.btn-quiet,
+.btn-danger,
+.mini-chip,
+.chip,
+.segmented button,
+.fx-card,
+.tg-rail-item {
+  position: relative;
+  isolation: isolate;
+}
+
+.tap-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    78px circle at var(--tap-x, 50%) var(--tap-y, 50%),
+    rgba(255, 255, 255, 0.34),
+    rgba(255, 255, 255, 0.08) 46%,
+    rgba(255, 255, 255, 0) 70%
+  );
+  animation: tapFlash 0.46s cubic-bezier(0.22, 0.9, 0.26, 1) forwards;
+}
+/* 浅色主题白光会直接糊成一片，换成角色粉的低透明度 */
+:root[data-theme="light"] .tap-flash {
+  background: radial-gradient(
+    78px circle at var(--tap-x, 50%) var(--tap-y, 50%),
+    rgba(232, 67, 90, 0.22),
+    rgba(232, 67, 90, 0.06) 46%,
+    rgba(232, 67, 90, 0) 70%
+  );
+}
+@keyframes tapFlash {
+  0% {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  24% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+/* ---- 按下：按钮压 2.5% + 下沉 1px，卡片只压 1.2% ---- */
+.btn:active,
+.btn-primary:active,
+.btn-ghost:active,
+.btn-quiet:active,
+.btn-danger:active,
+.mini-chip:active,
+.chip:active,
+.segmented button:active,
+.fx-card:active,
+.tg-rail-item:active {
+  transform: translateY(1px) scale(var(--tap-scale));
+  transition-duration: var(--tap-press);
+}
+.news-card:active,
+.game-card:active,
+.mini-btn:active,
+.chrome-btn:active {
+  transform: translateY(1px) scale(var(--tap-scale-soft));
+  transition-duration: var(--tap-press);
+}
+/* 图标类的圆钮压得再轻一点，不然小圆会像在抖 */
+.mini-btn:active,
+.chrome-btn:active {
+  scale: 0.94;
+}
+
+/* ---- hover 微抬补齐：主按钮本来就有，幽灵/安静/危险三种也要有，否则一排按钮里只有一个会动 ---- */
+.btn-ghost:hover,
+.btn-quiet:hover,
+.btn-danger:hover,
+.mini-chip:hover {
+  transform: translateY(-1px);
+}
+/* 抬起来之后不能丢边框/底色，否则看着是"浮起来了但变淡了" */
+.btn-ghost:hover {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
+}
+:root[data-theme="light"] .btn-ghost:hover {
+  box-shadow: 0 6px 16px rgba(28, 18, 44, 0.1);
+}
+
+/* ---- 指针：能点的一律手型，点不了的一律禁用型 ---- */
+button:not([disabled]),
+.switch,
+[data-nav],
+[data-action],
+.fx-card,
+.tg-rail-item,
+.chip,
+.mini-btn,
+.news-card,
+.game-card {
+  cursor: pointer;
+}
+button[disabled],
+.btn[disabled],
+.btn[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* ---- 焦点环：键盘走到哪儿一眼能看见，鼠标点过不留痕 ---- */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 82%, transparent);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---- 选中文字：默认蓝白在深色主题里很跳，换成角色粉 ---- */
+::selection {
+  background: rgba(232, 67, 90, 0.32);
+  color: #fff5f7;
+}
+:root[data-theme="light"] ::selection {
+  background: rgba(232, 67, 90, 0.2);
+  color: #2a1c33;
+}
+
+/* ---- 关掉动效时，反馈退回静态：不闪、不缩 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .tap-flash {
+    display: none;
+  }
+  .btn:active,
+  .btn-primary:active,
+  .btn-ghost:active,
+  .btn-quiet:active,
+  .btn-danger:active,
+  .mini-chip:active,
+  .chip:active,
+  .segmented button:active,
+  .fx-card:active,
+  .tg-rail-item:active,
+  .news-card:active,
+  .game-card:active,
+  .mini-btn:active,
+  .chrome-btn:active {
+    transform: none;
+    scale: none;
+  }
+  .btn-ghost:hover,
+  .btn-quiet:hover,
+  .btn-danger:hover,
+  .mini-chip:hover {
+    transform: none;
+  }
+}
+
+/* ---- 侧栏分组分隔线：替代原来「应用」二字的分组标签 ----
+ * 「应用」下面只挂了一个设置，读起来像没写完；改成一条渐隐细线，
+ * 既有分组感，又不占一行、不误导。 */
+.nav-divider {
+  height: 1px;
+  margin: 13px 10px 11px;
+  background: linear-gradient(90deg, transparent, var(--line-strong) 16%, var(--line-strong) 84%, transparent);
+  opacity: 0.72;
+}
+body.sidebar-collapsed .nav-divider {
+  margin: 13px 6px 11px;
+}
+
+/* ---- 收起态：把往外扩散的发光收住 ----
+ * 侧栏只剩 72px，头像那圈 0 12px 30px 的红色外发光会一直渗到右边，
+ * 在窄栏里看着就是「图标右边一块暗影」。收起态改成贴身小投影，
+ * 展开态（238px）空间够，保留原来的辉光。 */
+body.sidebar-collapsed .brand-mark {
+  box-shadow: 0 3px 9px rgba(232, 67, 90, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+body.sidebar-collapsed .nav-item {
+  box-shadow: none;
+}
+body.sidebar-collapsed .nav-item.active {
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+/* 收起栏只有 72px，那两条贴边的金色光带（.sidebar 的 border-right + ::after）
+ * 会紧贴图标右侧，看着像一道阴影压过来。收起态把光带减淡，边界交给深色描边。 */
+body.sidebar-collapsed .sidebar {
+  border-right-color: rgba(240, 198, 116, 0.08);
+}
+body.sidebar-collapsed .sidebar::after {
+  opacity: 0.35;
+}
+
+/* ================================================================== */
+/* 音乐页：左栏分组 + 队列列表可读性                                     */
+/* ================================================================== */
+
+/* 导航项副标题：队列 = 点过的歌，我的歌单 = 平台收藏 */
+.kr-nav-text small {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 1.3;
+  opacity: 0.85;
+}
+.kr-nav-item.is-active .kr-nav-text small {
+  color: inherit;
+  opacity: 0.7;
+}
+/* 有副标题的行会变高，图标跟第一行文字对齐，而不是整块居中（居中会让图标掉到两行之间） */
+.kr-nav-item:has(.kr-nav-text small) {
+  align-items: flex-start;
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+.kr-nav-item:has(.kr-nav-text small) .kr-nav-icon {
+  margin-top: 1px;
+}
+
+/* 分组标题和下面两项之间留一口气，免得「发现」看着像队列的一部分 */
+.kr-nav-block + .kr-nav-block .kr-nav-label {
+  padding-top: 4px;
+}
+
+/* ---- 队列行：整行可点、悬停有底、当前播放左侧留条 ---- */
+.song-row {
+  padding: 0;
+  border-radius: 10px;
+  border-color: transparent;
+}
+.song-row-main {
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+.song-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.song-row.active {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* 移除键平时藏起来：满屏 × 会让人以为每行都是「删除」，
+ * 悬停 / 键盘聚焦才浮现，行本身干净很多 */
+.song-row-remove {
+  opacity: 0;
+  transition: opacity 0.14s ease;
+}
+.song-row:hover .song-row-remove,
+.song-row.active .song-row-remove,
+.song-row-remove:focus-visible {
+  opacity: 1;
+}
+
+/* ---- 分段头：改成吸顶分组条 ----
+ * 原来是一条贴底的细线，滚两屏就分不清自己在哪一段（用户反馈「很乱」）。
+ * 吸顶后段名一直在，段与行也有了明确的块状层级。 */
+.song-queue-seg-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 12px 0 4px;
+  padding: 7px 12px;
+  border-bottom: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  /* 段头吸顶：底色必须跟列表底一致，滚过去的内容才像是「被盖住」而不是「穿过一条白带」。
+   * 半透明的 surface-2 在深色主题里会亮出一截，所以这里用实色 surface + 下沿细线。 */
+  background: var(--surface);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 9px;
+}
+.song-queue-seg-head span {
+  font-size: 12px;
+}
+/* 行间松一点：54px 行高压在一起像表格，加 2px 才有「一条一条」的呼吸感 */
+.song-list {
+  gap: 6px;
+}
+
+/* ---- 歌单详情：读取中的提示行贴边被挡 ----
+ * .kr-detail 为了贴顶用了 margin:-8px，抵消掉 .song-app-scroll 的内边距，
+ * 结果 loading 态那一行「正在读取曲目…」和骨架都紧贴左边缘，看着像被裁掉。
+ * 标题条自己带 padding，不受影响；这里只给正文块补回来。 */
+.kr-detail > .playlists-group-note {
+  margin: 0;
+  padding: 12px 14px 0;
+  line-height: 1.7;
+}
+.kr-detail > .kr-detail-skeleton {
+  padding: 10px 12px 16px;
+}
+.kr-detail-skeleton-row {
+  height: 46px;
+}
+
+/* ================================================================== */
+/* 启动页抽屉卡片：名字条 + 状态点（最终生效版）                       */
+/*                                                                     */
+/* 这条抽屉前前后后写了五代样式，最后一代才生效，改到前面那几代等于没  */
+/* 改（状态点改 7px 却被后面的 6px 覆盖，就是踩的这个坑）。这里统一收  */
+/* 口：卡片维持「封面吃满 + 底部一行名字」，状态点钉在封面右上角，     */
+/* 三种状态一眼分得开。                                                */
+/* ================================================================== */
+.start-screen .start-games .start-game-thumb {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 132px;
+  overflow: hidden;
+}
+
+.start-screen .start-games .start-game-copy {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 9px 6px;
+  background: none;
+}
+
+.start-screen .start-games .start-game-copy strong {
+  flex: 0 1 auto;
+  /* 早期规则给过 width:100%，不覆盖掉的话名字会被撑满、把「运行中」挤没 */
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.start-screen .start-games .start-game-copy small {
+  flex: none;
+  /* 同上：width:100% + align-self:stretch 会让小字吃满整条，名字被压成 0 宽 */
+  width: auto;
+  max-width: none;
+  align-self: center;
+  margin-left: auto;
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+/* 状态点：已装 = 实心绿；运行中 = 强调色 + 光晕；没装/没配 = 空心圈。
+   空心圈是「还空着」，不是「坏了」—— 之前没装也是灰实点，看着像故障。 */
+.start-screen .start-games .start-game-state {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.62), 0 0 0 2.5px rgba(4, 3, 7, 0.42);
+}
+
+.start-screen .start-games .start-game-state.is-ready {
+  background: #59d18c;
+  box-shadow: 0 0 0 2.5px rgba(4, 3, 7, 0.42);
+}
+
+.start-screen .start-games .start-game-state.is-running {
+  background: var(--accent);
+  box-shadow: 0 0 0 2.5px rgba(4, 3, 7, 0.42), 0 0 10px var(--accent);
+}
+
+/* ================================================================== */
+/* 硬链接生成 / 更新弹窗：收窄 + 压扁                                   */
+/*                                                                     */
+/* 原来直接吃默认的 760px 弹窗，四行结论卡 + 五格阶段条 + 一段说明，     */
+/* 一屏铺满还带滚动条，像个工程面板。这版把宽度收到 520，结论卡改两列，  */
+/* 说明句并进「这一步具体会做什么」，一眼能看完：版本、能复用多少、盘  */
+/* 够不够、装到哪里、现在走到第几步。                                  */
+/* ================================================================== */
+.modal.modal-sophon {
+  width: min(520px, 100%);
+}
+
+.modal-sophon .modal-head {
+  padding: 16px 18px 12px;
+}
+
+.modal-sophon .modal-head h2 {
+  font-size: 17px;
+}
+
+.modal-sophon .modal-head p {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.modal-sophon .modal-body {
+  padding: 0 18px 14px;
+}
+
+.modal-sophon .modal-foot {
+  padding: 12px 18px;
+}
+
+/* 结论卡：两列四格，比四行「标签 —— 值」省一半高度 */
+.modal-sophon .sw-sum {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+}
+
+.modal-sophon .sw-sum-row {
+  padding: 5px 0;
+  border-top: 0;
+  gap: 8px;
+}
+
+.modal-sophon .sw-sum-k {
+  font-size: 11px;
+}
+
+.modal-sophon .sw-sum-v {
+  font-size: 12px;
+}
+
+/* 那段解释「可复用上限是什么」的长句，挪进折叠里，别占正文 */
+.modal-sophon .sw-sum-hint {
+  display: none;
+}
+
+.modal-sophon .sw-note {
+  margin-bottom: 4px;
+}
+
+.modal-sophon .sw-note-more {
+  margin-bottom: 10px;
+}
+
+.modal-sophon .sophon-target {
+  margin: 8px 0 10px;
+  padding: 8px 10px;
+}
+
+.modal-sophon .sophon-target code {
+  font-size: 12.5px;
+}
+
+.modal-sophon .sw-stages {
+  margin-bottom: 10px;
+}
+
+.modal-sophon .sw-stage {
+  padding: 6px 3px;
+}
+
+.modal-sophon .sw-stage-label {
+  font-size: 10px;
+}
+
+/* ================================================================== */
+/* 切换服务器：面板上的一句话 + 「怎么换」三步说明                      */
+/* ================================================================== */
+
+/* 抽屉头部：标签下面补一句「点一行会发生什么」，两行排开不挤 */
+.start-dock-server-head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.start-dock-sub {
+  flex: 0 0 100%;
+  color: var(--hero-muted, rgba(255, 255, 255, 0.55));
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+}
+
+.switch-guide-steps {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.switch-guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.switch-guide-num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--gold-soft);
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.switch-guide-copy strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.switch-guide-copy p {
+  margin: 3px 0 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.switch-guide-label {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+}
+
+.switch-guide-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.switch-guide-notes li {
+  position: relative;
+  padding-left: 14px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.switch-guide-notes li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--gold);
+  opacity: 0.7;
+}
+
+/* 换不了的服务器：压暗 + 虚线边，一眼看出「这一行不是现在能点的」。
+   以前它和可用行长得一模一样，点下去却只会弹个「先去补客户端」。 */
+.start-server-item.is-unavailable {
+  opacity: 0.62;
+}
+
+.start-server-item.is-unavailable .start-server-item-copy strong {
+  color: var(--hero-muted, rgba(255, 255, 255, 0.6));
+}
+
+.start-server-item.is-unavailable:hover {
+  opacity: 0.82;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 2.4.5 切换界面重做
+ *
+ * 旧卡片把「名称 + 三个徽标 + 状态胶囊 + 文件名 + 五个图标按钮」摞成四行，
+ * 塞在 250px 宽的格子里，一眼看过去全是字和方块。新版只留三层：
+ *   ① 状态点 + 名称（最多挂两个徽标）  ② 文件名一行  ③ 右侧主按钮
+ * 工具图标沉到底栏一条细线下面：要找的时候找得到，不用的时候不抢视线。
+ * 左侧 2px 色条代替原来那颗大圆球 —— 状态用颜色说，不用再占一个 26px 的位。
+ * ═══════════════════════════════════════════════════════════════════ */
+.server-list {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 0;
+}
+
+.server-tile {
+  position: relative;
+  display: flex;
+  flex-direction: row; /* 老规则是 column，这里必须显式写回来 */
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-2);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+/* 一行装下：点 + 名称/文件名 + 工具 + 主按钮。以前工具在下面另起一条带分隔线
+   的底栏，一张卡就多出 30px；现在收进同一行，整片列表矮了三分之一。 */
+
+/* 左侧状态色条：就绪绿、当前金、异常红 */
+.server-tile::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.server-tile[data-state='ready']::before {
+  background: #59d18c;
+  opacity: 0.5;
+}
+
+.server-tile[data-state='active']::before {
+  background: var(--accent);
+}
+
+.server-tile[data-state='missing']::before {
+  background: #d9694f;
+  opacity: 0.75;
+}
+
+.server-tile.is-active {
+  border-color: rgba(240, 198, 116, 0.34);
+  background: color-mix(in srgb, var(--surface-2) 88%, var(--accent) 12%);
+}
+
+.server-tile.is-broken {
+  background: color-mix(in srgb, var(--surface-2) 94%, #d9694f 6%);
+}
+
+.st-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+}
+
+.st-dot.ready {
+  background: #59d18c;
+  box-shadow: 0 0 0 3px rgba(90, 209, 140, 0.16);
+}
+
+.st-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
+}
+
+.st-dot.missing {
+  background: #d9694f;
+  box-shadow: 0 0 0 3px rgba(217, 105, 79, 0.16);
+}
+
+.st-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.st-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.st-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 「当前」用实心金：一屏里只能有一个，值得用最重的样式 */
+.st-flag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #1a1206;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+}
+
+.st-chip {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.st-chip.is-warn {
+  border-color: rgba(217, 105, 79, 0.5);
+  color: #d9694f;
+}
+
+.st-chip.is-shared {
+  border-color: rgba(240, 198, 116, 0.4);
+  color: var(--accent-2);
+}
+
+.st-sub {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.server-tile .st-go {
+  flex: none;
+  min-width: 58px;
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.server-tile .st-go .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 工具组跟在同一行里：平时压到很淡，鼠标进这一行才亮起来。
+   不占第二条横线、也不需要 hover 才出现 —— 找得到，但不抢视线。 */
+.st-tools {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: none;
+  opacity: 0.5;
+  transition: opacity 0.14s ease;
+}
+
+.server-tile:hover .st-tools {
+  opacity: 1;
+}
+
+.st-tool {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.13s ease, color 0.13s ease;
+}
+
+.st-tool .icon {
+  width: 12.5px;
+  height: 12.5px;
+}
+
+.st-tool:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.st-tool.is-danger:hover {
+  color: #ff8a73;
+  background: rgba(217, 105, 79, 0.16);
+}
+
+/* 「卸载」写成字：删文件这件事不能只靠一个垃圾桶图标去猜，
+   而且旁边正好还有一个「清除路径」的图标，两个垃圾桶会认错 */
+.st-tool.is-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  padding: 0 6px;
+  margin-left: 3px;
+  border: 1px solid rgba(217, 105, 79, 0.32);
+  color: #d9856f;
+  font-size: 11px;
+  line-height: 20px;
+}
+
+.st-tool.is-text span {
+  white-space: nowrap;
+}
+
+.st-tool.is-text:hover {
+  border-color: rgba(217, 105, 79, 0.55);
+  color: #ff9d84;
+}
+
+/* ── 管理面板顶部：只报两个数，不再写一整段怎么点 ─────────────────── */
+.sw-mgr-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sw-mgr-summary strong {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sw-mgr-dot {
+  color: var(--line-strong);
+}
+
+/* ── 下拉：渠道标签跟到名字后面同一行 ───────────────────────────── */
+.start-server-item-copy strong .sw-srv-tag {
+  margin-right: 0;
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+
+/* 就绪行右侧那枚空占位和 badge 会各占一块，收成一个 */
+.start-screen .start-dock .start-server-item .sw-srv-state:last-of-type {
+  margin-right: 2px;
+}
+
+/* ── 下拉底部动作：去掉解释小字后收成方块，剩几个就均分几个 ───────── */
+.sw-srv-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.sw-srv-action {
+  flex: 1 1 0;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 7px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  text-align: center;
+}
+
+.sw-srv-action:hover {
+  border-color: rgba(var(--accent-rgb), 0.34);
+}
+
+.sw-srv-action-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
+
+.sw-srv-action-copy strong {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+/* ── 未安装游戏的三枚按钮：下载 / 自动检测 / 路径选择 ───────────────
+   主按钮在别处被设成 width:100%（让「开始游戏」独占整行），这条规则一并继承
+   到了这里，把后两枚直接顶出容器 —— 用户只看得到「下载游戏」，找不到选路径的
+   入口。这里改成按内容分配宽度，三枚都留在同一行。 */
+.start-dock-dl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.start-dock-dl-row .start-dock-play {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  height: 40px;
+  padding: 0 13px;
+  font-size: 13px;
+}
+
+.start-dock-dl-row .start-dock-secondary {
+  flex: none;
+  gap: 5px;
+  height: 40px;
+  padding: 0 11px;
+  border-radius: 10px;
+  font-size: 12.5px;
+}
+
+.start-dock-dl-row .start-dock-secondary .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.start-dock-dl-row .start-dock-play span,
+.start-dock-dl-row .start-dock-secondary span {
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .server-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 2.4.5 服务器面板收紧：一屏装下、少一层标题
+ * ═══════════════════════════════════════════════════════════════════ */
+.modal.modal-servers {
+  width: min(540px, 100%);
+}
+
+.modal-servers .modal-head {
+  padding-bottom: 8px;
+}
+
+.modal-servers .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modal-servers .modal-foot {
+  padding-top: 8px;
+}
+
+/* 一行：左边两个数，右边三个动作 */
+.sw-mgr-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sw-mgr-bar .sw-mgr-summary {
+  margin: 0;
+  flex: none;
+}
+
+.sw-mgr-bar .server-manager-actions {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sw-mgr-bar .server-manager-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.sw-mgr-bar .server-manager-actions .btn {
+  flex: none;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.sw-mgr-bar .server-manager-actions .btn .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 面板再瘦一圈：标题到内容、内容到页脚各收一点 */
+.modal-servers .modal-head {
+  padding: 14px 18px 6px;
+}
+
+.modal-servers .modal-body {
+  padding: 4px 16px 12px;
+}
+
+.modal-servers .modal-foot {
+  padding: 10px 16px;
+}
+
+.modal-servers .modal-head h2 {
+  font-size: 16px;
+}
+
+.modal-servers .modal-close {
+  width: 26px;
+  height: 26px;
+}
+
+/* 工具组压得淡，但「卸载」不能跟着一起淡到看不清 —— 它是这张卡上唯一删文件的入口 */
+.st-tools {
+  opacity: 0.62;
+}
+
+/* 服务器弹层别一路顶到屏幕上沿。
+   它的 bottom 挂在一张本来就贴底的 dock 卡片上，高度越大顶得越高：
+   320px 时在 720 高的窗口里只剩 21% 的顶部余量，看着就是「整块窜到顶」。
+   收到 224 / 32vh 之后，一屏看得见 3~4 个服务器，再长就自己滚。 */
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  max-height: min(224px, 32vh);
+  transform-origin: bottom right;
+  animation: startDockMenuIn 0.15s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 从按钮那一侧轻轻展开：不再是「啪」地出现一整块 */
+@keyframes startDockMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scaleY(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+/* 再点一次服务器键就收起：按钮本身要能点到，不能被遮罩吃掉 */
+.start-screen .start-dock .start-server-pick {
+  position: relative;
+  z-index: 3;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 卸载确认：回收站 / 永久删除，两条路分开摆
+ *
+ * 这两条路的代价差得远（一条能捞回来，一条删了就没了），塞进一个「确定」按钮
+ * 里用户会默认点下去然后后悔。所以摊成两块说明 + 两个按钮，永久删除描红。
+ * ═══════════════════════════════════════════════════════════════════ */
+.uninstall-path {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.uninstall-pick {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.uninstall-pick li {
+  display: grid;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.uninstall-pick li:last-child {
+  border-color: rgba(217, 105, 79, 0.34);
+}
+
+.uninstall-pick strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.uninstall-pick span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.uninstall-foot {
+  gap: 8px;
+}
+
+/* 永久删除描红但不用实心：它是这张弹窗上唯一不可逆的动作，得看着像「危险」，
+   又不能比「移到回收站」更抢眼，否则用户顺手就点了 */
+.uninstall-foot .btn-danger {
+  border: 1px solid rgba(217, 105, 79, 0.55);
+  background: rgba(217, 105, 79, 0.12);
+  color: #ff9b86;
+}
+
+.uninstall-foot .btn-danger:hover {
+  background: rgba(217, 105, 79, 0.22);
+}
+
+/* 服务器卡片上的卸载键：游戏运行时压成不可用，鼠标移上去说明原因 */
+.st-tool.is-locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.st-tool.is-locked:hover {
+  background: transparent;
+  color: inherit;
+}
+
+/* 音乐页标题下面那句话：独占一整排。
+   DOM 顺序仍是 标题 → 说明 → 账号 → 按钮，但给说明 order:99 +
+   flex-basis:100%，它就换行铺满一整排，账号/按钮留在第一排右侧。 */
+.song-app-head {
+  flex-wrap: wrap;
+}
+
+.song-app-head > .song-app-desc {
+  order: 99;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 0;
+  max-width: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+/* 窄窗口放不下「标题 + 说明 + 账号 + 三个按钮」，说明退回标题下方一行 */
+@media (max-width: 1080px) {
+  .song-app-head {
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 10px 14px;
+  }
+
+  .song-app-head > .song-app-desc {
+    order: 3;
+    flex: 1 1 100%;
+    margin-top: 2px;
+    max-width: 560px;
+  }
+
+  .song-app-accounts {
+    margin-left: auto;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器列表改回「浮层」，不再把卡片撑高
+ *
+ * 之前这里写的是 position: relative —— 菜单参与布局，而 dock 是钉在底部的，
+ * 高度一涨整张卡片就往上长：三四个服加上动作区，卡片顶直接窜到屏幕上沿。
+ * 这就是「一点服务器，卡片就上到顶端」的来源，跟弹层高度关系不大。
+ *
+ * 改回 absolute 浮在 pick 上方：卡片本体尺寸一动不动，列表自己滚。
+ * 仍然是 display 切换（不重建 DOM，动态背景不会被重置）。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: auto;
+  margin-top: 0;
+  max-height: min(212px, 32vh);
+  z-index: 4;
+}
+
+/* 浮层里那块渐隐底衬会盖住列表：把它的层级压到菜单内容下面 */
+.start-screen .start-dock .start-server-menu::before {
+  z-index: 0;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  position: relative;
+  z-index: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器管理窗口：收成一张小面板
+ *
+ * 一个游戏最多四行服务器、四个动作，540px 的框里空着一半。
+ * 三处调整：宽度收到 464；「可用 / 待处理」并进标题行；四个动作挪进
+ * 底栏跟「完成」并排 —— 原先它们单独占一整行，加上页脚一共多出两行高度。
+ * 行内边距和字号各收 1px，三服的面板从 305px 高降到 ~240px。
+ * ═══════════════════════════════════════════════════════════════════ */
+.modal.modal-servers {
+  width: min(448px, 100%);
+  border-radius: 14px;
+}
+
+.modal-servers .modal-head {
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px 9px 14px;
+}
+
+.ms-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.modal-servers .modal-head h2 {
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ms-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.ms-count strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.modal-servers .modal-close {
+  width: 24px;
+  height: 24px;
+}
+
+.modal-servers .modal-close .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.modal-servers .modal-body {
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.modal-servers .server-list {
+  gap: 5px;
+}
+
+.modal-servers .server-tile {
+  gap: 7px;
+  padding: 5px 8px;
+  border-radius: 9px;
+}
+
+.modal-servers .st-title strong {
+  font-size: 13.5px;
+  line-height: 18px;
+}
+
+.modal-servers .st-sub {
+  margin-top: 1px;
+  font-size: 10.5px;
+  line-height: 13px;
+}
+
+.modal-servers .st-tool {
+  width: 21px;
+  height: 21px;
+  border-radius: 5px;
+}
+
+.modal-servers .st-tool .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 「卸载」是唯一带字的工具键：上面的 width:21px 会把它也压成方块，
+   这里必须写回 auto，否则「卸」字被裁掉一半 */
+.modal-servers .st-tool.is-text {
+  flex: none;
+  width: auto;
+  margin-left: 2px;
+  padding: 0 5px;
+  font-size: 10.5px;
+  line-height: 18px;
+}
+
+.modal-servers .server-tile .st-go {
+  min-width: 52px;
+  height: 23px;
+  padding: 0 7px;
+  font-size: 11.5px;
+}
+
+/* 底栏：左边四个动作，右边「完成」。两拨东西同一行，页脚不再单独占高度 */
+.modal-servers .ms-foot {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px 9px;
+}
+
+.ms-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ms-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.ms-foot .ms-actions .btn {
+  flex: none;
+  height: 25px;
+  padding: 0 7px;
+  font-size: 11.5px;
+}
+
+.ms-foot .ms-actions .btn .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ms-foot > .btn {
+  flex: none;
+  height: 24px;
+  padding: 0 12px;
+  font-size: 11.5px;
+}
+
+/* 异环的渠道块在这张小面板里跟着收一档，别一块占掉半屏 */
+.modal-servers .nte-panel {
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border-left-width: 2px;
+  border-radius: 10px;
+}
+
+.modal-servers .nte-panel-head strong {
+  font-size: 13px;
+}
+
+.modal-servers .nte-current {
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
+.modal-servers .nte-channel-cards {
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.modal-servers .nte-channel-card {
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: 8px;
+}
+
+.modal-servers .nte-channel-card strong {
+  font-size: 12.5px;
+}
+
+.modal-servers .nte-channel-card small {
+  font-size: 10.5px;
+}
+
+.modal-servers .nte-notice {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.modal-servers .nte-notice .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 启动页服务器下拉：压成一张小票
+ *
+ * 之前每行是「名字 / 文件名」两行，行高 50；底部两个动作是「图标在上、
+ * 文字在下」的方块，各占 51px。三行加动作块就是 200px 高的一块板，
+ * 直接盖住背景挂饰。现在：名字和文件名并到一行（29px），
+ * 动作改成横排小字（24px），三服整块 138px。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-menu {
+  gap: 2px;
+  padding: 6px;
+  border-radius: 12px;
+  max-height: min(220px, 36vh);
+}
+
+.start-screen .start-dock .sw-srv-list {
+  gap: 1px;
+}
+
+.start-screen .start-dock .start-server-item {
+  min-height: 0;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+/* 名字和文件名同一行：文件名本来就不长，单独占一行纯属浪费 17px */
+.start-screen .start-dock .start-server-item-copy {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  flex: none;
+  max-width: 62%;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 10.5px;
+}
+
+.start-screen .start-dock .start-server-item-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* 动作区：横排小字，不再是一排方块 */
+.start-screen .start-dock .sw-srv-actions {
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 5px;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  flex: 1 1 0;
+  flex-direction: row;
+  gap: 5px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  color: rgba(255, 255, 255, 0.62);
+  background: transparent;
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  border: 0;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.start-screen .start-dock .sw-srv-action-icon {
+  width: 14px;
+  height: 14px;
+  background: transparent;
+}
+
+.start-screen .start-dock .sw-srv-action-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器管理窗口第二轮：从「一行一张卡」改成「一张面板里的分隔行」
+ *
+ * 第一轮只是把尺寸压小，观感还是碎的：每个服一个小圆角方框、底栏一块
+ * 不同颜色的底 —— 三行并排就是四个色块拼在一起。这一轮去掉行边框和
+ * 行底色，只留一条分隔线；底栏改透明；工具图标再压淡一档，行数不多时
+ * 整块看起来像一张列表而不是一堆盒子。
+ * ═══════════════════════════════════════════════════════════════════ */
+.modal.modal-servers {
+  width: min(424px, 100%);
+  border-radius: 13px;
+}
+
+.modal-servers .modal-head {
+  padding: 9px 9px 8px 12px;
+  border-bottom: 0;
+}
+
+.modal-servers .modal-body {
+  gap: 0;
+  padding: 0 12px;
+}
+
+.modal-servers .server-list {
+  gap: 0;
+}
+
+.modal-servers .server-tile {
+  padding: 6px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.modal-servers .server-tile:last-child {
+  border-bottom: 0;
+}
+
+.modal-servers .server-tile.is-broken {
+  background: transparent;
+}
+
+.modal-servers .server-tile::before {
+  top: 7px;
+  bottom: 7px;
+  border-radius: 2px;
+}
+
+.modal-servers .server-tile:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+/* 当前服给一条淡金底，但不描边：它只是「这一行被选中」，不是另一张卡 */
+.modal-servers .server-tile.is-active {
+  border-radius: 8px;
+  border-bottom-color: transparent;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.modal-servers .server-tile.is-active + .server-tile {
+  border-top: 0;
+}
+
+.modal-servers .st-tools {
+  opacity: 0.48;
+}
+
+.modal-servers .modal-foot.ms-foot {
+  padding: 7px 12px 8px;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+
+.modal-servers .ms-foot .ms-actions .btn {
+  gap: 4px;
+  padding: 0 5px;
+  border-color: transparent;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10.5px;
+}
+
+.modal-servers .ms-foot .ms-actions .btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.modal-servers .ms-foot .ms-actions .btn:hover {
+  color: var(--text);
+}
+
+.modal-servers .ms-foot > .btn {
+  height: 24px;
+  padding: 0 11px;
+  font-size: 11.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 「这个服还没装」的三选一
+ *
+ * 三条路代价差得远（硬链接最省空间、选路径最快、扫描不用记路径），
+ * 所以摊成三张可点的行，每行一句话说清代价；不能当源的那条直接禁用并写原因。
+ * ═══════════════════════════════════════════════════════════════════ */
+.modal.modal-setup {
+  width: min(400px, 100%);
+  border-radius: 14px;
+}
+
+.modal-setup .modal-head {
+  padding: 14px 16px 10px;
+  border-bottom: 0;
+}
+
+.modal-setup .modal-head h2 {
+  font-size: 17px;
+}
+
+.modal-setup .modal-head p {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.modal-setup .modal-body {
+  padding: 2px 12px 14px;
+}
+
+.setup-pick {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.setup-opt:hover:not(:disabled) {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+}
+
+.setup-opt:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.setup-opt-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--accent);
+}
+
+.setup-opt-icon .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.setup-opt-copy {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 1px;
+  min-width: 0;
+}
+
+.setup-opt-copy strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.setup-opt-copy small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.setup-opt-go {
+  flex: none;
+  color: var(--line-strong);
+}
+
+.setup-opt-go .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.setup-opt:hover:not(:disabled) .setup-opt-go {
+  color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 工具页 / 设置页：压「框」，不动字号
+ *
+ * 上一版为了塞下更多内容把字号一起压小了（标题 14.5→13、说明 13→12），
+ * 读起来吃力。这一版字号全部还原成基础值，只压缩真正浪费空间的地方：
+ * 面板内边距、行上下留白、控件外形高度（按钮 44→34、输入框 42→34）。
+ * 另外把三处「各长各的」统一掉：
+ *   ① 音效页「音乐」那张卡的 .setting-row-split / .setting-pair /
+ *      .setting-hint 原来只写在 .material-panel 下，而那张卡不是
+ *      material 面板，三条规则一条都不命中 —— 两个开关贴着文字、
+ *      底下一段 16px 正文色的长文把卡撑得老高。这里补成全局规则。
+ *   ② 窗口页「背景不透明度 / 背景清晰度」被 .setting-row-pair 改成
+ *      「文案在上、滑块通栏在下」，跟同面板另外两行完全不是一个样子。
+ *      把 .setting-row-pair 还原成单纯的包装层，两行回到左文案右滑块。
+ *   ③ 滑块右侧的数值格固定 36px，「模糊 60」这种四字值会溢出，
+ *      改成 min-width + 自适应。
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 页头：只收留白，字号不动 ─────────────────────────────────────── */
+.page-tools .page-head,
+.page-settings .page-head {
+  padding: 12px 0 16px;
+}
+
+/* ── 工具页 ───────────────────────────────────────────────────────── */
+.page-tools .tg-shell {
+  gap: 12px;
+}
+
+.page-tools .tg-rail {
+  gap: 2px;
+  padding: 6px;
+  border-radius: 14px;
+}
+
+.page-tools .tg-rail-item {
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 9px;
+}
+
+/* 面板别再有 380px 的下限：内容只有 4 个标签时就该只有 4 个标签那么高。
+   下限一去掉，面板高度就由内容决定，中间那段空档也就没了。 */
+.page-tools .tg-panel {
+  gap: 12px;
+  min-height: 0;
+  padding: 14px 16px;
+  border-radius: 14px;
+}
+
+.page-tools .tg-panel-head {
+  padding-bottom: 10px;
+}
+
+.page-tools .tg-panel-groups {
+  gap: 12px;
+  flex: 0 1 auto;
+}
+
+/* 取消「把余量全推给 wiki」——那只是把空白从底部挪到中间 */
+.page-tools .tg-panel-groups > .tg-wiki {
+  margin-top: 2px;
+}
+
+.page-tools .tg-group {
+  gap: 6px;
+}
+
+.page-tools .tg-feats {
+  gap: 6px;
+}
+
+/* ── 设置页：外壳与导航 ───────────────────────────────────────────── */
+.page-settings .settings-shell {
+  gap: 12px;
+}
+
+.page-settings .settings-nav {
+  padding: 7px;
+  border-radius: 12px;
+}
+
+.page-settings .settings-nav-item {
+  padding: 8px 10px;
+}
+
+.page-settings .settings-grid {
+  gap: 12px;
+}
+
+/* 面板收掉一圈内边距（20/22 → 15/18），这是「框很长」的主因之一 */
+.page-settings .settings-panel {
+  padding: 15px 18px 14px;
+  border-radius: 13px;
+}
+
+.page-settings .settings-panel > .desc {
+  margin-top: 4px;
+}
+
+/* ── 设置行：去掉 58px 硬下限，行距从 11 收到 6 ──────────────────── */
+.page-settings .setting-row {
+  gap: 14px;
+  min-height: 0;
+  padding: 6px 0;
+}
+
+.page-settings .setting-row:first-of-type {
+  margin-top: 6px;
+}
+
+.page-settings .setting-copy {
+  flex: 1 1 200px;
+}
+
+/* ── 控件：只减外形高度，字保持原样 ──────────────────────────────── */
+.page-settings .btn {
+  height: 34px;
+  padding: 0 13px;
+}
+
+.page-settings .btn-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.page-settings .text-input {
+  height: 34px;
+}
+
+.page-settings .segmented button {
+  height: 25px;
+}
+
+/* 滑块右侧的数值：36px 定宽装不下「模糊 60」 */
+.page-settings .volume-value {
+  width: auto;
+  min-width: 42px;
+}
+
+/* ── 音效「音乐」：把只挂在 .material-panel 下的三条补成全局 ──────── *
+ * 补上之后这张卡是一行两个开关 + 一句 13px 淡色说明，
+ * 和「界面音效」那张卡等高，不再是页面里最高的一块。 */
+.setting-row-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+  align-items: center;
+}
+
+.setting-pair {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.setting-pair strong {
+  font-size: 14.5px;
+  font-weight: 550;
+  line-height: 1.35;
+}
+
+.setting-pair + .setting-pair {
+  padding-left: 24px;
+  border-left: 1px solid var(--line);
+}
+
+.setting-hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ── 窗口「背景不透明度 / 背景清晰度」：还原成普通两行 ────────────── *
+ * 原来外面套了一层 .setting-row-pair，被改成「文案上、滑块通栏下」，
+ * 同一张卡里前两行是左右布局、后两行是上下布局，看着就乱。
+ * 这层只留包装作用，两行回到跟其它设置项一样的样子。 */
+.page-settings .material-panel .setting-row-pair {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+}
+
+.page-settings .material-panel .setting-row-pair .setting-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.page-settings .material-panel .setting-row-pair .setting-row:last-child {
+  border-bottom: 0;
+}
+
+.page-settings .material-panel .setting-row-pair .volume-control {
+  width: 214px;
+  max-width: 46%;
+}
+
+/* 材质面板里其它行也一样密度，别单独加厚 */
+.page-settings .material-panel .setting-row {
+  padding: 6px 0;
+}
+
+/* 材质面板自带一套更小的字号（13.5 / 12 / 12.5），切到「窗口」分组时
+   标题和说明会突然比别的分组小一号，就是「每个选项看着都不一样」的一条。
+   这里把它拉回与其它面板相同的规格。 */
+.page-settings .material-panel > .desc {
+  font-size: 13.5px;
+  margin-bottom: 2px;
+}
+
+.page-settings .material-panel .setting-copy strong {
+  font-size: 14.5px;
+}
+
+.page-settings .material-panel .setting-copy span {
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 画质配置页：从「注册表导出」收成一张能看的设置面板
+ *
+ * 原来两个毛病：
+ *   ① 每张卡是「标题条 + 一行行 label/value」，行高 7px 上下留白，
+ *      17 项的「画质细节」一屏装不下，翻起来像在看注册表；
+ *   ② 可编辑行只有 label 和 control 两个子元素，却套在
+ *      `1fr 1.1fr auto` 三列网格里 —— 控件落在中间那列，
+ *      右边永远空一条，视线对不齐，看着就「素」。
+ * 这一版：行改成两列、控件贴右；卡头加一条强调色 + 项数；
+ * 行之间补极细分割线；行高 / 内边距 / 输入框整体收一档。
+ * ═══════════════════════════════════════════════════════════════════ */
+
+.gfx-grid {
+  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.gfx-card {
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 3.5%, transparent), transparent 40%),
+    color-mix(in srgb, #ffffff 1.6%, transparent);
+}
+
+/* 卡头：左侧一条 2px 强调条 + 顶部渐隐，标题和项数分居两端 */
+.gfx-card > header {
+  position: relative;
+  gap: 8px;
+  padding: 8px 12px 7px 13px;
+  background: transparent;
+}
+
+.gfx-card > header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.gfx-card > header strong {
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.gfx-card > header em {
+  margin-left: auto;
+  font-size: 10.5px;
+  opacity: 0.55;
+}
+
+.gfx-card > ul {
+  padding: 3px 0 5px;
+}
+
+/* 两列小卡：行间一条极细分割线，把一长串行分出节奏 */
+.gfx-card:not(.is-wide) > ul > .gfx-row + .gfx-row {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--line) 62%, transparent);
+}
+
+.gfx-row {
+  padding: 5px 13px;
+  font-size: 13px;
+  gap: 10px;
+}
+
+.gfx-label {
+  color: var(--text-2, var(--text));
+  opacity: 0.78;
+  font-size: 12.5px;
+}
+
+/* 可编辑行只有 label + control 两个子元素，三列网格会让控件停在中间，
+   右边空一条。这里退回两列，控件直接贴右沿。 */
+.gfx-row-edit {
+  grid-template-columns: minmax(88px, 1fr) auto;
+  padding: 5px 0;
+  cursor: default;
+}
+
+.gfx-control {
+  gap: 6px;
+}
+
+.gfx-input {
+  min-width: 112px;
+  max-width: 196px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.gfx-switch {
+  padding: 2px;
+  gap: 2px;
+  border-radius: 9px;
+}
+
+.gfx-switch button {
+  padding: 3px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.gfx-switch button.active {
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* 带 17 项的宽卡：两列排版，行距再收一点，整块不至于拉太长 */
+.gfx-grid .gfx-card.is-wide > ul {
+  grid-template-columns: repeat(auto-fill, minmax(264px, 1fr));
+  gap: 0 20px;
+  padding: 4px 13px 6px;
+}
+
+.gfx-grid .gfx-card.is-wide .gfx-row {
+  padding: 5px 0;
+}
+
+.gfx-grid .gfx-card.is-wide .gfx-row-edit {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--line) 46%, transparent);
+}
+
+/* 页脚那段说明：原来是一整段长文，收成一条脚注 */
+.shots-note {
+  max-width: 720px;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.72;
+}
+
+/* 下拉框和「没读到值」这两处原来**一条样式都没有**：
+   下拉是浏览器原生白底 select，跟旁边自绘的「开启 / 关闭」胶囊、
+   数字输入框完全不是一套，一眼就看得出没做。这里补齐。 */
+.gfx-select {
+  min-width: 116px;
+  max-width: 200px;
+  padding: 5px 26px 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background-color: var(--panel, var(--bg-deep));
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.6 6 7.6l3-3' fill='none' stroke='%238b8b96' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.gfx-select:hover {
+  border-color: var(--accent-line, rgba(var(--accent-rgb), 0.42));
+}
+
+.gfx-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint, rgba(var(--accent-rgb), 0.14));
+}
+
+/* 原生下拉面板在深色主题下是白底黑字，把能控的部分一起压暗 */
+.gfx-select option {
+  background: var(--bg-deep);
+  color: var(--text);
+}
+
+.gfx-missing {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: right;
+  opacity: 0.75;
+}
+
+/* 收尾对齐：
+   · 行原来没有左右内边距，标签直接贴在卡片描边上，和卡头的 13px 对不齐；
+   · 下拉 27px、数字框 29px、胶囊 31px，同一列三种高度；
+   统一成 28px，行内边距与卡头一致，控件一律贴右沿。 */
+.gfx-row-edit {
+  padding: 5px 13px;
+}
+
+.gfx-select,
+.gfx-input {
+  width: 120px;
+  height: 28px;
+  padding: 0 9px;
+  line-height: 26px;
+}
+
+.gfx-select {
+  width: 126px;
+  padding: 0 24px 0 9px;
+  line-height: normal;
+}
+
+.gfx-switch {
+  height: 28px;
+  align-items: center;
+}
+
+.gfx-switch button {
+  height: 24px;
+  padding: 0 10px;
+}
+
+.gfx-missing {
+  max-width: 138px;
+}
+
+/* 控件列固定宽度：下拉 126、数字框 120、胶囊随按钮数变，右端本来各差几像素。
+   给这一列一个统一宽度再靠右对齐，整张卡的控件就落在同一条竖线上。 */
+.gfx-row-edit {
+  grid-template-columns: minmax(88px, 1fr) 132px;
+}
+
+.gfx-control {
+  width: 132px;
+  min-width: 0;
+}
+
+.gfx-grid .gfx-card.is-wide .gfx-row-edit {
+  grid-template-columns: minmax(80px, 1fr) 132px;
+}
+
+.gfx-switch button {
+  padding: 0 8px;
+}
+
+/* 「独占 / 无边框 / 窗口」这种三段胶囊比 132px 的控件列宽，之前被压成
+   两行（「独\n占」）。按钮不许换行；控件列仍靠右对齐，胶囊超出时往左溢出，
+   右端照样落在同一条竖线上。 */
+.gfx-switch button {
+  white-space: nowrap;
+}
+
+.gfx-control {
+  justify-content: flex-end;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 动态页大框轮换：首页式翻页键
+ *
+ * 大框从「只有最新一条」改成在最近 8 条里轮（公告 > 活动 > 资讯）。
+ * 翻页键压在右侧配图的下沿，不占左边文字的版面；条数少的时候整组
+ * 键直接不渲染。
+ * ═══════════════════════════════════════════════════════════════════ */
+.news-feature-wrap {
+  position: relative;
+  margin-bottom: 28px;
+}
+
+.news-feature-wrap .news-feature {
+  margin-bottom: 0;
+}
+
+.news-feature-nav {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(10, 10, 14, 0.46);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.news-feature-step {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.82);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.14s ease;
+}
+
+.news-feature-step:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.news-feature-step:active {
+  transform: scale(0.92);
+}
+
+.news-feature-step .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.news-feature-pos {
+  min-width: 34px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.news-feature-pos strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 启动页服务器下拉 v3：卡片式小框
+ *
+ * 用户参考外部启动器给的样式：每一行是一个带描边的小圆角框，
+ * 左边状态点、右边渠道/当前标签；exe 文件名整段去掉（markup 里已不渲染，
+ * 只有「没文件/告警」时才留一行小字）。当前服的框用主题色描边 + 微光，
+ * 没装好的框改虚线。底部 动作区改成同款描边小胶囊，和框呼应。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-menu {
+  gap: 5px;
+  padding: 7px;
+  border-radius: 13px;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  gap: 5px;
+}
+
+.start-screen .start-dock .start-server-item {
+  min-height: 0;
+  gap: 9px;
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.028);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+}
+
+/* 当前服：主题色描边 + 微光，一眼锁定 */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.07);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.14), 0 3px 12px rgba(0, 0, 0, 0.28);
+}
+
+/* 没装好 / 缺文件的行：虚线框示意「待补」 */
+.start-screen .start-dock .start-server-item.is-unavailable,
+.start-screen .start-dock .start-server-item.is-broken {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.13);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 程序名没了，名字可以放宽，渠道 tag 不再被挤掉 */
+.start-screen .start-dock .start-server-item-copy strong {
+  max-width: 76%;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* 动作区：与卡片同语言的描边小胶囊 */
+.start-screen .start-dock .sw-srv-actions {
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.start-screen .start-dock .sw-srv-action {
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent);
+}
+
+.start-screen .start-dock .sw-srv-action-icon {
+  width: 15px;
+  height: 15px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.start-screen .start-dock .sw-srv-action-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 12px;
+  font-weight: 560;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器下拉 v4：收成小框，不再撑满整条 dock
+ * left 锚定 + 固定小宽：右下角让出来，挂饰不再被盖住。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  left: 0;
+  right: auto;
+  width: 238px;
+  max-width: 88%;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 音乐页头部 v3：第一排 = 标题（左）+ 账号/按钮（右），第二排 = 说明整排
+ * title 吃 flex:1 把右侧控件顶到行尾；说明仍然 order:99 换行铺满。
+ * ═══════════════════════════════════════════════════════════════════ */
+.song-app-head > .song-app-title {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.song-app-head > .song-app-accounts {
+  margin-left: auto;
+}
+
+.song-app-head > .song-app-actions {
+  margin-left: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器管理弹窗 v3：与启动页下拉同一套卡片语言
+ * 行=描边圆角卡（当前服主题色描边、缺文件虚线）、工具钮默认淡出 hover
+ * 浮亮、计数做成小胶囊、文件名弱化成灰字、底部动作收成小胶囊。
+ * ═══════════════════════════════════════════════════════════════════ */
+.modal.modal-servers {
+  width: min(430px, 100%);
+}
+
+/* 头部：标题 + 计数胶囊 */
+.modal.modal-servers .modal-head {
+  padding: 14px 16px 10px;
+}
+
+.modal.modal-servers .ms-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.modal.modal-servers .ms-head h2 {
+  font-size: 15.5px;
+  margin: 0;
+}
+
+.modal.modal-servers .ms-count {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.modal.modal-servers .ms-count strong {
+  color: var(--accent);
+  font-weight: 640;
+}
+
+/* 行卡片 */
+.modal.modal-servers .server-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 7px;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.028);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.modal.modal-servers .server-tile:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.modal.modal-servers .server-tile.is-active {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.07);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.14), 0 3px 12px rgba(0, 0, 0, 0.26);
+}
+
+.modal.modal-servers .server-tile.is-broken {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.13);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal.modal-servers .st-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+}
+
+.modal.modal-servers .st-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.modal.modal-servers .st-title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.modal.modal-servers .st-title strong {
+  font-size: 13.5px;
+  font-weight: 620;
+}
+
+.modal.modal-servers .st-flag {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.modal.modal-servers .st-chip {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.modal.modal-servers .st-chip.is-warn {
+  border-color: rgba(250, 179, 101, 0.4);
+  background: rgba(250, 179, 101, 0.1);
+  color: rgba(250, 179, 101, 0.92);
+}
+
+.modal.modal-servers .st-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工具钮：默认淡出，悬停整组浮亮 */
+.modal.modal-servers .st-tools {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+
+.modal.modal-servers .server-tile:hover .st-tools,
+.modal.modal-servers .st-tools:focus-within {
+  opacity: 1;
+}
+
+.modal.modal-servers .st-tool {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.modal.modal-servers .st-tool .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.modal.modal-servers .st-tool:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+
+.modal.modal-servers .st-tool.is-danger:hover {
+  background: rgba(248, 113, 113, 0.14);
+  color: #f87171;
+}
+
+.modal.modal-servers .st-tool.is-text {
+  width: auto;
+  padding: 0 8px;
+  gap: 4px;
+  font-size: 11.5px;
+}
+
+/* 主行动钮 */
+.modal.modal-servers .st-go {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  gap: 5px;
+}
+
+.modal.modal-servers .st-go .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 底部动作区：透明 + 小胶囊 */
+.modal.modal-servers .ms-foot {
+  padding: 9px 16px 12px;
+  background: transparent;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.modal.modal-servers .ms-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.modal.modal-servers .ms-actions .btn-sm {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  gap: 5px;
+}
+
+.modal.modal-servers .ms-foot > .btn-primary {
+  height: 28px;
+  border-radius: 8px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器下拉 v6：不是另做小框——pick 那个框原位向上扩开成列表
+ * （恢复 left:0/right:0 与 pick 同宽，浮层仍是 bottom:calc(100%+8px)），
+ * 里面装的每一行才是小框（v5 的紧凑行尺寸保留）。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock.is-menu-open .start-server-menu {
+  left: 0;
+  right: 0;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  padding: 5px;
+  gap: 4px;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  gap: 4px;
+}
+
+.start-screen .start-dock .start-server-item {
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+.start-screen .start-dock .start-server-item-copy {
+  gap: 5px;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  font-size: 10px;
+  padding: 0 6px;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 10.5px;
+}
+
+.start-screen .start-dock .start-server-item-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.start-screen .start-dock .sw-srv-state {
+  font-size: 10.5px;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  height: 24px;
+  padding: 0 9px;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器下拉 v7：菜单从 pick 框顶上展开（不是从整个 dock 顶上）
+ * pick 和菜单包进同一个 .start-server-anchor（position:relative），
+ * 菜单 absolute bottom:calc(100%+8px) 相对 anchor —— 底边永远贴着
+ * pick 顶上方 8px，宽度与 pick 一致；不受 running 块 / 缩放影响。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-anchor {
+  position: relative;
+}
+
+.start-screen .start-dock .start-server-anchor .start-server-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: auto;
+  margin-top: 0;
+  z-index: 6;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器列表 v9：不做浮层窗口了 —— 列表就是 dock 自己的一部分。
+ * 点「官服」展开时，dock 从底部锚点整块向上长高，列表排在
+ * 「服务器 3/3 可用」标签之下、官服框之上；收起时 dock 缩回原样。
+ * anchor 变纵向 flex，用 order 排：标签 → 列表 → 官服框。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-anchor {
+  display: flex;
+  flex-direction: column;
+}
+
+.start-screen .start-dock .start-server-anchor .start-dock-server-head {
+  order: -2;
+}
+
+.start-screen .start-dock .start-server-anchor .start-server-menu {
+  position: static;
+  order: -1;
+  bottom: auto;
+  margin: 2px 0 8px;
+  max-height: min(330px, 52vh);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v10：压到「一条」的小框——每个服就是一根细线
+ * 参考用户截图：点 + 名字一行放下，三个服加动作区一屏轻松放下。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  min-height: 0;
+  gap: 7px;
+  padding: 3px 9px;
+  border-radius: 7px;
+}
+
+.start-screen .start-dock .start-server-item-copy {
+  gap: 6px;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 12px;
+  font-weight: 590;
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  font-size: 9.5px;
+  padding: 0 5px;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 10px;
+}
+
+.start-screen .start-dock .start-server-item-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.start-screen .start-dock .start-server-item-tick .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.start-screen .start-dock .sw-srv-state {
+  font-size: 10px;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  gap: 3px;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  height: 22px;
+  padding: 0 8px;
+  gap: 5px;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 10.5px;
+}
+
+.start-screen .start-dock .sw-srv-action-icon .icon {
+  width: 11px;
+  height: 11px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v11：一行放下全部服务器
+ * sw-srv-list 改横向 flex，每个服是一个并排小胶囊（点 + 名字）；
+ * 「当前」文字和对勾去掉——高亮描边已经表达选中，横排没地方放它们。
+ * 服务器多的游戏（终末地 5 个）自动换行，不会挤爆。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 6px;
+  padding: 4px 10px;
+}
+
+.start-screen .start-dock .start-server-item + .start-server-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.start-screen .start-dock .start-server-item .sw-srv-state,
+.start-screen .start-dock .start-server-item .start-server-item-tick {
+  display: none;
+}
+
+.start-screen .start-dock .start-server-item-copy {
+  min-width: 0;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v12：胶囊不摊派宽度 —— flex:1 会把三个胶囊均分整行，
+ * 每个还是长条。改成 0 0 auto 按内容收紧，胶囊只比名字宽一点点，
+ * 三个加起来远短于一行，靠左排。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  width: auto;
+  gap: 5px;
+  padding: 3px 9px;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  justify-content: flex-start;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器胶囊 v13：精修
+ * 症结：渠道标签带边框底色把胶囊撑宽，三个放不下掉行；边框生硬、
+ * 高亮发闷。这轮：标签弱化成纯文字、胶囊玻璃质感 + 全圆角、
+ * 当前服渐变高亮 + 圆点发光、hover 有回应。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  gap: 4px 5px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 6px;
+  padding: 3.5px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.028));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.04));
+}
+
+/* 当前服：主题色渐变底 + 描边 + 微光 */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.17), rgba(var(--accent-rgb), 0.07));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 10px rgba(var(--accent-rgb), 0.18);
+}
+
+/* 渠道标签：去掉小药丸壳，变成跟在名字后面的淡字，胶囊立刻收窄 */
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.02em;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy .sw-srv-tag {
+  color: rgba(var(--accent-rgb), 0.85);
+}
+
+/* 圆点：普通服柔绿，当前服发光 */
+.start-screen .start-dock .start-server-item-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-dot {
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.8);
+}
+
+/* 名字：当前服提亮，非当前稍收 */
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy strong {
+  color: #fff;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器胶囊 v14：三个必须同排 + 动作区改真胶囊
+ * - 胶囊再收一点（padding 3px 9px / gap 4px），保证 268px dock 里
+ *   「官服+B服+国际服」一行放下不掉行；
+ * - 底部「重新扫描/服务器管理」原来各自撑满半条，改成内容自适应的
+ *   圆角胶囊，靠左排，和上面服务器胶囊一个语言。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  gap: 5px;
+  padding: 3px 9px;
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  margin-left: 1px;
+}
+
+.start-screen .start-dock .sw-srv-list {
+  gap: 4px;
+  justify-content: flex-start;
+}
+
+/* 动作区：从「两段长条」改成内容自适应胶囊 */
+.start-screen .start-dock .sw-srv-actions {
+  gap: 5px;
+  margin-top: 3px;
+  padding-top: 7px;
+  border-top: 0;
+  justify-content: flex-start;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  flex: 0 0 auto;
+  width: auto;
+  height: 23px;
+  padding: 0 10px;
+  gap: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.024));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.14), rgba(var(--accent-rgb), 0.05));
+  color: var(--accent);
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11px;
+  font-weight: 570;
+}
+
+.start-screen .start-dock .sw-srv-action-icon .icon {
+  width: 11.5px;
+  height: 11.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器胶囊 v15：一行铁律
+ * 再收 2px 内边距 + 渠道字 9.5px；关键是 flex-shrink 放开（0 1 auto），
+ * 万一服务器名特别长，胶囊等比收缩省略号，也不许掉到第二行。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  gap: 4px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 5px;
+  padding: 3px 8px;
+}
+
+.start-screen .start-dock .start-server-item-copy {
+  gap: 4px;
+  min-width: 0;
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  flex: none;
+  font-size: 9.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器胶囊 v16：nowrap 铁律补丁
+ * wrap 模式下浏览器按「内容宽」直接换行，flex-shrink 根本没机会出手；
+ * 改 nowrap 后超宽时胶囊才会收缩（名字省略号），保证永远一行。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  flex-wrap: nowrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * GPU 减负：修「侧栏展开卡死」
+ * 实测 GPU 进程持续 180%+：菜单自己那层 backdrop-filter(20px) 叠在
+ * dock 的 22px 玻璃上，底下又是全屏缓动图/视频 → 双层模糊逐帧重采样。
+ * 菜单在 dock 内部，dock 已经提供玻璃底，菜单这层纯属浪费——去掉；
+ * 菜单展开时再把纯装饰的火花/光轨动画暂停，进一步让出渲染余量。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-menu,
+.start-screen .start-dock .start-server-menu::before {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.start-screen .start-dock.is-menu-open .start-dock-sparks i,
+.start-screen .start-dock.is-menu-open .start-dock-charm img,
+.start-screen .start-dock.is-menu-open .start-dock-crest img {
+  animation-play-state: paused !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器胶囊 v17：主次分明（用户实拍反馈「也不好看」）
+ * 症结：五个胶囊一样重 + 一排红绿圆点像状态墙，当前服反而淹没。
+ * 改法：
+ *  · 当前服 = 实心主题色胶囊（白字、主题色投影），一眼锁定；
+ *  · 其他服 = 幽灵细框，弱化一档，hover 才浮起来；
+ *  · 可用服的圆点全部隐藏（状态墙噪音），只有缺文件/告警才留点；
+ *  · 超过一行放不下的场景恢复换行（5 个服时不再挤成蚂蚁）；
+ *  · 底部动作按钮去框，只留图标+文字的轻按钮。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 可用服的圆点隐藏；缺文件/告警才留 */
+.start-screen .start-dock .start-server-item .start-server-item-dot {
+  display: none;
+}
+
+.start-screen .start-dock .start-server-item.is-unavailable .start-server-item-dot,
+.start-screen .start-dock .start-server-item.is-broken .start-server-item-dot {
+  display: block;
+}
+
+/* 当前服：实心主题色胶囊，白字，柔光 */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: rgba(var(--accent-rgb), 0.65);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.92), rgba(var(--accent-rgb), 0.68));
+  box-shadow: 0 2px 10px rgba(var(--accent-rgb), 0.3);
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy strong {
+  color: #fff;
+  font-weight: 650;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy .sw-srv-tag {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* 其他服文字弱化一档 */
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.66);
+}
+
+.start-screen .start-dock .start-server-item:hover .start-server-item-copy strong {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  color: rgba(255, 255, 255, 0.34);
+}
+
+/* 底部动作：去框的轻按钮 */
+.start-screen .start-dock .sw-srv-actions {
+  gap: 2px;
+  padding-top: 5px;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--accent);
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11px;
+  font-weight: 540;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v18：照参考图重做 —— 大号「图标 + 粗体字」胶囊
+ * 参考图的语言：胶囊是大圆角矩形（不是 999 细条），左边一枚图标，
+ * 右边粗体白字；当前项是渐变实心胶囊（红→橙），其余细边框幽灵胶囊。
+ *  · 行高 40px、圆角 14px、图标 22px 圆角方块、字 14px/650；
+ *  · 名字和「未选 exe」等小字同一行排；
+ *  · 缺文件的服，图标变成琥珀色警示（不再靠红点）。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  gap: 8px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  padding: 0 15px 0 11px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* 左侧图标：小圆角方块 + 线性图标 */
+.start-screen .start-dock .start-server-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.start-screen .start-dock .start-server-item-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* 名字 + 状态小字同一行 */
+.start-screen .start-dock .start-server-item-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 14px;
+  font-weight: 650;
+  color: #fff;
+  letter-spacing: 0.01em;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* 当前服：渐变实心胶囊（参考图那枚亮色） */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: transparent;
+  background: linear-gradient(120deg, rgba(var(--accent-rgb), 0.96) 0%, #ff9a52 135%);
+  box-shadow: 0 6px 18px rgba(var(--accent-rgb), 0.3);
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-icon {
+  background: rgba(0, 0, 0, 0.18);
+  color: #fff;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy strong {
+  color: #fff;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy .sw-srv-tag,
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy small {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* 没装好的服：图标改成琥珀色警示 */
+.start-screen .start-dock .start-server-item.is-unavailable .start-server-item-icon,
+.start-screen .start-dock .start-server-item.is-broken .start-server-item-icon {
+  background: rgba(250, 179, 101, 0.16);
+  color: #fab565;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v19：宽高微调，让大号胶囊在 268px dock 里能两两并排
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  height: 38px;
+  gap: 8px;
+  padding: 0 13px 0 10px;
+  border-radius: 13px;
+}
+
+.start-screen .start-dock .start-server-item-icon {
+  width: 21px;
+  height: 21px;
+  border-radius: 7px;
+}
+
+.start-screen .start-dock .start-server-item-copy {
+  gap: 5px;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 13.5px;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 10px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v20：跟官服框同款
+ * 用户拍板「还是做的和官服的框一样吧，但不一样一点，好分辨」。
+ * 同款：同样的描边色 / 圆角 / 半透明底 / 圆点 + 名字的结构；
+ * 不同点：胶囊更矮更窄（次级选项），当前服用主题色描边 + 微光底
+ * （和展开态官服框一个观感），一眼分得清「这是列表项 / 这是当前框」。
+ * 动作区（重新扫描 / 服务器管理）挪到列表最上面。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 当前服：和展开态的官服框同观感（主题色描边 + 淡底） */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
+/* 缺文件的服：虚线框示意「待补」 */
+.start-screen .start-dock .start-server-item.is-unavailable,
+.start-screen .start-dock .start-server-item.is-broken {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* 圆点回到官服框那套（带光晕） */
+.start-screen .start-dock .start-server-item-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-dot {
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+}
+
+/* 名字回到 13px 常规粗细，跟官服框里的名字一个层级 */
+.start-screen .start-dock .start-server-item-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hero-ink);
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* 动作区在列表上方：给一条分隔线，和下面的服务器列表分层 */
+.start-screen .start-dock .sw-srv-actions {
+  order: -1;
+  gap: 6px;
+  margin: 0 0 7px;
+  padding: 0 0 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  justify-content: flex-start;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  gap: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent);
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 11.5px;
+  font-weight: 560;
+}
+
+/* v20 补丁：服务器框不参与收缩（宁可换行也不截字） */
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 服务器行 v21：以「官服框」为样板重做
+ *
+ * 样板 = 启动页「开始游戏」上方那个官服框（截图基准）：
+ *   1px 半透明白描边 + 12px 圆角 + 半透明底
+ *   左边 7px 圆点（带 3px 光晕环）
+ *   中间白色粗体字
+ *   右边一个 chevron 箭头
+ *   展开时整框换成主题色描边 + 淡底
+ *
+ * 列表行就照这套语言做，同时用两点跟官服框区分开，一眼能分：
+ *   · 官服框 = 整行满宽、44px 高、右侧 ⌄（展开）
+ *     列表行 = 按内容宽、矮一档、右侧 ›（切过去）
+ *   · 当前服 = 红光描边 + 红点（和官服框选中态一致）
+ *     其它服 = 灰描边 + 绿点/琥珀点，不抢眼
+ *   · 缺文件的行 = 虚线框 + 琥珀点，提示「待补」
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.start-screen .start-dock .start-server-item:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* 当前服：红光描边 + 淡底，和官服框展开态一个观感 */
+.start-screen .start-dock .start-server-item.is-active {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
+.start-screen .start-dock .start-server-item.is-active:hover {
+  border-color: rgba(var(--accent-rgb), 0.62);
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+/* 缺文件 / 要重建：虚线框 + 琥珀点，弱化但可辨 */
+.start-screen .start-dock .start-server-item.is-unavailable,
+.start-screen .start-dock .start-server-item.is-broken {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.start-screen .start-dock .start-server-item.is-unavailable:hover,
+.start-screen .start-dock .start-server-item.is-broken:hover {
+  border-color: rgba(250, 179, 101, 0.42);
+  background: rgba(250, 179, 101, 0.07);
+}
+
+/* 圆点：官服框同款（7px + 3px 光晕环），颜色跟状态走 */
+.start-screen .start-dock .start-server-item-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.start-screen .start-dock .start-server-item-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
+}
+
+.start-screen .start-dock .start-server-item-dot.ready {
+  background: #5ad67d;
+  box-shadow: 0 0 0 3px rgba(90, 214, 125, 0.16);
+}
+
+.start-screen .start-dock .start-server-item-dot.missing {
+  background: #fab565;
+  box-shadow: 0 0 0 3px rgba(250, 179, 101, 0.16);
+}
+
+/* 名字：官服框同款（白色粗体 13px），渠道标签跟在后面弱化 */
+.start-screen .start-dock .start-server-item-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hero-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-screen .start-dock .start-server-item-copy small {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-screen .start-dock .start-server-item-copy .sw-srv-tag {
+  flex: none;
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* 右侧箭头：官服框是 ⌄（展开），列表行是 ›（切过去）——这是最直观的区分 */
+.start-screen .start-dock .start-server-item-go {
+  display: inline-flex;
+  flex: none;
+  opacity: 0.4;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.start-screen .start-dock .start-server-item-go .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.start-screen .start-dock .start-server-item:hover .start-server-item-go {
+  opacity: 0.9;
+  transform: translateX(1px);
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-go {
+  opacity: 0.75;
+  color: var(--accent);
+}
+
+/* 「当前」小字和对勾在横排里没位置，收起来（状态由圆点和描边表达） */
+.start-screen .start-dock .start-server-item .sw-srv-state,
+.start-screen .start-dock .start-server-item .start-server-item-tick {
+  display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v21 补丁：清掉旧占位伪元素 + 文字色修正
+ *  · .start-server-item::after 是老版本给「勾」留的 13px 空位，
+ *    现在右侧已经有 › 箭头了，两个占位叠加把行撑出容器左边（探针实测
+ *    第一个「官服」行被裁掉一截）。直接去掉这个伪元素。
+ *  · 名字用 #fff 固定白（--hero-ink 在启动页作用域外会失效变暗）。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item::after {
+  display: none;
+}
+
+.start-screen .start-dock .start-server-item-copy strong {
+  color: #fff;
+}
+
+.start-screen .start-dock .start-server-item.is-active .start-server-item-copy strong {
+  color: #fff;
+}
+
+/* 列表整体不越界：左侧留一点余量，别让描边贴着容器边 */
+.start-screen .start-dock .sw-srv-list {
+  padding-left: 1px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v22：列表项改成竖排满宽 —— 与「官服框」完全同构
+ *
+ * 官服框本身是 width:100% 的一条（圆角矩形 + 圆点 + 粗体字 + 箭头）。
+ * 之前把列表项挤成横排小胶囊，横竖两种语言混在一个面板里，怎么调都
+ * 不协调。现在统一成竖排：每一项都是一条「小一号的官服框」——
+ *   满宽、圆角、圆点光晕、白色粗体字、右侧 ›；
+ * 区别只留两处，够分辨又不混：
+ *   · 高度矮一档（38px vs 官服框 44px）、字号小一号
+ *   · 右侧箭头方向不同：官服框是 ⌄（展开列表），列表项是 ›（切过去）
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .sw-srv-list {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.start-screen .start-dock .start-server-item {
+  flex: 0 0 auto;
+  width: 100%;
+  height: 38px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v22 补丁：恢复状态圆点
+ * 早前为了「一排红绿点像状态墙」把 .start-server-item-dot 整个 display:none
+ * 了，改成竖排满宽后这个理由不成立（每行一个点，不再是墙），
+ * 而且官服框就有圆点——列表项缺了圆点就不是同一套语言了。全部恢复。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-server-item .start-server-item-dot {
+  display: block;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v23：切换服务器的框 —— 整列同宽对齐，按钮摆正居中
+ *
+ * 之前这个框里摆着三套互不对齐的东西：
+ *   · 面板自己套了一层圆角"雾"外壳（渐变底 + 内高光 + 上下渐隐），
+ *     列表项在这层壳里面又缩一圈；
+ *   · 列表项因此只有 268px，还比"官服框"多缩了 6px（左）/ 12px（右），
+ *     左右不对称 → 整列看着往左歪；
+ *   · 动作按钮是 justify-content:flex-start + width:auto 的小胶囊，
+ *     整排贴在左边，右边空一大块。
+ *
+ * 这版把整个框拍平成一列，同一件事只留一种宽度：
+ *   1) 拆掉面板那层外壳（外壳本来就是浮层时代的产物，现在是 dock
+ *      文档流里的一个普通块，留着只会多套一层缩进）；
+ *      列表项本身已有描边圆角，直接当"官服框的小一号"用。
+ *   2) 列表项、按钮行、官服框三者左右边缘严格对齐；
+ *      列表预留的滚动条槽撤掉，避免右边莫名少一截。
+ *   3) 动作按钮改成等分整行（一个按钮时占满，两个时各占一半），
+ *      图标+文字整体居中，沿用列表项的描边小框语言：
+ *      圆角 10、描边 0.1 白、顶部一道内高光、悬停染主题色。
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* 1) 拆掉面板外壳，只留内容 */
+.start-screen .start-dock .start-server-anchor .start-server-menu {
+  padding: 0;
+  margin: 2px 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.start-screen .start-dock .start-server-anchor .start-server-menu::before {
+  display: none;
+}
+
+/* 2) 列表：左右内边距和滚动条槽都撤掉，边缘跟官服框对齐 */
+.start-screen .start-dock .sw-srv-list {
+  padding-left: 0;
+  padding-right: 0;
+  max-height: min(330px, 52vh);
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
+}
+
+.start-screen .start-dock .sw-srv-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 3) 动作区：整行等分，两个按钮各占一半，内容居中 */
+.start-screen .start-dock .sw-srv-actions {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0 0 8px;
+  position: static;
+  border-top: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: none;
+  justify-content: stretch;
+}
+
+.start-screen .start-dock .sw-srv-action {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  height: 32px;
+  padding: 0 10px;
+  gap: 6px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.66);
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.start-screen .start-dock .sw-srv-action:hover {
+  border-color: rgba(var(--accent-rgb), 0.5);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+}
+
+.start-screen .start-dock .sw-srv-action-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.start-screen .start-dock .sw-srv-action-copy strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v24：抽卡记录「合并版」—— 三个池子同页并排，不再按池切换
+ *
+ * KPI 汇总条（gacha-kpi-grid）不动，下面原来「分段图墙」换成池子卡片：
+ *   · 每张卡 = 池名 + 日期范围 + 总抽数 → 四行统计（高星平均/高星/中星/低星）
+ *     → 5★/4★ 切换胶囊 → 条形列表；
+ *   · 5★ 列表条长 = 该次出金的垫抽数，红条 = 吃到保底，灰色 = 当前已垫；
+ *   · 4★ 列表按名字聚合次数，紫条长度 = 次数占比；
+ *   · 条目头像复用 .gacha-avatar（金边圆头），行内缩到 26px。
+ * ═══════════════════════════════════════════════════════════════════ */
+.gacha-pools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+}
+
+@media (max-width: 1180px) {
+  .gacha-pools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 780px) {
+  .gacha-pools { grid-template-columns: 1fr; }
+}
+
+.gacha-pool-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 14px 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.022));
+  box-shadow: 0 18px 44px -26px rgba(0, 0, 0, 0.7);
+  min-width: 0;
+}
+
+.gacha-pool-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.gacha-pool-title strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.gacha-pool-title small {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--muted, rgba(255, 255, 255, 0.45));
+}
+.gacha-pool-total {
+  font-size: 20px;
+  font-weight: 650;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.gacha-pool-total small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted, rgba(255, 255, 255, 0.45));
+  margin-left: 3px;
+}
+
+.gacha-pool-stats {
+  margin: 12px 0 10px;
+  padding: 9px 0 7px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.gacha-pstat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+.gacha-pstat .k { font-size: 11.5px; color: var(--muted, rgba(255, 255, 255, 0.45)); }
+.gacha-pstat .k.is-high { color: var(--gold); }
+.gacha-pstat .k.is-mid { color: var(--purple, #c9a6ff); }
+.gacha-pstat .k.is-low { color: var(--blue, #86b6ff); }
+.gacha-pstat .v { font-size: 11.5px; white-space: nowrap; }
+.gacha-pstat .v em {
+  font-style: normal;
+  color: var(--muted, rgba(255, 255, 255, 0.45));
+  font-weight: 400;
+}
+
+.gacha-pool-switch {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 10px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.gacha-pool-tab {
+  border: 0;
+  background: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11.5px;
+  font-family: inherit;
+  padding: 4px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.gacha-pool-tab:hover { color: var(--accent); }
+.gacha-pool-tab.active {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+}
+
+.gacha-pool-rows { display: none; }
+.gacha-pool-rows.is-on { display: block; }
+
+.gacha-prow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  min-width: 0;
+}
+.gacha-prow .gacha-avatar {
+  width: 26px;
+  height: 26px;
+  border-width: 1.5px;
+  border-radius: 8px;
+}
+.gacha-prow-av {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #2b1e0c;
+  background: linear-gradient(180deg, #ffe1a3, #f0b95f);
+  box-shadow: 0 0 0 1px rgba(255, 211, 122, 0.45);
+}
+.gacha-prow-av.is-four {
+  color: #241a36;
+  background: linear-gradient(180deg, #d9c4ff, #a582f0);
+  box-shadow: 0 0 0 1px rgba(201, 166, 255, 0.4);
+}
+.gacha-prow-av.is-pity {
+  color: rgba(255, 255, 255, 0.66);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+.gacha-prow-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gacha-prow-name.is-muted { color: var(--muted, rgba(255, 255, 255, 0.45)); }
+.gacha-prow-up {
+  font-style: normal;
+  flex: none;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+.gacha-prow-count {
+  flex: none;
+  min-width: 24px;
+  text-align: right;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.62);
+  font-variant-numeric: tabular-nums;
+}
+.gacha-prow-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 14px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+.gacha-prow-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #6fd69b, #46b47c);
+}
+.gacha-prow-bar i.is-hot { background: linear-gradient(90deg, #ff8f8f, #e2565c); }
+.gacha-prow-bar i.is-four { background: linear-gradient(90deg, #c9a6ff, #9a76e0); }
+.gacha-prow-bar i.is-soft { background: linear-gradient(90deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.18)); }
+
+.gacha-pool-card .gacha-empty-line {
+  margin: 6px 0;
+  font-size: 11.5px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v25：启动页 dock 主按钮的「更新游戏」态
+ *
+ * 有官方更新时主按钮从「开始游戏」变成「更新游戏」（app.js startDockDownloadActions）：
+ *   · is-update：正常可点，主题色描边 + 微光，一眼和「开始游戏」区分开；
+ *   · is-updating：更新进行中，按钮不可点，文字由进度事件实时改写
+ *     （.start-dock-update-label），完成后按钮整体重绘变回「开始游戏」。
+ * ═══════════════════════════════════════════════════════════════════ */
+.start-screen .start-dock .start-dock-play.is-update {
+  border: 1px solid rgba(var(--accent-rgb), 0.55);
+  box-shadow:
+    0 0 0 1px rgba(var(--accent-rgb), 0.16),
+    0 12px 32px -16px rgba(var(--accent-rgb), 0.6);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.24), rgba(var(--accent-rgb), 0.12));
+}
+.start-screen .start-dock .start-dock-play.is-update:hover {
+  border-color: rgba(var(--accent-rgb), 0.8);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.32), rgba(var(--accent-rgb), 0.18));
+}
+.start-screen .start-dock .start-dock-play.is-updating {
+  cursor: progress;
+  opacity: 0.9;
+}
+.start-screen .start-dock .start-dock-play.is-updating .icon {
+  animation: hxl-spin 1.1s linear infinite;
+}
+@keyframes hxl-spin {
+  to { transform: rotate(360deg); }
 }

@@ -256,10 +256,98 @@ function makeAbort() {
   return controller;
 }
 
+/**
+ * 异环更新检测（只查版本，不下载）。
+ *
+ * 数据源（都实测过）：
+ *   本地启动器版本 → <安装根>/NTELauncher/Config/Config.ini 的 [VERSION] Version
+ *   远程启动器版本 → VersionInfoFileURL 指到的 Version.ini（官服/B服 CDN 各一份）
+ * 两边不一致 = 启动器侧资源有更新（channelSdk / Patcher / 配置等）。
+ *
+ * ⚠️ 覆盖范围说明：这套清单只管 NTELauncher 文件夹，游戏本体（Client）走
+ * PatcherSDK 的 .sig 差分机制，远程路径未公开、sig 是二进制私有格式，
+ * 本体的下载/校验暂时做不了，仍由官方启动器在启动时接管。
+ * 所以检测到「有更新」时，能自动更新的只是启动器侧资源。
+ */
+async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal }) {
+  const root = findConfigRoot(installRoot);
+  if (!root) {
+    return {
+      kind: 'nte',
+      state: 'not-installed',
+      localVersion: '',
+      latestVersion: '',
+      reason: '没有找到异环安装目录（NTELauncher/Config/Config.ini）',
+    };
+  }
+
+  let iniUrl = versionUrl;
+  if (!iniUrl) {
+    const iniPath = path.join(root, 'NTELauncher', 'Config', 'Config.ini');
+    try {
+      const text = await fsp.readFile(iniPath, 'utf8');
+      const hit = text.match(/^VersionInfoFileURL=(.+)$/m);
+      if (hit) iniUrl = hit[1].trim();
+    } catch {
+      /* 下面按渠道兜底 */
+    }
+  }
+  if (!iniUrl && channel) {
+    iniUrl = `https://yhcdn1.wmupd.com/hd/publish_ob${channel === 'bilibili' ? '_B' : ''}/launcher/Version.ini`;
+  }
+  if (!iniUrl) {
+    return {
+      kind: 'nte',
+      state: 'none',
+      localVersion: '',
+      latestVersion: '',
+      reason: '没有找到版本清单地址（VersionInfoFileURL）',
+    };
+  }
+
+  let localVersion = '';
+  try {
+    const text = await fsp.readFile(path.join(root, 'NTELauncher', 'Config', 'Config.ini'), 'utf8');
+    localVersion = (text.match(/^\[VERSION\][\s\S]*?^Version=(.+)$/m) || [])[1]?.trim() || '';
+  } catch {
+    /* 读不到就当空 */
+  }
+
+  try {
+    const ini = await fetchText(iniUrl, signal);
+    const latestVersion = (ini.match(/^Version=(.+)$/m) || [])[1]?.trim() || '';
+    const state = latestVersion && localVersion && latestVersion !== localVersion ? 'update' : 'none';
+    return {
+      kind: 'nte',
+      state,
+      localVersion,
+      latestVersion,
+      targetVersion: latestVersion,
+      versionUrl: iniUrl,
+      installRoot: root,
+    };
+  } catch (error) {
+    return {
+      kind: 'nte',
+      state: 'error',
+      localVersion,
+      latestVersion: '',
+      error: `读取异环版本清单失败：${error.message}`,
+    };
+  }
+}
+
+/** 更新启动器侧资源（就是预下载那套：AllFiles 清单 → zip → 校验 → 落盘）。 */
+async function updateLauncherFiles(options) {
+  return predownload(options);
+}
+
 module.exports = {
   findConfigRoot,
   parseAllFiles,
   unzipSingleEntry,
   predownload,
   makeAbort,
+  checkUpdate,
+  updateLauncherFiles,
 };

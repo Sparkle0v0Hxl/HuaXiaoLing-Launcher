@@ -31,8 +31,9 @@ const path = require('node:path');
 
 const hoyo = require('./predownload-hoyo');
 const endfield = require('./predownload-endfield');
+const neverness = require('./neverness-predownload');
 
-/** 各游戏的预下载能力表。neverness 的「不支持」结论见文件末尾注释。 */
+/** 各游戏的预下载能力表。 */
 const SUPPORT = {
   // 官服 / B服 / 国际服 三家都有自己独立的 Sophon build（实测 B服 package_id 与官服不同
   // 但 manifests 逐项相同），所以三个渠道都能走同一套预下载。
@@ -41,27 +42,21 @@ const SUPPORT = {
   zzz: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   endfield: { supported: true, kind: 'endfield', note: '鹰角 zip 分包预下载（Diffs/）' },
   neverness: {
-    supported: false,
-    kind: 'none',
+    supported: true,
+    kind: 'nte',
     /*
-     * 异环（Neverness to Everness，Hotta Studio / 完美世界）：确认不支持。
+     * 异环（Neverness to Everness，Hotta Studio / 完美世界）—— 2026-10-30 接入。
      *
-     * 1. 官方 PC 端没有公开的版本/包清单接口。米哈游有 hyp-connect 的 getGameBranches + getBuild，
-     *    鹰角有 batch_proxy 的 get_latest_game，两者都有成熟的开源实现（Starward /
-     *    Hi3Helper.Plugin.Endfield）可循；异环只有官方 NTELauncher.exe 一条路，
-     *    公开渠道查不到任何接口文档或逆向实现。
-     * 2. 预下载的前提是能拿到「新版本每个文件的 md5」，否则下载下来的字节无法校验，
-     *    应用时也不敢覆盖玩家已有的游戏文件。拿不到清单就做不到可校验的预下载。
-     * 3. 本启动器对异环本来就只做「拉起官方启动器」（settings.nevernessUseOfficialLauncher），
-     *    没有自研更新链路，预下载产物也没有落地的应用方。
-     * 4. 官方口径是「PC 端只有官服」：B服是 B站账号体系，只有安卓/iOS 客户端，
-     *    官网 PC 端不支持 B站登录。所以异环也不存在米哈游那种「官服 / B服两套客户端」的玩法。
+     * 能做的：启动器侧资源（NTELauncher 文件夹）的版本检测 + 更新。
+     *   Config.ini [VERSION] Version vs 远程 Version.ini，不一致即「有更新」；
+     *   更新走 AllFiles.xml 清单逐文件下载校验（neverness-predownload.js）。
      *
-     * 所以这里明确返回 unsupported，界面上不给入口，而不是伪造一个接口。
-     * 注：异环的官服 / B服「切换」是另一件事（改 NTELauncher 配置），见 neverness-channels.js。
+     * 做不了的：游戏本体（Client）的差分更新。
+     *   本体走 PatcherSDK 的 .sig 差分机制，远程路径未公开、sig 是二进制私有格式，
+     *   拿不到清单就做不到可校验的下载。本体更新仍由官方启动器在启动时接管
+     *   （异环本来就是拉官方启动器启动，本体有新版本时它会自己补）。
      */
-    reason:
-      '异环（完美世界 / Hotta Studio）没有公开的版本/包清单接口，预下载只能由官方 NTELauncher 完成；拿不到文件级 md5 就无法校验，做不到可安全应用的预下载',
+    note: '异环启动器侧资源检测与更新（游戏本体仍由官方启动器接管）',
   },
 };
 
@@ -183,6 +178,9 @@ async function check({
   if (info.kind === 'endfield') {
     return endfield.checkEndfieldPredownload({ channel, installRoot, verify });
   }
+  if (info.kind === 'nte') {
+    return neverness.checkUpdate({ installRoot, channel, signal: null });
+  }
   return { supported: false, state: 'unsupported' };
 }
 
@@ -192,6 +190,7 @@ async function start(options) {
   if (!info.supported) throw new Error(info.reason || '这个游戏不支持预下载');
   if (info.kind === 'hoyo') return hoyo.startHoyoPredownload(options);
   if (info.kind === 'endfield') return endfield.startEndfieldPredownload(options);
+  if (info.kind === 'nte') return neverness.updateLauncherFiles(options);
   throw new Error('这个游戏不支持预下载');
 }
 
@@ -201,6 +200,8 @@ async function apply(options) {
   if (!info.supported) throw new Error(info.reason || '这个游戏不支持预下载');
   if (info.kind === 'hoyo') return hoyo.applyHoyoPredownload(options);
   if (info.kind === 'endfield') return endfield.applyEndfieldPredownload(options);
+  // 异环没有「预下载缓存」这一层，检测到更新后直接把启动器侧资源补齐
+  if (info.kind === 'nte') return neverness.updateLauncherFiles(options);
   throw new Error('这个游戏不支持预下载');
 }
 

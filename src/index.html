@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self'; connect-src wss://broadcastlv.chat.bilibili.com wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
+      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self'; connect-src 'self' wss://*.bilibili.com:* wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>花筱灵启动器</title>
@@ -70,6 +70,12 @@
       <symbol id="i-star" viewBox="0 0 24 24">
         <path d="m12 3.6 2.6 5.3 5.9.9-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.8l5.9-.9Z" />
       </symbol>
+      <!-- 抽卡：两张交叠的卡，正面卡带一颗四角星（不用星星做整体意象，太像收藏） -->
+      <symbol id="i-gacha" viewBox="0 0 24 24">
+        <rect x="3.4" y="8.6" width="9" height="12" rx="1.8" />
+        <rect x="11.6" y="3.4" width="9" height="12" rx="1.8" />
+        <path d="M16.1 6.6v4.6M13.8 8.9h4.6" />
+      </symbol>
       <symbol id="i-edit" viewBox="0 0 24 24">
         <path d="m14.8 5.2 4 4L8.4 19.6l-4.6.7.7-4.6Z" />
         <path d="m13.3 6.7 4 4" />
@@ -116,6 +122,10 @@
       </symbol>
       <symbol id="i-repeat-one" viewBox="0 0 24 24">
         <path d="M5 8h11l-2.5-2.5M19 16H8l2.5 2.5" /><path d="M16 5v4h4M8 19v-4H4" /><path d="M12 10.5v3" />
+      </symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24">
+        <path stroke-width="2.6" d="M8.5 19V6M8.5 6 5.5 9.2M8.5 6l3 3.2" />
+        <path stroke-width="2.6" d="M15.5 5v13M15.5 18l-3-3.2M15.5 18l3-3.2" />
       </symbol>
       <symbol id="i-shuffle" viewBox="0 0 24 24">
         <path d="M4 7h3.5c4 0 5 10 9 10H20M17.5 14.5 20 17l-2.5 2.5" /><path d="M4 17h3.5c1.4 0 2.4-1.2 3.3-2.7M20 7h-3.5c-1.4 0-2.4 1.2-3.3 2.7M17.5 4.5 20 7l-2.5 2.5" />
@@ -234,12 +244,12 @@
               <span>启动页</span>
             </button>
             <button class="nav-item" data-nav="gacha">
-              <svg class="icon"><use href="#i-star"></use></svg>
+              <svg class="icon"><use href="#i-gacha"></use></svg>
               <span>抽卡</span>
             </button>
             <button class="nav-item" data-nav="song">
-              <svg class="icon"><use href="#i-mic"></use></svg>
-              <span>点歌台</span>
+              <svg class="icon"><use href="#i-music"></use></svg>
+              <span>音乐</span>
             </button>
             <button class="nav-item" data-nav="downloads">
               <svg class="icon"><use href="#i-download"></use></svg>
@@ -250,15 +260,10 @@
               <svg class="icon"><use href="#i-news"></use></svg>
               <span>动态</span>
             </button>
-            <div class="nav-group" id="nav-tools-group">
-              <button class="nav-item nav-item-parent" data-nav="tools" data-action="nav-tools-toggle" aria-expanded="false">
-                <svg class="icon"><use href="#i-wrench"></use></svg>
-                <span>工具</span>
-                <svg class="icon nav-caret"><use href="#i-chevron-right"></use></svg>
-              </button>
-              <!-- 子项由 app.js 按 game-features 的分类动态填充 -->
-              <div class="nav-sub" id="nav-tools-sub" hidden></div>
-            </div>
+            <button class="nav-item" data-nav="tools">
+              <svg class="icon"><use href="#i-wrench"></use></svg>
+              <span>工具</span>
+            </button>
             <button class="nav-item" data-nav="screenshots" hidden>
               <svg class="icon"><use href="#i-image"></use></svg>
               <span>截图管理</span>
@@ -267,22 +272,26 @@
               <svg class="icon"><use href="#i-settings"></use></svg>
               <span>画质配置</span>
             </button>
-            <div class="nav-label" style="margin-top: 18px">应用</div>
-            <button class="nav-item" data-nav="settings">
+            <!-- 只有「设置」一项，不再单开分组标签：一条细线分隔就够，
+                 原先的「应用」二字下只挂一个设置，读起来像没写完 -->
+            <div class="nav-divider" aria-hidden="true"></div>
+            <button class="nav-item nav-item-system" data-nav="settings">
               <svg class="icon"><use href="#i-settings"></use></svg>
               <span>设置</span>
             </button>
           </nav>
         </div>
 
+        <!-- 火花立绘：展开时是侧栏底部的一块形象区（真的占位，不压在导航上），
+             收起时整块隐藏。放在「收起侧栏」上面，视线落点是 导航 → 立绘 → 收起。 -->
+        <div class="sidebar-char" aria-hidden="true">
+          <img src="assets/sparxie-fullbody.png" alt="" />
+        </div>
+
         <button class="sidebar-toggle" data-action="toggle-sidebar" title="收起侧栏">
           <svg class="icon"><use href="#i-chevron-left"></use></svg>
           <span>收起侧栏</span>
         </button>
-
-        <div class="sidebar-char" aria-hidden="true">
-          <img src="assets/sparxie-fullbody.png" alt="" />
-        </div>
 
         <button class="profile" id="profile-btn" title="打开设置" aria-label="打开设置">
           <span class="avatar" id="profile-avatar">大</span>
@@ -331,10 +340,10 @@
     <div class="mini-player is-chip" id="mini-player" hidden>
       <!-- 启动页形态：嵌在「选择游戏」标题右边的窄条 -->
       <div class="mini-chip" id="mini-chip" data-mini-drag>
-        <button class="mini-chip-cover" id="mini-chip-cover" data-action="mini-open" title="打开点歌台"><span>♪</span></button>
+        <button class="mini-chip-cover" id="mini-chip-cover" data-action="mini-open" title="打开音乐"><span>♪</span></button>
         <button class="mini-chip-copy" data-action="mini-expand" title="展开播放器">
           <strong id="mini-chip-title">未播放</strong>
-          <small id="mini-chip-artist">点歌台</small>
+          <small id="mini-chip-artist">音乐</small>
         </button>
         <button class="mini-chip-btn" data-action="mini-toggle" title="播放 / 暂停"><svg class="icon"><use id="mini-chip-play-use" href="#i-play"></use></svg></button>
         <button class="mini-chip-btn" data-action="mini-next" title="下一首"><svg class="icon"><use href="#i-chevron-right"></use></svg></button>
@@ -344,10 +353,10 @@
       <div class="mini-panel">
         <div class="mini-panel-head">
           <button class="mini-grip" data-mini-drag title="按住拖动到任意位置" aria-label="拖动播放器"><svg class="icon"><use href="#i-grip"></use></svg></button>
-          <button class="mini-cover" data-action="mini-open" title="打开点歌台"><span>♪</span></button>
-          <button class="mini-copy" data-action="mini-open" title="打开点歌台">
+          <button class="mini-cover" data-action="mini-open" title="打开音乐"><span>♪</span></button>
+          <button class="mini-copy" data-action="mini-open" title="打开音乐">
             <strong id="mini-title">未播放</strong>
-            <small id="mini-artist">点歌台</small>
+            <small id="mini-artist">音乐</small>
           </button>
           <button class="mini-collapse" data-action="mini-collapse" title="收起"><svg class="icon"><use href="#i-chevron-down"></use></svg></button>
           <button class="mini-close" data-action="mini-close" title="关闭播放器"><svg class="icon"><use href="#i-x"></use></svg></button>

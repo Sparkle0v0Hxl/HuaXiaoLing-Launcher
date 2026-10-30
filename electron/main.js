@@ -30,7 +30,7 @@ const { JsonStore } = require('./store');
 const { DownloadManager } = require('./downloads');
 const { ensureSeedData } = require('./seed');
 const { linkTrees, previewTrees } = require('./link');
-const { prepareLinkedRuntime } = require('./runtime');
+const { prepareLinkedRuntime, walkFiles } = require('./runtime');
 const { hardlinkTree } = require('./runtime');
 const { loadGachaHistory } = require('./gacha');
 const nteCapture = require('./nte-capture');
@@ -71,7 +71,7 @@ const graphicsSchema = require('./graphics-schema');
 const graphicsDetect = require('./graphics-detect');
 const installManager = require('./install-manager');
 const windowMaterial = require('./window-material');
-const { resolvePlayableUrl } = require('./music-resolve');
+const { resolvePlayableUrl, sameSongEnough } = require('./music-resolve');
 const {
   resolveSourceUrl,
   fetchLyric: fetchSourceLyric,
@@ -1397,8 +1397,8 @@ async function pickBh3Cover(banners) {
 }
 
 /* 动态背景拿不到时的静态兜底：把图落成 startCover
-   （命名带 -clean2 是既有清理逻辑的通行证：ensureAnimatedStartBackgrounds
-   会把不带 -clean2 的 startCover 直接清空）。失败静默，回退钉住封面。
+   （命名带 -clean2/-clean3 是既有清理逻辑的通行证：ensureAnimatedStartBackgrounds
+   会把不带这两段的 startCover 直接清空）。失败静默，回退钉住封面。
    2.4.x 修正：优先用官方启动器背景（getAllGameBasicInfo 的 bh3_cn
    background 图，Starward 启动页同款、无活动文字压屏），轮播 banner
    降为第二兜底——banner 是带标题字的活动图，压当启动页背景很难看。 */
@@ -1435,6 +1435,8 @@ async function ensureBh3StartCover(game) {
     await fsp.writeFile(path.join(dir, 'official-bh3-clean2.png'), buffer);
     game.startCover = expected;
     await store.saveNow();
+    // 顺手把卡片封面也从占位 SVG 换成这张官方主视觉
+    if (promoteBh3Cover()) await store.saveNow();
     pushState(true);
   } catch (error) {
     console.warn('崩坏3 启动页静态背景兜底失败：', error.message);
@@ -1443,7 +1445,7 @@ async function ensureBh3StartCover(game) {
 
 /* 2.4.x 增量：明日方舟静态兜底。PV 拉不到时把官网 KV 大图
    （web.hycdn.cn 官方 CDN，无活动文字压屏）落成 startCover，
-   命名带 -clean2 与崩坏3 同理，是既有清理逻辑的通行证。
+   命名带 -clean2/-clean3 与崩坏3 同理，是既有清理逻辑的通行证。
    失败静默，回退钉住封面。 */
 const ARKNIGHTS_KV_URLS = [
   'https://web.hycdn.cn/upload/image/20260805/8ed71a3d0fed6ca51a7df1b94544f84d.png',
@@ -1865,10 +1867,18 @@ async function cacheStartVideo(source, relativePath, local = false) {
   return destination;
 }
 
-// 2.4.0 合并自对方分支：明日方舟 / 崩坏3 的 builtin 封面是人工挑选的官方主视觉，
-// 要按自定义封面保护，否则会被官网同步抓回来的活动 banner 顶掉。
-// 启动页背景（含 startCover 静态图）因此要照常保留。
-const PINNED_BUILTIN_COVERS = /^covers\/builtin-(?:arknights|bh3)\.(?:jpg|jpeg|png|webp|svg)$/i;
+// 2.4.0 合并自对方分支：崩坏3 的 builtin 封面是人工挑选的官方主视觉，按自定义封面保护，
+// 避免被官网同步抓回来的活动 banner 顶掉（崩坏3 另有 ensureBh3StartCover 兜底启动页背景）。
+// 明日方舟则相反：用户明确要求「同步官网封面」，所以 arknights 不进这个保护名单——
+// 它的 builtin 封面当作普通初始图，首次同步就会被官网最新 KV 覆盖成 official-arknights。
+//
+// 2.4.4 修正：内置的 builtin-bh3.svg 只是一张深色占位插画，摆在主页卡片上几乎看不见，
+// 用户反馈「崩坏3 封面图没有了」。官方去文字主视觉（ensureBh3StartCover 拉下来的
+// official-bh3-clean2）本来就是真图，直接把它当卡片封面用，并一起钉住不让同步覆盖。
+const PINNED_BUILTIN_COVERS = /^covers\/(?:builtin-bh3\.(?:jpg|jpeg|png|webp|svg)|official-bh3-clean2\.(?:png|jpg|jpeg|webp))$/i;
+// 崩坏3 卡片的官方主视觉（与启动页背景同一张，本地已有就用，没有才退回内置 SVG）
+const BH3_CARD_COVER = 'covers/official-bh3-clean2.png';
+const BH3_PLACEHOLDER_COVER = 'covers/builtin-bh3.svg';
 function isCustomCover(game) {
   const cover = (game && game.cover) || '';
   if (!cover) return false;
@@ -1876,9 +1886,154 @@ function isCustomCover(game) {
   return !/^covers\/(builtin|official)-/.test(cover);
 }
 
+/**
+ * 崩坏3 卡片封面自愈。
+ *
+ * 老用户的库里 bh3 的 cover 还停在 covers/builtin-bh3.svg（深色占位图，看起来像没封面）。
+ * 只要本地已经有官方主视觉，就把它换上去；文件还没下到就保持原样，等
+ * ensureBh3StartCover 下完再调一次本函数即可。
+ */
+function promoteBh3Cover() {
+  let changed = false;
+  for (const game of store.data.games || []) {
+    if (game.builtinKey !== 'bh3') continue;
+    const cover = String(game.cover || '');
+    if (cover && cover !== BH3_PLACEHOLDER_COVER) continue;
+    const absolute = path.join(app.getPath('userData'), BH3_CARD_COVER);
+    try {
+      if (!fs.statSync(absolute).isFile() || fs.statSync(absolute).size < 8192) continue;
+    } catch {
+      continue;
+    }
+    game.cover = BH3_CARD_COVER;
+    changed = true;
+  }
+  return changed;
+}
+
 let startArtworkJob = null;
 // 2.4.x 增量：官方背景补拉的连续重试计数（成功一轮即清零）
 let bh3OfficialRetry = 0;
+
+/* nativeImage 只认 PNG/JPEG，而米家 CDN 的官方版本图全是 .webp ——
+   createFromPath 直接返回空图，eraseImageText 拿到空图永远返回 null，
+   这就是「clean3 一直生成不出来」的根因。
+   这里用隐藏窗口的 canvas 解码转成 PNG 落盘（Chromium 一定认得 webp）。 */
+let pngConvertWindow = null;
+
+async function convertImageToPngBuffer(imagePath) {
+  if (!pngConvertWindow || pngConvertWindow.isDestroyed()) {
+    pngConvertWindow = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        // file:// 图片要画进 canvas 不被污染，只能关掉同源校验
+        webSecurity: false,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    pngConvertWindow.on('closed', () => {
+      pngConvertWindow = null;
+    });
+    await pngConvertWindow.loadURL('data:text/html,<canvas id="c"></canvas>');
+  }
+  const fileUrl = require('node:url').pathToFileURL(imagePath).href;
+  const dataUrl = await pngConvertWindow.webContents.executeJavaScript(
+    `(async () => {
+      const img = new Image();
+      img.src = ${JSON.stringify(fileUrl)};
+      await img.decode();
+      const c = document.getElementById('c');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      return c.toDataURL('image/png');
+    })()`,
+    true
+  );
+  const base64 = String(dataUrl || '').split(',')[1] || '';
+  if (!base64) throw new Error('webp 转 PNG 失败：canvas 返回空');
+  return Buffer.from(base64, 'base64');
+}
+
+/* nativeImage 能吃的前提下做去字；源不是 PNG/JPEG 先转 PNG。
+   转出的 PNG 与源图同名换扩展名，mtime 比源旧时重转。
+   返回 clean3 文件名（covers 相对），失败返回 null。 */
+async function ensureErasedCover(builtinKey, rawSourcePath) {
+  let sourcePath = rawSourcePath;
+  if (!/\.(png|jpe?g)$/i.test(sourcePath)) {
+    const pngPath = sourcePath.replace(/\.[^.]+$/, '.png');
+    try {
+      const [srcStat, pngStat] = await Promise.all([
+        fsp.stat(sourcePath).catch(() => null),
+        fsp.stat(pngPath).catch(() => null),
+      ]);
+      if (!srcStat) return null;
+      if (!pngStat || pngStat.mtimeMs < srcStat.mtimeMs) {
+        await fsp.writeFile(pngPath, await convertImageToPngBuffer(sourcePath));
+      }
+      sourcePath = pngPath;
+    } catch (error) {
+      console.warn(`[背景去字] ${builtinKey} 源图转 PNG 失败：`, error.message);
+      return null;
+    }
+  }
+  const cleanName = `official-${builtinKey}-clean3.png`;
+  const cleaned = await ensureErasedBackground({
+    nativeImage,
+    sourcePath,
+    cachePath: path.join(app.getPath('userData'), 'covers', cleanName),
+  }).catch(() => null);
+  return cleaned ? cleanName : null;
+}
+
+/* 去字缓存修补：不依赖官网同步。
+   官方同步每 6 小时才跑一轮，而那轮里去字一旦失败（旧算法时期 / 网络抖动 /
+   webp 解不出来），startCover 被清空，用户就得干等下一轮才可能补上。
+   这里在启动时直接检查：内置米哈游系游戏本地已有官方版本图（covers/official-*）
+   但启动页没有 -clean3 去字版的，用本地文件当场补一张，不联网。 */
+const ERASED_COVER_KEYS = new Set(['genshin', 'starrail', 'zzz']);
+let erasedCoverRepairJob = null;
+
+function repairErasedStartCovers() {
+  if (erasedCoverRepairJob || !store?.data?.games) return;
+  erasedCoverRepairJob = (async () => {
+    let changed = false;
+    for (const game of store.data.games) {
+      if (!ERASED_COVER_KEYS.has(game.builtinKey)) continue;
+      if (isCustomCover(game)) continue;
+      if (game.startCover && /-clean3\./.test(game.startCover)) continue;
+      const coverRelative = String(game.cover || '');
+      if (!/^covers\/official-/.test(coverRelative)) continue;
+      const sourcePath = path.join(app.getPath('userData'), coverRelative);
+      try {
+        if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size < 8192) continue;
+      } catch {
+        continue;
+      }
+      try {
+        const cleanName = await ensureErasedCover(game.builtinKey, sourcePath);
+        if (cleanName) {
+          game.startCover = `covers/${cleanName}`;
+          changed = true;
+          console.log(`[背景修补] ${game.builtinKey} 已生成 ${cleanName}`);
+        }
+      } catch (error) {
+        console.warn(`[背景修补] ${game.builtinKey} 失败：`, error.message);
+      }
+    }
+    if (changed) {
+      await store.saveNow();
+      pushState(true);
+    }
+  })()
+    .catch((error) => console.warn('[背景修补] 异常：', error.message))
+    .finally(() => {
+      erasedCoverRepairJob = null;
+    });
+}
+
 // 2.4.0 合并自对方分支：启动页动图的缓存文件名可能是 .mp4 也可能是 .webm，
 // 按顺序探测已存在且非空的那一个。
 function existingStartVideo(key) {
@@ -1901,7 +2056,7 @@ function ensureAnimatedStartBackgrounds() {
     let officialMiss = false;
     for (const game of store.data.games) {
       if (!game.builtinKey) continue;
-      if (game.startCover && !game.startCover.includes('-clean2.')) game.startCover = '';
+      if (game.startCover && !/-(?:clean2|clean3)\./.test(game.startCover)) game.startCover = '';
       // 2.4.0 合并：customCover 判定换成 isCustomCover —— 明日方舟 / 崩坏3 的
       // 钉住封面（PINNED_BUILTIN_COVERS）不算「用户自定义」，启动页背景照常跟官方走。
       const pinnedCover = PINNED_BUILTIN_COVERS.test(game.cover || '');
@@ -2012,6 +2167,15 @@ function ensureAnimatedStartBackgrounds() {
   return startArtworkJob;
 }
 
+/*
+ * 用户手动确认的版本号兜底（仅当官网静态页面确实挖不到版本号时才用，绝不编造）。
+ * 明日方舟官网是 SPA，231KB 的静态 HTML 里完全不含版本号（连「2.7.81」都搜不到），
+ * 所以自动同步拿不到；这里用用户给的权威值。游戏发新版本后需要同步更新这个表。
+ */
+const MANUAL_GAME_VERSIONS = {
+  arknights: '2.7.81',
+};
+
 async function syncOfficialGame(game, backgrounds) {
   const site = OFFICIAL_SITES[game.builtinKey];
   if (!site) return { name: game.name, ok: false, error: '没有官网配置' };
@@ -2041,10 +2205,19 @@ async function syncOfficialGame(game, backgrounds) {
       const html = await response.text();
       const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
       const description = (html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) || [])[1] || '';
-      const versionMatch = `${title} ${description}`.match(/(\d+\.\d+)[^0-9]{0,10}版本/);
+      // 版本号：先在 title/description 里找「X.Y版本」（米哈游系官网都这么写）；
+      // 找不到再退回整页正文（终末地官网把版本号写在轮播/正文里，不在 title）。
+      let versionMatch = `${title} ${description}`.match(/(\d+\.\d+)[^0-9]{0,10}版本/);
+      if (!versionMatch) versionMatch = html.match(/(\d+\.\d+)[^0-9]{0,10}版本/);
       if (versionMatch) version = versionMatch[1];
       const versionNameMatch = html.match(/「([^」]{1,16})」版本(?:更新说明|PV)/);
       if (versionNameMatch) versionName = versionNameMatch[1];
+      // 明日方舟官网是 SPA，静态 HTML 里不暴露任何版本号（实测 231KB 页面里连 2.7.81 都搜不到），
+      // 所以站点正则永远挖不到。用用户确认的兜底值 MANUAL_GAME_VERSIONS.arknights（2.7.81），
+      // 仅当真挖不到时才回退，不编造版本号。游戏更新后需同步更新那个表。
+      if (game.builtinKey === 'arknights' && !version) {
+        version = MANUAL_GAME_VERSIONS.arknights || null;
+      }
       const ogMatch = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']*)["']/i);
       if (ogMatch && ogMatch[1]) {
         try {
@@ -2088,8 +2261,8 @@ async function syncOfficialGame(game, backgrounds) {
   }
 
   const background = latestBackground(backgrounds, game.builtinKey);
-  // 旧版本的去字缓存换成 -clean2，失效的路径直接清掉
-  if (game.startCover && !game.startCover.includes('-clean2.')) game.startCover = '';
+  // 去字缓存版本是 -clean3（v2 算法），失效的路径直接清掉
+  if (game.startCover && !/-(?:clean2|clean3)\./.test(game.startCover)) game.startCover = '';
   // 2.4.0 合并：customCover 判定换成 isCustomCover（保护明日方舟 / 崩坏3 钉住的封面）
   const customCover = isCustomCover(game);
   const versionArtwork = customCover ? { image: '', video: '' } : await fetchVersionArtwork(game.builtinKey);
@@ -2120,14 +2293,9 @@ async function syncOfficialGame(game, backgrounds) {
     result.cover = true;
     result.coverReused = true;
     // 去字缓存可能被清掉过；复用原图时顺手补一次，别让启动页退回带字的版本
-    if ((!game.startCover || !game.startCover.includes('-clean2.')) && fromVersionArt) {
-      const cleanName = `official-${game.builtinKey}-clean2.png`;
-      const cleaned = await ensureErasedBackground({
-        nativeImage,
-        sourcePath: artFile,
-        cachePath: path.join(app.getPath('userData'), 'covers', cleanName),
-      }).catch(() => null);
-      if (cleaned) game.startCover = `covers/${cleanName}`;
+    if ((!game.startCover || !game.startCover.includes('-clean3.')) && fromVersionArt) {
+      const cleanName = await ensureErasedCover(game.builtinKey, artFile).catch(() => null);
+      if (cleanName) game.startCover = `covers/${cleanName}`;
     }
   } else if (imageUrl && !customCover) {
     try {
@@ -2150,13 +2318,10 @@ async function syncOfficialGame(game, backgrounds) {
           result.cover = true;
           // 官方图常带烧录标题；生成一张去掉文字的版本给启动页用，
           // 游戏库封面仍用原图，避免影响卡片视觉。
-          const cleanName = `official-${game.builtinKey}-clean2.png`;
           // 只有来源是官方版本图时才做去字；分享图/宣传图直接不进启动页
-          const cleaned = fromVersionArt ? await ensureErasedBackground({
-            nativeImage,
-            sourcePath: path.join(dir, fileName),
-            cachePath: path.join(dir, cleanName),
-          }).catch(() => null) : null;
+          const cleaned = fromVersionArt
+            ? await ensureErasedCover(game.builtinKey, path.join(dir, fileName)).catch(() => null)
+            : null;
           if (cleaned) {
             game.startCover = `covers/${cleanName}`;
             result.coverCleaned = true;
@@ -2294,9 +2459,22 @@ function runtimePaths(baseRoot, gameKey, channel, overrideRoot = '') {
   const exact = String(overrideRoot || '').trim();
   const configured = String(store.data.settings.runtimeRoot || '').trim();
   const root = configured ? path.resolve(configured) : path.join(baseDrive, 'VelaRuntimes');
-  const target = exact
-    ? path.resolve(exact)
-    : path.join(root, gameKey, channel);
+  /*
+   * 自定义目录一律当「运行时根目录」用，自动补上 <游戏>\<渠道> 这一层。
+   *
+   * 以前弹窗里「选择目录」选中的文件夹会被当成客户端根，几十 GB 的游戏文件
+   * 直接摊在你选的文件夹里 —— 看着就像「还是下到根目录了」。现在两种入口
+   * （设置里的运行时目录 / 弹窗里临时选一个）语义一致：选父目录，子目录由
+   * 启动器按游戏和渠道建，多个渠道也不会互相覆盖。
+   */
+  const withGameDir = (base) => {
+    const resolved = path.resolve(base);
+    const tail = path.join(gameKey, channel || '');
+    return resolved.toLowerCase().endsWith(tail.toLowerCase())
+      ? resolved
+      : path.join(resolved, gameKey, channel || '');
+  };
+  const target = exact ? withGameDir(exact) : path.join(root, gameKey, channel);
   const sameDrive = path.parse(path.normalize(target)).root.toLowerCase() === baseDrive.toLowerCase();
   return {
     root,
@@ -2593,6 +2771,50 @@ async function reconcileEndfieldRuntime(runtimeRoot, packDir, channel) {
   );
 }
 
+/**
+ * 渠道包会随官方版本持续自动更新（EndfieldBase.dll 等渠道差异文件会变），
+ * 而已建好的运行时带着 v2 标记不会触发重建。这里把「包里内容与运行时
+ * 不一致（或运行时缺失）」的文件补进去：先解除硬链接再复制，
+ * 避免把基础客户端 / 别的渠道一起改掉。返回更新的文件数。
+ */
+async function syncEndfieldPackDelta(runtimeRoot, packDir) {
+  const files = await walkFiles(packDir);
+  const md5File = (file) =>
+    new Promise((resolve, reject) => {
+      const hash = crypto.createHash('md5');
+      fs.createReadStream(file)
+        .on('data', (chunk) => hash.update(chunk))
+        .on('error', reject)
+        .on('end', () => resolve(hash.digest('hex')));
+    });
+  let patched = 0;
+  for (const file of files) {
+    const target = path.join(runtimeRoot, file.rel);
+    let same = false;
+    try {
+      const stat = await fsp.stat(target);
+      if (stat.size === file.size) {
+        // 渠道差异文件跨渠道时尺寸几乎都不同（EndfieldBase/HGP/OneChannelLC），
+        // 尺寸相同的大文件（BLWebBrowser 的 libcef 这类）没必要每次启动都读一遍
+        // md5：只校验 48MB 以下的小文件，超过的直接当一致。
+        if (file.size <= 48 * 1024 * 1024) {
+          same = (await md5File(target)) === (await md5File(file.full));
+        } else {
+          same = true;
+        }
+      }
+    } catch {
+      same = false;
+    }
+    if (same) continue;
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.rm(target, { force: true });
+    await fsp.copyFile(file.full, target).catch(() => {});
+    patched += 1;
+  }
+  return patched;
+}
+
 /** 删掉 runtime 子目录里「不在目标包对应子目录」的文件；包里没有该子目录时不删，避免误删。 */
 async function reconcileDirSubset(runtimeSub, packSub) {
   let packFiles = [];
@@ -2758,6 +2980,19 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     await reconcileEndfieldRuntime(runtimeRoot, packDir, channel);
 
     await fsp.writeFile(marker, new Date().toISOString(), 'utf8');
+  }
+
+  // 渠道包是持续自动更新的（EndfieldBase.dll 等渠道差异文件随官方版本变化），
+  // 已建好的运行时不会重建，所以每次准备运行时都做一次差异同步，
+  // 保证国际服运行时里的 EndfieldBase.dll 一定是对应渠道的版本
+  // （否则官方完整性校验报「游戏文件缺失或损坏」）。
+  try {
+    const patched = await syncEndfieldPackDelta(runtimeRoot, packDir);
+    if (patched) {
+      writeLaunchLog(`[endfield] ${server.name} 渠道差异同步：${patched} 个文件按渠道包更新（${channel}）`);
+    }
+  } catch (error) {
+    writeLaunchLog(`[endfield] ${server.name} 渠道差异同步失败：${error.message}`);
   }
 
   // 官方启动器会持续刷新基础客户端里的平台状态（U8Data/config、sdkdata，
@@ -3019,6 +3254,65 @@ function findNteGame(target) {
  */
 let nteAutoClickRunning = false;
 
+/**
+ * 用 tasklist 查这些镜像名里哪些正在运行。查挂了就当没看见（和 assertLauncherClosed 一致：
+ * 尽力而为，不让进程查询失败挡住启动）。
+ */
+function listRunningImages(names) {
+  return Promise.all(
+    names.map(
+      (name) =>
+        new Promise((resolve) => {
+          execFile(
+            'tasklist.exe',
+            ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'],
+            { windowsHide: true, timeout: 5000 },
+            (error, output) => {
+              if (error) return resolve('');
+              resolve(new RegExp(`^"${name}"`, 'im').test(String(output)) ? name : '');
+            }
+          );
+        })
+    )
+  ).then((hits) => hits.filter(Boolean));
+}
+
+/**
+ * 官方启动器（NTEGame.exe）点 × 只是缩进托盘，进程不退出。这时再 spawn 一次会踩中它的
+ * 单实例机制：新实例只负责「唤醒旧窗口」就秒退，旧实例收到唤醒后也开始优雅退出——
+ * 结果一个窗口都不剩，用户看到的就是「点了开始游戏，毫无反应」。
+ * （2026-10-30 15:57 的 NTEGame.log / NTEGame_100.log 完整记录了这一幕。）
+ *
+ * 所以启动前先清场：
+ *   · HTGame.exe 在跑 → 游戏本体已经在运行，提示用户别重复拉；
+ *   · NTEUpdate.exe 在跑 → 官方更新器正在自更新，杀掉有风险，让用户等几秒；
+ *   · 只有 NTEGame / NTELauncher 挂着（窗口或托盘）→ 结束掉、等互斥量释放，再全新拉起。
+ */
+async function clearNteLingeringLauncher(gameId) {
+  const gameExe = await listRunningImages(['HTGame.exe']);
+  if (gameExe.length) return { ok: false, code: 'game-running' };
+  const updater = await listRunningImages(['NTEUpdate.exe']);
+  if (updater.length) {
+    writeLaunchLog(`launch ${gameId}: NTEUpdate.exe 正在自更新，不抢跑`);
+    return { ok: false, code: 'updater-running' };
+  }
+  const lingering = await listRunningImages(['NTEGame.exe', 'NTELauncher.exe']);
+  if (!lingering.length) return { ok: true, code: 'clean' };
+  writeLaunchLog(`launch ${gameId}: NTE 托盘残留进程 ${lingering.join('、')}（官方启动器关窗不退出），先结束再全新拉起`);
+  for (const name of lingering) {
+    await new Promise((resolve) => {
+      execFile('taskkill.exe', ['/IM', name, '/F', '/T'], { windowsHide: true, timeout: 8000 }, () => resolve());
+    });
+  }
+  // 等单实例互斥量（WMGP_*_MUTEX_NAME）真正释放，最多再等 4 秒
+  for (let i = 0; i < 10; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const left = await listRunningImages(lingering);
+    if (!left.length) break;
+  }
+  return { ok: true, code: 'cleared' };
+}
+
 function autoClickNteStart(gameId) {
   if (nteAutoClickRunning) return;
   nteAutoClickRunning = true;
@@ -3057,7 +3351,9 @@ function autoClickNteStart(gameId) {
   (async () => {
     try {
       let noProcStreak = 0;
-      for (let round = 0; round < 25; round += 1) {
+      // 60 轮 × 3.5s ≈ 3.5 分钟：覆盖「打开就是资源更新，更新完才开始按钮」的慢场景
+      // （2026-10-30 B服切服实测：212MB 更新跑了 3 分半，25 轮等不到按钮就放弃了）。
+      for (let round = 0; round < 60; round += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3500));
         const out = await attempt();
         if (out === 'CLICKED') {
@@ -3229,15 +3525,34 @@ async function discoverBuiltinServers() {
 }
 
 async function detectGame(key) {
+  const found = await collectGameCandidates(key);
+  return found[0] || null;
+}
+
+/**
+ * 把某个游戏所有「能找到的客户端」都收出来，不去重渠道。
+ *
+ * detectGame 找到第一个就收工，够用于「这个游戏装没装」；但点「B服 - 自动扫描」
+ * 时不行：注册表和常见目录里官服大概率排在前面，第一个命中的往往是官服 exe，
+ * 记进 B服 那一行就成了「扫描B服扫到官服去了」。这个函数只负责全收，
+ * 由调用方按 detectionChannel 过滤。
+ */
+async function collectGameCandidates(key) {
   const def = GAME_DETECTION[key];
-  if (!def) return null;
+  if (!def) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (found) => {
+    if (!found) return;
+    const stamp = found.toLowerCase();
+    if (seen.has(stamp)) return;
+    seen.add(stamp);
+    out.push(found);
+  };
 
   const registryLists = await Promise.all(def.registry.map((registryKey) => registryValues(registryKey)));
   for (const values of registryLists) {
-    for (const value of values) {
-      const found = checkPath(value, def);
-      if (found) return found;
-    }
+    for (const value of values) push(checkPath(value, def));
   }
 
   const roots = new Set();
@@ -3255,11 +3570,22 @@ async function detectGame(key) {
 
   for (const root of roots) {
     for (const rel of def.paths) {
-      const found = checkPath(path.join(root, rel), def);
-      if (found) return found;
+      push(checkPath(path.join(root, rel), def));
     }
   }
-  return null;
+  return out;
+}
+
+/**
+ * 按服务器（渠道）扫一遍：只返回真正属于这个渠道的客户端。
+ * 找不到就返回 null，让界面老实说「没找到 B服」，而不是拿官服顶上去。
+ */
+async function detectServerExecutable(game, server) {
+  if (!game || !server) return null;
+  const candidates = await collectGameCandidates(game.builtinKey);
+  const channel = server.channel || 'official';
+  if (!channel || channel === 'custom') return candidates[0] || null;
+  return candidates.find((item) => detectionChannel(game, item) === channel) || null;
 }
 
 async function detectBuiltins(onlyMissing = true) {
@@ -3466,6 +3792,14 @@ function publicGame(game) {
     servers: (game.servers || []).map((server) => ({
       ...server,
       exists: targetExists(server.path),
+      /*
+       * 目录本身还在不在。
+       *
+       * 「exe 不在」有两种完全不同的原因：没选过路径，和「整个客户端目录被删/挪走了」。
+       * 界面靠这两个字段分开说人话，否则删完 B服 的人只会看到「还没选择启动程序」，
+       * 根本不知道是自己把共用的客户端目录删掉了。
+       */
+      rootExists: Boolean(server.root) && targetExists(server.root),
       active: server.id === game.activeServerId,
     })),
   };
@@ -3820,9 +4154,15 @@ async function performUpdateCheck(options = {}) {
 /** 这批文件正被启动器自己或者正在跑的游戏占用？ */
 function describeRunningProcesses(paths) {
   const names = new Set();
+  // 启动器自己的 exe 不能算「被别的程序占用」：更新流程本来就是先退自己、再由覆盖脚本接管，
+  // 而且 tasklist 里同名的还有渲染/GPU 等子进程，它们会跟着主进程一起退。
+  // 不排除的话，每次走到最后一步都会把自己当成占用者，更新永远停在「关掉之后再点一次」。
+  const selfExe = path.basename(String(process.execPath || '')).toLowerCase();
   for (const item of paths || []) {
     const base = path.basename(String(item || ''));
-    if (base) names.add(base);
+    if (!base) continue;
+    if (base.toLowerCase() === selfExe) continue;
+    names.add(base);
   }
   if (!names.size) return [];
   try {
@@ -3846,8 +4186,88 @@ function describeRunningProcesses(paths) {
   }
 }
 
+/* 上次「下载好了但被占用挡住」的更新包：落盘存一份，重启启动器后还能接着装，
+ * 不用再下一次几百 MB。 */
+function preparedUpdateFile() {
+  return path.join(updateTempBase(), 'prepared-update.json');
+}
+
+function persistPreparedUpdate(staged) {
+  try {
+    fs.mkdirSync(updateTempBase(), { recursive: true });
+    fs.writeFileSync(preparedUpdateFile(), JSON.stringify(staged, null, 2), 'utf8');
+  } catch {
+    /* 存不下就只是下次要重下，不影响本次 */
+  }
+}
+
+function loadPreparedUpdate() {
+  try {
+    const staged = JSON.parse(fs.readFileSync(preparedUpdateFile(), 'utf8'));
+    if (!staged || !staged.tempRoot || !staged.source) return null;
+    if (!fs.existsSync(staged.source)) return null;
+    // 两套覆盖器至少要有一套在（Node 版优先，老包只有 PowerShell 版）
+    const hasApplyJs = staged.applyJsSource && fs.existsSync(staged.applyJsSource);
+    const hasPs1 = staged.installerSource && fs.existsSync(staged.installerSource);
+    if (!hasApplyJs && !hasPs1) return null;
+    return staged;
+  } catch {
+    return null;
+  }
+}
+
+function clearPreparedUpdate() {
+  try {
+    fs.rmSync(preparedUpdateFile(), { force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 覆盖的最后一段：核对 → 查占用 → 交给覆盖脚本重启。 */
+async function applyStaged(staged) {
+  const conflict = updater.describeApplyProblem({ staged, currentVersion: APP_VERSION });
+  if (conflict) throw new Error(conflict);
+  const busy = describeRunningProcesses(staged.locks);
+  if (busy.length) {
+    updateStatus = { ...updateStatus, downloading: false, percent: 0, prepared: staged };
+    persistPreparedUpdate(staged);
+    pushState(true);
+    return {
+      ok: false,
+      message: `升级包已就绪，但这些程序还开着，关掉之后再点一次更新：\n${busy.join('、')}`,
+      busy,
+    };
+  }
+
+  updateStatus = { ...updateStatus, percent: 100, prepared: null };
+  send('update:progress', { percent: 100, phase: 'apply', label: '正在覆盖程序文件，马上重启…' });
+  await updater.apply({
+    staged,
+    onReadyToQuit: () => {
+      setTimeout(() => {
+        quitting = true;
+        app.quit();
+      }, 250);
+    },
+  });
+  clearPreparedUpdate();
+  return { ok: true, restarting: true, version: staged.version };
+}
+
 async function startUpdate(options = {}) {
   if (updateStatus.downloading) throw new Error('已经在下载更新了');
+  // 上一次已经下载解压好、只是被占用程序挡住了：直接用那份，别再下一次几百 MB
+  const ready = updateStatus.prepared || loadPreparedUpdate();
+  if (ready) {
+    try {
+      return await applyStaged(ready);
+    } catch {
+      // 这份已经不能用了（版本对不上 / 解压目录被清掉），清掉走正常下载
+      updateStatus = { ...updateStatus, prepared: null };
+      clearPreparedUpdate();
+    }
+  }
   const locations = resolveUpdateSource();
   if (!locations.length) throw new Error('还没有设置更新源');
   updateStatus = { ...updateStatus, downloading: true, percent: 0, error: '' };
@@ -3908,31 +4328,7 @@ async function startUpdate(options = {}) {
     // 版本号以清单为准：package.json 只在发版时才改，清单是随时能改的。
     send('update:progress', { percent: 100, phase: 'extract', label: '正在解压更新包…' });
     const staged = await updater.stage({ zipPath, tempBase, version: manifest.version });
-    const conflict = updater.describeApplyProblem({ staged, currentVersion: APP_VERSION });
-    if (conflict) throw new Error(conflict);
-    const busy = describeRunningProcesses(staged.locks);
-    if (busy.length) {
-      updateStatus = { ...updateStatus, downloading: false, percent: 0, prepared: staged };
-      pushState(true);
-      return {
-        ok: false,
-        message: `升级包已就绪，但这些程序还开着，关掉之后再点一次更新：\n${busy.join('、')}`,
-        busy,
-      };
-    }
-
-    updateStatus = { ...updateStatus, percent: 100 };
-    send('update:progress', { percent: 100, phase: 'apply', label: '正在覆盖程序文件，马上重启…' });
-    await updater.apply({
-      staged,
-      onReadyToQuit: () => {
-        setTimeout(() => {
-          quitting = true;
-          app.quit();
-        }, 250);
-      },
-    });
-    return { ok: true, restarting: true, version: manifest.version };
+    return await applyStaged(staged);
   } catch (error) {
     updateStatus = {
       ...updateStatus,
@@ -4549,7 +4945,7 @@ function spawnElevatedSelf(delayMs = 2500) {
     `try { Wait-Process -Id ${process.pid} -Timeout 30 -ErrorAction Stop } catch { }`,
     '$elevated = $null',
     'try {',
-    `  $elevated = Start-Process -FilePath ${psQuote(process.execPath)} -Verb RunAs -PassThru`,
+    `  $elevated = Start-Process -FilePath ${psQuote(process.execPath)} -Verb RunAs -WorkingDirectory ${psQuote(path.dirname(process.execPath))} -PassThru`,
     '  Start-Sleep -Seconds 6',
     '  if ($elevated.HasExited) { throw "elevated instance exited immediately" }',
     '} catch {',
@@ -5205,44 +5601,65 @@ function installIpc() {
   });
 
   /*
-   * 启动页唤出侧栏：把窗口整体向左「外扩」出一块放侧栏，
-   * 这样画面本身不用缩窄、不用右移被裁。扩不出去时（全屏 / 最大化 /
-   * 已经贴着显示器左边缘）返回 ok:false，渲染层改走浮层方案。
+   * 启动页唤出侧栏 = 窗口向左「长」出去，抽屉钉在窗口左边缘被一点点露出来。
+   *
+   * 这里刻意不做补间，只负责「把窗口设成展开量 delta」；补间在渲染层的 rAF 里
+   * 一帧帧调过来。一次 setBounds 跳到位和 CSS 动画永远对不齐，观感就是
+   * 「窗口先拉伸一下、抽屉再追上来」—— 那正是要避免的东西。
+   *
+   *   · window:start-nav-room     问一句左侧还有多少空间（不够就退回「往里推」）
+   *   · window:start-nav-resize   把窗口设成「基准 + delta」，每帧调一次
+   *   · window:start-nav-collapse 立刻收回基准（跳转 / 最大化 / 界面重载时用）
+   *
+   * 基准（startNavBase）在第一次 resize 时记一次，之后所有帧都以它为准做绝对
+   * 换算，不做相对累加 —— 否则每帧取整的误差会越滚越大。
    */
-  let startNavBaseBounds = null;
-  ipcMain.handle('window:expand-left', (event, payload = {}) => {
-    if (!win || win.isDestroyed() || win.isMinimized()) return { ok: false, reason: 'unavailable' };
-    const expand = Boolean(payload.expand);
-    if (!expand) {
-      if (!startNavBaseBounds) return { ok: true, expanded: false };
-      const restore = startNavBaseBounds;
-      startNavBaseBounds = null;
-      win.setBounds(restore);
-      return { ok: true, expanded: false };
-    }
-    const width = Math.round(Number(payload.width) || 0);
-    if (width <= 0) return { ok: false, reason: 'no-width' };
-    // 已经扩过了就别叠加
-    if (startNavBaseBounds) return { ok: true, expanded: true };
-    if (win.isFullScreen() || win.isMaximized()) return { ok: false, reason: 'no-expand' };
+  let startNavBase = null;
+
+  const startNavRoom = () => {
+    if (!win || win.isDestroyed()) return { ok: false, room: 0 };
+    if (win.isFullScreen() || win.isMaximized()) return { ok: false, room: 0, reason: 'fullscreen' };
     const bounds = win.getBounds();
-    let area = bounds;
-    try {
-      area = screen.getDisplayMatching(bounds).workArea;
-    } catch (error) {
-      area = bounds;
+    const area = screen.getDisplayMatching(bounds).workArea;
+    return { ok: true, room: Math.max(0, Math.round(bounds.x - area.x)), bounds };
+  };
+
+  const applyStartNav = (delta) => {
+    if (!win || win.isDestroyed()) return 0;
+    if (win.isFullScreen() || win.isMaximized()) return 0;
+    const d = Math.max(0, Math.round(Number(delta) || 0));
+    if (!startNavBase) {
+      const b = win.getBounds();
+      startNavBase = { x: b.x, y: b.y, width: b.width, height: b.height };
     }
-    // 左边没地方了（贴边 / 多屏拼接处）也扩不了
-    if (bounds.x - width < area.x) return { ok: false, reason: 'no-space' };
-    startNavBaseBounds = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
-    win.setBounds({
-      x: bounds.x - width,
-      y: bounds.y,
-      width: bounds.width + width,
-      height: bounds.height,
-    });
-    return { ok: true, expanded: true };
-  });
+    if (d > 0) {
+      win.setBounds({
+        x: startNavBase.x - d,
+        y: startNavBase.y,
+        width: Math.max(320, startNavBase.width + d),
+        height: startNavBase.height,
+      });
+    }
+    return d;
+  };
+
+  const collapseStartNav = () => {
+    if (!startNavBase) return 0;
+    if (win && !win.isDestroyed() && !win.isFullScreen() && !win.isMaximized()) {
+      win.setBounds(startNavBase);
+    }
+    startNavBase = null;
+    return 1;
+  };
+
+  ipcMain.handle('window:start-nav-room', () => startNavRoom());
+
+  // 渲染层每帧调一次，只做事不回话（回话要排一趟请求-响应，纯浪费）
+  ipcMain.on('window:start-nav-resize', (_event, payload = {}) =>
+    applyStartNav(payload.delta)
+  );
+
+  ipcMain.handle('window:start-nav-collapse', () => collapseStartNav());
 
   ipcMain.handle('starrail:fps:get', async () => {
     const game = store.data.games.find((item) => item.builtinKey === 'starrail');
@@ -5551,6 +5968,8 @@ function installIpc() {
       // 状态回推时会把刚点下去的值抹掉，开关表现为「点了直接弹回原状」。
       'charms',
       'charBg',
+      // 侧栏底部那张火花立绘：展开侧栏时会占掉一截高度，用户要能自己关掉
+      'sidebarChar',
       'updateManifest',
       'autoCheckUpdate',
       'notesSeenVersion',
@@ -6165,8 +6584,9 @@ async function crossSourceFallbackUrl(title, artist, flags) {
       async () => {
         const best = pickBest(await kugouSearch(keyword, 5), wants);
         if (!best) throw new Error('没搜到同名曲');
+        if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
         const info = await kugouSongUrl(best.hash);
-        return { ...info, matched: `${best.title} - ${best.artist}` };
+        return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
       },
     ]);
   }
@@ -6176,8 +6596,9 @@ async function crossSourceFallbackUrl(title, artist, flags) {
       async () => {
         const best = pickBest(await qqSearch(keyword, 5), wants);
         if (!best) throw new Error('没搜到同名曲');
+        if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
         const info = await qqSongUrl(best.mid);
-        return { ...info, matched: `${best.title} - ${best.artist}` };
+        return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
       },
     ]);
   }
@@ -6267,11 +6688,25 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   const title = String(meta.title || '').trim();
   const artist = String(meta.artist || '').trim();
 
-  // 3) 同一个歌名的其它版本（重制 / 现场 / 翻唱）通常没有版权限制
+  /*
+   * 3) 同一个歌名的其它版本（重制 / 现场 / 翻唱）通常没有版权限制。
+   *    只按歌名搜出来的列表里混着同名不同曲和别人的翻唱，以前是「第一个能播的就用」，
+   *    于是会出现「点了这首、放的是另一首」还毫无提示。先按同歌名 + 同歌手筛一遍。
+   */
   if (neteaseAllowed && title) {
     try {
       const search = await neteaseGet(apiBase, '/search', { keywords: `${title} ${artist}`.trim(), limit: 8, type: 1 });
-      const list = search?.result?.songs || [];
+      const list = (search?.result?.songs || []).filter(
+        (song) =>
+          song?.id &&
+          String(song.id) !== String(id) &&
+          sameSongEnough(
+            title,
+            artist,
+            song.name,
+            (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / ')
+          )
+      );
       for (const song of list) {
         if (!song?.id || String(song.id) === String(id)) continue;
         try {
@@ -6284,6 +6719,10 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
             br: Number(item.br) || 0,
             size: Number(item.size) || 0,
             type: String(item.type || ''),
+            // 带上实际用的这份的歌名 / 歌手：渲染层换源后还要再核一次身份
+            // （用 matchedTitle/Artist，别覆盖 title/artist，否则队列里的歌名会被换掉）
+            matchedTitle: String(song.name || title),
+            matchedArtist: (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / '),
             altOf: {
               id: song.id,
               title: String(song.name || ''),
@@ -6309,6 +6748,9 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
         br: alt.br || 0,
         size: 0,
         type: '',
+        // 换到酷狗 / QQ 的那份：歌名歌手单独放 matched* 上，渲染层据此核「还是不是这首」
+        matchedTitle: alt.title || title,
+        matchedArtist: alt.artist || artist,
         otherSource: { source: alt.source, matched: alt.matched || '' },
       };
     } catch {
@@ -6428,7 +6870,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   /*
    * 走 Chromium 网络栈并自动携带会话 cookie 的 GET。
    * 之前用 undici 的 fetch：手动拼 Cookie 头会被当"禁止头"剥掉，
-   * 会话里的 buvid/登录态根本发不出去，-352 风控就是这么一直拦着的。
+   * 会话里的 buvid/登录态根本发不出去。
    */
   function biliFetchText(url, referer) {
     return new Promise((resolve, reject) => {
@@ -6447,21 +6889,23 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     });
   }
 
-  ipcMain.handle('live:danmu-info', async (_event, roomId) => {
-    const id = String(roomId || '').trim();
-    if (!id) throw new Error('没有房间号');
-    await ensureBiliBuvid().catch(() => {});
-    const url = `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?id=${encodeURIComponent(id)}&type=0`;
-    const referer = `https://live.bilibili.com/${id}`;
-    let json = null;
+  /*
+   * 取一个 B 站接口的 JSON：先走 Chromium 栈，被拦了自动回落 Node 栈。
+   * accept 用来判断"这份结果算不算拿到"，默认是 code===0。
+   */
+  async function biliGetJson(url, referer, accept) {
+    const good = accept || ((parsed) => parsed?.code === 0);
     let detail = '';
+    let json = null;
     // 路线一：Chromium 网络栈，自动带会话 cookie，TLS 指纹与真实浏览器一致
     try {
       const { status, body } = await biliFetchText(url, referer);
       detail = `HTTP ${status}`;
       try {
         json = JSON.parse(body);
+        if (good(json)) return { json, detail };
       } catch {
+        json = null;
         detail += `，返回的不是 JSON：${body.slice(0, 60)}`;
       }
     } catch (error) {
@@ -6472,40 +6916,398 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
      * 会把 Chromium 栈的请求挡成 ERR_BLOCKED_BY_CLIENT，这时走 Node 的
      * 网络栈绕开它；undici 允许显式带 Cookie 头，会话里的 buvid/登录态照样能用。
      */
-    if (json?.code !== 0) {
+    try {
+      const jarCookies = await session.defaultSession.cookies.get({ url }).catch(() => []);
+      const cookie = jarCookies.map((c) => `${c.name}=${c.value}`).join('; ');
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': BILI_UA,
+          Referer: referer,
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+      });
+      const body = await res.text();
+      detail += `；Node 备用路线 HTTP ${res.status}`;
       try {
-        const jarCookies = await session.defaultSession.cookies
-          .get({ url: 'https://live.bilibili.com/' })
-          .catch(() => []);
-        const cookie = jarCookies.map((c) => `${c.name}=${c.value}`).join('; ');
-        const res = await fetch(url, {
-          headers: {
-            'User-Agent': BILI_UA,
-            Referer: referer,
-            ...(cookie ? { Cookie: cookie } : {}),
-          },
-        });
-        const body = await res.text();
-        detail += `；Node 备用路线 HTTP ${res.status}`;
-        try {
-          json = JSON.parse(body);
-        } catch {
-          detail += `，非 JSON：${body.slice(0, 60)}`;
-        }
-      } catch (error) {
-        detail += `；Node 备用路线失败：${error.message}`;
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object') json = parsed;
+      } catch {
+        detail += `，非 JSON：${body.slice(0, 60)}`;
       }
+    } catch (error) {
+      detail += `；Node 备用路线失败：${error.message}`;
+    }
+    return { json, detail };
+  }
+
+  /*
+   * WBI 签名：B 站给一批 web 接口加的风控，getDanmuInfo 就在其中。
+   *
+   * -352 的根因：请求里的 w_rid 算错。w_rid = md5(排序后的 query + mixinKey)，
+   * 而 mixinKey 来自一份 64 位的置换表（WBI_MIXIN_TAB）。这份表以前在 idx40 之后
+   * 是错的，于是无论登录与否、带不带 buvid，签名永远不对，B 站一律回 -352，
+   * 文案一直让用户"去登录"，登录完照样 -352。已用探针逐位对照官方算法校正为规范表，
+   * 实测：不带 cookie 只带签名即可 code=0 拿到 token。
+   *
+   * 密钥（img_key / sub_key）从 x/web-interface/nav 的 wbi_img 里取，
+   * 未登录也能拿到，服务端会轮换，这里缓存 30 分钟。
+   */
+  // 注意：这是 B 站官方公开的规范 mixin 置换表（64 位）。之前这份表在 idx40 之后是错的，
+  // 导致 w_rid 算错、getDanmuInfo 永远回 -352（签名未通过）。已用探针对照官方算法逐位校正。
+  const WBI_MIXIN_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+    26, 17, 0, 11, 60, 20, 21, 56, 34, 44, 52, 22, 36, 1, 63, 59, 57, 54, 62, 6,
+    4, 30, 25, 51,
+  ];
+  let biliWbiKeysCache = null;
+
+  function biliMixinKey(imgKey, subKey) {
+    const raw = `${imgKey}${subKey}`;
+    return WBI_MIXIN_TAB.map((index) => raw[index]).join('').slice(0, 32);
+  }
+
+  function biliWbiQuery(params, imgKey, subKey) {
+    const wbiEncode = (text) =>
+      encodeURIComponent(text).replace(/[!'()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+    const signed = { ...params, wts: Math.floor(Date.now() / 1000) };
+    const query = Object.keys(signed)
+      .sort()
+      .map((key) => `${wbiEncode(key)}=${wbiEncode(String(signed[key]))}`)
+      .join('&');
+    const wRid = crypto
+      .createHash('md5')
+      .update(query + biliMixinKey(imgKey, subKey))
+      .digest('hex');
+    return `${query}&w_rid=${wRid}`;
+  }
+
+  async function biliWbiKeys(force) {
+    if (!force && biliWbiKeysCache && Date.now() - biliWbiKeysCache.at < 30 * 60 * 1000) {
+      return biliWbiKeysCache;
+    }
+    // nav 未登录时回 -101，但 wbi_img 照样给，所以这里按"有没有 wbi_img"算成功
+    const { json } = await biliGetJson(
+      'https://api.bilibili.com/x/web-interface/nav',
+      'https://www.bilibili.com/',
+      (parsed) => Boolean(parsed?.data?.wbi_img?.img_url && parsed?.data?.wbi_img?.sub_url)
+    );
+    const imgUrl = json?.data?.wbi_img?.img_url;
+    const subUrl = json?.data?.wbi_img?.sub_url;
+    if (!imgUrl || !subUrl) throw new Error('拿不到B站签名密钥，稍后重试');
+    biliWbiKeysCache = {
+      imgKey: String(imgUrl).split('/').pop().split('.')[0],
+      subKey: String(subUrl).split('/').pop().split('.')[0],
+      at: Date.now(),
+    };
+    return biliWbiKeysCache;
+  }
+
+  ipcMain.handle('live:danmu-info', async (_event, roomId) => {
+    const info = await getBiliDanmuInfo(roomId);
+    const first = info.hosts[0] || {};
+    return {
+      token: info.token,
+      host: String(first.host || ''),
+      port: Number(first.port || 443),
+      hosts: info.hosts,
+    };
+  });
+
+  /*
+   * 弹幕 WebSocket 迁到主进程（根治渲染层长连接被本机网络层掐断的问题）。
+   * 渲染层只负责：发 live:danmu-connect(token+hosts) / 收 live:danmu-event。
+   * 真正建连、鉴权、心跳、断线重连、服务器轮换、token 刷新全在这里（Node 栈，
+   * 实测 95 秒以上稳定，不再受 Chromium 出站长连接约 70 秒被掐的限制）。
+   */
+  const zlib = require('zlib');
+  const WS = globalThis.WebSocket || WebSocket;
+  const biliDanmuConnections = new Map();
+
+  // 取弹幕鉴权：与 live:danmu-info 共用同一套 wbi 签名逻辑，重连时主进程自己取，不绕回渲染层。
+  async function getBiliDanmuInfo(roomId) {
+    const id = String(roomId || '').trim();
+    if (!id) throw new Error('没有房间号');
+    await ensureBiliBuvid().catch(() => {});
+    const referer = `https://live.bilibili.com/${id}`;
+    let json = null;
+    let detail = '';
+    for (let attempt = 0; attempt < 2 && json?.code !== 0; attempt += 1) {
+      const { imgKey, subKey } = await biliWbiKeys(attempt > 0);
+      const url = `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?${biliWbiQuery(
+        { id, type: 0 },
+        imgKey,
+        subKey
+      )}`;
+      const result = await biliGetJson(url, referer);
+      json = result.json;
+      detail = result.detail;
     }
     if (json?.code !== 0 || !json?.data?.token) {
       const message = String(json?.message || '');
       throw new Error(
         message === '-352'
-          ? '被B站风控拦截(-352)，点「登录B站」登录一次账号即可解决'
+          ? `被B站风控拦截(-352)，接口签名未通过（${detail || '原因不明'}）`
           : `${message || '弹幕鉴权获取失败'}（${detail || '原因不明'}）`
       );
     }
-    const host = (json.data.host_list || [])[0] || {};
-    return { token: String(json.data.token), host: String(host.host || ''), port: Number(host.wss_port || 443) };
+    const hosts = (json.data.host_list || [])
+      .map((item) => ({ host: String(item?.host || ''), port: Number(item?.wss_port || item?.ws_port || 443) }))
+      .filter((item) => item.host);
+    return { token: String(json.data.token), hosts };
+  }
+
+  function biliBuildWsUrls(hosts) {
+    const list = [];
+    const seen = new Set();
+    const push = (host, port) => {
+      const h = String(host || '').trim();
+      const p = Number(port) || 443;
+      if (!h) return;
+      const key = `${h}:${p}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push(`wss://${h}:${p}/sub`);
+    };
+    for (const item of hosts || []) {
+      push(item && item.host, 443);
+      push(item && item.host, item && item.port);
+    }
+    push('broadcastlv.chat.bilibili.com', 443);
+    return list;
+  }
+
+  function biliPacketMain(value, operation = 7) {
+    const body = Buffer.from(JSON.stringify(value), 'utf8');
+    const buffer = Buffer.alloc(16 + body.length);
+    buffer.writeUInt32BE(16 + body.length, 0);
+    buffer.writeUInt16BE(16, 4);
+    buffer.writeUInt16BE(1, 6);
+    buffer.writeUInt32BE(operation, 8);
+    buffer.writeUInt32BE(1, 12);
+    body.copy(buffer, 16);
+    return buffer;
+  }
+
+  function safeSend(sender, channel, payload) {
+    try {
+      if (sender && !sender.isDestroyed()) sender.send(channel, payload);
+    } catch {
+      /* webContents 已销毁 */
+    }
+  }
+
+  /*
+   * 主进程的 WebSocket 是 Electron 暴露的 DOM 风格实现：用 addEventListener 注册事件，
+   * 不是 Node 的 ws 包（ws 包才有 .on）。为了不依赖具体版本，这里做个兼容：
+   * 优先 addEventListener；万一某版本暴露的是 ws 风格就退回 .on。
+   * message 事件：addEventListener 给的是 {data}，ws 风格直接给 data；
+   * close 事件：addEventListener 给的是 {code}，ws 风格直接给 code。都归一化一下。
+   */
+  function wsOn(ws, name, handler) {
+    if (typeof ws.addEventListener === 'function') {
+      ws.addEventListener(name, (event) => {
+        if (name === 'message') return handler(event && event.data !== undefined ? event.data : event);
+        if (name === 'close') return handler(event && event.code !== undefined ? event.code : event);
+        return handler(event);
+      });
+    } else {
+      ws.on(name, handler);
+    }
+  }
+
+  function biliDecodeMain(buf, roomId, sender, state) {
+    let offset = 0;
+    while (offset + 16 <= buf.length) {
+      const total = buf.readUInt32BE(offset);
+      const header = buf.readUInt16BE(offset + 4);
+      const version = buf.readUInt16BE(offset + 6);
+      const operation = buf.readUInt32BE(offset + 8);
+      if (!total || total > buf.length - offset) break;
+      const body = buf.subarray(offset + header, offset + total);
+      if (operation === 8) {
+        safeSend(sender, 'live:danmu-event', { roomId, type: 'pushing' });
+      } else if (operation === 5) {
+        if (version === 2 || version === 3) {
+          try {
+            const inflated = version === 3 ? zlib.brotliDecompressSync(body) : zlib.inflateSync(body);
+            biliDecodeMain(inflated, roomId, sender, state);
+          } catch {
+            /* 损坏的压缩帧忽略 */
+          }
+        } else {
+          try {
+            const json = JSON.parse(body.toString('utf8'));
+            const items = Array.isArray(json) ? json : [json];
+            for (const item of items) {
+              if (String(item?.cmd || '').includes('DANMU_MSG')) {
+                const message = String(item.info?.[1] || '');
+                const user = String(item.info?.[2]?.[1] || '');
+                state.captured += 1;
+                safeSend(sender, 'live:danmu-event', { roomId, type: 'danmu', message, user, captured: state.captured });
+              }
+            }
+          } catch {
+            /* 非 JSON 包忽略 */
+          }
+        }
+      }
+      offset += total;
+    }
+  }
+
+  function biliOpenWs(state) {
+    const urls = state.urls;
+    if (state.urlIndex >= urls.length) {
+      safeSend(state.sender, 'live:danmu-event', {
+        roomId: state.roomId,
+        type: 'closed',
+        status: `连接失败：${urls.length} 个弹幕服务器都不通`,
+      });
+      biliDanmuConnections.delete(state.roomId);
+      return;
+    }
+    let ws = null;
+    try {
+      ws = new WS(urls[state.urlIndex]);
+    } catch {
+      state.urlIndex += 1;
+      biliOpenWs(state);
+      return;
+    }
+    state.ws = ws;
+    state.opened = false;
+    ws.binaryType = 'arraybuffer';
+    let done = false;
+    const goNext = () => {
+      try { ws.close(); } catch {}
+      state.urlIndex += 1;
+      biliOpenWs(state);
+    };
+    wsOn(ws, 'open', () => {
+      state.opened = true;
+      state.openedAt = Date.now();
+      try {
+        ws.send(biliPacketMain({ uid: 0, roomid: Number(state.roomId), protover: 2, platform: 'web', type: 2, key: state.token }));
+      } catch {}
+      if (state.heartbeat) clearInterval(state.heartbeat);
+      state.heartbeat = setInterval(() => {
+        if (ws.readyState === WS.OPEN) {
+          try { ws.send(biliPacketMain({}, 2)); } catch {}
+        }
+      }, 20000);
+      state.connected = true;
+      if (state.lastRetryAt && Date.now() - state.lastRetryAt > 5 * 60 * 1000) state.retryCount = 0;
+      safeSend(state.sender, 'live:danmu-event', {
+        roomId: state.roomId,
+        type: 'open',
+        status: state.token ? '已连接' : '已连接（未取得弹幕鉴权，可能收不到弹幕）',
+      });
+    });
+    wsOn(ws, 'message', (data) => {
+      let buf;
+      if (data instanceof ArrayBuffer) buf = Buffer.from(data);
+      else if (ArrayBuffer.isView(data)) buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+      else buf = Buffer.from(data);
+      if (!buf || !buf.length) return;
+      biliDecodeMain(buf, state.roomId, state.sender, state);
+    });
+    const onDrop = (code) => {
+      if (done) return;
+      done = true;
+      if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+      state.connected = false;
+      if (!state.opened) { goNext(); return; }
+      if (state.openedAt && Date.now() - state.openedAt < 5000 && state.urlIndex + 1 < urls.length) {
+        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'status', status: '这个弹幕服务器连上就被踢，换一个…' });
+        goNext();
+        return;
+      }
+      if (state.closedByUser) {
+        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'closed', status: '已断开' });
+        biliDanmuConnections.delete(state.roomId);
+        return;
+      }
+      const tries = (state.retryCount || 0) + 1;
+      if (tries > 3) {
+        const hint = code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : '把这段发给作者排查';
+        safeSend(state.sender, 'live:danmu-event', {
+          roomId: state.roomId,
+          type: 'closed',
+          status: `已断开（重连 3 次都失败 · code ${code ?? '未知'}）：${hint}`,
+          code,
+        });
+        biliDanmuConnections.delete(state.roomId);
+        return;
+      }
+      state.retryCount = tries;
+      state.lastRetryAt = Date.now();
+      safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'reconnecting', tries, code });
+      setTimeout(() => biliReconnect(state), 3000);
+    };
+    wsOn(ws, 'error', () => { if (!done) onDrop(1006); });
+    wsOn(ws, 'close', (code) => onDrop(code));
+  }
+
+  async function biliReconnect(state) {
+    // token 5 分钟内直接复用，否则重新取（主进程自带 wbi 签名，不用回渲染层）
+    if (!(state.lastDanmuAt && Date.now() - state.lastDanmuAt < 5 * 60 * 1000 && state.token)) {
+      try {
+        const info = await getBiliDanmuInfo(state.roomId);
+        state.token = info.token;
+        state.hosts = info.hosts;
+        state.lastDanmuAt = Date.now();
+      } catch (error) {
+        if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'closed', status: `重连失败：${error.message}` });
+        biliDanmuConnections.delete(state.roomId);
+        return;
+      }
+    }
+    state.urls = biliBuildWsUrls(state.hosts);
+    state.urlIndex = 0;
+    biliOpenWs(state);
+  }
+
+  ipcMain.on('live:danmu-connect', (event, payload = {}) => {
+    const roomId = String(payload.roomId || '');
+    if (!roomId) return;
+    const existing = biliDanmuConnections.get(roomId);
+    if (existing) { try { existing.ws && existing.ws.close(); } catch {} biliDanmuConnections.delete(roomId); }
+    const state = {
+      roomId,
+      token: String(payload.token || ''),
+      hosts: Array.isArray(payload.hosts) ? payload.hosts : [],
+      lastDanmuAt: Date.now(),
+      sender: event.sender,
+      urls: biliBuildWsUrls(Array.isArray(payload.hosts) ? payload.hosts : []),
+      urlIndex: 0,
+      opened: false,
+      openedAt: 0,
+      retryCount: 0,
+      lastRetryAt: 0,
+      closedByUser: false,
+      heartbeat: null,
+      captured: 0,
+      ws: null,
+      connected: false,
+    };
+    biliDanmuConnections.set(roomId, state);
+    if (typeof WS !== 'function') {
+      safeSend(event.sender, 'live:danmu-event', { roomId, type: 'closed', status: '主进程缺少 WebSocket 支持' });
+      biliDanmuConnections.delete(roomId);
+      return;
+    }
+    biliOpenWs(state);
+  });
+
+  ipcMain.on('live:danmu-disconnect', (_event, roomId) => {
+    const state = biliDanmuConnections.get(String(roomId || ''));
+    if (!state) return;
+    state.closedByUser = true;
+    if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+    try { state.ws && state.ws.close(); } catch {}
+    biliDanmuConnections.delete(String(roomId));
   });
 
   /*
@@ -6513,6 +7315,13 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
    * 用默认会话开窗——登录产生的 SESSDATA 等 cookie 直接落在主会话里，
    * 弹幕鉴权（useSessionCookies）立刻就能用上，不需要导来导去。
    * 窗口轮询到 SESSDATA 出现就自动关闭并返回成功。
+   *
+   * 注意：-352 并不是"没登录"造成的（见上面的 WBI 签名），登录入口只是
+   * 顺手保留。但它必须真的能用，不能点了没反应，所以这里补两件事：
+   *   1. 伪装成桌面 Chrome——Electron 默认 UA 带 Electron/xx，B 站登录页
+   *      会按 UA 判断"浏览器不受支持"，二维码渲染不出来 / 登录提交被拒。
+   *   2. 放行 window.open——QQ / 微信 / 短信登录是弹窗，Electron 默认拦掉，
+   *      不放行就是点了没反应。
    */
   let biliLoginWin = null;
   ipcMain.handle('bili:login', () => {
@@ -6537,6 +7346,22 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
         backgroundColor: '#f6f7f8',
         webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
       });
+      try {
+        biliLoginWin.webContents.setUserAgent(BILI_UA);
+        biliLoginWin.webContents.session.setUserAgent(BILI_UA);
+      } catch {
+        /* ignore */
+      }
+      // QQ / 微信登录会另开弹窗，Electron 默认拦掉 window.open
+      biliLoginWin.webContents.setWindowOpenHandler(() => ({
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 720,
+          autoHideMenuBar: true,
+          webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+        },
+      }));
       poll = setInterval(async () => {
         try {
           const cookies = await session.defaultSession.cookies.get({ domain: 'bilibili.com' });
@@ -7939,6 +8764,34 @@ function musicLoginWindow(target) {
     };
   });
 
+  /*
+   * 按「某个服务器的渠道」扫一遍。
+   *
+   * 和 games:detect 的区别：那个是「这个游戏装在哪」，找到就写进对应渠道那一行；
+   * 这个是「B服 装在哪」，只认 B服 的 exe。用户在 B服 那一行点自动扫描，
+   * 期待的显然是 B服 被填上，而不是官服那一行又刷新一遍。
+   */
+  ipcMain.handle('games:detect-server', async (_event, id, serverId) => {
+    const game = store.data.games.find((item) => item.id === id);
+    if (!game) return { ok: false, error: '没有找到这个游戏' };
+    const server = (game.servers || []).find((item) => item.id === serverId);
+    if (!server) return { ok: false, error: '没有找到这个服务器' };
+    const found = await detectServerExecutable(game, server);
+    if (!found) {
+      return {
+        ok: false,
+        error: `没扫到${server.name}的客户端。它可能还没下载，或者装在非常规目录里 —— 可以手动选路径。`,
+      };
+    }
+    server.path = found;
+    server.root = path.dirname(found);
+    server.incomplete = false;
+    server.unavailable = false;
+    await store.saveNow();
+    pushState(true);
+    return { ok: true, path: found, name: server.name };
+  });
+
   ipcMain.handle('servers:add', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
     if (!game) throw new Error('没有找到这个游戏');
@@ -8004,16 +8857,35 @@ function musicLoginWindow(target) {
     return publicGame(game);
   });
 
+  /*
+   * 清路径 / 移出配置时，把所有「跟着这个路径走」的运行时记忆一并清掉。
+   *
+   * 以前只清 path/root/incomplete/packPath，originalRoot、runtimeLinked、
+   * rootDir、confirmed 全都留着。于是清完 B服 之后，官服那条的
+   * endfieldBaseRoot() 还会拿 B服 的 originalRoot 当基础、
+   * hasOtherInstalledServer 也还以为 B服 装着客户端，点「重建」就真的
+   * 去硬链接重做一份 —— 用户看到的是「我明明有官服，怎么还要重建」。
+   */
+  function resetServerState(server) {
+    server.path = '';
+    server.root = '';
+    server.incomplete = false;
+    server.packPath = '';
+    server.originalRoot = '';
+    server.rootDir = '';
+    server.runtimeLinked = false;
+    server.legacyRuntime = false;
+    server.confirmed = false;
+    server.unavailable = false;
+  }
+
   ipcMain.handle('servers:clear-path', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
     if (!game) throw new Error('没有找到这个游戏');
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修改服务器');
     const server = game.servers.find((item) => item.id === input?.serverId);
     if (!server) throw new Error('没有找到这个服务器');
-    server.path = '';
-    server.root = '';
-    server.incomplete = false;
-    server.packPath = '';
+    resetServerState(server);
     ensureServers(game);
     await store.saveNow();
     pushState(true);
@@ -8027,10 +8899,7 @@ function musicLoginWindow(target) {
     const target = game.servers.find((item) => item.id === input?.serverId);
     if (target?.builtinServer || game.builtin) {
       if (!target) throw new Error('没有找到这个服务器');
-      target.path = '';
-      target.root = '';
-      target.incomplete = false;
-      target.packPath = '';
+      resetServerState(target);
       await store.saveNow();
       pushState(true);
       return publicGame(game);
@@ -9011,7 +9880,32 @@ function musicLoginWindow(target) {
    *   2. 串行 + 每次间隔 1.5s，冷启动瞬间不要同时打五六个渠道，拖慢首屏；
    *   3. 查询失败**不覆盖**上一次的有效状态 —— 断网时按钮不能凭空消失。
    */
-  const PREDOWNLOAD_AUTO_TTL = 6 * 60 * 60 * 1000;
+  const PREDOWNLOAD_AUTO_TTL = 2 * 60 * 60 * 1000;
+
+  /*
+   * 更新应用成功后，让基于这份客户端的「链接运行时」失效。
+   *
+   * 本体更新永远写进真实安装目录（endfieldInstallRoot 会自动排除运行时目录），
+   * 运行时只是硬链接镜像 —— 所以「官服点了更新、国际服再点更新」**不会各下一次**：
+   * 第二次检测到真实目录已是最新版本，apply 没有东西可下，直接走运行时重建（秒级）。
+   *
+   * 终末地：删掉运行时目录里的 .hxl-endfield-runtime-v2 标记，
+   * 下次启动/切服时 ensureEndfieldChannelRuntime 检测到缺标记就自动重建硬链接。
+   */
+  function invalidateRuntimesAfterUpdate(game) {
+    for (const server of game.servers || []) {
+      for (const dir of [server.root, server.originalRoot]) {
+        if (!dir) continue;
+        const marker = path.join(dir, '.hxl-endfield-runtime-v2');
+        try {
+          if (fs.existsSync(marker)) fs.unlinkSync(marker);
+        } catch {
+          /* 删不掉就下次启动时再试 */
+        }
+      }
+    }
+  }
+
 
   async function autoRefreshPredownloadStatus() {
     const now = Date.now();
@@ -9081,6 +9975,8 @@ function musicLoginWindow(target) {
   ipcMain.handle('predownload:apply', async (_event, input) => {
     const { game, server, base } = resolvePredownload(input);
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再应用更新');
+    // 异环更新会改写 NTELauncher 下的文件，官方启动器开着会锁文件 / 退出时回写配置
+    if (game.builtinKey === 'neverness') await nevernessChannels.assertLauncherClosed();
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
     predownloadJobs.set(jobId, signal);
@@ -9095,6 +9991,8 @@ function musicLoginWindow(target) {
       if (signal.cancelled) return { ok: false, cancelled: true };
       const tag = String(result?.tag || result?.version || '');
       server.predownload = null;
+      // 更新落在了真实安装目录，把链接运行时的标记清掉，下次启动自动重建
+      invalidateRuntimesAfterUpdate(game);
       if (tag) {
         game.version = tag;
         game.versionName = tag;
@@ -9320,6 +10218,156 @@ function musicLoginWindow(target) {
     return true;
   });
 
+  /*
+   * 卸载某个渠道的客户端（删掉安装目录里的文件）。
+   *
+   * 只删「这一台服务器独占」的目录，两条红线：
+   *   ① 官服 / B服 常常指向同一个文件夹 —— 只要还有别的服务器（任何游戏）用着
+   *      同一个 root，直接拒绝。这是之前「删了 B服 官服也一起没了」那件事的补偿。
+   *   ② 目录浅到只剩盘符（G:\）或者用户主目录这种，一律不动：真要误删了找不回来。
+   *
+   * 删除动作走系统回收站（shell.trashItem），不是 rm -rf —— 删错了还能捞。
+   */
+  const uninstallPlan = (game, server) => {
+    /*
+     * 游戏开着的时候优先说这一句。
+     * 以前这个判断放在渲染层、而且排在「目录被共用」后面：共用目录一挡，
+     * 用户看到的是「还被 XX 用着」，跟他此刻真正的问题（游戏没关）对不上号。
+     * 更要紧的是文件被进程占着，trashItem 会直接失败，抛出来的还是英文系统错误。
+     */
+    if (running.has(game.id) || launching.has(game.id)) {
+      return {
+        ok: false,
+        running: true,
+        reason: '游戏正在运行，先关掉游戏再卸载客户端',
+      };
+    }
+    const root = String(server?.root || '').trim();
+    if (!root) {
+      return { ok: false, reason: '这个服务器还没有安装目录，没有可卸载的文件' };
+    }
+    const norm = root.replace(/[\\/]+$/, '').toLowerCase();
+    const segments = norm.split(/[\\/]+/).filter(Boolean);
+    // 盘符根目录（G:\）和用户主目录一律不碰：误删的代价太大，让用户自己去资源管理器
+    const home = os.homedir().replace(/[\\/]+$/, '').toLowerCase();
+    if (segments.length < 2 || norm === home) {
+      return {
+        ok: false,
+        reason: `「${root}」层级太浅，为免误删，请到资源管理器里手动处理`,
+      };
+    }
+    const shared = [];
+    for (const other of store.data.games) {
+      for (const item of other.servers || []) {
+        if (other.id === game.id && item.id === server.id) continue;
+        const otherRoot = String(item.root || '').replace(/[\\/]+$/, '').toLowerCase();
+        if (otherRoot && otherRoot === norm) {
+          shared.push(`${other.name} · ${item.name}`);
+        }
+      }
+    }
+    if (shared.length) {
+      return {
+        ok: false,
+        reason: `这个文件夹还被「${shared.join(
+          '」「'
+        )}」用着：它们共用同一个目录，删掉就一起没了`,
+        root,
+        shared,
+      };
+    }
+    return { ok: true, root, exists: fs.existsSync(root) };
+  };
+
+  ipcMain.handle('servers:uninstall-plan', async (_event, input) => {
+    const game = store.data.games.find((item) => item.id === input?.gameId);
+    if (!game) return { ok: false, reason: '没有找到这个游戏' };
+    const server = game.servers.find((item) => item.id === input?.serverId);
+    if (!server) return { ok: false, reason: '没有找到这个服务器' };
+    const plan = uninstallPlan(game, server);
+    return { ...plan, running: running.has(game.id) };
+  });
+
+  /*
+   * 卸载客户端。
+   *
+   * 全部走返回值、不抛异常：IPC 抛出来的错误只剩一句 message，既带「Error invoking
+   * remote method」的英文壳，也带不了「能不能改成永久删除」这种结构化信息。用户看
+   * 到的就是一句看不懂的英文，压根不知道该干嘛。
+   *
+   * 失败分三类，各自给一句能照着做的话：
+   *   BUSY  文件被占着（游戏/更新器没退干净）
+   *   TRASH 回收站用不了（被策略禁用、回收站损坏、UWP 精简系统）—— 可以 force 直删
+   *   OTHER 其它系统错误，附原始信息
+   */
+  ipcMain.handle('servers:uninstall', async (_event, input) => {
+    const game = store.data.games.find((item) => item.id === input?.gameId);
+    if (!game) return { ok: false, code: 'NOT_FOUND', reason: '没有找到这个游戏' };
+    if (running.has(game.id) || launching.has(game.id)) {
+      return {
+        ok: false,
+        code: 'RUNNING',
+        reason: '游戏正在运行，先关掉游戏再卸载客户端',
+      };
+    }
+    const server = game.servers.find((item) => item.id === input?.serverId);
+    if (!server) return { ok: false, code: 'NOT_FOUND', reason: '没有找到这个服务器' };
+    const plan = uninstallPlan(game, server);
+    if (!plan.ok) return { ok: false, code: plan.running ? 'RUNNING' : 'BLOCKED', reason: plan.reason };
+
+    let moved = false;
+    if (plan.exists) {
+      if (input?.force === true) {
+        // 二次确认过的永久删除：回收站用不了时的唯一出路
+        try {
+          await fsp.rm(plan.root, { recursive: true, force: true, maxRetries: 2 });
+        } catch (error) {
+          return {
+            ok: false,
+            code: 'OTHER',
+            reason: `直接删除也没成功，可能有程序还占着这些文件：${String(
+              error?.message || error || ''
+            )}`,
+            root: plan.root,
+          };
+        }
+      } else {
+        // 回收站而不是直接删：这一步之后用户还能在回收站里找回来
+        try {
+          await shell.trashItem(plan.root);
+        } catch (error) {
+          const raw = String(error?.message || error || '');
+          if (/EBUSY|EPERM|EACCES|being used|正在使用|占用|locked/i.test(raw)) {
+            return {
+              ok: false,
+              code: 'BUSY',
+              reason: `「${plan.root}」里的文件还被占用着：先把游戏和它的更新器完全退出（托盘里也退掉）再试一次`,
+              root: plan.root,
+            };
+          }
+          /*
+           * 剩下最常见的就是回收站本身用不了 —— 系统策略禁用、回收站损坏、
+           * 或者目录在某个不支持回收站的卷上。这种情况允许改成永久删除。
+           */
+          return {
+            ok: false,
+            code: 'TRASH',
+            reason: '系统回收站用不了，没法把文件挪进去（文件本身没动）',
+            detail: raw,
+            root: plan.root,
+          };
+        }
+      }
+      moved = true;
+    }
+    // 文件没了，路径记录也要跟着清：否则启动器还指着一个空目录
+    resetServerState(server);
+    ensureServers(game);
+    await store.saveNow();
+    pushState(true);
+    return { ok: true, target: plan.root, moved, forced: input?.force === true };
+  });
+
   ipcMain.handle('games:sync-official', async () => syncAllOfficial());
 
   ipcMain.handle('games:launch', async (_event, id) => {
@@ -9399,6 +10447,56 @@ function musicLoginWindow(target) {
           if (launcher) {
             writeLaunchLog(`launch ${id}: NTE official launcher=${launcher}`);
             target = launcher;
+          }
+        }
+        /*
+         * 清掉官方启动器的托盘残留：它关窗只是缩托盘，进程不退。带着旧进程 spawn
+         * 会触发它的单实例「唤醒旧实例→旧实例退出→新实例秒退」，点了等于没点。
+         */
+        if (/^nte(game|launcher)\.exe$/i.test(path.basename(target))) {
+          const nteClear = await clearNteLingeringLauncher(id);
+          if (nteClear.code === 'game-running') {
+            return { ok: false, error: '异环已经在运行了（HTGame.exe）。先玩着，或退出游戏再启动。' };
+          }
+          if (nteClear.code === 'updater-running') {
+            return { ok: false, error: '异环官方更新器正在自更新，等十几秒再点一次。' };
+          }
+        }
+      }
+
+      if (game.builtinKey === 'endfield') {
+        /*
+         * 「点了启动却弹出官方启动器」的根因：安装/更新/兜底链路会把 server.path
+         * 存成 PlatformProcess.exe（平台进程）甚至 HypergryphLauncher.exe ——
+         * 这两个直接跑起来就是官方平台/启动器界面，永远不会是游戏。
+         * 启动前统一修正：同目录（或 workDir）有 Endfield.exe 就用它，
+         * 按官方启动器托管布局再找一层（games\Endfield Game\Endfield.exe）；
+         * 都没有就明确报错，绝不直接执行平台进程。
+         */
+        const baseName = path.basename(target).toLowerCase();
+        if (baseName !== 'endfield.exe') {
+          const rootDir =
+            game.workDir && fs.existsSync(path.join(game.workDir, 'Endfield.exe'))
+              ? game.workDir
+              : path.dirname(target);
+          const gameExe = [
+            path.join(path.dirname(target), 'Endfield.exe'),
+            path.join(rootDir, 'Endfield.exe'),
+            path.join(path.dirname(target), 'games', 'Endfield Game', 'Endfield.exe'),
+            path.join(rootDir, 'games', 'Endfield Game', 'Endfield.exe'),
+          ].find((candidate) => fs.existsSync(candidate));
+          if (gameExe) {
+            writeLaunchLog(`launch ${id}: 终末地启动路径被修正 ${target} -> ${gameExe}`);
+            target = gameExe;
+            game.workDir = path.dirname(gameExe);
+          } else if (/platformprocess|hypergryphlauncher/i.test(baseName)) {
+            writeLaunchLog(`launch ${id}: 终末地路径指向平台进程且找不到游戏本体：${target}`);
+            return {
+              ok: false,
+              error:
+                '这个服务器指向的是官方启动器的平台进程，不是游戏本体（Endfield.exe 缺失）。' +
+                '请在这个服务器上点「重建运行时」，或到服务器设置里把路径指到 Endfield.exe。',
+            };
           }
         }
       }
@@ -9804,17 +10902,18 @@ function musicLoginWindow(target) {
 
   ipcMain.handle('app:relaunch-admin', async () => {
     if (!app.isPackaged) return { ok: false, error: '开发模式下请直接用管理员终端运行' };
-    try {
-      // 等当前实例退干净再提权启动，否则新实例抢不到单实例锁会直接退出（表现为「没反应」）
-      spawnElevatedSelf(1500);
-      setTimeout(() => {
-        quitting = true;
-        app.quit();
-      }, 400);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
+    if (currentElevation()) return { ok: true, already: true };
+    /*
+     * 必须走 relaunchElevated()：它确认提权脚本进程真的起来了才退当前实例。
+     * 以前这里直接 spawn + app.quit()——powershell 被安全软件拦掉时脚本没跑、
+     * 老实例已经退了，用户看到的就是「点了重启，启动器消失，权限还是普通」，
+     * 也就是「管理员权限功能根本无效」。
+     */
+    if (relaunchElevated()) return { ok: true };
+    return {
+      ok: false,
+      error: '无法调度提权重启（PowerShell 可能被安全软件拦截）。请右键启动器选「以管理员身份运行」',
+    };
   });
 
   ipcMain.handle('app:quit', () => {
@@ -11604,6 +12703,8 @@ app.whenReady().then(async () => {
   await store.saveNow();
   if (ensureAllServers()) await store.saveNow();
   await detectBuiltins(true);
+  // 崩坏3 卡片封面自愈：占位 SVG → 已缓存的官方主视觉（没有官方图就保持原样）
+  if (promoteBh3Cover()) await store.saveNow();
 
   downloads = new DownloadManager({
     store,
@@ -11621,9 +12722,16 @@ app.whenReady().then(async () => {
   ipc?.primeGraphicsCache?.();
   ensureNevernessCover();
   ensureAnimatedStartBackgrounds();
+  // 去字缓存修补：启动后 2.5 秒跑，不挡首帧（单张约 0.9s，最多三张）
+  setTimeout(repairErasedStartCovers, 2500);
   startNoticeAutoSync();
   setTimeout(checkEndfieldUpdateNotice, 8000);
   setTimeout(autoUpdateEndfieldPacks, 12000);
+  // 游戏更新自动检测：启动后 18 秒查一轮，之后每 30 分钟补查。
+  // 之前这个函数只有定义没有调用，是「官方更新了我们却一直不显示」的直接原因。
+  // autoRefreshPredownloadStatus 内部有 2 小时 TTL，不会把官方接口当轮询打。
+  setTimeout(() => autoRefreshPredownloadStatus().catch(() => {}), 18000);
+  setInterval(() => autoRefreshPredownloadStatus().catch(() => {}), 30 * 60 * 1000);
   setTimeout(startEndfieldGachaWatcher, 5000);
   // 自更新：开机后 15 秒查一次，之后每 6 小时一次（老版本机器靠这个收到提示）
   settlePreviousUpdate();
@@ -11785,14 +12893,17 @@ app.whenReady().then(async () => {
       }
     }, 3500);
   }
-  if (
-    process.env.HX_CAPTURE !== '1' &&
-    store.data.settings.autoSyncOfficial !== false &&
-    Date.now() - (store.data.lastOfficialSync || 0) > 6 * 60 * 60 * 1000
-  ) {
-    setTimeout(() => {
-      syncAllOfficial().catch((error) => console.warn('自动同步官网失败：', error.message));
-    }, 4200);
+  // 官网自动同步：每 6 小时扫一轮。
+  // 注意：轮询定时器必须「无条件注册」，不能和「距上次同步是否超过 6h」的判断写进同一个 if。
+  // 旧代码把 setInterval 也塞在那个判断里，导致「6h 内重新打开启动器」时定时器根本没建起来，
+  // 于是一整天都不自动同步——用户说的「重开也不获取」就是这个 bug。
+  // 现在：定时器常驻；首轮是否立即跑，才用 6h 阈值去抖（避免频繁开关启动器反复打官网）。
+  if (process.env.HX_CAPTURE !== '1' && store.data.settings.autoSyncOfficial !== false) {
+    if (Date.now() - (store.data.lastOfficialSync || 0) > 6 * 60 * 60 * 1000) {
+      setTimeout(() => {
+        syncAllOfficial().catch((error) => console.warn('自动同步官网失败：', error.message));
+      }, 4200);
+    }
     setInterval(() => {
       if (store?.data?.settings?.autoSyncOfficial !== false) {
         syncAllOfficial().catch((error) => console.warn('自动同步官网失败：', error.message));

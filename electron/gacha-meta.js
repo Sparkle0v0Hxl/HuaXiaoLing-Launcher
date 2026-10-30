@@ -112,6 +112,31 @@ async function fetchEndfieldCharacters() {
  * 用 endfield-cat 项目的元数据仓库补：weapon.json 给名称，
  * 图标按约定放 images/weapon/icon/<itemid>.png，直接拼 URL 即可。
  */
+/**
+ * 社区仓库漏掉的新武器：图标取自森空岛官方 WIKI 武器图鉴
+ * （https://wiki.skland.com/endfield/catalog?mainTypeId=1&subTypeId=2）。
+ * 社区仓库更新有滞后，官方 WIKI 上架即全；这里按 itemid 补进去，
+ * 且只补仓库里没有的 id —— 等仓库跟上后会自然被覆盖，不会互相打架。
+ * 以后再有新武器，照这个格式追加一行即可（图标地址在 WIKI 卡片上右键复制）。
+ */
+const ENDFIELD_WIKI_WEAPONS = {
+  wpn_lance_0014: {
+    name: '曜夜的首演',
+    icon: 'https://bbs.hycdn.cn/image/common/20260808/4634516/6a772fb96febdf01b964b1e2_f1525633.png',
+    rarity: 6,
+  },
+  wpn_claym_0018: {
+    name: '玉中身',
+    icon: 'https://bbs.hycdn.cn/image/common/20261015/4826366/6ad03970b47fff85b0ef843e_13673ac9.png',
+    rarity: 6,
+  },
+  wpn_funnel_0019: {
+    name: '寒夜幽影',
+    icon: 'https://bbs.hycdn.cn/image/common/20260902/4826366/6a977074c40accef2ad54999_f1525633.png',
+    rarity: 6,
+  },
+};
+
 async function fetchEndfieldWeapons() {
   const list = await withRetry(
     () => fetchJson(`${ENDFIELD_ITEM_CDN}/locale/zh-CN/weapon.json`),
@@ -126,6 +151,10 @@ async function fetchEndfieldWeapons() {
       icon: `${ENDFIELD_ITEM_CDN}/images/weapon/icon/${id}.png`,
       rarity: Number(item.rarity) || 0,
     };
+  }
+  // 官方 WIKI 兜底：社区仓库还没收录的新武器用官方图标补上
+  for (const [id, item] of Object.entries(ENDFIELD_WIKI_WEAPONS)) {
+    if (!weapons[id]) weapons[id] = { ...item };
   }
   if (!Object.keys(weapons).length) throw new Error('终末地武器表没有解析到数据');
   return weapons;

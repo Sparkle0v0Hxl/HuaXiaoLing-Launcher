@@ -82,6 +82,8 @@ function platformFromUrl(url) {
   })();
   if (!host) return null;
   if (host.endsWith('bilibili.com')) return 'bilibili';
+  // B 站分享出来的短链（b23.tv / bili2233.cn），展开后才认得出房间号
+  if (host.endsWith('b23.tv') || host.endsWith('bili2233.cn')) return 'bilibili';
   if (host.endsWith('douyu.com')) return 'douyu';
   if (host.endsWith('huya.com')) return 'huya';
   if (host.endsWith('douyin.com')) return 'douyin';
@@ -120,11 +122,38 @@ const PLATFORM_LABELS = {
 /* 各平台房间信息                                                      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * b23.tv / bili2233.cn 短链：先展开成真正的直播间地址。
+ * 有的短链直接 302 到 live.bilibili.com，有的返回一个带 JS 跳转的页面，
+ * 两种情况都处理——先看 response.url，不行再从页面里抠房间号。
+ */
+async function expandBiliShortLink(text) {
+  if (!/b23\.(tv|live)|bili2233\.cn/i.test(text)) return text;
+  const { signal, done } = withTimeout(15000);
+  try {
+    const response = await fetch(text, {
+      headers: { 'user-agent': BROWSER_UA, accept: 'text/html' },
+      redirect: 'follow',
+      signal,
+    });
+    if (/live\.bilibili\.com\/\d+/i.test(response.url || '')) return response.url;
+    const html = await response.text().catch(() => '');
+    const hit = html.match(/live\.bilibili\.com\/(?:h5\/)?(\d+)/i) || html.match(/room_id["':=\s]+(\d+)/i);
+    if (hit) return `https://live.bilibili.com/${hit[1]}`;
+    return text;
+  } catch {
+    return text;
+  } finally {
+    done();
+  }
+}
+
 async function resolveBilibili(text) {
+  const expanded = await expandBiliShortLink(text);
   const match =
-    text.match(/live\.bilibili\.com\/(?:h5\/)?(\d+)/i) ||
-    text.match(/room[_/]?id[=:]?(\d+)/i) ||
-    text.match(/^(\d+)$/);
+    expanded.match(/live\.bilibili\.com\/(?:h5\/)?(\d+)/i) ||
+    expanded.match(/room[_/]?id[=:]?(\d+)/i) ||
+    expanded.match(/^(\d+)$/);
   const roomId = match?.[1];
   if (!roomId) throw new Error('没有识别出 B 站直播间号');
   const json = await getJson(`https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${roomId}`);

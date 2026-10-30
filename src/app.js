@@ -37,6 +37,12 @@ const UI_SCALE_STEPS = [80, 90, 100, 110, 120, 130];
 const REPO_URL = 'https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher';
 const REPO_RELEASES_URL = `${REPO_URL}/releases`;
 /**
+ * 国内镜像更新源（Gitee 上只放一个 latest.json，几 KB）。
+ * 老版本客户端不认清单里的 mirrors 字段、只认 url，裸连 GitHub 下不动包；
+ * 这份清单里的下载地址已经换成镜像前缀，填进「更新源」就能发现 + 下载一次搞定。
+ */
+const GITEE_MANIFEST_URL = 'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json';
+/**
  * 设置页「项目主页 / 问题反馈」这两个入口的地址。
  *
  * 反馈走仓库自带的 issue 表单（`.github/ISSUE_TEMPLATE/bug_report.yml`），
@@ -92,6 +98,8 @@ const state = {
   navToolsOpen: false,
   // 启动页左上「导航」浮层的开合状态（不落盘；开合只切 class 不重绘，视频不中断）
   startNavOpen: false,
+  // 这次展开是不是把窗口往左外扩了（收起时要按外扩量缩回去）
+  startNavExpanded: false,
   hoyolab: null,
   // 鹰角 / 完美世界 / 库街区等通行证的登录态，key 是 provider id
   passport: null,
@@ -148,6 +156,8 @@ const state = {
     percent: 0,
   },
   nteCapture: { running: false, phase: '', message: '' },
+  // 启动页「更新游戏」按钮的进行中状态：{ gameId, jobId, label }
+  gameUpdate: null,
   nteAutoPage: localStorage.getItem('vela:nte-auto-page') !== '0',
   songs: [],
   songIndex: 0,
@@ -274,6 +284,8 @@ const state = {
    */
   /* 工具页左侧分组导航当前停在哪个分类（默认停在「按游戏查看」） */
   toolsTab: 'games',
+  /* 工具页右侧能力面板当前显示哪个游戏（key），空则用列表第一个 */
+  toolsGame: '',
   /*
    * 二级页「返回工具页」条的来路标记。
    * 从工具页点功能入口进 record / gacha 等页时置真，目标页据此渲染返回条；
@@ -320,6 +332,18 @@ const state = {
  */
 const liveRuntimes = new Map();
 
+/*
+ * 弹幕 WebSocket 已迁到主进程：渲染层只负责发 connect/disconnect、收 live:danmu-event。
+ * 这里统一订阅主进程转发过来的弹幕事件，按 bilibili 房间号路由到对应卡片，更新 UI。
+ * 主进程持有长连接（Node 栈，实测 95 秒以上稳定），渲染层约 70 秒被本机网络层掐断的
+ * 问题在这一层根治，无需渲染层再做任何 WebSocket 建连 / 重连。
+ */
+try {
+  api.live.onDanmuEvent(handleBiliDanmuEvent);
+} catch (error) {
+  /* 旧版主进程没暴露该桥时静默降级，不影响其它功能 */
+}
+
 try {
   const savedSongs = JSON.parse(localStorage.getItem('vela:songs') || '[]');
   if (Array.isArray(savedSongs)) state.songs = savedSongs;
@@ -329,11 +353,12 @@ try {
 
 const PAGE_META = {
   home: { label: '主页', eyebrow: 'OVERVIEW' },
-  start: { label: '开始', eyebrow: 'START' },
+  // 侧栏导航叫「启动页」，标题栏 / 窗口标题跟着用它，别一处叫开始一处叫启动页
+  start: { label: '启动页', eyebrow: 'START' },
   library: { label: '游戏库', eyebrow: 'LIBRARY' },
   gacha: { label: '抽卡', eyebrow: 'WISHES' },
   downloads: { label: '下载', eyebrow: 'DOWNLOADS' },
-  song: { label: '点歌台', eyebrow: 'KARAOKE' },
+  song: { label: '音乐', eyebrow: 'MUSIC' },
   news: { label: '动态', eyebrow: 'JOURNAL' },
   tools: { label: '工具', eyebrow: 'TOOLBOX' },
   record: { label: '战绩', eyebrow: 'RECORD' },
@@ -397,6 +422,11 @@ function icon(name, cls = '') {
 }
 
 let uiSoundContext = null;
+let uiNoiseBuffer = null;
+/* 连点节流：同一种音色 45ms 内只响一次，任意两种音色间隔不足 26ms 时压掉后者，
+ * 否则快速点列表会叠成一片电流声。 */
+const uiSoundStamp = Object.create(null);
+let uiSoundAnyStamp = 0;
 
 function saveSoundSettings() {
   try {
@@ -947,7 +977,11 @@ function disableAudioFxOnError() {
   if (audioFxGraph) buildAudioFxChain(audioFxGraph, 'off', 0);
   document.body.dataset.audioFx = 'off';
   reloadSongForFx();
-  toast('当前音源不支持音效处理，已自动切回原声', 'info');
+  /*
+   * 不弹提示：这是「这次播放的地址读不了跨域」，属于自动处理的内部决定，
+   * 用户听到的就是原声，没有需要他做判断的事。留在控制台里方便排查。
+   */
+  console.info('[音效] 当前音源不支持跨域读取，已自动切回原声');
 }
 
 /**
@@ -1290,6 +1324,26 @@ function startReleaseNotesWatch() {
   window.setTimeout(tick, 3000);
 }
 
+/** 把字节数说成人看得懂的大小，进度条上要显示「下了多少 / 一共多少」。 */
+function formatMB(bytes) {
+  const value = Number(bytes) || 0;
+  if (value <= 0) return '';
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** 进度条下面那行字：优先用主进程给的阶段说明，否则拼出百分比 + 已下/总量。 */
+function updateProgressText(percent, label) {
+  if (label) return label;
+  const update = state.update || {};
+  const done = formatMB(update.received);
+  const total = formatMB(update.total);
+  if (Number(percent) >= 100) return '下载完成，正在校验并覆盖文件…';
+  if (done && total) return `正在下载 ${percent}% · ${done} / ${total}`;
+  if (done) return `正在下载 ${percent}% · 已下 ${done}`;
+  return `正在下载 ${percent}%`;
+}
+
 function setUpdateProgress(percent, label) {
   const wrap = document.querySelector('#update-modal-progress');
   if (!wrap) return;
@@ -1298,7 +1352,7 @@ function setUpdateProgress(percent, label) {
   const bar = wrap.querySelector('.update-progress-bar span');
   const text = wrap.querySelector('small');
   if (bar) bar.style.width = `${value}%`;
-  if (text) text.textContent = label || (value >= 100 ? '正在解压并覆盖文件…' : `正在下载 ${value}%`);
+  if (text) text.textContent = updateProgressText(value, label);
 }
 
 function openAudioFxModal() {
@@ -1314,7 +1368,7 @@ function openAudioFxModal() {
     <div class="modal-backdrop" data-backdrop>
       <div class="modal narrow" role="dialog" aria-modal="true">
         <div class="modal-head">
-          <div><h2>音效</h2><p>给点歌台加上空间感、耳机定位或频段增强，随歌曲实时生效。</p></div>
+          <div><h2>音效</h2><p>给音乐页加上空间感、耳机定位或频段增强，随歌曲实时生效。</p></div>
           <button class="modal-close" data-close title="关闭">${icon('x')}</button>
         </div>
         <div class="modal-body">
@@ -1326,7 +1380,7 @@ function openAudioFxModal() {
               <span class="volume-value" id="fx-intensity-value">${state.audioFx.intensity}%</span>
             </div>
           </div>
-          <p class="hint">音效需要浏览器支持 Web Audio。若某些直链不允许跨域读取，播放会没有声音，此时会自动切回原声并提示。</p>
+          <p class="hint">音效需要浏览器支持 Web Audio。若某些直链不允许跨域读取，播放会没有声音，此时会自动切回原声（不再弹提示，免得打断听歌）。</p>
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" data-close>完成</button>
@@ -1345,47 +1399,147 @@ function openAudioFxModal() {
   }
 }
 
+/* ---------- 界面音效：现场合成，不带音频文件 ----------
+ * 两层结构，缺一层就会「电子味」或者「没手感」：
+ *   · 噪声瞬态 tick（8~26ms、带通）提供「哒」的接触感，纯正弦永远做不出这个质感；
+ *   · 音体 tone（正弦 / 三角、短滑音）提供音高与方向，区分「轻点」「确认」「警告」。
+ * 音量走 pow(x,1.4) 感知曲线：线性映射时 35% 听感不足 20%，用户会以为音效坏了。
+ */
+function uiSoundNoise(context) {
+  if (uiNoiseBuffer && uiNoiseBuffer.sampleRate === context.sampleRate) return uiNoiseBuffer;
+  const length = Math.max(1, Math.floor(context.sampleRate * 0.12));
+  const buffer = context.createBuffer(1, length, context.sampleRate);
+  const data = buffer.getChannelData(0);
+  // 固定种子的伪随机：每次启动噪声频谱一致，不会「这次脆、下次闷」
+  let seed = 22695477;
+  for (let i = 0; i < length; i += 1) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    data[i] = seed / 0x3fffffff - 1;
+  }
+  uiNoiseBuffer = buffer;
+  return buffer;
+}
+
 function playUiSound(kind = 'click', force = false) {
   const settings = state.sound;
-  if (!settings.enabled || (!settings[kind] && !force)) return;
+  if (!settings.enabled) return;
+  // 三个开关管四类音：tap / primary / toggle 归「点击音」，error 归「通知音」
+  const gate = kind === 'notify' || kind === 'error' ? 'notify' : kind === 'launch' ? 'launch' : 'click';
+  if (!settings[gate] && !force) return;
+  if (force) {
+    // 预览按钮连点也别叠成电流声
+    const stamp = performance.now();
+    if (stamp - (uiSoundStamp[kind] || 0) < 140) return;
+    uiSoundStamp[kind] = stamp;
+  }
   const volume = Math.max(0, Math.min(100, Number(settings.volume) || 0)) / 100;
   if (volume <= 0) return;
+  if (!force && !uiSoundBudget(kind)) return;
+  const amp = Math.pow(volume, 1.4);
   try {
     const AudioCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtor) return;
     if (!uiSoundContext) uiSoundContext = new AudioCtor();
     if (uiSoundContext.state === 'suspended') uiSoundContext.resume().catch(() => {});
     const context = uiSoundContext;
-    const now = context.currentTime + 0.005;
-    const tone = (frequency, start, duration, endFrequency, level, type = 'sine') => {
+    const now = context.currentTime + 0.004;
+
+    const tone = (frequency, delay, duration, endFrequency, gain, type = 'sine', attack = 0.006) => {
+      const start = now + delay;
       const oscillator = context.createOscillator();
       const envelope = context.createGain();
       oscillator.type = type;
       oscillator.frequency.setValueAtTime(frequency, start);
-      if (endFrequency) {
+      if (endFrequency && endFrequency !== frequency) {
         oscillator.frequency.exponentialRampToValueAtTime(endFrequency, start + duration);
       }
       envelope.gain.setValueAtTime(0.0001, start);
-      envelope.gain.exponentialRampToValueAtTime(level, start + 0.012);
+      envelope.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain * amp), start + Math.min(attack, duration * 0.4));
       envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
       oscillator.connect(envelope);
       envelope.connect(context.destination);
       oscillator.start(start);
       oscillator.stop(start + duration + 0.02);
     };
-    if (kind === 'notify') {
-      tone(659.25, now, 0.2, 783.99, 0.014 + volume * 0.055, 'sine');
-      tone(987.77, now + 0.1, 0.24, 880, 0.01 + volume * 0.04, 'sine');
-    } else if (kind === 'launch') {
-      tone(261.63, now, 0.3, 659.25, 0.012 + volume * 0.045, 'triangle');
-      tone(523.25, now + 0.1, 0.36, 1046.5, 0.008 + volume * 0.035, 'sine');
-    } else {
-      tone(1046.5, now, 0.055, 740, 0.01 + volume * 0.035, 'sine');
+
+    const tick = (frequency, delay, duration, gain, q = 1.6) => {
+      const start = now + delay;
+      const source = context.createBufferSource();
+      source.buffer = uiSoundNoise(context);
+      const filter = context.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(frequency, start);
+      filter.Q.setValueAtTime(q, start);
+      const envelope = context.createGain();
+      envelope.gain.setValueAtTime(0.0001, start);
+      envelope.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain * amp), start + Math.min(0.004, duration * 0.35));
+      envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      source.connect(filter);
+      filter.connect(envelope);
+      envelope.connect(context.destination);
+      source.start(start);
+      source.stop(start + duration + 0.01);
+    };
+
+    switch (kind) {
+      case 'tap':
+        // 导航 / 图标按钮：只留一点点接触感，点多了不烦
+        tick(3200, 0, 0.014, 0.075);
+        tone(1560, 0, 0.04, 1320, 0.03);
+        break;
+      case 'primary':
+        // 主行动（开始游戏 / 下载 / 确认）：更厚，带一点下沉
+        tick(1500, 0, 0.026, 0.12);
+        tone(520, 0, 0.12, 300, 0.055, 'triangle');
+        tone(1040, 0.018, 0.05, 1180, 0.026);
+        break;
+      case 'toggle':
+        // 开关：短促上扬，闭眼也能听出是「拨过去」而不是「按一下」
+        tick(3600, 0, 0.012, 0.085);
+        tone(980, 0.004, 0.05, 1420, 0.035);
+        break;
+      case 'error':
+        tick(520, 0, 0.03, 0.1);
+        tone(300, 0, 0.17, 186, 0.05, 'triangle');
+        break;
+      case 'notify':
+        tone(659.25, 0, 0.2, 783.99, 0.06, 'sine', 0.012);
+        tone(987.77, 0.1, 0.24, 880, 0.042, 'sine', 0.012);
+        break;
+      case 'launch':
+        tone(261.63, 0, 0.3, 659.25, 0.055, 'triangle', 0.02);
+        tone(523.25, 0.1, 0.36, 1046.5, 0.036, 'sine', 0.016);
+        tone(130.81, 0, 0.32, 196, 0.03, 'sine', 0.03);
+        break;
+      default:
+        // click：普通按钮，短、干、带明确接触点
+        tick(2600, 0, 0.022, 0.095);
+        tone(1120, 0, 0.055, 760, 0.045);
     }
   } catch {
     /* audio feedback is optional */
   }
 }
+
+/* 连点节流：正常点击走 45ms 同音色 / 26ms 全音色两道闸 */
+function uiSoundBudget(kind) {
+  const stamp = performance.now();
+  if (stamp - (uiSoundStamp[kind] || 0) < 45) return false;
+  if (stamp - uiSoundAnyStamp < 26) return false;
+  uiSoundStamp[kind] = stamp;
+  uiSoundAnyStamp = stamp;
+  return true;
+}
+
+/* 按控件角色挑音色：主按钮、导航、开关不该是同一个「哒」 */
+function uiSoundKindFor(element) {
+  if (!element) return 'click';
+  if (element.closest('.switch')) return 'toggle';
+  if (element.matches('.btn-primary, .btn-danger')) return 'primary';
+  if (element.closest('.nav-item, [data-nav], .mini-btn, .chrome-btn, .segmented, .chip')) return 'tap';
+  return 'click';
+}
+
 
 function cssUrl(url) {
   return `url("${String(url).replace(/["\\\n\r]/g, (ch) => encodeURIComponent(ch))}")`;
@@ -1667,6 +1821,7 @@ function applySettings() {
   document.body.classList.toggle('sidebar-collapsed', settings.sidebarCollapsed === true);
   document.body.classList.toggle('charms-on', settings.charms !== false);
   document.body.classList.toggle('charbg-on', settings.charBg !== false);
+  document.body.classList.toggle('no-sidebar-char', settings.sidebarChar === false);
   applyBackdrop(settings);
   document.title = `花筱灵启动器 · ${PAGE_META[state.route]?.label || '主页'}`;
 }
@@ -1749,50 +1904,196 @@ function updateChrome() {
 }
 
 /*
- * 启动页唤出侧栏：优先把窗口整体向左外扩出一块放侧栏，画面尺寸/位置都不变；
- * 扩不出去（全屏 / 最大化 / 已经贴着显示器左边缘）才退化成浮层（挂 start-nav-overlay）。
- * 侧栏宽度直接读 CSS 变量，收缩态是 72px 图标条、展开态是 238px，不用写死。
+ * 启动页唤出侧栏：抽屉不自己动，靠窗口往左「长」出来。
+ *
+ *   · 外扩（默认，普通窗口）：窗口一次性往左张开 push 宽，画面钉死在窗口右边缘，
+ *     在屏幕上一像素都不动；抽屉就在新露出来的那一条里显形。
+ *   · 内推（全屏 / 最大化 / 贴着屏幕左边缘没空间）：没有窗口可长，只能把画面
+ *     往右推、右侧裁掉，抽屉压在左边。全屏没有窗口可用，只能是这一种。
+ *
+ * 外扩为什么不再逐帧推窗口：窗口每变一次尺寸，系统都会把上一帧位图按窗口左上角
+ * 再贴一次，画面在屏幕上就跟着窗口左沿抖一段 —— 一帧几像素、连起来就是「背景
+ * 跟着一起过去」。这是窗口层的账，画面这边怎么钉都追不上。所以窗口一步到位，
+ * 动效交给抽屉自己（见 styles.css 的 startNavDrawerIn）。
  */
-function startNavSidebarWidth() {
-  const element = document.querySelector('.sidebar');
-  if (!element) return 72;
-  const parsed = Number.parseFloat(getComputedStyle(element).getPropertyValue('--sidebar-w'));
-  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 72;
+const START_NAV_MS = 180;
+let startNavCloseTimer = 0;
+
+/** 动画期间的守卫：这段时间里任何「跟着窗口尺寸重算」的活都可以先跳过。 */
+function startNavAnimating() {
+  return document.body.classList.contains('start-nav-anim');
 }
 
-async function setStartNavOpen(open) {
-  state.startNavOpen = open;
-  document.body.classList.toggle('start-nav-open', open);
-  let overlay = false;
-  if (!open) {
-    document.body.classList.remove('start-nav-overlay');
-    try {
-      await api.expandWindowLeft({ expand: false });
-    } catch (error) {
-      /* 窗口还原失败不影响界面收起 */
+/** 动画收尾后补一次全局 resync，把补间期间跳过的尺寸相关布局补上。 */
+function resyncAfterStartNav() {
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+  });
+}
+
+/*
+ * 展开方向要看窗口左边还剩多少空间，问主进程是一趟 IPC 往返。窗口不动的时候
+ * 这个值恒定，所以缓存住：点下去立刻开跑，不用先站着等一次往返 —— 那 10~20ms
+ * 的空档就是「点了没反应」的来源。窗口被人挪过或超过 4s 就当过期重问。
+ */
+const startNavRoomCache = { room: -1, at: 0 };
+async function readStartNavRoom(force = false) {
+  const age = performance.now() - startNavRoomCache.at;
+  if (!force && startNavRoomCache.room >= 0 && age < 4000) return startNavRoomCache.room;
+  try {
+    const info = await api.startNavRoom();
+    const room = Math.max(0, Number(info?.room) || 0);
+    startNavRoomCache.room = room;
+    startNavRoomCache.at = performance.now();
+    return room;
+  } catch {
+    return startNavRoomCache.room >= 0 ? startNavRoomCache.room : 0;
+  }
+}
+function warmStartNavRoom() {
+  readStartNavRoom(true).catch(() => {});
+}
+
+// 指针一沾到菜单键就先问起来，等真正点下去时缓存已经是热的
+document.addEventListener(
+  'pointerenter',
+  (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest('[data-action="toggle-start-nav"]')) {
+      warmStartNavRoom();
     }
+  },
+  true
+);
+
+/** 把窗口左沿一步挪到「基准 - delta」，画面那边靠 CSS 钉住右沿，两边不需要同步。 */
+function applyStartNavWidth(delta) {
+  document.documentElement.style.setProperty('--start-nav-push', `${Math.round(delta)}px`);
+  Promise.resolve(api.startNavResize(Math.round(delta))).catch(() => {});
+}
+
+async function setStartNavOpen(open, options = {}) {
+  if (state.startNavOpen === open) return;
+  state.startNavOpen = open;
+  const bar = document.querySelector('.sidebar');
+  const measured = bar ? Math.round(bar.getBoundingClientRect().width) : 0;
+  // 展开态 220、收起态 72（图标条）：量出来当补间终点，画面补偿量、窗口外扩量共用它
+  const push = measured > 0 ? measured : 220;
+  const instant = options.instant === true;
+
+  if (open) {
+    // 正在退场（120ms）时又被点开：把那条收尾砍掉，抽屉原样留在原位
+    if (startNavCloseTimer) {
+      clearTimeout(startNavCloseTimer);
+      startNavCloseTimer = 0;
+    }
+    document.body.classList.remove('start-nav-closing');
+    // 命中缓存就直接开跑，同时后台把缓存刷成最新；没命中才等这一趟
+    let room = startNavRoomCache.room;
+    if (room < 0 || performance.now() - startNavRoomCache.at >= 4000) {
+      room = await readStartNavRoom(true);
+    } else {
+      warmStartNavRoom();
+    }
+    // 等这一下的时间里用户可能又点回去了：那就什么都别做
+    if (state.startNavOpen !== true) return;
+    const outward = room >= push;
+    const wasOutward = document.body.classList.contains('start-nav-outward');
+    state.startNavExpanded = outward;
+    /*
+     * 外扩的画面基准宽必须在窗口还没动、也还没挂 start-nav-open 的时候量：
+     * 一旦挂上类，.start-screen 就 fixed 到右边缘了，这时量到的是「已经被撑开的
+     * 视口」。中途被打断重开时也不能重量 —— 那会儿窗口本来就不是基准宽。
+     */
+    if (outward && !wasOutward) {
+      /*
+       * 基准宽取画面自己的宽度，不用 clientWidth：窗口带竖向滚动条时 clientWidth
+       * 会少掉那条的宽度，画面会平白窄十几像素（看着就是「画面缩了一下」）。
+       */
+      const screenEl = document.querySelector('.start-screen');
+      const baseW = Math.round(
+        screenEl ? screenEl.getBoundingClientRect().width : document.documentElement.clientWidth
+      );
+      document.documentElement.style.setProperty('--start-nav-base-w', `${baseW}px`);
+    }
+    document.body.classList.toggle('start-nav-outward', outward);
+    document.body.classList.add('start-nav-open');
+    if (!outward) {
+      /*
+       * 内推：全屏 / 最大化 / 窗口贴着屏幕左边缘，没有地方让窗口长，只能把画面
+       * 整体往右推、右边被裁掉，侧栏压在左边。
+       * 这里以前直接 return，--start-nav-push 一直是 0 —— 侧栏虽然置为可见，
+       * 却被纹丝不动的画面整个盖住，全屏下点完只看到「什么都没发生」。
+       */
+      document.documentElement.style.setProperty('--start-nav-push', `${push}px`);
+      setTimeout(resyncAfterStartNav, START_NAV_MS + 40);
+      return;
+    }
+    /*
+     * 外扩：窗口一步张开到位，画面在屏幕上不动。
+     *
+     * 以前这里是一帧一帧把窗口左沿往左挪、宽度跟着长，看着像把抽屉「推」出去；
+     * 但窗口每变一次尺寸，系统都会把上一帧位图按窗口左上角再贴一次，画面就跟着
+     * 窗口左沿抖一段（一帧几像素，连起来就是「背景跟着一起过去」）。这是窗口层
+     * 面的事，画面怎么用 CSS 钉右沿都追不上。现在窗口只动一次，多出来的那条左侧
+     * 由抽屉自己滑出来接住（styles.css 的 startNavDrawerIn）。
+     */
+    /*
+     * 先把抽屉摆好，再让窗口长出去。
+     * 顺序反过来的话会有一两帧「窗口已经宽了、左边那条还是空的」—— 那正是用户
+     * 说的「闪一下」。读一次 offsetWidth 把刚加的类强制落地（同步重排），
+     * 保证主进程 setBounds 生效时，抽屉已经画在新位置上。
+     */
+    void document.body.offsetWidth;
+    applyStartNavWidth(push);
+    // 窗口尺寸变了：小播放器那类按矩形定位的东西要重新量一次
+    setTimeout(resyncAfterStartNav, 80);
     return;
   }
-  if (document.body.classList.contains('is-fullscreen')) {
-    overlay = true;
-  } else {
-    let result = null;
-    try {
-      result = await api.expandWindowLeft({ expand: true, width: startNavSidebarWidth() });
-    } catch (error) {
-      result = null;
-    }
-    overlay = !result || !result.ok;
+
+  const finish = () => {
+    // 中途又被点开了：窗口和画面补偿都留着，别在这一刻收
+    if (state.startNavOpen) return;
+    state.startNavExpanded = false;
+    // 先归零再摘类：摘类的一瞬间 translateX(var(--push)) 会立刻生效，顺序反了就跳一下
+    document.documentElement.style.setProperty('--start-nav-push', '0px');
+    document.documentElement.style.removeProperty('--start-nav-base-w');
+    document.body.classList.remove(
+      'start-nav-outward',
+      'start-nav-open',
+      'start-nav-anim',
+      'start-nav-closing'
+    );
+    Promise.resolve(api.startNavCollapse()).catch(() => {});
+  };
+
+  if (!state.startNavExpanded) {
+    // 内推模式：窗口没动过，把展开量归零，画面自己滑回去（transform 是常驻的）
+    document.documentElement.style.setProperty('--start-nav-push', '0px');
+    document.body.classList.remove('start-nav-open', 'start-nav-outward');
+    setTimeout(resyncAfterStartNav, START_NAV_MS + 40);
+    return;
   }
-  document.body.classList.toggle('start-nav-overlay', overlay);
+  if (instant) {
+    finish();
+    resyncAfterStartNav();
+    return;
+  }
+  // 直接一步收回：抽屉不做退场动画，窗口缩回的同时那块区域一起消失，
+  // 画面钉在右沿一帧都不动。以前是「先退 120ms 再收窗口」，那段时间窗口还宽着、
+  // 左边空出一条，看上去就是闪了一下。
+  finish();
+  resyncAfterStartNav();
 }
 
 function navigate(route, options = {}) {
   if (route === 'library') route = 'home';
   if (!PAGE_META[route]) route = 'home';
-  // 启动页唤出的侧栏开着时跳走：顺手收回
+  // 启动页唤出的侧栏开着时跳走：顺手收回。
+  // 离开启动页时必须「立刻」收：画面马上要换成别的页，等 0.36s 动画的话，
+  // 外层窗口还多着一条侧栏的宽度，新页面会先按窄画面画一帧再跳回来。
   if (state.startNavOpen) {
-    setStartNavOpen(false).catch(() => {});
+    setStartNavOpen(false, { instant: route !== 'start' }).catch(() => {});
   }
   const changed = route !== state.route;
   /*
@@ -2139,9 +2440,63 @@ function decorateCharacterMotifs() {
   });
 }
 
+/*
+ * 「点歌台点什么都跳回顶部」的根因：
+ * .view 上写了 scroll-behavior: smooth，render() 里 `dom.view.scrollTop = scroll`
+ * 因此变成一次平滑滚动动画而不是瞬间归位。下一次重绘读 scrollTop 时，动画
+ * 还没滚到位，读到的是中途的较小值，再设回去又矮一截——连续几次操作就逐级
+ * 衰减到 0，看起来就是"无论点啥都回到顶部"。
+ *
+ * 两条对策：
+ *   1. 恢复滚动时临时关掉 smooth，让它瞬间归位（下一帧还原 CSS 的设定）；
+ *      内容还没撑开时浏览器会把 scrollTop 钳到 0，所以下一帧再补一次。
+ *   2. 记住上一次"命令式"设进去的位置，下回重绘优先用它，而不是读实时值。
+ *      用户真的滚了（滚轮 / 按键 / 触摸 / 按滚动条）就以实时值为准。
+ */
+let appliedViewScroll = null;
+/*
+ * 点歌台外层滚动容器（.song-app-scroll）的位置记忆。
+ *
+ * 以前只在 preserveScroll 为真时保存/还原它，可点歌台里有太多重绘不带这个参数
+ * （主进程回推状态、入队、播放进度、封面加载…），每来一次列表就归零，
+ * 表现就是「点什么都会跳回顶部」。这里改成模块级记忆：只要还在同一个 tab，
+ * 不论哪次重绘都还原原位；换 tab / 离开页面才从头开始。
+ */
+let songScrollMemo = { tab: '', top: 0, left: 0 };
+for (const type of ['wheel', 'keydown', 'touchstart', 'mousedown']) {
+  dom.view.addEventListener(type, () => {
+    appliedViewScroll = null;
+  }, { passive: true });
+}
+
+function setViewScroll(top) {
+  const el = dom.view;
+  const prevBehavior = el.style.scrollBehavior;
+  el.style.scrollBehavior = 'auto';
+  el.scrollTop = top;
+  requestAnimationFrame(() => {
+    el.scrollTop = top;
+    el.style.scrollBehavior = prevBehavior;
+  });
+  appliedViewScroll = top;
+}
+
 function render(options = {}) {
   if (!state.games.length && !state.app.version) return;
   document.body.classList.toggle('start-mode', state.route === 'start');
+  /*
+   * 侧栏的滑入过渡要等启动页「站稳」之后才启用。
+   * 刚进启动页那一帧，侧栏从布局内的可见元素变成 fixed + 藏到左边缘外，
+   * 如果过渡已经生效，它会当着用户面从原地滑出去一次（进页面就看到侧栏往左跑）。
+   * 等一帧（样式已落地）再挂 start-nav-ready，之后唤出/收起才有动画。
+   */
+  if (state.route === 'start') {
+    requestAnimationFrame(() => {
+      if (state.route === 'start') document.body.classList.add('start-nav-ready');
+    });
+  } else {
+    document.body.classList.remove('start-nav-ready');
+  }
   // 二级功能页隐藏悬挂装饰：挂件固定在左上角，正好压住战绩/抽卡页第一行标签的字
   document.body.classList.toggle(
     'is-subpage',
@@ -2152,7 +2507,7 @@ function render(options = {}) {
   if (state.route !== 'start' && state.startServerMenu) state.startServerMenu = false;
   applySettings();
   updateChrome();
-  const scroll = dom.view.scrollTop;
+  const scroll = appliedViewScroll != null ? appliedViewScroll : dom.view.scrollTop;
   const view = {
     home: homeView,
     start: startView,
@@ -2186,6 +2541,21 @@ function render(options = {}) {
    * 是自己的滚动容器。整页 innerHTML 重绘后这些节点是全新的，scrollTop 归零，
    * 表现为"点收起后列表跳回顶部"。按选择器记忆各容器位置，重绘后原样还回去。
    */
+  // 点歌台真正的外层滚动容器是 .song-app-scroll（整块搜索结果 / 榜单 / 队列都在它里面滚），
+  // 它由下面单独的 songScrollMemo 负责，不受 preserveScroll 影响。
+  if (state.route === 'song') {
+    const songScrollEl = dom.view.querySelector('.song-app-scroll');
+    const songTabNow = String(state.songTab || 'queue');
+    if (songScrollEl && songScrollMemo.tab === songTabNow) {
+      songScrollMemo.top = songScrollEl.scrollTop;
+      songScrollMemo.left = songScrollEl.scrollLeft;
+    } else {
+      // 刚进页面 / 换了 tab：容器内容整体换掉，回到顶部才对
+      songScrollMemo = { tab: songTabNow, top: 0, left: 0 };
+    }
+  } else if (songScrollMemo.tab) {
+    songScrollMemo = { tab: '', top: 0, left: 0 };
+  }
   const INNER_SCROLL_SELECTORS = ['.song-list'];
   const innerScrollMemo = options.preserveScroll
     ? INNER_SCROLL_SELECTORS.map((sel) =>
@@ -2196,19 +2566,34 @@ function render(options = {}) {
   const prevArt = dom.view.querySelector(`.start-screen ${START_ART_LIVE}`);
   dom.view.innerHTML = view ? view() : homeView();
   handoffStartArt(prevArt);
+  // 点歌台外层滚动位置还原：任何一次重绘都保住用户当前看到的位置
+  if (state.route === 'song') {
+    const wantTop = options.resetSongScroll ? 0 : songScrollMemo.top;
+    const wantLeft = options.resetSongScroll ? 0 : songScrollMemo.left;
+    const songScrollEl = dom.view.querySelector('.song-app-scroll');
+    if (songScrollEl) {
+      songScrollEl.scrollTop = wantTop;
+      songScrollEl.scrollLeft = wantLeft;
+      // 列表里的封面图 / 异步内容可能晚一帧才把高度撑够，scrollTop 会先被钳小；
+      // 下一帧补一次，确保真的回到原位。
+      requestAnimationFrame(() => {
+        const again = dom.view.querySelector('.song-app-scroll');
+        if (again && Math.abs(again.scrollTop - wantTop) > 1) again.scrollTop = wantTop;
+      });
+    }
+  }
   if (options.preserveScroll) {
-    dom.view.scrollTop = scroll;
+    setViewScroll(scroll);
     INNER_SCROLL_SELECTORS.forEach((sel, i) => {
       const nodes = dom.view.querySelectorAll(sel);
       (innerScrollMemo[i] || []).forEach((memo, j) => {
         const el = nodes[j];
-        if (el) {
-          el.scrollTop = memo.top;
-          el.scrollLeft = memo.left;
-        }
+        if (!el) return;
+        el.scrollTop = memo.top;
+        el.scrollLeft = memo.left;
       });
     });
-  } else dom.view.scrollTop = 0;
+  } else setViewScroll(0);
   const nextLyricBox = dom.view.querySelector('#song-lyrics');
   if (nextLyricBox && lyricScroll) nextLyricBox.scrollTop = lyricScroll;
   bindView();
@@ -2506,9 +2891,19 @@ function startView() {
           <button class="start-game-nav is-prev" type="button" tabindex="-1" aria-label="往前翻游戏">${icon('chevron-down', 'start-games-nav-icon')}</button>
           <div class="start-game-list">
           ${ordered
-            .map(
-              (game) => `
-              <button class="start-game-thumb ${game.id === selected.id ? 'active' : ''}" data-action="start-select" data-id="${esc(game.id)}" title="${esc(game.name)}">
+            .map((game) => {
+              /*
+               * 状态点必须三种状态都给全：老代码只在「运行中 / 已安装」时挂 class，
+               * 新加进来还没配客户端的游戏就是一颗没样式的裸元素，看着像没画出来。
+               * 现在 运行中 / 已就绪 / 未配置 各有一档，鼠标悬停也能读到文字。
+               */
+              const dot = game.running
+                ? { cls: 'is-running', text: '运行中' }
+                : game.installed
+                  ? { cls: 'is-ready', text: '已就绪' }
+                  : { cls: 'is-missing', text: game.builtin ? '未检测到安装' : '未配置启动程序' };
+              return `
+              <button class="start-game-thumb ${game.id === selected.id ? 'active' : ''}" data-action="start-select" data-id="${esc(game.id)}" title="${esc(`${game.name} · ${dot.text}`)}">
                 <span class="start-game-media">
                   ${(game.startCoverUrl || game.coverUrl) ? `<img src="${esc(game.startCoverUrl || game.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : `<span class="start-game-initial">${esc(initial(game.name))}</span>`}
                 </span>
@@ -2516,9 +2911,9 @@ function startView() {
                   <strong>${esc(game.name)}</strong>
                   ${game.running ? '<small>运行中</small>' : ''}
                 </span>
-                <span class="start-game-state ${game.running ? 'is-running' : game.installed ? 'is-ready' : ''}"></span>
-              </button>`
-            )
+                <span class="start-game-state ${dot.cls}" aria-label="${esc(dot.text)}"></span>
+              </button>`;
+            })
             .join('')}
           </div>
           <button class="start-game-nav is-next" type="button" tabindex="-1" aria-label="往后翻游戏">${icon('chevron-down', 'start-games-nav-icon')}</button>
@@ -2530,15 +2925,9 @@ function startView() {
 }
 
 /**
- * 启动页的服务器面板：把「服务器」页的全部能力压进一行。
- *
- * - 点服务器胶囊 = 切换并启动
- * - 胶囊右侧小齿轮 = 只切换不启动
- * - 「管理」打开完整面板，重建 / 编辑 / 目录 / 清除 / 移除都在里面
- */
-/**
- * 启动页的服务器选择器：参考 Starward 的做法，只保留「当前服务器」一行，
- * 点开才展开完整列表；切换、检测、硬链接、管理都在弹层里完成。
+ * 启动页的服务器选择器：只保留「当前服务器」一行，点开才展开完整列表。
+ * 列表里点某个服 = 只切换（不启动游戏）；要进游戏用 dock 底部的「开始游戏」。
+ * 切换、检测、硬链接、管理都在弹层里完成。
  */
 /* 服务器面板是纯 DOM 开合，离开/切换时要主动把类名摘掉，否则下次进来是展开态。 */
 function closeStartServerMenu() {
@@ -2585,6 +2974,25 @@ function groupServersForDisplay(servers) {
  */
 function startDockDownloadActions(game) {
   if (game.installed) {
+    // 有官方更新时主按钮让位给「更新游戏」，更新完自动变回「开始游戏」。
+    // 状态来自 server.predownload（后台自动检测落盘），update = 本地落后正式版。
+    const updating = state.gameUpdate && state.gameUpdate.gameId === game.id;
+    if (updating) {
+      return `<button class="start-dock-play is-updating" disabled title="正在更新，完成后自动变回开始游戏">
+          ${icon('refresh', 'sm')}
+          <span class="start-dock-update-label">${esc(state.gameUpdate.label || '正在更新…')}</span>
+        </button>`;
+    }
+    const servers = game.servers || [];
+    const server = servers.find((item) => item.active) || servers[0];
+    const info = predownloadInfo(server);
+    if (info && info.state === 'update') {
+      const target = String(info.latestVersion || info.targetVersion || '');
+      return `<button class="start-dock-play is-update" data-action="start-update-game" data-id="${esc(game.id)}" title="${target ? `下载并更新到 ${esc(target)}` : '下载并应用官方更新'}">
+          ${icon('download')}
+          <span class="start-dock-update-label">更新游戏</span>
+        </button>`;
+    }
     return `<button class="start-dock-play" data-action="start-selected" data-id="${esc(game.id)}">
         ${icon('play')}
         <span>开始游戏</span>
@@ -2627,30 +3035,32 @@ function startServerPanel(game) {
     const file = server.path ? server.path.split(/[\\/]/).pop() : '';
     const tag = serverChannelTag(game, server);
     const block = serverBlockHint(server);
-    // 右边这枚小标签是「一眼看出状态」的那一眼：只有文件名和圆点还是要点进去才知道能不能用
-    const badge = server.active ? '当前' : server.incomplete ? '不完整' : server.exists ? '就绪' : '未配置';
+    // 右边这枚小标签是「一眼看出状态」的那一眼；就绪态不写字（点已经是绿的），
+    // 留白比「已就绪」三个字更干净，也能把宽度让给渠道和文件名
+    const badge = server.active ? '当前' : state_.label;
+    // 2.4.5：下拉行不再显示 exe 文件名——只有「没有文件」时才写短状态
+    // （未选 exe / 告警块），有文件的行只留 渠道 tag，行高更矮
+    const sub = file ? '' : (block ? block.short : '') || '';
+    // 没装好的行点下去不是「切过去」，而是问「怎么把它补上」（硬链接 / 选路径 / 扫描）
+    const usable = server.exists && !server.incomplete;
     return `
-        <button class="start-server-item ${server.active ? 'is-active' : ''} ${block ? 'is-broken sw-srv-unusable' : ''}"
+        <button class="start-server-item ${server.active ? 'is-active' : ''} ${
+          usable ? '' : 'is-unavailable'
+        } ${block ? 'is-broken sw-srv-unusable' : ''}"
           role="option" aria-selected="${server.active ? 'true' : 'false'}"
-          data-action="start-server-pick" data-game="${esc(game.id)}" data-server="${esc(server.id)}"
-          title="${esc(server.path || server.packPath || server.name)}">
+          data-action="${usable ? 'start-server-pick' : 'start-server-setup'}" data-game="${esc(game.id)}" data-server="${esc(server.id)}"
+          title="${esc(block ? `${server.name} · ${block.text}` : server.path || server.packPath || server.name)}">
           <span class="start-server-item-dot ${state_.cls}"></span>
           <span class="start-server-item-copy">
-            <strong>${esc(server.name)}</strong>
-            <small>${
-              // 渠道放在文件名前面：文件名会被截断，渠道不能跟着一起消失
+            <strong>${esc(server.name)}${
+              // 渠道跟在名字后面同一行：文件名会被截断，渠道不能跟着一起消失
               tag ? `<em class="sw-srv-tag">${esc(tag)}</em>` : ''
-            }${esc(file || state_.label)}</small>
-            ${
-              block
-                ? `<span class="sw-srv-block">${icon('alert', 'xs')}<span>${esc(block.text)}<em>${esc(
-                    block.next
-                  )}</em></span></span>`
-                : ''
-            }
+            }</strong>
+            ${sub ? `<small>${esc(sub)}</small>` : ''}
           </span>
-          <em class="sw-srv-state ${state_.cls}">${esc(badge)}</em>
+          ${badge ? `<em class="sw-srv-state ${state_.cls}">${esc(badge)}</em>` : ''}
           ${server.active ? `<span class="start-server-item-tick">${icon('check')}</span>` : ''}
+          <span class="start-server-item-go" aria-hidden="true">${icon('chevron-right', 'xs')}</span>
         </button>`;
   };
 
@@ -2682,51 +3092,45 @@ function startServerPanel(game) {
       <span class="start-dock-crest" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></span>
       <span class="start-dock-charm" aria-hidden="true"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
       <span class="start-dock-sparks" aria-hidden="true"><i></i><i></i><i></i></span>
-      <div class="start-dock-server-head">
-        <span class="start-dock-label">服务器 <em>${ready} / ${servers.length} 可用</em></span>
-      </div>
-      <button class="start-server-pick" data-action="start-server-menu" aria-expanded="${open ? 'true' : 'false'}" title="切换服务器">
-        <span class="start-server-pick-dot ${status ? status.cls : 'missing'}"></span>
-        <span class="start-server-pick-copy">
-          <strong>${esc(active ? active.name : '未配置服务器')}</strong>
-          <small>${
-            activeBlock
-              ? `<span class="sw-srv-pick-bad">${esc(activeBlock.text)}</span>`
-              : `${
-                  active && serverChannelTag(game, active)
-                    ? `<em class="sw-srv-tag">${esc(serverChannelTag(game, active))}</em>`
-                    : ''
-                }${esc(fileName || (status ? status.label : '还没有可用客户端'))}`
-          }</small>
-        </span>
-        <span class="start-server-pick-caret">${icon('chevron-down')}</span>
-      </button>
-      <div class="start-server-menu" role="listbox" aria-label="服务器列表">
-              <div class="sw-srv-list">${items || '<p class="start-server-empty">还没有服务器</p>'}</div>
+      <div class="start-server-anchor">
+        <div class="start-dock-server-head">
+          <span class="start-dock-label">服务器 <em>${ready} / ${servers.length} 可用</em></span>
+        </div>
+        <button class="start-server-pick" data-action="start-server-menu" aria-expanded="${open ? 'true' : 'false'}" title="展开服务器列表">
+          <span class="start-server-pick-dot ${status ? status.cls : 'missing'}"></span>
+          <span class="start-server-pick-copy">
+            <strong>${esc(active ? active.name : '未配置服务器')}</strong>
+            <small>${
+              activeBlock
+                ? `<span class="sw-srv-pick-bad">${esc(activeBlock.short)}</span>`
+                : `${
+                    active && serverChannelTag(game, active)
+                      ? `<em class="sw-srv-tag">${esc(serverChannelTag(game, active))}</em>`
+                      : ''
+                  }${fileName ? '' : esc(status ? status.label : '还没有可用客户端')}`
+            }</small>
+          </span>
+          <span class="start-server-pick-caret">${icon('chevron-down')}</span>
+        </button>
+        <div class="start-server-menu" role="listbox" aria-label="服务器列表">
               <div class="sw-srv-actions">
-                <button class="sw-srv-action" data-action="start-link" data-game="${esc(game.id)}">
-                  <span class="sw-srv-action-icon">${icon('link')}</span>
-                  <span class="sw-srv-action-copy">
-                    <strong>硬链接去重</strong>
-                    <small>两个客户端里完全相同的文件只留一份，省掉重复占的空间</small>
-                  </span>
-                </button>
-                <button class="sw-srv-action" data-action="start-detect" data-game="${esc(game.id)}">
+                ${
+                  // 全都认出来了就没必要再「重新扫描」——那个按钮只在还没找全的时候才有用
+                  ready < servers.length
+                    ? `<button class="sw-srv-action" data-action="start-detect" data-game="${esc(game.id)}" title="刚装完游戏或挪过文件夹时，让启动器重新找一遍">
                   <span class="sw-srv-action-icon">${icon('refresh')}</span>
-                  <span class="sw-srv-action-copy">
-                    <strong>重新扫描安装目录</strong>
-                    <small>刚装完游戏或挪过文件夹时，让启动器重新找一遍</small>
-                  </span>
-                </button>
-                <button class="sw-srv-action" data-action="start-server-manage" data-game="${esc(game.id)}">
+                  <span class="sw-srv-action-copy"><strong>重新扫描</strong></span>
+                </button>`
+                    : ''
+                }
+                <button class="sw-srv-action" data-action="start-server-manage" data-game="${esc(game.id)}" title="切换、重建、编辑 exe 路径、硬链接去重都在这里">
                   <span class="sw-srv-action-icon">${icon('settings')}</span>
-                  <span class="sw-srv-action-copy">
-                    <strong>服务器管理</strong>
-                    <small>重建、编辑 exe 路径、清除、移除都在这里</small>
-                  </span>
+                  <span class="sw-srv-action-copy"><strong>服务器管理</strong></span>
                 </button>
               </div>
-            </div>
+              <div class="sw-srv-list">${items || '<p class="start-server-empty">还没有服务器</p>'}</div>
+        </div>
+      </div>
       ${
         game.running
           ? `<div class="start-dock-running">
@@ -2749,25 +3153,15 @@ function openStartServerManager(gameId) {
   const servers = game.servers || [];
   openModal(`
     <div class="modal-backdrop" data-backdrop>
-      <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal modal-servers" role="dialog" aria-modal="true">
         <div class="modal-head">
-          <div>
-            <h2>管理服务器 · ${esc(game.name)}</h2>
-            <p>切换、重建、编辑目录、清除路径都在这里；操作完成会直接回到启动页。</p>
+          <div class="ms-head">
+            <h2>服务器 · ${esc(game.name)}</h2>
+            <span class="ms-count"><strong>${servers.filter((server) => server.exists && !server.incomplete).length}</strong> 可用 · <strong>${servers.filter((server) => !server.exists || server.incomplete).length}</strong> 待处理</span>
           </div>
           <button class="modal-close" data-close title="关闭">${icon('x')}</button>
         </div>
         <div class="modal-body">
-          <p class="sw-mgr-summary">
-            ${servers.filter((server) => server.exists && !server.incomplete).length} 个可用 · ${
-              servers.filter((server) => !server.exists || server.incomplete).length
-            } 个需要处理 —— 缺启动程序的点「编辑」选 exe，显示「需要重建」的点「重建」。
-          </p>
-          <div class="server-manager-actions">
-            <button class="btn btn-ghost btn-sm" data-action="start-detect" data-game="${esc(game.id)}" title="重新扫描安装目录，找已经装好的客户端">${icon('refresh')}重新扫描目录</button>
-            <button class="btn btn-ghost btn-sm" data-action="start-link" data-game="${esc(game.id)}" title="两个客户端里完全相同的文件只留一份，省下重复占的空间">${icon('link')}硬链接去重</button>
-            ${game.builtin ? '' : `<button class="btn btn-ghost btn-sm" data-action="add-server" data-game="${esc(game.id)}">${icon('plus')}添加服务器</button>`}
-          </div>
           ${
             game.builtinKey === 'neverness'
               ? nteChannelMarkup(game, servers.find((item) => item.active) || servers[0])
@@ -2775,9 +3169,14 @@ function openStartServerManager(gameId) {
           }
           <div class="server-list" id="server-manager-list" data-game="${esc(game.id)}">${servers.map((server) => serverRow(game, server)).join('') || '<p class="gacha-empty-line">还没有服务器</p>'}</div>
         </div>
-        <div class="modal-foot">
-          <button class="btn btn-ghost" data-close>关闭</button>
-          <button class="btn btn-primary" data-action="start-server-done" data-game="${esc(game.id)}">完成</button>
+        <div class="modal-foot ms-foot">
+          <div class="ms-actions">
+            <button class="btn btn-ghost btn-sm" data-action="start-detect" data-game="${esc(game.id)}" title="重新扫描安装目录，找已经装好的客户端">${icon('refresh')}重新扫描</button>
+            <button class="btn btn-ghost btn-sm" data-action="start-link" data-game="${esc(game.id)}" title="两个客户端里完全相同的文件只留一份，省下重复占的空间">${icon('link')}硬链接去重</button>
+            <button class="btn btn-ghost btn-sm" data-action="start-server-guide" data-game="${esc(game.id)}" title="切换服务器会做什么、需要你准备什么">${icon('alert')}切换说明</button>
+            ${game.builtin ? '' : `<button class="btn btn-ghost btn-sm" data-action="add-server" data-game="${esc(game.id)}">${icon('plus')}添加服务器</button>`}
+          </div>
+          <button class="btn btn-primary btn-sm" data-action="start-server-done" data-game="${esc(game.id)}">完成</button>
         </div>
       </div>
     </div>
@@ -2785,6 +3184,204 @@ function openStartServerManager(gameId) {
   // 渠道和预下载状态都是外部读来的，弹窗建好后再补，不阻塞打开
   if (game.builtinKey === 'neverness') refreshNtePanel();
   autoCheckPredownload(game);
+}
+
+/* ------------------------------------------------------------------ */
+/* 切换服务器的第一次引导                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 没装过的那个服，点它先问一句「怎么补上这份客户端」。
+ *
+ * 原来的行为是一步到位：官方渠道直接进硬链接安装，其它渠道直接开「选路径」。
+ * 问题是用户手里到底是「已经装了、只是没告诉启动器」还是「根本还没下」，
+ * 启动器猜不出来 —— 猜错就是白等一个几十分钟的安装，或者对着文件选择框发愣。
+ *
+ * 三条路摊开写清楚代价：硬链接最省空间（但要有源）、选路径最快（已经装好了）、
+ * 自动扫描不用记路径。选完才真正进各自动作，弹窗自己先关掉。
+ */
+function openServerSetupDialog(gameId, serverId) {
+  const game = state.games.find((item) => item.id === gameId);
+  const server = game && (game.servers || []).find((item) => item.id === serverId);
+  if (!game || !server) return;
+  // 能当硬链接源的：别的渠道、文件真的还在
+  const bases = (game.servers || []).filter(
+    (item) =>
+      item.id !== server.id && item.exists && !item.incomplete && item.channel !== server.channel
+  );
+  const canLink = bases.length > 0;
+  const baseNames = bases.map((item) => item.name).join(' / ');
+  openModal(
+    `<div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow modal-setup" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>${esc(server.name)}</h2>
+            <p>${esc(game.name)} · 这个服还没有能启动的客户端</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <ul class="setup-pick">
+            <li>
+              <button class="setup-opt" data-setup="link" ${canLink ? '' : 'disabled'}>
+                <span class="setup-opt-icon">${icon('link')}</span>
+                <span class="setup-opt-copy">
+                  <strong>硬链接生成一份</strong>
+                  <small>${
+                    canLink
+                      ? `以「${esc(baseNames)}」为源，一样的文件直接复用，只下差异部分`
+                      : '本机还没有别的渠道客户端可以当源'
+                  }</small>
+                </span>
+                <span class="setup-opt-go">${icon('chevron-right')}</span>
+              </button>
+            </li>
+            <li>
+              <button class="setup-opt" data-setup="path">
+                <span class="setup-opt-icon">${icon('folder-open')}</span>
+                <span class="setup-opt-copy">
+                  <strong>选择已经装好的客户端</strong>
+                  <small>${esc(server.name)} 其实装过了，手动指到它的 exe</small>
+                </span>
+                <span class="setup-opt-go">${icon('chevron-right')}</span>
+              </button>
+            </li>
+            <li>
+              <button class="setup-opt" data-setup="scan">
+                <span class="setup-opt-icon">${icon('refresh')}</span>
+                <span class="setup-opt-copy">
+                  <strong>自动扫描一遍</strong>
+                  <small>在常见安装目录里找 ${esc(server.name)} 的客户端</small>
+                </span>
+                <span class="setup-opt-go">${icon('chevron-right')}</span>
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>`
+  );
+  dom.modalRoot.querySelectorAll('[data-setup]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const choice = btn.dataset.setup;
+      closeModal();
+      if (choice === 'link') {
+        openSophonModal(gameId, serverId, 'prepare');
+        return;
+      }
+      if (choice === 'path') {
+        openServerModal(gameId, serverId);
+        return;
+      }
+      const result =
+        typeof api.games?.detectServer === 'function'
+          ? await api.games.detectServer(gameId, serverId)
+          : await api.games.detect(gameId);
+      if (result && result.ok) {
+        toast(`${server.name} 已找到，路径已填好`, 'success');
+      } else {
+        toast((result && result.error) || '没找到这个服的客户端，可以手动选路径', 'info');
+      }
+    });
+  });
+}
+
+
+const SERVER_SWITCH_GUIDE_KEY = 'vela:server-switch-guide';
+
+/** 切换说明的每一条：都是「换之前要知道的」，一句一件事。 */
+/* 三步讲清「怎么换」：顺序就是用户真正要做的顺序，别的都算补充说明 */
+const SERVER_SWITCH_GUIDE_STEPS = [
+  {
+    title: '先把游戏关掉',
+    text: '开着的时候切换会被拦下来：客户端文件正被占用，切过去也起不来。',
+  },
+  {
+    title: '点一下要换到的服务器',
+    text: '只列已经装好的。灰掉的那些点进去是去做准备，不会开始下载。',
+  },
+  {
+    title: '看到「当前」跳过去就好了',
+    text: '再点开始游戏，启动的就是它的客户端。第一次进游戏要重新登录。',
+  },
+];
+
+/* 容易误会的事：两句，短到一眼扫完 */
+const SERVER_SWITCH_GUIDE_POINTS = [
+  '各渠道的账号、存档、更新包互不相通，换过去要重新登录。',
+  '同一个客户端文件夹别被两行同时占：删掉它，两边一起失效。',
+];
+
+function serverSwitchGuideSeen() {
+  try {
+    return localStorage.getItem(SERVER_SWITCH_GUIDE_KEY) === '1';
+  } catch {
+    // 隐私模式读不到存储，就当没看过——多弹一次比一次不弹好
+    return false;
+  }
+}
+
+function markServerSwitchGuideSeen() {
+  try {
+    localStorage.setItem(SERVER_SWITCH_GUIDE_KEY, '1');
+  } catch {
+    /* 写不进去就算了，大不了下次再弹一遍 */
+  }
+}
+
+/**
+ * 「切换服务器是怎么回事」的说明卡。
+ * 第一次在启动页切换成功后自动弹一次；以后想看，从「服务器管理」里的
+ * 「切换说明」进，关掉后回到管理面板，不把人晾在原地。
+ */
+function openServerSwitchGuide({ returnToManager = '' } = {}) {
+  openModal(
+    `<div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="server-guide-title">
+        <div class="modal-head">
+          <div>
+            <h2 id="server-guide-title">怎么换服务器</h2>
+            <p>以后想再看，在「服务器管理」里点「切换说明」。</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <ol class="switch-guide-steps">
+            ${SERVER_SWITCH_GUIDE_STEPS.map(
+              (step, index) => `
+              <li class="switch-guide-step">
+                <span class="switch-guide-num">${index + 1}</span>
+                <div class="switch-guide-copy">
+                  <strong>${esc(step.title)}</strong>
+                  <p>${esc(step.text)}</p>
+                </div>
+              </li>`
+            ).join('')}
+          </ol>
+          <ul class="switch-guide-notes">
+            ${SERVER_SWITCH_GUIDE_POINTS.map((text) => `<li>${esc(text)}</li>`).join('')}
+          </ul>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" data-close>知道了</button>
+        </div>
+      </div>
+    </div>`,
+    {
+      onClose: () => {
+        if (returnToManager) openStartServerManager(returnToManager);
+      },
+    }
+  );
+}
+
+/** 真切换成功之后才调：没看过就弹一次，顺手记下已经看过。 */
+function showServerSwitchGuideOnce() {
+  if (serverSwitchGuideSeen()) return;
+  markServerSwitchGuideSeen();
+  openServerSwitchGuide();
 }
 
 /** 让暂停按钮的图标和文案跟着视频状态走。 */
@@ -3316,7 +3913,11 @@ function libraryView() {
 function serverState(server) {
   if (server.incomplete) return { label: '需要重建', cls: 'missing' };
   if (server.active && server.exists) return { label: '当前服务器', cls: 'active' };
-  if (server.exists) return { label: '已就绪', cls: 'ready' };
+  // 「已经就绪」是正常态，不用再写三个字：左边的点已经是绿的，
+  // 状态徽标只留给「要用户动手」的那几种（需要重建 / 目录丢失 / 未配置）。
+  if (server.exists) return { label: '', cls: 'ready' };
+  // 目录本身都没了：和「从没配过路径」是两回事，状态文案得分开
+  if (server.root && server.rootExists === false) return { label: '目录丢失', cls: 'missing' };
   return { label: '未配置', cls: 'missing' };
 }
 
@@ -3342,6 +3943,26 @@ function serverChannelTag(game, server) {
 }
 
 /**
+ * 服务器行左侧的图标。
+ *
+ * 参考图里每个服务器是一枚「图标 + 粗体字」的大按钮，图标是识别第一眼，
+ * 所以按渠道分：官方=盾牌、B服=火花（渠道）、国际服=月/地球感、Play=播放、
+ * Steam=下载、自建=服务器。认不出来就退回通用服务器图标。
+ */
+function serverIconId(server) {
+  const channel = server && server.channel ? String(server.channel) : '';
+  const name = server && server.name ? String(server.name) : '';
+  const pick = (...keys) => keys.some((key) => name.includes(key) || channel.includes(key));
+  if (channel === 'official' || pick('官方', '官服', 'official')) return 'shield';
+  if (channel === 'bilibili' || pick('bilibili', 'B服')) return 'sparkle';
+  if (channel === 'global' || pick('国际', 'global')) return 'moon';
+  if (channel === 'play' || pick('play')) return 'play';
+  if (channel === 'steam' || pick('steam')) return 'download';
+  if (channel === 'custom' || pick('自建', 'custom')) return 'server';
+  return 'server';
+}
+
+/**
  * 这一行为什么用不了、下一步该点哪。
  *
  * 只说「未配置」玩家分不清是没装游戏、没选 exe，还是上次生成到一半，
@@ -3349,24 +3970,228 @@ function serverChannelTag(game, server) {
  */
 function serverBlockHint(server) {
   if (!server) return null;
+  /*
+   * text 是「说清楚发生了什么」，short 是「塞得进行内的四五个字」。
+   * 下拉列表里一行只留 short，长句只留给 toast —— 之前每行下面挂一整块
+   * 「点这一行 → 服务器管理 → 编辑 → 选 exe」，三行服务器就堆出六行字，
+   * 整个列表看着像说明书。
+   */
   if (server.incomplete) {
     return {
       text: '客户端不完整（文件缺失），现在启动会失败',
+      short: '客户端不完整',
       next: '点这一行 → 服务器管理 → 重建',
     };
   }
   if (!server.exists) {
+    /*
+     * 「exe 不在」有两种原因，以前都说成「还没选择启动程序」。
+     * 用户删了共用目录之后看到这句话完全对不上号 —— 他明明选过路径，
+     * 只是那个目录被删/挪走了。所以这里按 root 还在不在分两句说。
+     */
+    if (server.root && server.rootExists === false) {
+      return {
+        text: '客户端目录已经不见了（被删除或移动过）',
+        short: '目录已不在',
+        next: '点「编辑」重新指定目录；文件真没了就点「重建」用其它渠道客户端生成',
+      };
+    }
     return {
       text: '还没选择启动程序（.exe）',
+      short: '未选 exe',
       next: '点这一行 → 服务器管理 → 编辑 → 选 exe',
     };
   }
   return null;
 }
 
+/**
+ * 这个服务器和同一游戏里的谁共用同一个安装目录。
+ *
+ * 官服 / B服 在米家三件套里经常指向同一个文件夹（只是启动程序不同）。
+ * 用户以为「删 B服」只影响 B服，去资源管理器把那个目录删了，
+ * 结果官服一起失效 —— 卡片上必须先把这个共用关系说出来。
+ */
+function sharedRootWith(game, server) {
+  if (!game || !server || !server.root) return null;
+  return (
+    (game.servers || []).find((item) => item.id !== server.id && item.path && sameRoot(item, server)) ||
+    null
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 切换服务器：所有入口共用同一套操作                                    */
+/* ------------------------------------------------------------------ */
+
+/* 切换中标记：终末地生成运行时可能要几十秒，这期间再点同一行只会叠出第二条提示 */
+let switchingKey = '';
+
+/**
+ * 一条不会自己消失的提示，给「切换服务器」这种要等一会儿的操作报进度。
+ * 返回 { update, done }：update 只换文案，done 换成最终结果并自动消失。
+ */
+function beginBusyToast(message) {
+  if (!dom.toastRoot) return { update() {}, done() {} };
+  const node = document.createElement('div');
+  node.className = 'toast info is-busy';
+  node.innerHTML = `${icon('refresh')}<span>${esc(message)}</span>`;
+  dom.toastRoot.appendChild(node);
+  let closed = false;
+  const drop = () => {
+    node.classList.add('leaving');
+    window.setTimeout(() => node.remove(), 240);
+  };
+  return {
+    update(next) {
+      const label = node.querySelector('span');
+      if (label && next) label.textContent = next;
+    },
+    done(text, type) {
+      if (closed) return;
+      closed = true;
+      if (!text) {
+        drop();
+        return;
+      }
+      node.className = `toast ${type || 'info'}`;
+      node.innerHTML = `${icon(type === 'error' ? 'alert' : type === 'success' ? 'check' : 'info')}<span>${esc(text)}</span>`;
+      playUiSound(type === 'error' ? 'error' : 'notify');
+      window.setTimeout(drop, 2800);
+    },
+  };
+}
+
+/** 终末地生成运行时期间的进度文案（主进程发 phase / processed / total / current）。 */
+function endfieldProgressText(progress) {
+  const name = progress.serverName || '渠道';
+  const total = Number(progress.total) || 0;
+  const done = Number(progress.processed) || 0;
+  if (total > 0) {
+    const pct = Math.min(100, Math.round((done / total) * 100));
+    return `正在为${name}生成运行时 ${pct}%（${done} / ${total} 个文件）`;
+  }
+  return progress.current || `正在为${name}生成运行时…`;
+}
+
+/** 启动游戏；需要提权时弹确认框，其余失败直接提示。返回是否真的起来了。 */
+async function launchGameOrExplain(game) {
+  const result = await api.games.launch(game.id);
+  if (result.ok) {
+    playUiSound('launch');
+    return true;
+  }
+  if (result.elevationRequired) {
+    const restart = await confirmDialog({
+      title: '需要管理员权限',
+      message: result.error,
+      confirmText: '以管理员身份重启',
+    });
+    if (restart) await api.relaunchAdmin();
+    return false;
+  }
+  toast(result.error, 'error');
+  return false;
+}
+
+/**
+ * 切换服务器的唯一实现 —— 启动页下拉、服务器管理弹窗、快捷面板、服务器胶囊全走这里。
+ *
+ * 以前这几个入口各写一套，于是同一件事在不同地方点出不同结果：
+ *   · 启动页下拉：会先改异环的 Config.ini，但切完不启动、也没有成功提示
+ *   · 服务器管理弹窗：直接 activate 再启动，异环的渠道根本没改，切完进游戏还是原服
+ *   · 快捷面板 / 服务器胶囊：同上，渠道也没改
+ *   · 终末地要现场生成链接运行时（几十秒），四套里没有任何进行中反馈，
+ *     只有一句一闪而过的 toast —— 看起来就是「点切换没反应」
+ * 现在统一成一条路：运行中先拦 → 不可用转去管理面板 → 异环先改渠道 →
+ * activate（终末地 / 原神国际服 / 明日方舟的运行时都由主进程在里面处理）→
+ * 统一的「进行中 / 已切换」提示。要不要顺带启动由入口显式传 launch。
+ */
+async function switchServerProfile(gameId, serverId, options = {}) {
+  const { launch = false } = options;
+  const game = state.games.find((item) => item.id === gameId);
+  const server = game && (game.servers || []).find((item) => item.id === serverId);
+  if (!game || !server) return { ok: false };
+  // 先把下拉收起来：无论后面是早退还是真去切换，菜单都不该留在屏幕上
+  closeStartServerMenu();
+
+  // 已经停在这个服上：不必重跑渠道 / 运行时流程，要启动就直接启动
+  if (server.active) {
+    if (!launch) return { ok: true, unchanged: true };
+    // 已经起来了就别再拉一个进程出来（重复点「启动」很常见）
+    if (game.running) {
+      toast(`${game.name} 正在运行`, 'info');
+      return { ok: true, unchanged: true };
+    }
+    await launchGameOrExplain(game);
+    return { ok: true };
+  }
+  if (switchingKey) {
+    toast('上一次切换还没完成，等它跑完再点', 'info');
+    return { ok: false };
+  }
+  if (game.running) {
+    toast(`${game.name} 正在运行，先结束进程再切换服务器`, 'info');
+    return { ok: false };
+  }
+  if (!server.exists || server.incomplete) {
+    // 不可用不是错误，是「还没准备好」：直接带用户去管理面板，别让人对着「切换失败」猜
+    const hint = serverBlockHint(server);
+    openStartServerManager(gameId);
+    toast(
+      hint
+        ? `「${server.name}」还不能切换：${hint.text}`
+        : `「${server.name}」还不能切换，先把客户端路径补齐`,
+      'info'
+    );
+    return { ok: false };
+  }
+  const busy = beginBusyToast(`正在切换到 ${server.name}…`);
+  switchingKey = `${gameId}:${serverId}`;
+  const offProgress =
+    typeof api.onEndfieldProgress === 'function'
+      ? api.onEndfieldProgress((progress) => {
+          if (!progress || progress.serverName !== server.name) return;
+          busy.update(endfieldProgressText(progress));
+        })
+      : null;
+  try {
+    /*
+     * 异环的「服务器」是同一个客户端的渠道，真正生效的是 Config.ini。
+     * 这段以前只写在启动页下拉里，另外三个入口都没有，所以那几处切完、
+     * 游戏里还是原渠道 —— 也是「操作不一样」最明显的一处。
+     */
+    if (
+      game.builtinKey === 'neverness' &&
+      ['official', 'bilibili'].includes(String(server.channel || ''))
+    ) {
+      const switched = await switchNteChannel(game, server, server.channel);
+      if (!switched) {
+        busy.done();
+        return { ok: false, cancelled: true };
+      }
+    }
+    await api.servers.activate({ gameId, serverId });
+    busy.done(`已切换到 ${server.name}`, 'success');
+    showServerSwitchGuideOnce();
+  } catch (error) {
+    busy.done(humanError(error), 'error');
+    return { ok: false, error };
+  } finally {
+    if (offProgress) offProgress();
+    switchingKey = '';
+  }
+
+  if (!launch) return { ok: true };
+  await launchGameOrExplain(game);
+  return { ok: true };
+}
+
 function serverRow(game, server) {
   const status = serverState(server);
   const usable = server.exists && !server.incomplete;
+  const shared = sharedRootWith(game, server);
+  const block = serverBlockHint(server);
   const canPrepare =
     game.builtinKey === 'endfield' &&
     server.channel !== 'official' &&
@@ -3381,52 +4206,67 @@ function serverRow(game, server) {
       : 'activate-server'
     : 'rebuild-server';
   const primaryLabel = usable ? (server.active ? '启动' : '切换') : '重建';
+  // 一行只留一句能读的话：有 exe 就写文件名，没有才用「未选 exe」这种四字状态。
+  // 以前这里叠着 状态胶囊 + 三个徽标 + 一句长提示，四行字挤在 250px 里。
+  const sub = fileName || (block ? block.short : '') || '未选择客户端';
   return `
-    <article class="server-tile ${server.active ? 'is-active' : ''}">
-      <div class="server-tile-head">
-        <span class="server-orb">${server.active ? icon('check') : ''}</span>
-        <div class="server-tile-copy">
-          <div class="server-name">
-            ${esc(server.name)}
-            ${server.active ? '<span class="server-badge">当前</span>' : ''}
-            ${server.runtimeLinked ? '<span class="server-badge">差异运行时</span>' : ''}
-          </div>
-          <div class="server-path" title="${esc(server.path || server.packPath || '')}">${esc(
-            server.incomplete
-              ? '尚未生成完整客户端'
-              : fileName || '未选择客户端'
-          )}</div>
+    <article class="server-tile ${server.active ? 'is-active' : ''} ${
+      usable ? '' : 'is-broken'
+    }" data-state="${status.cls}">
+      <span class="st-dot ${status.cls}" aria-hidden="true"></span>
+      <div class="st-main">
+        <div class="st-title">
+          <strong>${esc(server.name)}</strong>
+          ${server.active ? '<span class="st-flag">当前</span>' : ''}
+          ${!usable && status.label ? `<span class="st-chip is-warn">${status.label}</span>` : ''}
+          ${server.runtimeLinked ? '<span class="st-chip">差异运行时</span>' : ''}
+          ${
+            shared
+              ? `<span class="st-chip is-shared" title="${esc(
+                  `${esc(server.name)} 和「${shared.name}」用的是同一个安装目录：删掉这个文件夹，两边都会失效`
+                )}">与${esc(shared.name)}共用目录</span>`
+              : ''
+          }
         </div>
-        <span class="server-state ${status.cls}">${status.label}</span>
+        <div class="st-sub" title="${esc(server.path || server.packPath || '')}">${esc(sub)}</div>
       </div>
-      <div class="server-tile-actions">
-        <button class="btn ${server.active ? 'btn-primary' : 'btn-ghost'} btn-sm server-primary" data-action="${primaryAction}" data-id="${esc(game.id)}" data-game="${esc(game.id)}" data-server="${esc(server.id)}">
-          ${icon(usable ? 'play' : 'refresh')}${primaryLabel}
-        </button>
+      <div class="st-tools">
         ${
           canUpdateSophon
-            ? `<button class="btn-icon btn-ghost" data-action="update-sophon" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="检查官方更新">${icon('refresh')}</button>`
+            ? `<button class="st-tool" data-action="update-sophon" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="检查官方更新">${icon('refresh')}</button>`
             : ''
         }
         ${
           canPrepare
-            ? `<button class="btn-icon btn-ghost" data-action="prepare-endfield" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="重新生成运行时">${icon('link')}</button>`
+            ? `<button class="st-tool" data-action="prepare-endfield" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="重新生成运行时">${icon('link')}</button>`
             : ''
         }
-        <button class="btn-icon btn-ghost" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
+        <button class="st-tool" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
         ${
           usable
-            ? `<button class="btn-icon btn-ghost" data-action="open-server-folder" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="打开安装目录">${icon('folder-open')}</button>`
+            ? `<button class="st-tool" data-action="open-server-folder" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="打开安装目录">${icon('folder-open')}</button>`
             : ''
         }
         ${
           server.builtinServer || (game.builtin && server.channel)
-            ? `<button class="btn-icon btn-ghost danger" data-action="clear-server-path" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="只清除路径，保留服务器">${icon('trash')}</button>`
+            ? `<button class="st-tool is-danger" data-action="clear-server-path" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="清除路径记录（不删文件）">${icon('x')}</button>`
             : (game.servers || []).length > 1
-              ? `<button class="btn-icon btn-ghost danger" data-action="remove-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="移除这个服务器">${icon('trash')}</button>`
+              ? `<button class="st-tool is-danger" data-action="remove-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="移除这个服务器（不删文件）">${icon('x')}</button>`
               : ''
         }
+        ${
+          server.root
+            ? `<button class="st-tool is-text is-danger ${game.running ? 'is-locked' : ''}" data-action="uninstall-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="${
+                game.running
+                  ? '游戏正在运行，先关掉游戏再卸载'
+                  : '把这一份客户端删到回收站，不影响别的服务器'
+              }">${icon('trash')}<span>卸载</span></button>`
+            : ''
+        }
       </div>
+      <button class="btn ${server.active ? 'btn-primary' : 'btn-ghost'} btn-sm st-go" data-action="${primaryAction}" data-id="${esc(game.id)}" data-game="${esc(game.id)}" data-server="${esc(server.id)}">
+        ${icon(usable ? (server.active ? 'play' : 'swap') : 'refresh')}${primaryLabel}
+      </button>
     </article>`;
 }
 
@@ -4250,6 +5090,14 @@ async function handleSongEnded() {
     return;
   }
   if (state.playMode === 'order' && state.songIndex >= state.songs.length - 1) {
+    /*
+     * 歌单续播还在往后排（点了一首，后面几十首正在一首首解析）：
+     * 这里等下一刻，别刚放完一首就报「播放完毕」。
+     */
+    if (playlistFill && (await waitForMoreSongs(8000)) && state.songIndex < state.songs.length - 1) {
+      await playSongAt(state.songIndex + 1, { skipRender: state.route !== 'song' });
+      return;
+    }
     audio.currentTime = 0;
     updateSongChrome();
     toast('歌单已经播放完毕', 'info');
@@ -4258,6 +5106,258 @@ async function handleSongEnded() {
   const next =
     state.playMode === 'shuffle' ? randomSongIndex() : (state.songIndex + 1) % state.songs.length;
   await playSongAt(next, { skipRender: state.route !== 'song' });
+}
+
+/* ── 播不动就跳下一首 ─────────────────────────────────────── */
+
+/*
+ * 以前「歌播不了」是怎么被吞掉的：
+ *   1. #song-audio 的 error 只被音效模块拿去关音效（app.js 的 fx 那段），
+ *      音效本来就关着时那句 if 直接不成立，等于什么都没做；
+ *   2. 队列推进只挂在 ended 上，播不了的歌永远等不到 ended；
+ *   3. 没有任何超时 —— 请求挂在那儿不报错也不出声，就一直停着。
+ * 三条合起来就是用户说的「放到听不到的歌曲后，就一直停住」。
+ *
+ * 现在解析没拿到地址 / audio 报 error / 超过 SONG_LOAD_TIMEOUT_MS 没出声，
+ * 都收进 handleSongFailed 这一个口子：先试着重新取一次链，还不行就标不可用并跳下一首。
+ */
+const SONG_LOAD_TIMEOUT_MS = 12000;
+/** 连着这么多首都播不了就停手，别把整个队列空转一遍。 */
+const SONG_FAIL_STREAK_LIMIT = 5;
+/** 同一首歌重新取链的冷却时间，防止「重取 → 又失败 → 再重取」转圈。 */
+const SONG_REFETCH_COOLDOWN_MS = 5 * 60 * 1000;
+
+let songLoadTimer = 0;
+let songFailStreak = 0;
+// 同一首歌的失败去重键：用「序号 + 地址」做键，避免同一首歌的 error 被反复处理陷入死循环，
+// 但跳到下一首后键就变了，不会挡住下一首的失败接管（原来是全局布尔锁，会在连续多首播不动时把
+// 第二首起的 error 静默吞掉，导致卡在第二首出不来）。
+let songFailGuard = '';
+let songSkipBatch = { count: 0, titles: [], reason: '', timer: 0 };
+
+function clearSongLoadWatchdog() {
+  if (songLoadTimer) clearTimeout(songLoadTimer);
+  songLoadTimer = 0;
+}
+
+/**
+ * 挂上「多久还没出声就算失败」的定时器。
+ * 只用在「已经在尝试播放但迟迟没声音」的情况：真正出声（playing）会摘掉它，
+ * 自动播放被浏览器拦下时 play() 会 reject，也会摘掉它 —— 那不是这首歌的错。
+ */
+function armSongLoadWatchdog() {
+  clearSongLoadWatchdog();
+  const audio = document.querySelector('#song-audio');
+  if (!audio || !audio.src) return;
+  songLoadTimer = window.setTimeout(() => {
+    songLoadTimer = 0;
+    // 已经出声了，或者根本没在尝试播放（自动播放被拦 / 用户暂停）：都不算失败
+    if (audio.currentTime > 0.5 || audio.paused) return;
+    void handleSongFailed('加载超时');
+  }, SONG_LOAD_TIMEOUT_MS);
+}
+
+/** 把 audio 的 MediaError 翻成人话。 */
+function describeAudioError(audio) {
+  const code = audio?.error?.code;
+  if (code === 1) return '播放被中断';
+  if (code === 2) return '网络错误';
+  if (code === 3) return '音频解码失败';
+  if (code === 4) return '音源不可用（地址过期，或受到版权 / 会员限制）';
+  return '无法播放';
+}
+
+/**
+ * 歌名主体：去括号后缀（Live / 重制 / 伴奏）、标点、空格和大小写。
+ * 与主进程 music-resolve.js 里的同名函数保持同一套规则。
+ */
+function songCoreName(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[（(【\[].*?[)）】\]]/g, ' ')
+    .replace(/[\s\-_/、,.·'"!?·・。，！？：:；;]+/g, '');
+}
+
+/** 歌手串拆成名字数组，"A / B"、"A、B"、"A feat. B" 都算多人。 */
+function artistNameList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item?.name || item || '')).filter(Boolean);
+  return String(value || '')
+    .split(/[\/、,&;；·]|feat\.?/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 换源拿回来的到底还是不是原来那首。
+ *
+ * 换源最糟的结果不是失败，而是「换成了另一首」：能放、也不报错、也没有提示，
+ * 但唱的是同名不同曲或者别人的翻唱。所以渲染层再核一次歌名主体 + 歌手，
+ * 对不上就当这次没换成功，走正常的失败/跳过流程。
+ */
+function songIdentityMatches(want, got) {
+  const wantCore = songCoreName(want?.title || want?.name);
+  // 主进程把「实际拿到地址的那一份」放在 matchedTitle / matchedArtist 上
+  const gotCore = songCoreName(got?.matchedTitle || got?.title || got?.name);
+  if (!wantCore || !gotCore) return true;
+  if (!(gotCore === wantCore || gotCore.includes(wantCore) || wantCore.includes(gotCore))) return false;
+  const wantNames = artistNameList(want?.artist).map(songCoreName).filter(Boolean);
+  const gotNames = artistNameList(got?.matchedArtist || got?.artist).map(songCoreName).filter(Boolean);
+  if (!wantNames.length || !gotNames.length) return true;
+  return wantNames.some((wantName) => gotNames.some((gotName) => gotName === wantName || gotName.includes(wantName) || wantName.includes(gotName)));
+}
+
+/**
+ * 失败时先试着重新取一次链。
+ *
+ * 地址过期是会员曲最常见的死法：队列整份存在 localStorage 里，
+ * 隔天再打开，昨天还能播的地址今天多半已经 403。
+ * 拿得到新地址就返回它，拿不到就把后端给的原因（会员专享 / 没有可播放版本）
+ * 留在 song.failReason 上，交给提示文案。
+ */
+async function refetchSongUrl(song) {
+  if (!song) return '';
+  // 本地文件没有可重新解析的对象
+  if (String(song.url || '').startsWith('file:')) return '';
+  if (Date.now() - (song.refetchedAt || 0) < SONG_REFETCH_COOLDOWN_MS) return '';
+  song.refetchedAt = Date.now();
+  try {
+    const result = await api.musicResolve({
+      song: {
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        platform: song.source || song.platform || '',
+        mid: song.mid,
+        hash: song.hash,
+        neteaseId: song.neteaseId,
+      },
+      apiBase: localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100',
+      level: state.songQuality,
+    });
+    if (result?.ok && result.url) {
+      // 换回来的必须还是同一首歌、同一个歌手；换到别的歌就当没换到
+      if (songIdentityMatches(song, result)) return String(result.url);
+      song.failReason = '换到的音源不是同一首歌';
+    } else {
+      song.failReason = String(result?.reason || '');
+    }
+  } catch (error) {
+    song.failReason = String(error?.message || '');
+  }
+  saveSongs();
+  return '';
+}
+
+/**
+ * 从 from 往后找第一首还没被标不可用的。
+ * 返回 -1 表示没得跳：队列只有一首，或者剩下的全标了不可用。
+ */
+function nextPlayableIndex(from) {
+  const total = state.songs.length;
+  if (total <= 1) return -1;
+  const start = Number(from) || 0;
+  if (state.playMode === 'shuffle') {
+    const pool = [];
+    for (let i = 0; i < total; i += 1) {
+      if (i !== start && !state.songs[i]?.unavailable) pool.push(i);
+    }
+    if (!pool.length) return -1;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  for (let step = 1; step <= total; step += 1) {
+    const index = (start + step) % total;
+    if (!state.songs[index]?.unavailable) return index;
+  }
+  return -1;
+}
+
+function resetSkipBatch() {
+  if (songSkipBatch.timer) clearTimeout(songSkipBatch.timer);
+  songSkipBatch = { count: 0, titles: [], reason: '', timer: 0 };
+}
+
+/**
+ * 跳过提示。连着跳多首时合并成一条，不刷屏。
+ * 后端给得出原因就写原因（「会员专享」「版权受限」之类），给不出就统一说无法播放。
+ */
+function queueSkipToast(song, reason) {
+  songSkipBatch.count += 1;
+  songSkipBatch.reason = songSkipBatch.reason || reason;
+  if (song?.title && songSkipBatch.titles.length < 3) songSkipBatch.titles.push(song.title);
+  if (songSkipBatch.timer) clearTimeout(songSkipBatch.timer);
+  songSkipBatch.timer = window.setTimeout(() => {
+    const count = songSkipBatch.count;
+    const titles = songSkipBatch.titles.slice();
+    const why = songSkipBatch.reason;
+    resetSkipBatch();
+    if (count <= 1) {
+      toast(`「${titles[0] || '这首'}」${why}，已跳过`, 'error');
+      return;
+    }
+    const more = count > titles.length ? ` 等 ${count} 首` : '';
+    toast(`已跳过 ${count} 首播不了的歌：${titles.join('、')}${more}`, 'error');
+  }, 700);
+}
+
+/** 一首歌「起不来」的统一收口。 */
+async function handleSongFailed(rawReason = '') {
+  const audio = document.querySelector('#song-audio');
+  // 手动关掉迷你播放器会 removeAttribute('src') 再 load()，那也会冒一个 error，
+  // 跟歌曲本身没关系，别去动队列。
+  if (!audio || !audio.src) return;
+  const song = currentSongEntry();
+  if (!song) return;
+  // 同一首歌不要重复处理（防死循环），但允许下一首接管：
+  // 用「序号 + 地址」做去重键，跳到下一首后键就变了，不会挡住它。
+  const guardKey = `${state.songIndex}:${song.url || ''}`;
+  if (songFailGuard === guardKey) return;
+  songFailGuard = guardKey;
+  clearSongLoadWatchdog();
+  try {
+    // 1) 先试着重新取一次链：地址过期 / 能换源救回来的，就不该跳
+    const fresh = await refetchSongUrl(song);
+    if (fresh) {
+      song.url = fresh;
+      song.unavailable = false;
+      delete song.unavailableReason;
+      delete song.failReason;
+      songFailStreak = 0;
+      saveSongs();
+      playCurrentSong();
+      /*
+       * 换源成功不弹提示：换回来的是同一首歌、同一个歌手，接着往下放就行，
+       * 弹一句「音源已刷新」属于系统自己的事，用户不需要知道。
+       * 换到的不是同一首（或换不到）才走下面的提示/跳过。
+       */
+      return;
+    }
+
+    // 2) 真的播不了：标不可用 → 提示 → 跳下一首
+    const reason = song.failReason || rawReason || '无法播放';
+    song.unavailable = true;
+    song.unavailableReason = reason;
+    saveSongs();
+    songFailStreak += 1;
+    queueSkipToast(song, reason);
+    if (state.route === 'song') render({ preserveScroll: true });
+    else updateSongChrome();
+
+    if (songFailStreak >= SONG_FAIL_STREAK_LIMIT) {
+      resetSkipBatch();
+      toast('连续多首无法播放，已停止。检查一下音源开关，以及网易云的登录和会员状态。', 'error');
+      return;
+    }
+    const next = nextPlayableIndex(state.songIndex);
+    if (next < 0) {
+      toast('队列里没有其它能播的歌了', 'info');
+      return;
+    }
+    await playSongAt(next, { skipRender: state.route !== 'song' });
+  } finally {
+    // 只在我们还停在「同一首」时清锁：跳到下一首后若下一首的 error 已抢先接管，
+    // 它的 guard 键不同，这里就不该把它清掉。
+    if (songFailGuard === guardKey) songFailGuard = '';
+  }
 }
 
 /**
@@ -4342,7 +5442,15 @@ function resumeLastSong() {
 function playCurrentSong(toggle = false) {
   const audio = document.querySelector('#song-audio');
   const song = currentSongEntry();
-  if (!audio || !song?.url) return;
+  if (!audio) return;
+  /*
+   * 没有可播放地址时以前是直接 return：不出声、不报错、也不推进队列，
+   * 播放器就静悄悄地死在这一首上。现在按「播不了」处理，交给失败收口去跳。
+   */
+  if (!song?.url) {
+    if (song) void handleSongFailed('没有可播放地址');
+    return;
+  }
   const key = `${state.songIndex}:${song.url}`;
   if (audio.dataset.songKey !== key) {
     audio.dataset.songKey = key;
@@ -4352,6 +5460,7 @@ function playCurrentSong(toggle = false) {
   if (toggle && !audio.paused) {
     audio.pause();
     clearFxWatchdog();
+    clearSongLoadWatchdog();
     updateSongChrome();
     return;
   }
@@ -4359,7 +5468,15 @@ function playCurrentSong(toggle = false) {
     applyAudioFx();
     armFxWatchdog(audio);
   }
-  audio.play().catch(() => {});
+  armSongLoadWatchdog();
+  audio.play().catch(() => {
+    /*
+     * 自动播放被浏览器策略拦下时 promise 会 reject：这首歌本身没问题，
+     * 只是还没轮到用户点播放。不在这里摘掉超时判定——真正出声时
+     * 'playing' 事件会清掉它；若一首死链连 error 都没冒，超时判定还能兜底。
+     * （autoplay 被拦时 audio.paused 仍为 true，watchdog 本身也不会误判失败。）
+     */
+  });
   updateSongChrome();
 }
 
@@ -4973,6 +6090,9 @@ function setupMiniPlayer() {
   );
 
   window.addEventListener('resize', () => {
+    // 侧栏推开的那 180ms 里，窗口宽度每帧都在变。这里跟着每帧量一次矩形、再写一次
+    // left/top，等于每帧强制同步布局 —— 画面正好在这时候卡。收尾补一次就够了。
+    if (startNavAnimating()) return;
     if (mini.hidden) return;
     if (mini.classList.contains('is-on-start')) {
       // 启动页收起形态跟着抽屉标题行走；展开形态保持固定定位，窗口变了就重新夹紧
@@ -5062,7 +6182,7 @@ function updateSongChrome() {
     const artist = document.querySelector('#mini-artist');
     const cover = mini.querySelector('.mini-cover');
     if (title) title.textContent = song.title || '未命名歌曲';
-    if (artist) artist.textContent = song.artist || '点歌台';
+    if (artist) artist.textContent = song.artist || '音乐';
     if (cover) {
       const image = songCover(song);
       cover.style.backgroundImage = image ? `url("${image.replace(/"/g, '')}")` : '';
@@ -5086,7 +6206,7 @@ function updateSongChrome() {
     const chipTitle = document.querySelector('#mini-chip-title');
     if (chipTitle) chipTitle.textContent = song.title || '未命名歌曲';
     const chipArtist = document.querySelector('#mini-chip-artist');
-    if (chipArtist) chipArtist.textContent = song.artist || '点歌台';
+    if (chipArtist) chipArtist.textContent = song.artist || '音乐';
     const chipPlay = document.querySelector('#mini-chip-play-use');
     if (chipPlay) chipPlay.setAttribute('href', playing ? '#i-pause' : '#i-play');
   }
@@ -5139,6 +6259,24 @@ function bindSongLyrics() {
     audio.addEventListener('ended', updateSongChrome);
     audio.addEventListener('ended', () => {
       void handleSongEnded();
+    });
+    /*
+     * 播不了（404 / 403 / 地址过期 / 音源失效）时 audio 只报 error，不会有 ended，
+     * 以前这里没人管，队列就永远停在这一首。现在和超时一起走失败收口。
+     */
+    audio.addEventListener('error', () => {
+      void handleSongFailed(describeAudioError(audio));
+    });
+    // 真的出声了：摘掉超时判定，清掉连续失败计数，顺手把这首的不可用标记洗掉
+    audio.addEventListener('playing', () => {
+      clearSongLoadWatchdog();
+      songFailStreak = 0;
+      const song = currentSongEntry();
+      if (song?.unavailable) {
+        song.unavailable = false;
+        delete song.unavailableReason;
+        saveSongs();
+      }
     });
   }
   if (audio.dataset.fxErrorBound !== '1') {
@@ -5301,80 +6439,82 @@ async function hydrateSong(song) {
   }
 }
 
-function biliPacket(value, operation = 7) {
-  const body = new TextEncoder().encode(JSON.stringify(value));
-  const buffer = new ArrayBuffer(16 + body.length);
-  const view = new DataView(buffer);
-  view.setUint32(0, 16 + body.length);
-  view.setUint16(4, 16);
-  view.setUint16(6, 1);
-  view.setUint32(8, operation);
-  view.setUint32(12, 1);
-  new Uint8Array(buffer, 16).set(body);
-  return buffer;
+/**
+ * 按 bilibili 房间号找到对应的卡片房间对象（app 内部 id 与 B 站房间号不是同一个，
+ * 主进程回传的事件里带的是 B 站房间号，所以要用 roomId 反查）。
+ */
+function findBiliRoom(biliRoomId) {
+  return state.liveRooms.find((r) => r.platform === 'bilibili' && String(r.roomId) === String(biliRoomId));
 }
 
-async function decodeBiliFrame(data, room) {
-  let buffer = data;
-  if (buffer instanceof Blob) buffer = await buffer.arrayBuffer();
-  if (!(buffer instanceof ArrayBuffer)) return;
-  const view = new DataView(buffer);
-  let offset = 0;
-  while (offset + 16 <= view.byteLength) {
-    const total = view.getUint32(offset);
-    const header = view.getUint16(offset + 4);
-    const version = view.getUint16(offset + 6);
-    const operation = view.getUint32(offset + 8);
-    if (!total || total > view.byteLength - offset) break;
-    const body = buffer.slice(offset + header, offset + total);
-    if (operation === 8) {
-      // 服务器对 auth 包的确认（cmd=AUTH_OK）。收到它才算真的"弹幕推送中"，
-      // 之前的"已连接"只代表 TCP 握手成功。
-      if (room && room.connected) {
-        room.status = "弹幕推送中";
-        if (state.route === "song") render({ preserveScroll: true });
-      }
+/** 点歌页才重绘卡片，避免别的页面无谓刷新。 */
+function renderLiveIfNeeded() {
+  if (state.route === 'song') render({ preserveScroll: true });
+}
+
+/**
+ * 主进程转发过来的弹幕事件统一在这里落地到 UI。
+ * 全部连接逻辑（建连 / 鉴权 / 心跳 / 断线重连 / 服务器轮换）都在主进程，
+ * 这里只把事件翻译成卡片状态 + 把弹幕喂给点歌匹配。
+ */
+function handleBiliDanmuEvent(payload) {
+  if (!payload || !payload.roomId) return;
+  const room = findBiliRoom(payload.roomId);
+  if (!room) return;
+  switch (payload.type) {
+    case 'pushing':
+      // 服务器对 auth 包回了确认：从这刻起才真的在推弹幕（之前"已连接"只是 TCP 握手）
+      room.status = '弹幕推送中';
+      renderLiveIfNeeded();
+      break;
+    case 'danmu': {
+      // 捕获数直接用主进程累计值；卡片上数字动 = 服务器真的在推，否则是连接没活
+      room.captured = payload.captured || (room.captured || 0) + 1;
+      const node = document.querySelector(`#live-captured-${room.id} b`);
+      if (node) node.textContent = String(room.captured);
+      handleLiveDanmaku(payload.message, payload.user);
+      break;
     }
-    if (operation === 5) {
-      if (version === 2 || version === 3) {
-        // protover 2 = zlib deflate；protover 3 = brotli（Chromium 原生支持）
-        try {
-          const stream = new DecompressionStream(version === 3 ? "br" : "deflate");
-          const writer = stream.writable.getWriter();
-          writer.write(new Uint8Array(body));
-          writer.close();
-          const inflated = await new Response(stream.readable).arrayBuffer();
-          await decodeBiliFrame(inflated, room);
-        } catch {
-          /* ignore a malformed compressed frame */
-        }
-      } else {
-        try {
-          const text = new TextDecoder().decode(body);
-          const json = JSON.parse(text);
-          const items = Array.isArray(json) ? json : [json];
-          for (const item of items) {
-            if (String(item?.cmd || '').includes('DANMU_MSG')) {
-              const message = String(item.info?.[1] || '');
-              const user = String(item.info?.[2]?.[1] || '');
-              // B 站也计捕获数：卡片上"已捕获 N 条弹幕"数字动 = 服务器真的在推，
-              // 不动 = 没在推（而不是点歌匹配的问题）。直接改 DOM，不走整页重绘。
-              if (room) {
-                room.captured = (room.captured || 0) + 1;
-                const node = document.querySelector(`#live-captured-${room.id} b`);
-                if (node) node.textContent = String(room.captured);
-              }
-              handleLiveDanmaku(message, user);
-            }
-          }
-        } catch {
-          /* non-JSON packet */
-        }
+    case 'open':
+      room.connected = true;
+      room.connecting = false;
+      if (room.lastRetryAt && Date.now() - room.lastRetryAt > 5 * 60 * 1000) room.retryCount = 0;
+      room.status = payload.status || '已连接';
+      // 只在第一次连上弹提示，换服务器 / 自动重连成功不重复弹
+      if (!room.toastedLive) {
+        room.toastedLive = true;
+        toast(`已连接直播间：${room.roomTitle}`, 'success');
       }
-    }
-    offset += total;
+      renderLiveIfNeeded();
+      break;
+    case 'status':
+      room.status = payload.status || room.status;
+      renderLiveIfNeeded();
+      break;
+    case 'reconnecting':
+      room.connecting = false;
+      room.connected = false;
+      room.status = `连接中断（code ${payload.code ?? '未知'}），3 秒后自动重连 ${payload.tries}/3…`;
+      renderLiveIfNeeded();
+      break;
+    case 'closed':
+      room.connected = false;
+      room.connecting = false;
+      if (payload.code != null) room.lastCloseCode = payload.code;
+      room.status = payload.status || '已断开';
+      renderLiveIfNeeded();
+      break;
+    default:
+      break;
   }
 }
+
+
+/*
+ * decodeBiliFrame 已删除：弹幕帧的解码（zlib/brotli 解压 + DANMU_MSG 提取）现在
+ * 全部在主进程用 Node 栈完成，主进程解出来后只把 {type:'danmu',message,user,captured}
+ * 通过 live:danmu-event 回传，渲染层不再碰原始二进制帧。
+ */
 
 /** 关掉一个房间的运行时链路（B 站 WebSocket / 其它平台的轮询与隐藏窗口）。 */
 function closeLiveRuntime(room) {
@@ -5384,6 +6524,8 @@ function closeLiveRuntime(room) {
     if (rt.heartbeat) clearInterval(rt.heartbeat);
     if (rt.timer) clearInterval(rt.timer);
     if (rt.socket) {
+      // 标记是用户主动关的：close 事件据此判断要不要自动重连
+      rt.closedByUser = true;
       try {
         rt.socket.close();
       } catch {
@@ -5394,6 +6536,16 @@ function closeLiveRuntime(room) {
   if (room.danmaku === 'bridge') {
     try {
       api.live.danmakuStop(room.id);
+    } catch {
+      /* 主进程没起来时忽略 */
+    }
+  }
+  // B 站弹幕连接现在在主进程：主动断开要通知主进程，否则主进程还在重连 / 继续推弹幕。
+  // 这里会把它在 biliDanmuConnections 里的连接标记为 closedByUser 并 close，
+  // 主进程回一个 closed 事件，但房间卡片已经先被摘掉了，handleBiliDanmuEvent 会 no-op。
+  if (room.platform === 'bilibili' && room.roomId) {
+    try {
+      api.live.danmuDisconnect(room.roomId);
     } catch {
       /* 主进程没起来时忽略 */
     }
@@ -5415,6 +6567,21 @@ function disconnectBiliLive() {
   for (const room of state.liveRooms.splice(0)) closeLiveRuntime(room);
   if (state.route === 'song') render({ preserveScroll: true });
 }
+
+/*
+ * buildBiliWsUrls 已删除：弹幕服务器候选地址（每 host 先 443 再自报端口、末尾补
+ * broadcastlv:443）现在由主进程的 biliBuildWsUrls 负责，渲染层不再拼 WebSocket URL。
+ */
+
+/*
+ * connectBiliWs / reconnectBiliRoom 已删除：B 站弹幕的建连、鉴权、心跳、断线重连、
+ * 服务器轮换、token 刷新现在全部在主进程（electron/main.js 的 biliOpenWs /
+ * biliReconnect）完成。渲染层只通过 api.live.danmuConnect({roomId,token,hosts}) 发起，
+ * 再由 handleBiliDanmuEvent 接收主进程回传的 open/pushing/danmu/status/closed/
+ * reconnecting 事件来更新卡片与喂点歌。这样长连接跑在 Node 栈上，不再受 Chromium
+ * 出站长连接约 70 秒被本机网络层掐断的限制（实测 ≥95 秒稳定）。
+ */
+
 
 /**
  * 连接直播间（可同时连多个：B站+抖音+斗鱼…并存，弹幕汇进同一个点歌处理）。
@@ -5478,13 +6645,15 @@ async function connectLiveRoom(rawUrl) {
      * 顺便用 host_list 里的弹幕服务器，比写死的 broadcastlv 更稳。
      */
     let authKey = '';
-    let wsUrl = 'wss://broadcastlv.chat.bilibili.com/sub';
+    let hosts = [];
     try {
       const danmu = await api.live.danmuInfo(room.roomId);
-      if (danmu?.token) {
-        authKey = danmu.token;
-        if (danmu.host && danmu.port) wsUrl = `wss://${danmu.host}:${danmu.port}/sub`;
-      }
+      if (danmu?.token) authKey = String(danmu.token);
+      hosts = Array.isArray(danmu?.hosts) ? danmu.hosts : [];
+      // 存一份：断线重连时 5 分钟内直接复用，不用每次都重新请求鉴权
+      room.danmuToken = authKey;
+      room.danmuHosts = hosts;
+      room.danmuAt = Date.now();
     } catch (error) {
       /*
        * 拿不到鉴权就直接不连：B 站服务器对空 key 的连接"接受但一条弹幕都不推"，
@@ -5499,44 +6668,17 @@ async function connectLiveRoom(rawUrl) {
       return;
     }
 
-    const socket = new WebSocket(wsUrl);
-    const rt = { socket, heartbeat: null, timer: null };
-    liveRuntimes.set(room.id, rt);
-    socket.binaryType = 'arraybuffer';
-    socket.addEventListener('open', () => {
-      socket.send(
-        biliPacket({
-          uid: 0,
-          roomid: Number(room.roomId),
-          protover: 2,
-          platform: 'web',
-          type: 2,
-          key: authKey,
-        })
-      );
-      rt.heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(biliPacket({}, 2));
-      }, 30000);
-      room.connected = true;
-      room.connecting = false;
-      room.status = authKey ? '已连接' : '已连接（未取得弹幕鉴权，可能收不到弹幕）';
-      toast(`已连接直播间：${room.roomTitle}`, 'success');
-      if (state.route === 'song') render({ preserveScroll: true });
-    });
-    socket.addEventListener('message', (event) => decodeBiliFrame(event.data, room));
-    socket.addEventListener('error', () => {
-      room.connecting = false;
-      room.status = '连接失败';
-      if (state.route === 'song') render({ preserveScroll: true });
-    });
-    socket.addEventListener('close', () => {
-      if (rt.heartbeat) clearInterval(rt.heartbeat);
-      rt.heartbeat = null;
-      room.connected = false;
-      room.connecting = false;
-      room.status = '已断开';
-      if (state.route === 'song') render({ preserveScroll: true });
-    });
+    /*
+     * 弹幕长连接已迁到主进程：这里只把鉴权 token + hosts 交给主进程，
+     * 真正的建连 / 心跳 / 断线重连 / 服务器轮换全由主进程（Node 栈）负责，
+     * 根治渲染层出站长连接约 70 秒被本机网络层掐断的问题。
+     * 卡片先置成"连接中"，主进程回 open 事件再改"已连接"，避免一瞬间状态跳变。
+     */
+    room.connecting = true;
+    room.connected = false;
+    room.status = '连接直播间…';
+    renderLiveIfNeeded();
+    api.live.danmuConnect({ roomId: room.roomId, token: authKey, hosts });
   } catch (error) {
     // 房间信息都解析不出来：从列表里摘掉，别留一张永远转圈的卡
     const idx = state.liveRooms.indexOf(room);
@@ -6466,6 +7608,208 @@ async function playPlaylist(platform, playlistId) {
   }
 }
 
+/** 两首歌是不是同一首：先认 neteaseId，认不出来再退回「歌名 + 歌手有交集」。 */
+function sameSongKey(a, b) {
+  if (!a || !b) return false;
+  const idA = a.neteaseId ? String(a.neteaseId) : '';
+  const idB = b.neteaseId ? String(b.neteaseId) : '';
+  if (idA && idB && idA === idB) return true;
+  const nameA = songCoreName(a.title);
+  if (!nameA || nameA !== songCoreName(b.title)) return false;
+  const artA = artistNameList(a.artist);
+  const artB = artistNameList(b.artist);
+  if (!artA.length || !artB.length) return true;
+  return artA.some((name) => artB.includes(name));
+}
+
+/** 队列里已经有的同一首歌排在第几？没有返回 -1。 */
+function queuedSongIndex(song) {
+  if (!song) return -1;
+  for (let i = 0; i < state.songs.length; i += 1) {
+    if (sameSongKey(song, state.songs[i])) return i;
+  }
+  return -1;
+}
+
+/**
+ * 队列的「已有哪些歌」索引：一趟建好，之后每首 O(1) 查。
+ * 几百首的歌单要是每首都去扫一遍队列（还带正则归一化），主线程会直接卡住。
+ */
+function buildQueuedKeySet() {
+  const set = new Set();
+  for (const entry of state.songs) rememberQueuedKey(set, entry);
+  return set;
+}
+
+function rememberQueuedKey(set, song) {
+  if (!set || !song) return;
+  if (song.neteaseId) set.add(`id:${song.neteaseId}`);
+  const name = songCoreName(song.title);
+  if (!name) return;
+  set.add(`n:${name}`);
+  for (const artist of artistNameList(song.artist)) set.add(`na:${name}|${artist}`);
+}
+
+function songAlreadyQueued(set, song) {
+  if (!set || !song) return false;
+  if (song.neteaseId && set.has(`id:${song.neteaseId}`)) return true;
+  const name = songCoreName(song.title);
+  if (!name) return false;
+  const artists = artistNameList(song.artist);
+  if (!artists.length) return set.has(`n:${name}`);
+  return artists.some((artist) => set.has(`na:${name}|${artist}`));
+}
+
+/**
+ * 歌单续播任务：一次只留一个，新点一首会把旧的顶掉。
+ * 播放到队列末尾、而它还在往后排歌时，要用它挡住「歌单已经播放完毕」。
+ */
+let playlistFill = null;
+let playlistFillToken = 0;
+
+/**
+ * 把歌单剩下的曲目在后台一首首插进队列（插在 cursor 这个位置，保持顺序）。
+ * token 变了就立刻收手 —— 用户已经点了别的歌，这条续播作废。
+ */
+async function fillPlaylistQueueFrom({ songs, start, platform, fromName, cursor, token }) {
+  let at = cursor;
+  const total = Math.max(0, songs.length - start);
+  const seen = buildQueuedKeySet();
+  for (let i = start; i < songs.length; i += 1) {
+    if (token !== playlistFillToken) return;
+    const song = songs[i];
+    if (!song) continue;
+    // 队列里已经有同一首就别排第二遍：宁可少一首重复，也不要一首歌播两次
+    if (songAlreadyQueued(seen, song)) continue;
+    const ok = await addChartSongToQueue(song, {
+      silent: true,
+      platform: platform || song.platform || '',
+      origin: 'playlist',
+      from: fromName,
+      insertAt: at,
+    });
+    if (ok) {
+      at += 1;
+      rememberQueuedKey(seen, song);
+    }
+    const done = i - start + 1;
+    if (done % 20 === 0 && done < total) {
+      toast(`正在按歌单顺序排后面… ${done}/${total}`, 'info');
+    }
+  }
+}
+
+/** 等续播任务把下一首补上来（最多等 ms 毫秒）。队列变长了就返回真。 */
+async function waitForMoreSongs(ms) {
+  const before = state.songs.length;
+  const deadline = Date.now() + ms;
+  while (playlistFill && Date.now() < deadline) {
+    if (state.songs.length > before) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return state.songs.length > before;
+}
+
+/**
+ * 同一张歌单的曲目在队列里是连着的一段。从 after 往后跳过这一段，
+ * 返回新曲目该插的位置 —— 再点同一张歌单里的另一首时，
+ * 新的一批要排在已经排好的那批后面，不能插到前面把顺序顶乱。
+ */
+function playlistBlockEnd(after, fromName) {
+  let at = Math.max(0, Math.min(Number(after) || 0, state.songs.length));
+  while (at < state.songs.length) {
+    const entry = state.songs[at];
+    if (!entry || entry.origin !== 'playlist' || (entry.from || '歌单') !== fromName) break;
+    at += 1;
+  }
+  return at;
+}
+
+/**
+ * 歌单里点某一首：这一首立刻开播，后面按歌单顺序接着往下放。
+ *
+ * 以前点一行只是「加入队列」，不出声，用户还得跑去队列页再点一次，
+ * 这就是「点了不给放」最直接的体感问题。现在：
+ *   1. 先把这一首解析出来插进队列并切过去播（点下去一两秒就出声）；
+ *   2. 后面的曲目在后台一首首紧跟着插进来 ——
+ *      几百首的歌单不用先全部解析完才播第一首。
+ *
+ * 不动队列里已有的歌：点歌队列是主播的活儿，点一首歌不该把观众点的都清掉。
+ */
+async function playPlaylistFromIndex(platform, playlistId, index) {
+  if (!platform || !playlistId) return;
+  const cached = state.myPlaylists.detail;
+  let detail =
+    cached && cached.platform === platform && cached.id === playlistId && !cached.loading && (cached.songs || []).length
+      ? cached
+      : null;
+  if (!detail) {
+    try {
+      const result = await fetchPlaylistDetail(platform, playlistId);
+      if (!result?.ok || !result.detail?.songs?.length) {
+        toast('这个歌单里没有可播放的曲目', 'info');
+        return;
+      }
+      detail = result.detail;
+    } catch (error) {
+      toast(humanError(error), 'error');
+      return;
+    }
+  }
+  const songs = detail.songs || [];
+  const start = Math.max(0, Math.min(Number(index) || 0, songs.length - 1));
+  const song = songs[start];
+  if (!song) return;
+  const fromName = detail.name || '歌单';
+
+  // 上一次的续播先作废并等它收手：否则两批歌会插到同一个位置上
+  playlistFillToken += 1;
+  const token = playlistFillToken;
+  if (playlistFill) await playlistFill.promise.catch(() => {});
+
+  // 队列里已经有这首（比如刚点过）就直接跳过去，不再排一遍
+  let target = queuedSongIndex(song);
+  if (target < 0) {
+    const ok = await addChartSongToQueue(song, {
+      silent: true,
+      platform: platform || song.platform || '',
+      origin: 'playlist',
+      from: fromName,
+    });
+    if (!ok) {
+      toast(`「${song.title || '这首'}」暂时找不到可播放版本`, 'info');
+      return;
+    }
+    target = state.songs.length - 1;
+  }
+  state.songIndex = target;
+  // 随机模式下「接着往下放」会变成随便挑一首；点歌单里的歌就是要按顺序听
+  if (state.playMode === 'shuffle') setPlayMode('order');
+  await playSongAt(target, { preserveScroll: true });
+  const rest = songs.length - start - 1;
+  toast(
+    rest > 0 ? `正在播放：${song.title} · 后面 ${rest} 首按歌单顺序接着放` : `正在播放：${song.title}`,
+    'success'
+  );
+
+  if (!rest) return;
+  const promise = fillPlaylistQueueFrom({
+    songs,
+    start: start + 1,
+    platform,
+    fromName,
+    // 排在这张歌单已有那段之后：连续点几首时，后点的歌接在后面而不是插到前面
+    cursor: playlistBlockEnd(target + 1, fromName),
+    token,
+  });
+  playlistFill = { token, promise };
+  promise
+    .catch(() => {})
+    .then(() => {
+      if (playlistFill && playlistFill.token === token) playlistFill = null;
+    });
+}
+
 /** 读取各平台登录状态，渲染到榜单面板。 */
 async function refreshNeteaseLogin() {
   try {
@@ -6565,7 +7909,14 @@ async function addChartSongToQueue(song, options = {}) {
     } else {
       entry.origin = 'pick';
     }
-    state.songs.push(entry);
+    /*
+     * insertAt：歌单里点某一首时，后面的曲目必须紧挨着它排队，
+     * 甩到队尾的话「接着往下放」就变成了「先放完别人的歌」。
+     */
+    const at = Number.isFinite(options.insertAt)
+      ? Math.max(0, Math.min(Number(options.insertAt), state.songs.length))
+      : state.songs.length;
+    state.songs.splice(at, 0, entry);
     saveSongs();
     if (!options.silent) {
       state.songIndex = state.songs.length - 1;
@@ -6627,10 +7978,56 @@ async function handleLiveDanmaku(message, user) {
   const keyword = match[1].trim().slice(0, 60);
   if (!keyword) return;
   liveRequestBusy = true;
+  console.log('[点歌] 收到弹幕点歌：', keyword, 'by', user || '观众');
   try {
     const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
     await api.netease.startService(apiBase).catch(() => {});
-    const song = await api.netease.searchSong({ apiBase, keyword, level: state.songQuality });
+    let song = null;
+    try {
+      // 主通道：网易云独占搜索（直接带可播放地址）
+      song = await api.netease.searchSong({ apiBase, keyword, level: state.songQuality });
+    } catch (neteaseErr) {
+      // 网易云通道失败（服务没起 / 没结果 / 会员曲扑空）：退回多平台搜索 + 解析，
+      // 避免弹幕点歌整条静默失败。手动点歌也是走这条多平台路，已经验证可靠。
+      console.warn('[点歌] 网易云搜索失败，退回多平台：', neteaseErr && neteaseErr.message);
+      try {
+        const res = await api.musicSearch({ platform: 'all', keyword, apiBase, limit: 8 });
+        const first = (res && res.songs && res.songs[0]) || null;
+        if (first) {
+          const r = await api.musicResolve({
+            song: {
+              title: first.title,
+              artist: first.artist,
+              cover: first.cover,
+              album: first.album,
+              platform: first.platform,
+              mid: first.mid,
+              hash: first.hash,
+              neteaseId: first.neteaseId,
+            },
+            apiBase,
+            level: state.songQuality,
+          });
+          if (r && r.ok && r.url) {
+            song = {
+              title: r.title || first.title,
+              artist: r.artist || first.artist,
+              cover: r.cover || first.cover || '',
+              neteaseId: r.neteaseId || first.neteaseId,
+              quality: r.level || state.songQuality,
+              url: r.url,
+              source: r.source || first.platform || '',
+            };
+          }
+        }
+      } catch (fallbackErr) {
+        console.error('[点歌] 多平台兜底也失败：', fallbackErr && fallbackErr.message);
+      }
+    }
+    if (!song) {
+      toast(`「${keyword}」暂时找不到可播放版本`, 'info');
+      return;
+    }
     const mode = liveSongMode();
     if (!state.songs.length) {
       // 队列是空的：无论什么模式都直接播这首
@@ -6653,6 +8050,7 @@ async function handleLiveDanmaku(message, user) {
       if (state.route === "song") render({ preserveScroll: true });
     }
   } catch (error) {
+    console.error('[点歌] 失败：', error);
     toast(`弹幕点歌失败：${error.message}`, 'error');
   } finally {
     liveRequestBusy = false;
@@ -7264,9 +8662,12 @@ function karaokeViewMarkup() {
     <div class="page song-page song-app">
       <header class="song-app-head">
         <div class="song-app-title">
-          <h1>点歌台</h1>
-          <span>${state.songs.length ? `${state.songs.length} 首` : '还没有歌'}${state.liveRooms.some((r) => r.connected) ? ' · 弹幕已连接' : ''}</span>
+          <!-- 和别的页统一：eyebrow 小标题 + 36px 主标题 + 计数跟在标题后 -->
+          <div class="eyebrow">${PAGE_META.song.eyebrow}</div>
+          <h1>音乐${state.liveRooms.some((r) => r.connected) ? '<span class="count">弹幕已连接</span>' : ''}</h1>
         </div>
+        <!-- 说明独占一整排：在标题下方铺满一行，不挤进标题行 -->
+        <p class="song-app-desc">本地歌曲、榜单和歌单都在这儿；登录音乐账号能读自己的歌单，直播间连上之后观众还能点歌。</p>
         <div class="song-app-accounts">
           ${musicAccountEntryMarkup()}
         </div>
@@ -7300,7 +8701,7 @@ function karaokeViewMarkup() {
               <span class="song-rail-cover ${cover ? 'has-cover' : ''}">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>
               <span class="song-rail-now-copy">
                 <strong id="rail-now-title">${esc(current?.title || '还没有点歌')}</strong>
-                <small id="rail-now-artist">${esc(current?.artist || '点歌台')}</small>
+                <small id="rail-now-artist">${esc(current?.artist || '音乐')}</small>
               </span>
             </div>
           </section>
@@ -7377,8 +8778,10 @@ function karaokeViewMarkup() {
               .map((room) => {
                 const label = esc(room.platformLabel || '直播间');
                 const statusLine = room.status ? `<p class="song-live-status">${esc(room.status)}</p>` : '';
-                // B站风控(-352)：给一个一键登录入口，登录后重连即可
-                const needBiliLogin = /鉴权失败|-352/.test(String(room.status || ''));
+                // 拿不到鉴权时给一个登录入口（B站偶尔对未登录会话加码）。
+                // -352 是接口签名问题，登录解决不了，别再把用户往死路上引。
+                const failedText = String(room.status || '');
+                const needBiliLogin = /鉴权失败/.test(failedText) && !/-352/.test(failedText);
                 const captured =
                   room.connected
                     ? `<p class="song-live-captured" id="live-captured-${esc(room.id)}">已捕获 <b>${room.captured || 0}</b> 条弹幕${
@@ -7427,7 +8830,7 @@ function karaokeViewMarkup() {
           <span class="song-bar-cover">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>
           <span class="song-bar-copy">
             <strong id="dock-title">${esc(current?.title || '还没有点歌')}</strong>
-            <small id="dock-now-artist">${esc(current?.artist || '点歌台')}</small>
+            <small id="dock-now-artist">${esc(current?.artist || '音乐')}</small>
           </span>
         </div>
 
@@ -7520,7 +8923,7 @@ function playlistDetailMarkup(detail, platform) {
         </div>
         <div class="kr-detail-actions">
           <button class="kr-detail-play" data-action="my-playlist-play" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}" ${songs.length ? '' : 'disabled'}>${icon('play', 'xs')}整张播放</button>
-          <button class="playlists-chip" data-action="my-playlist-import" data-platform="${esc(platform)}" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}加入队列</button>
+          <button class="playlists-chip" data-action="my-playlist-import" data-platform="${esc(platform)}" title="整张追加到队列末尾，不打断正在放的那首" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}整张入队</button>
         </div>
       </div>`;
 
@@ -7537,23 +8940,25 @@ function playlistDetailMarkup(detail, platform) {
   if (!songs.length) {
     return `<div class="kr-detail">${head}<p class="playlists-group-note">这个歌单里没有读到曲目。</p></div>`;
   }
+  const current = state.songs[state.songIndex] || null;
   return `
     <div class="kr-detail">${head}
-      <p class="kr-detail-hint">点任意一首加进队列；「整张播放」会替换当前队列并从第 1 首开播。</p>
+      <p class="kr-detail-hint">点任意一首就直接开播，后面按歌单顺序接着往下放。队列里已有的歌不会被动。</p>
       <div class="playlist-songs kr-detail-songs">
         ${songs
-          .map(
-            (song, index) => `
-          <button class="song-chart-song kr-detail-song" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="加入点歌队列">
-            <span class="song-chart-index">${index + 1}</span>
+          .map((song, index) => {
+            const playing = sameSongKey(song, current);
+            return `
+          <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
+            <span class="song-chart-index">${playing ? '♪' : index + 1}</span>
             <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
             <span class="song-chart-copy">
               <strong>${esc(song.title)}</strong>
               <small>${esc(song.artist || '未知歌手')}</small>
             </span>
-            ${icon('plus', 'xs')}
-          </button>`
-          )
+            ${icon('play', 'xs')}
+          </button>`;
+          })
           .join('')}
       </div>
     </div>`;
@@ -7877,15 +9282,142 @@ function gachaTileHtml(item, { cap = 90 } = {}) {
 
 /**
  * 概览即全部：没有「查看全部」的二次入口。
- * 「全部」只留 KPI 大数字，下面按池子（角色/武器/常驻/邦布）分段把五星图墙全量铺开；
- * 选了具体池时 KPI 换成该池口径，加垫数面板，再铺该池全部五星。
+ * 下面把角色/武器/常驻/邦布各一张统计卡同页并排，不再按池子切换——
+ * 每张卡是该池的 5★ 平均、5★/4★/低星统计，和可切换的 5★/4★ 条形列表；
+ * 选了具体分类时只显示对应那一张卡。
  */
+
+// 各游戏常驻池的五星名单：限定池里抽到名单外的 = 命中 UP（标 up），名单里的 = 歪了。
+// 只用来加「up」小标；认不出的游戏不给标，宁可少标不标错。
+const GACHA_STANDARD_FIVE = {
+  genshin: [
+    '迪卢克', '琴', '莫娜', '七七', '刻晴', '提纳里', '迪希雅',
+    '天空之刃', '天空之傲', '天空之卷', '天空之翼', '天空之脊',
+    '阿莫斯之弓', '四风原典', '狼的末路', '和璞鸢', '风鹰剑',
+  ],
+  starrail: [
+    '姬子', '瓦尔特', '布洛妮娅', '克拉拉', '杰帕德', '白露', '彦卿',
+    '银河铁道之夜', '无可取代的东西', '但战斗还未结束', '以世界之名',
+    '时节不居', '如泥酣眠', '于夜色中',
+  ],
+  zzz: ['猫又', '丽娜', '11号', '格莉丝', '珂蕾妲', '莱卡恩'],
+};
+
+/** 这条五星是否命中 UP：常驻/邦布池不标；名单里（含别名包含）没有它才标 */
+function gachaIsUp(name, pool, standardNames) {
+  if (!standardNames || !standardNames.size) return false;
+  if (pool === 'standard' || pool === 'bangboo' || !name) return false;
+  if (standardNames.has(name)) return false;
+  for (const known of standardNames) {
+    if (name.includes(known) || known.includes(name)) return false;
+  }
+  return true;
+}
+
+/** 一张池子统计卡：头部（池名 + 日期范围 + 总抽数）、四行统计、5★/4★ 切换、条形列表 */
+function gachaPoolCard(pool, label, poolData, game, standardNames) {
+  const cap = gachaPityCap(game);
+  const high = gachaHighLabel(game);
+  const mid = gachaMidLabel(game);
+  const lowLabel = game.key === 'endfield' ? '4★' : game.key === 'zzz' ? 'B级' : '3★';
+  const midLetter = mid.replace('★', '') || '4';
+  const total = poolData.total || 0;
+  const five = poolData.five || 0;
+  const four = poolData.four || 0;
+  const low = poolData.low !== undefined ? poolData.low : Math.max(0, total - five - four);
+  const pct = (part) => (total ? ((part / total) * 100).toFixed(2) : '0.00');
+  const isWeapon = pool === 'weapon';
+  // 吃到保底的红条阈值：角色/常驻离保底 16 抽内算顶满，武器池机制不同放宽 18 抽
+  const hotAt = Math.max(1, cap - (isWeapon ? 18 : 16));
+  const pityCur = poolData.currentPity || 0;
+  const avg = Number(poolData.averagePity) || 0;
+  const range = poolData.firstTime
+    ? `${esc(String(poolData.firstTime).slice(0, 10).replace(/-/g, '/'))} - ${esc(String(poolData.lastTime || poolData.firstTime).slice(0, 10).replace(/-/g, '/'))}`
+    : '暂无记录';
+
+  // —— 5★ 列表：最上面一条是当前已垫，往下是每次出金（条长 = 该次垫抽，红条 = 吃到保底）——
+  const rows5 = [];
+  if (pityCur) {
+    rows5.push(`
+      <div class="gacha-prow">
+        <span class="gacha-prow-av is-pity">垫</span>
+        <span class="gacha-prow-name is-muted">已垫</span>
+        <span class="gacha-prow-count">${pityCur}</span>
+        <span class="gacha-prow-bar"><i class="is-soft" style="width:${Math.min(100, (pityCur / cap) * 100).toFixed(1)}%"></i></span>
+      </div>`);
+  }
+  for (const item of poolData.fiveHistory || []) {
+    const pity = Number(item.pity) || 0;
+    const name = item.name || gachaKindFallback(item.itemType);
+    const up = gachaIsUp(name, pool, standardNames) ? '<em class="gacha-prow-up">up</em>' : '';
+    rows5.push(`
+      <div class="gacha-prow" title="${esc(name)} · ${esc(item.banner || '')} · ${esc(String(item.time).slice(0, 10))} · ${pity} 抽">
+        ${gachaAvatarHtml(item)}
+        <span class="gacha-prow-name">${esc(name)}${up}</span>
+        <span class="gacha-prow-count">${pity}</span>
+        <span class="gacha-prow-bar"><i${pity >= hotAt ? ' class="is-hot"' : ''} style="width:${Math.min(100, (pity / cap) * 100).toFixed(1)}%"></i></span>
+      </div>`);
+  }
+  const list5 = rows5.join('') || `<p class="gacha-empty-line">这个池子还没有出过${esc(high)}</p>`;
+
+  // —— 4★ 列表：按名字聚合次数，条长 = 次数占比，取前 8；头像用真图，缺图回落字牌 ——
+  const fourCount = new Map();
+  for (const item of poolData.fourHistory || []) {
+    const name = item.name || gachaKindFallback(pool === 'weapon' ? 'weapon' : '');
+    const hit = fourCount.get(name);
+    if (hit) {
+      hit.count += 1;
+      if (!hit.icon) hit.icon = item.icon || null;
+    } else {
+      fourCount.set(name, { count: 1, icon: item.icon || null, itemType: item.itemType });
+    }
+  }
+  const fourTop = [...fourCount.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 8);
+  const maxFour = fourTop.length ? fourTop[0][1].count : 0;
+  const list4 = fourTop.length
+    ? fourTop
+        .map(([name, hit]) => {
+          const avatar = hit.icon
+            ? gachaAvatarHtml({ icon: hit.icon, itemType: hit.itemType })
+            : `<span class="gacha-prow-av is-four">${esc(midLetter)}</span>`;
+          return `
+      <div class="gacha-prow">
+        ${avatar}
+        <span class="gacha-prow-name">${esc(name)}</span>
+        <span class="gacha-prow-count">${hit.count}</span>
+        <span class="gacha-prow-bar"><i class="is-four" style="width:${((hit.count / maxFour) * 100).toFixed(1)}%"></i></span>
+      </div>`;
+        })
+        .join('')
+    : `<p class="gacha-empty-line">这个池子还没有${esc(mid)}记录</p>`;
+
+  return `
+    <section class="gacha-pool-card" data-pool="${esc(pool)}">
+      <header class="gacha-pool-head">
+        <div class="gacha-pool-title">
+          <strong>${esc(label)}</strong>
+          <small>${range}</small>
+        </div>
+        <div class="gacha-pool-total">${total}<small>抽</small></div>
+      </header>
+      <div class="gacha-pool-stats">
+        <div class="gacha-pstat"><span class="k is-high">${esc(high)} 平均</span><span class="v">${avg || '—'}${avg ? ` <em>/ 最快 ${poolData.luckiest || '—'} 抽</em>` : ''}</span></div>
+        <div class="gacha-pstat"><span class="k is-high">${esc(high)} 统计</span><span class="v">${five} <em>[${pct(five)}%]</em></span></div>
+        <div class="gacha-pstat"><span class="k is-mid">${esc(mid)} 统计</span><span class="v">${four} <em>[${pct(four)}%]</em></span></div>
+        <div class="gacha-pstat"><span class="k is-low">${esc(lowLabel)} 统计</span><span class="v">${low} <em>[${pct(low)}%]</em></span></div>
+      </div>
+      <div class="gacha-pool-switch">
+        <button class="gacha-pool-tab active" data-action="gacha-pool-tab" data-tier="5">${esc(high)}</button>
+        <button class="gacha-pool-tab" data-action="gacha-pool-tab" data-tier="4">${esc(mid)}</button>
+      </div>
+      <div class="gacha-pool-rows is-on" data-tier="5">${list5}</div>
+      <div class="gacha-pool-rows" data-tier="4">${list4}</div>
+    </section>`;
+}
 
 function gachaOverview(user, game, scope = 'all') {
   const high = gachaHighLabel(game);
   const mid = gachaMidLabel(game);
-  const cap = gachaPityCap(game);
-  const pities = (user.pities || []).slice(0, 4);
   const fourRate = user.fourRate !== undefined
     ? user.fourRate
     : user.total
@@ -7894,36 +9426,33 @@ function gachaOverview(user, game, scope = 'all') {
   const average = Number(user.averagePity) || 0;
   const luckiest = Number(user.luckiest) || 0;
 
-  const tileGrid = (items) =>
-    items.length
-      ? `<div class="gacha-tile-grid">${items.map((item) => gachaTileHtml(item, { cap })).join('')}</div>`
-      : `<p class="gacha-empty-line">这一池还没有出过${esc(high)}</p>`;
+  // 常驻五星名单 = 内置名单 + 这份记录里真从常驻池抽到过的五星（数据自校准）
+  const bucket = user.breakdown || null;
+  const standardNames = new Set(GACHA_STANDARD_FIVE[game.key] || []);
+  if (bucket && bucket.standard) {
+    for (const item of bucket.standard.fiveHistory || []) {
+      if (item.name) standardNames.add(item.name);
+    }
+  }
 
-  // 概览直接分段铺：角色池 / 武器池 / 常驻池 / 邦布池各一段，全部五星一次看完
+  // 概览直接并排铺：角色 / 武器 / 常驻 / 邦布各一张卡，一眼看完
   const POOLS = [
     ['character', '角色池'],
     ['weapon', '武器池'],
     ['standard', '常驻池'],
     ['bangboo', '邦布池'],
   ];
-  const bucket = user.breakdown || null;
-  const poolHead = (label, items) => `
-      <section class="gacha-pool-section">
-        <div class="gacha-overview-head">
-          <h4>${label}</h4>
-          <em>${items.length} 个${esc(high)}</em>
-        </div>
-        ${tileGrid(items)}
-      </section>`;
-  const sections = bucket
+  const cardHtml = ([key, label]) =>
+    bucket[key] && bucket[key].total > 0 ? gachaPoolCard(key, label, bucket[key], game, standardNames) : '';
+  const cards = bucket
     ? scope === 'all'
-      ? POOLS.filter(([key]) => bucket[key] && bucket[key].total > 0)
-          .map(([key, label]) => poolHead(label, bucket[key].fiveHistory || []))
-          .join('')
-      : poolHead((POOLS.find(([key]) => key === scope) || [])[1] || '当前卡池', user.fiveHistory || [])
-    : poolHead('五星记录', user.fiveHistory || []);
-  // 几个池子都没有五星记录时给一句提示，别让 KPI 下面空着
-  const body = sections || '<p class="gacha-empty-line">还没有出过' + esc(high) + '，出了会自动出现在这里。</p>';
+      ? POOLS.map(cardHtml).filter(Boolean).join('')
+      : cardHtml(POOLS.find(([key]) => key === scope) || ['standard', '当前卡池'])
+    : gachaPoolCard('all', '全部记录', user, game, null);
+  // 一个池子都铺不出来时给一句提示，别让 KPI 下面空着
+  const body = cards
+    ? `<div class="gacha-pools">${cards}</div>`
+    : `<p class="gacha-empty-line">还没有出过${esc(high)}，出了会自动出现在这里。</p>`;
 
   return `
     <div class="gacha-dashboard">
@@ -7958,31 +9487,6 @@ function gachaOverview(user, game, scope = 'all') {
             : ''
         }
       </div>
-      ${
-        /* 「全部」界面只留总抽数/五星这些大数字；卡池统计只在选了具体池时出现 */
-        scope !== 'all'
-          ? `<div class="gacha-pity-panel">
-        <div class="gacha-overview-head">
-          <h4>卡池垫数</h4>
-        </div>
-        ${
-          pities.length
-            ? pities
-                .map((item) => {
-                  const percent = Math.min(100, (item.pity / cap) * 100);
-                  return `
-                  <div class="gacha-pity-row">
-                    <span class="gacha-pity-name" title="${esc(item.name)}">${esc(item.name)}</span>
-                    <div class="gacha-pity-bar"><span style="width:${percent}%" class="${percent >= 80 ? 'near' : ''}"></span></div>
-                    <strong>${item.pity}<em>/${cap}</em></strong>
-                  </div>`;
-                })
-                .join('')
-            : '<p class="gacha-empty-line">还没有卡池记录</p>'
-        }
-      </div>`
-          : ''
-      }
     </div>
     ${
       user.pityExact === false
@@ -8154,18 +9658,18 @@ function gachaView2() {
     </div>`;
 
   if (state.gachaLoading) {
-    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('star')}</div><h3>获取抽卡数据中…</h3><p>首次读取需要一点时间，请稍候。</p></div></div>`;
+    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('gacha')}</div><h3>获取抽卡数据中…</h3><p>首次读取需要一点时间，请稍候。</p></div></div>`;
   }
   if (state.gachaError) {
     return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>读取失败</h3><p>${esc(state.gachaError)}</p><button class="btn btn-ghost" data-action="refresh-gacha">重新读取</button></div></div>`;
   }
   if (!state.gacha) {
-    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('star')}</div><h3>还没有抽卡记录</h3><p>启动器会自动读取本机的抽卡数据；也可以用 UIGF 或异环导出 JSON 导入。</p><div class="empty-actions"><button class="btn btn-primary" data-action="import-gacha">${icon('download')}导入记录</button><button class="btn btn-ghost" data-action="sync-gacha">${icon('refresh')}在线同步</button></div></div></div>`;
+    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('gacha')}</div><h3>还没有抽卡记录</h3><p>启动器会自动读取本机的抽卡数据；也可以用 UIGF 或异环导出 JSON 导入。</p><div class="empty-actions"><button class="btn btn-primary" data-action="import-gacha">${icon('download')}导入记录</button><button class="btn btn-ghost" data-action="sync-gacha">${icon('refresh')}在线同步</button></div></div></div>`;
   }
 
   const selection = gachaEnsureSelection();
   if (!selection) {
-    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('star')}</div><h3>还没有抽卡记录</h3><p>可以导入 UIGF / SRGF / 异环导出 JSON；终末地可以直接网页登录同步。</p><div class="empty-actions"><button class="btn btn-ghost" data-action="import-gacha">导入 UIGF / 异环</button><button class="btn btn-ghost" data-action="gacha-source" data-value="endfield">终末地同步</button></div></div></div>`;
+    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('gacha')}</div><h3>还没有抽卡记录</h3><p>可以导入 UIGF / SRGF / 异环导出 JSON；终末地可以直接网页登录同步。</p><div class="empty-actions"><button class="btn btn-ghost" data-action="import-gacha">导入 UIGF / 异环</button><button class="btn btn-ghost" data-action="gacha-source" data-value="endfield">终末地同步</button></div></div></div>`;
   }
   const { games, game, user } = selection;
 
@@ -8187,7 +9691,7 @@ function gachaView2() {
           </div>
         </div>
         <div class="empty">
-          <div class="empty-icon">${icon('star')}</div>
+          <div class="empty-icon">${icon('gacha')}</div>
           <h3>${esc(game.name)} 还没有抽卡记录</h3>
           <p>${
             game.key === 'endfield'
@@ -10225,7 +11729,7 @@ function gfxControl(group, field) {
   }
 
   if (!hasCurrent) {
-    return `<span class="gfx-missing">没读到这一项的值，点右上角「重新读取」</span>`;
+    return `<span class="gfx-missing" title="没读到这一项的值，点右上角「重新读取」">未读取到</span>`;
   }
 
   return `<input class="gfx-input" type="number" step="any" value="${esc(String(current))}"
@@ -10279,6 +11783,7 @@ function graphicsView() {
           <article class="gfx-card gfx-card-writable${wide}">
             <header>
               <strong>${esc(group.title)}</strong>
+              <em>${(group.fields || []).length} 项</em>
             </header>
             <ul>${rows || '<li class="gfx-row"><span class="gfx-label">（没有可读字段）</span></li>'}</ul>
           </article>`;
@@ -10653,6 +12158,35 @@ function initSidebarScroll() {
     },
     { passive: true }
   );
+
+  /*
+   * 滚轮转发：侧栏里真正能滚的只有导航这一块，但顶部品牌区、底部立绘、
+   * 「收起侧栏」和个人资料都盖在它上面/下面。鼠标停在那些地方滚轮毫无反应，
+   * 用起来就是「侧栏滑不动」。这里把侧栏范围内的滚轮统一喂给导航容器，
+   * 手感与直接滚列表一致（行模式的 deltaY 按 16px 一行换算）。
+   */
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebar && sidebar.dataset.wheelRelay !== '1') {
+    sidebar.dataset.wheelRelay = '1';
+    sidebar.addEventListener(
+      'wheel',
+      (event) => {
+        // Ctrl + 滚轮是缩放，Alt/Shift 有可能是横向，都别抢
+        if (event.ctrlKey || event.altKey) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target && target.closest('#sidebar-scroll')) return;
+        const max = scroller.scrollHeight - scroller.clientHeight;
+        if (max <= 1) return;
+        const step = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1;
+        const next = Math.max(0, Math.min(scroller.scrollTop + event.deltaY * step, max));
+        if (next === scroller.scrollTop) return;
+        event.preventDefault();
+        scroller.scrollTop = next;
+        markScrolling();
+      },
+      { passive: false }
+    );
+  }
 }
 
 /** 游戏卡内部的分类分组顺序与短标签。 */
@@ -10686,12 +12220,13 @@ const TOOLS_CATEGORY_SHORT = {
  * - 默认全部展开，点卡片头折叠 / 展开（折叠状态存 state.toolsCollapsed）；
  * - 顶部一条游戏主题色（game.accent）光带，便于一眼区分游戏。
  */
-function toolsGameCard(game, supportOf) {
+/**
+ * 一个游戏的能力内容：按分类分组的功能标签 + wiki 折叠块。
+ * 只产出「内容」，不带卡片外壳——右侧能力面板直接铺它。
+ */
+function toolsGameBody(game, supportOf) {
   const features = supportOf(game.key);
   const supported = features.filter((item) => item.supported);
-  // 默认收缩：只有被点开过的游戏才展开，展开状态存 state.toolsExpanded
-  const open = Boolean(state.toolsExpanded && state.toolsExpanded[game.key]);
-  const accent = game.accent || '#f0c674';
 
   const featButton = (item) => {
     const isRecord = RECORD_FEATURE_SET.has(item.key);
@@ -10717,25 +12252,36 @@ function toolsGameCard(game, supportOf) {
     </div>`;
   }).join('');
 
-  /* wiki 收进卡内收缩框（3.x 改版：替代底部独立 wiki 面板） */
+  /* wiki 收进内容区底部（3.x 改版：替代底部独立 wiki 面板） */
   const wikiBlock = gameWikiGroup(game);
-  const bodyInner =
-    groups || wikiBlock
-      ? `${groups}${wikiBlock}`
-      : `<p class="tools-game-empty">这款游戏暂无可接入的能力。</p>`;
+  if (!groups && !wikiBlock) return `<p class="tools-game-empty">这款游戏暂无可接入的能力。</p>`;
+  return `${groups}${wikiBlock}`;
+}
 
-  return `<div class="tg-card${open ? ' is-open' : ''}" style="--tg-accent:${esc(accent)}">
-    <button class="tg-head" data-action="tools-game-toggle" data-value="${esc(game.key)}" aria-expanded="${open ? 'true' : 'false'}">
-      <span class="tg-bar" aria-hidden="true"></span>
-      <span class="tg-head-copy">
-        <strong>${esc(game.name)}</strong>
-        <small>${esc(game.subtitle || '')}</small>
-      </span>
-      <span class="tg-count">${supported.length} 项</span>
-      <span class="tg-arrow">${icon('chevron-down', 'xs')}</span>
-    </button>
-    ${open ? `<div class="tg-body">${bodyInner}</div>` : ''}
-  </div>`;
+/** 左侧游戏条目：主题色小光带 + 游戏名 + 副标题 + 能力数。 */
+function toolsRailItem(game, supportOf, active) {
+  const count = supportOf(game.key).filter((item) => item.supported).length;
+  return `<button class="tg-rail-item${active ? ' is-active' : ''}" style="--tg-accent:${esc(game.accent || '#f0c674')}"
+    data-action="tools-game-pick" data-value="${esc(game.key)}" role="tab" aria-selected="${active ? 'true' : 'false'}"
+    title="${esc(game.name)}：${count} 项能力">
+    <span class="tg-bar" aria-hidden="true"></span>
+    <span class="tg-rail-copy">
+      <strong>${esc(game.name)}</strong>
+      <small>${esc(game.subtitle || '')}</small>
+    </span>
+    <span class="tg-rail-count">${count} 项</span>
+  </button>`;
+}
+
+/** 右侧能力面板：一次只铺一个游戏，高度自然撑满，不再有卡片高低参差。 */
+function toolsPanel(game, supportOf) {
+  const count = supportOf(game.key).filter((item) => item.supported).length;
+  return `<div class="tg-panel-head">
+      <strong>${esc(game.name)}</strong>
+      <small>${esc(game.subtitle || '')}</small>
+      <span class="tg-count">${count} 项能力</span>
+    </div>
+    <div class="tg-panel-groups">${toolsGameBody(game, supportOf)}</div>`;
 }
 
 /**
@@ -10815,14 +12361,23 @@ function toolsView() {
    * 功能分类只是重复维度。现在整页就是一面全宽的游戏能力卡墙；
    * 不按游戏走的两件事——账号登录、自定义插件——收进右上角。
    */
-  const gameCards = games.map((game) => toolsGameCard(game, supportOf)).join('');
+  /*
+   * 布局：左边一条游戏列表，右边是选中游戏的能力面板。
+   * 以前是一面可折叠的卡片墙，点开一张、其余仍收起，同一行里高矮不齐、
+   * 看着像没对齐的半成品；主从布局一次只铺一个游戏，右侧自然填满，
+   * 选谁看谁，也不会把整页拉得很长。
+   */
+  const activeKey =
+    games.some((game) => game.key === state.toolsGame) ? state.toolsGame : (games[0] && games[0].key) || '';
+  const activeGame = games.find((game) => game.key === activeKey) || games[0] || null;
+  const rail = games.map((game) => toolsRailItem(game, supportOf, game.key === activeKey)).join('');
 
   return `<div class="page page-tools">
     <div class="page-head">
       <div>
         <div class="eyebrow">${PAGE_META.tools.eyebrow}</div>
         <h1>工具</h1>
-        <p class="page-desc">${totalGames} 个游戏 · ${totalFeatures} 项能力，按游戏分组，点标签直接进入对应功能</p>
+        <p class="page-desc">${totalGames} 个游戏 · ${totalFeatures} 项能力，左边选游戏，右边直接进对应功能</p>
       </div>
       <div class="tools-head-actions">
         <button class="btn ghost" data-action="tools-accounts">${icon('login', 'xs')}账号登录</button>
@@ -10831,8 +12386,11 @@ function toolsView() {
       </div>
     </div>
 
-    <div class="tools-game-grid tg-grid-full">
-      ${gameCards || '<p class="tools-game-empty">暂时没有读取到游戏能力。</p>'}
+    <div class="tg-shell">
+      <aside class="tg-rail" role="tablist" aria-label="按游戏查看能力">${rail}</aside>
+      <section class="tg-panel" style="--tg-accent:${esc((activeGame && activeGame.accent) || '#f0c674')}">
+        ${activeGame ? toolsPanel(activeGame, supportOf) : '<p class="tools-game-empty">暂时没有读取到游戏能力。</p>'}
+      </section>
     </div>
   </div>`;
 }
@@ -11667,14 +13225,48 @@ function newsPinnedSkeletonList() {
     </div>`;
 }
 
+/**
+ * 大框轮换池：最新 8 条里按「公告 > 活动 > 资讯」排（同类型按时间新→旧）。
+ * 只在最近 8 条里挑，不全文扫 —— 池子稳定，翻页键的位置不会因为
+ * 远处一条旧公告突然插队而跳。
+ */
+function noticeFeaturePool(entries) {
+  const priority = { 公告: 0, 活动: 1, 资讯: 2 };
+  return entries
+    .slice(0, 8)
+    .sort((a, b) => {
+      const pa = priority[noticeTypeLabel(a.notice)] ?? 3;
+      const pb = priority[noticeTypeLabel(b.notice)] ?? 3;
+      if (pa !== pb) return pa - pb;
+      return noticeSortTime(b.notice) - noticeSortTime(a.notice);
+    });
+}
+
 /** 置顶区：最新官方动态大框 + 置顶动态行列表。 */
 function newsPinnedMarkup(entries) {
-  const head = entries[0];
+  /*
+   * 大框不再是「只有最新那一条」：公告一多，最新那条常常是条无关的资讯，
+   * 真正要看的版本更新 / 活动公告被压在列表里。这里把最近 8 条拎出来，
+   * 按「公告 > 活动 > 资讯」稳定排一遍（同类型仍按时间），
+   * 大框只在池子里轮，配上一组首页式翻页键。
+   */
+  const pool = noticeFeaturePool(entries);
+  const total = pool.length;
+  const index = total ? Math.min(Math.max(state.newsFeatureIndex || 0, 0), total - 1) : 0;
+  const head = pool[index] || entries[0];
   const { notice, game } = head;
   const typeLabel = noticeTypeLabel(notice);
   const cover = game.startCoverUrl || game.coverUrl || '';
   // 动态页做减法：置顶行列表只留 3 条，再往下都是折叠区，避免"滑不停"
-  const rest = entries.slice(1, 4);
+  const rest = entries.filter((entry) => entry !== head).slice(0, 3);
+  const nav =
+    total > 1
+      ? `<span class="news-feature-nav">
+          <button class="news-feature-step" data-action="news-feature-prev" title="上一条公告" aria-label="上一条公告">${icon('chevron-left', 'xs')}</button>
+          <span class="news-feature-pos"><strong>${index + 1}</strong> / ${total}</span>
+          <button class="news-feature-step" data-action="news-feature-next" title="下一条公告" aria-label="下一条公告">${icon('chevron-right', 'xs')}</button>
+        </span>`
+      : '';
   return `
     <div class="news-pinned">
       ${
@@ -11682,6 +13274,7 @@ function newsPinnedMarkup(entries) {
           ? `<div class="notice-error">${icon('info', 'xs')} ${esc(state.noticeBoardError)}</div>`
           : ''
       }
+      <div class="news-feature-wrap">
       <button class="news-feature news-feature--notice" data-action="open-external" data-url="${esc(notice.link)}"${noticeAccentStyle(game, 'text-align:left')} title="${esc(notice.title)}">
         <div class="news-feature-main">
           <span class="news-pinned-tags">
@@ -11711,6 +13304,8 @@ function newsPinnedMarkup(entries) {
           }
         </div>
       </button>
+      ${nav}
+      </div>
       ${
         rest.length
           ? `<div class="news-pinned-list">
@@ -11999,6 +13594,8 @@ async function loadNoticeBoard(force = false) {
     if (payload && typeof payload === 'object') {
       state.noticeBoard = { ...state.noticeBoard, ...payload };
       state.noticeBoardUpdatedAt = Date.now();
+      // 数据换了，页码跟着归位：新公告永远从第一条看起
+      state.newsFeatureIndex = 0;
     }
   } catch (error) {
     state.noticeBoardError = error?.message || '官方公告同步失败';
@@ -12273,6 +13870,12 @@ function settingsView() {
               <button class="switch ${state.settings.charBg !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charBg !== false}" data-action="toggle-charbg" title="${state.settings.charBg !== false ? '关闭' : '开启'}"></button>
             </div>
           </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>侧栏立绘</strong><span>展开侧栏时，底部显示火花立绘。关掉后这一块不占高度，导航能一次显示更多项，不用滚。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.sidebarChar !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.sidebarChar !== false}" data-action="toggle-sidebar-char" title="${state.settings.sidebarChar !== false ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
         </section>
 
         <section class="${group('window', true)} material-panel" ${groupAttr('window')}>
@@ -12345,7 +13948,7 @@ function settingsView() {
 
         <section class="${group('sound')} sound-settings-panel" ${groupAttr('sound')}>
           <h2>${icon('volume')}界面音效</h2>
-          <p class="desc">按钮、导航和通知的反馈音，独立于歌曲音量；歌曲音量与 3D 音效在点歌台里调整。</p>
+          <p class="desc">按钮、导航和通知的反馈音，独立于歌曲音量；歌曲音量与 3D 音效在音乐页里调整。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>界面音效</strong><span>按钮、导航和开关操作时播放轻量反馈音；关闭后完全静音。</span></div>
             <div class="setting-control">${soundSwitchMarkup('enabled', state.sound.enabled)}</div>
@@ -12415,7 +14018,7 @@ function settingsView() {
             <div class="setting-control">${switchMarkup('nevernessUseOfficialLauncher', settings.nevernessUseOfficialLauncher !== false)}</div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、星穹铁道、绝区零、终末地的启动程序。</span></div>
+            <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、崩坏3、星穹铁道、绝区零、异环、终末地的启动程序。</span></div>
             <div class="setting-control"><button class="btn btn-ghost" data-action="detect-all">${icon('refresh')}立即检测</button></div>
           </div>
           <div class="setting-row">
@@ -12466,7 +14069,7 @@ function settingsView() {
             </div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>始终以管理员身份启动</strong><span>终末地通过官方登录流程启动时需要管理员权限。开启后，下次启动会直接请求 Windows UAC，不再重复弹出应用内提示。</span></div>
+            <div class="setting-copy"><strong>始终以管理员身份启动</strong><span>终末地通过官方登录流程启动时需要管理员权限。开启后，下次启动会直接请求 Windows UAC，不再重复弹出应用内提示；UAC 被拒绝或新实例没起来时会自动退回普通权限，不会出现双击打不开的情况。</span></div>
             <div class="setting-control">${switchMarkup('alwaysAdmin', settings.alwaysAdmin)}</div>
           </div>
           <div class="setting-row">
@@ -12519,12 +14122,13 @@ function settingsView() {
 
         <section class="${group('update', true)}" ${groupAttr('update')}>
           <h2>${icon('download')}软件更新</h2>
-          <p class="desc">更新源已经内置：启动器会先看启动器目录里那份 <code>latest.json</code>，没有就自动去官方 Release 取。所以装完就能自己升级，不用手动填地址。</p>
+          <p class="desc">更新源已经内置：先看启动器目录里那份 <code>latest.json</code>，没有就去官方 Release 取，装完就能自己升级。下载失败会自动换国内镜像重试并做 sha256 校验，裸连也能装；开着 Steam++ 这类加速器也不会再因为证书检查失败。</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。</span></div>
+            <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。一直卡在「检查更新」或下载不动时，点右边「用国内镜像源」换成 Gitee 上的清单试一次。</span></div>
             <div class="setting-control update-source-control">
               <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="留空 = 内置官方源" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
+              <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}用国内镜像源</button>
               <button class="btn btn-ghost" data-action="pick-update-source">${icon('folder')}选择文件</button>
             </div>
           </div>
@@ -12541,14 +14145,24 @@ function settingsView() {
           </div>
           <div class="setting-row">
             <div class="setting-copy">
-              <strong>更新日志</strong>
-              <span>覆盖脚本在后台单独运行，界面看不到它的输出。更新卡住或没重启时，把这里的日志发回来就能定位是哪一步出的问题。</span>
+              <strong>覆盖安装日志</strong>
+              <span>覆盖脚本在后台单独运行，界面看不到它的输出。更新卡住或没重启时，把这里的日志发回来就能定位是哪一步出的问题（这不是版本更新日志，版本更新内容在「动态」页）。</span>
             </div>
             <div class="setting-control update-action-control">
               <button class="btn btn-ghost" data-action="view-update-log">${icon('file-text')}查看日志</button>
               <button class="btn btn-ghost" data-action="open-update-log">${icon('folder')}打开文件</button>
             </div>
           </div>
+          ${
+            state.update && state.update.backup && state.update.backup.ok
+              ? `<div class="setting-row">
+                  <div class="setting-copy"><strong>回到上一个版本</strong><span>上一次升级前的程序文件还留着备份（v${esc(state.update.backup.version || '?')} → v${esc(state.update.backup.target || '?')}）。新版本有问题时，可以一键还原回去。</span></div>
+                  <div class="setting-control update-action-control">
+                    <button class="btn btn-ghost" data-action="rollback-update">${icon('refresh')}回滚到 v${esc(state.update.backup.version || '?')}</button>
+                  </div>
+                </div>`
+              : ''
+          }
           <div class="setting-row">
             <div class="setting-copy">
               <strong>手动更新</strong>
@@ -12559,7 +14173,7 @@ function settingsView() {
               <button class="btn btn-ghost" data-action="open-external" data-url="${REPO_URL}">${icon('external')}仓库</button>
             </div>
           </div>
-          ${state.update && state.update.downloading ? `<div class="update-progress"><div class="update-progress-bar"><span style="width:${Number(state.update.percent) || 0}%"></span></div><small>正在下载 ${Number(state.update.percent) || 0}%</small></div>` : ''}
+          ${state.update && state.update.downloading ? `<div class="update-progress"><div class="update-progress-bar"><span style="width:${Number(state.update.percent) || 0}%"></span></div><small>${updateProgressText(Number(state.update.percent) || 0, '')}</small></div>` : ''}
         </section>
 
         <section class="${group('community')}" ${groupAttr('community')}>
@@ -12594,19 +14208,23 @@ function settingsView() {
 
         <section class="${group('about', true)}" ${groupAttr('about')}>
           <h2>${icon('info')}关于</h2>
-          <p class="desc">一个本地优先的桌面游戏书架。</p>
+          <p class="desc">一个本地优先的桌面游戏书架，会自己管更新，外加一台能放歌的音乐台。</p>
           <div class="setting-row" style="border-bottom:0;padding-bottom:0">
             <div class="about-block">
               <div class="about-name">花筱灵启动器</div>
               <div class="about-version">VERSION ${esc(state.app.version || '1.0.0')} · ELECTRON ${esc(state.app.electron || '')}</div>
               <div class="about-note">
-                内置原神、崩坏：星穹铁道、绝区零、异环、明日方舟：终末地的启动入口，也支持添加任意本地游戏。
-                界面与代码为原创实现，红金舞台氛围参考《崩坏：星穹铁道》的花火，但只使用原创几何图形，不内置官方立绘或标志。
-                版本封面会在联网时从官网获取并缓存，版权归各游戏官方所有。
+                内置原神、崩坏：星穹铁道、绝区零、崩坏3、明日方舟、异环、明日方舟：终末地的启动入口，也支持添加任意本地游戏；装在哪、切哪个服、缺不缺资源，启动器都会自己认，游戏有官方更新时「开始游戏」会直接变成「更新游戏」，点了就下、下完自动就位。
+                切服不用重下：多渠道游戏（官服 / B服 / 国际服）共用一份客户端，运行时按渠道自动组装，更新一次全服通用。
+                抽卡记录三池一页看完：条形图带真头像、红条 = 吃到保底，自动算平均出金和当前垫数。
+                另带一台音乐台：网易云 / QQ / 酷狗 / 酷我多平台搜歌、歌单链接导入、队列分组与过滤、音效与歌词，直播间连上后还能听观众弹幕点歌。
+                界面与代码为原创实现；启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有。
+                游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。
                 功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。
-                游戏列表、设置和时长都保存在本地，不会上传。
+                游戏列表、设置、歌单和时长都保存在本地，不会上传。
               </div>
               <div class="about-links">
+                <button class="link-btn" data-action="open-changelog">${icon('file-text')}版本更新日志</button>
                 <button class="link-btn" data-action="install-update">${icon('download')}导入更新包</button>
                 <button class="link-btn" data-action="open-external" data-url="https://github.com/Scighost/Starward">Starward · MIT ${icon('external')}</button>
                 <button class="link-btn" data-action="quit-app">退出启动器</button>
@@ -13038,11 +14656,12 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'my-playlist-song': {
+      // 点一行 = 点歌：这首立刻开播，后面按歌单顺序接着放（以前只入队、不出声）
       const index = Number(element.dataset.index) || 0;
-      const song = (state.myPlaylists.detail?.songs || [])[index];
-      if (!song) break;
-      const ok = await addChartSongToQueue(song, { silent: true, platform: element.dataset.platform || '' });
-      toast(ok ? `已加入：${song.title}` : `「${song.title}」暂时找不到可播放版本`, ok ? 'success' : 'info');
+      const detail = state.myPlaylists.detail;
+      const song = (detail?.songs || [])[index];
+      if (!song || !detail) break;
+      await playPlaylistFromIndex(element.dataset.platform || detail.platform || '', detail.id, index);
       break;
     }
     case 'my-playlist-import': {
@@ -13114,7 +14733,7 @@ async function handleAction(action, id, element, event = null) {
     case 'music-source-pick': {
       const picker = document.querySelector('#music-source-file');
       if (picker) picker.click();
-      else toast('找不到文件选择框，刷新一下点歌台', 'error');
+      else toast('找不到文件选择框，刷新一下音乐页', 'error');
       break;
     }
     case 'music-source-subscribe': {
@@ -13348,7 +14967,7 @@ async function handleAction(action, id, element, event = null) {
       setMiniEnabled(false);
       // 总开关被关了，界面上的小播放器开关也要跟着回到关位
       paintSwitches('toggle-mini-player', false);
-      toast('小播放器已关闭，可在「设置 → 声音」或点歌台重新打开', 'info');
+      toast('小播放器已关闭，可在「设置 → 声音」或音乐页重新打开', 'info');
       break;
     }
     case 'toggle-mini-player': {
@@ -13383,27 +15002,7 @@ async function handleAction(action, id, element, event = null) {
       playCurrentSong();
       break;
     }
-    case 'queue-seg-toggle': {
-      /*
-       * 队列段的展开 / 收起。段序号在队列增删后会漂移，但折叠只是显示层
-       * 的记忆，漂了也不影响行号映射（data-index 始终是全局真实下标）。
-       *
-       * 展开与否要看「实际生效值」再取反：含当前播放的段默认是展开的
-       * （state 里还没记），这时点一下应该是收起，而不是把 undefined 取反成 true。
-       */
-      const segIdx = Number(element.dataset.seg) || 0;
-      const segments = songQueueSegments();
-      const seg = segments[segIdx];
-      if (!seg) break;
-      let start = 0;
-      for (let i = 0; i < segIdx; i += 1) start += segments[i].items.length;
-      const hasCurrent = state.songIndex >= start && state.songIndex < start + seg.items.length;
-      const effective =
-        state.queueExpanded[segIdx] !== undefined ? state.queueExpanded[segIdx] : hasCurrent;
-      state.queueExpanded[segIdx] = !effective;
-      render({ preserveScroll: true });
-      break;
-    }
+    /* queue-seg-toggle 已删：队列段的展开/收起砍掉了，列表平铺 */
     case 'queue-filter-clear': {
       state.queueFilter = '';
       render({ preserveScroll: true });
@@ -13486,27 +15085,40 @@ async function handleAction(action, id, element, event = null) {
       else playUiSound('launch');
       break;
     }
-    case 'start-server': {
-      // 点服务器胶囊：切换并直接启动
-      const gameId = element.dataset.game;
-      const serverId = element.dataset.server;
-      const game = state.games.find((item) => item.id === gameId);
-      const server = game && (game.servers || []).find((item) => item.id === serverId);
-      if (!game || !server) break;
-      if (!server.exists || server.incomplete) {
-        // 不可用时直接打开管理面板，让用户点「重建」
-        openStartServerManager(gameId);
+    case 'start-server':
+      // 服务器胶囊：切换 + 直接启动（快速进游戏，和下拉里的「只切换」区分开）
+      await switchServerProfile(element.dataset.game, element.dataset.server, { launch: true });
+      break;
+    case 'start-update-game': {
+      // dock 主按钮的「更新游戏」：直接应用官方更新，完成/失败后按钮都会变回去。
+      // 进度显示靠全局 onPredownloadProgress 订阅直接改按钮文字，不整页重绘。
+      const game = state.games.find((item) => item.id === id);
+      if (!game) break;
+      if (state.gameUpdate) {
+        toast('已经有更新在进行中了', 'info');
         break;
       }
+      const server = (game.servers || []).find((item) => item.active) || (game.servers || [])[0];
+      if (!server) break;
+      const jobId = `dock-update-${game.id}-${Date.now()}`;
+      state.gameUpdate = { gameId: game.id, jobId, label: '正在准备更新…' };
+      render({ preserveScroll: true });
       try {
-        await api.servers.activate({ gameId, serverId });
-        if (game.installed) {
-          const launch = await api.games.launch(gameId);
-          if (!launch.ok) toast(launch.error, 'error');
-          else playUiSound('launch');
+        const result = await api.predownload.apply({ gameId: game.id, serverId: server.id, jobId });
+        if (result && result.cancelled) toast('更新已取消', 'info');
+        else if (result && result.ok === false) toast('更新没有完成，部分文件校验失败', 'error');
+        else {
+          const version = String(result?.tag || result?.version || '');
+          toast(version ? `已更新到 ${version}，可以开始游戏了` : '更新完成，可以开始游戏了', 'success');
+          if (game.builtinKey === 'neverness' && version) {
+            toast(`启动器资源已更新到 ${version}；游戏本体如有新版本，打开异环启动器时会自动补`, 'info');
+          }
         }
       } catch (error) {
-        toast(humanError(error), 'error');
+        toast(`更新失败：${humanError(error)}`, 'error');
+      } finally {
+        state.gameUpdate = null;
+        render({ preserveScroll: true });
       }
       break;
     }
@@ -13528,43 +15140,19 @@ async function handleAction(action, id, element, event = null) {
         ?.setAttribute('aria-expanded', next ? 'true' : 'false');
       break;
     }
-    case 'start-server-pick': {
-      const gameId = element.dataset.game;
-      const serverId = element.dataset.server;
-      const game = state.games.find((item) => item.id === gameId);
-      const server = game && (game.servers || []).find((item) => item.id === serverId);
-      closeStartServerMenu();
-      if (!game || !server) {
-        render({ preserveScroll: true });
-        break;
-      }
-      if (!server.exists || server.incomplete) {
-        openStartServerManager(gameId);
-        break;
-      }
-      /*
-       * 异环的「服务器」其实是同一个客户端的渠道（官服/B服），真正生效的是
-       * Config.ini 里的渠道配置——所以在 dock 里点服务器时要顺手把渠道也切了，
-       * 不用再钻进服务器管理面板。
-       */
-      if (
-        game.builtinKey === 'neverness' &&
-        ['official', 'bilibili'].includes(String(server.channel || ''))
-      ) {
-        const switched = await switchNteChannel(game, server, server.channel);
-        if (!switched) {
-          render({ preserveScroll: true });
-          break;
-        }
-      }
-      try {
-        await api.servers.activate({ gameId, serverId });
-        toast(`已切换到 ${server.name}`, 'success');
-      } catch (error) {
-        toast(humanError(error), 'error');
-      }
+    case 'start-server-pick':
+      // 下拉里点服务器 = 只切换（启动交给「开始游戏」，比「切完顺手把游戏拉起来」清楚）
+      await switchServerProfile(element.dataset.game, element.dataset.server, { launch: false });
       break;
-    }
+    case 'start-server-setup':
+      // 这个服还没装好：先问「怎么补上」，别直接把人扔进一个几十分钟的安装
+      closeStartServerMenu();
+      openServerSetupDialog(element.dataset.game, element.dataset.server);
+      break;
+    case 'start-server-guide':
+      // 从管理面板进来的：关掉说明卡后回到管理面板
+      openServerSwitchGuide({ returnToManager: element.dataset.game || '' });
+      break;
     case 'start-server-manage':
       closeStartServerMenu();
       openStartServerManager(element.dataset.game);
@@ -13648,6 +15236,8 @@ async function handleAction(action, id, element, event = null) {
       await api.minimizeWindow();
       break;
     case 'window-maximize':
+      // 侧栏外扩着时最大化：先把窗口收回原宽，否则还原窗口会多留一条侧栏的宽度
+      if (state.startNavExpanded) await setStartNavOpen(false, { instant: true }).catch(() => {});
       await api.toggleMaximize();
       break;
     case 'window-close':
@@ -13844,6 +15434,16 @@ async function handleAction(action, id, element, event = null) {
       state.gachaScope = element.dataset.value || 'all';
       render({ preserveScroll: true });
       break;
+    case 'gacha-pool-tab': {
+      // 池子卡片里的 5★/4★ 切换是纯本地显隐，不动全局状态、不重渲染
+      const card = element.closest('.gacha-pool-card');
+      if (card) {
+        const tier = element.dataset.tier;
+        card.querySelectorAll('.gacha-pool-tab').forEach((tab) => tab.classList.toggle('active', tab === element));
+        card.querySelectorAll('.gacha-pool-rows').forEach((list) => list.classList.toggle('is-on', list.dataset.tier === tier));
+      }
+      break;
+    }
     case 'choose-gacha-db': {
       const dbPath = await api.gacha.pickDatabase();
       if (dbPath) {
@@ -13865,66 +15465,59 @@ async function handleAction(action, id, element, event = null) {
       if (game.builtinKey === 'endfield' && server.channel !== 'official') {
         // 终末地：只有非官服渠道才「生成」运行时（官服直接指定官服客户端即可，见下）
         await handleAction('prepare-endfield', element.dataset.server, element);
-      } else if (
-        ['genshin', 'starrail', 'zzz'].includes(game.builtinKey) &&
-        ['official', 'bilibili', 'global'].includes(server.channel)
-      ) {
-        /*
-         * 官服也能以其它已装渠道（B服 / 国际服）当基础硬链接生成了：没官服客户端的人
-         * 再也不用卡在「只能选官服路径」的死循环上。但本机一个其它渠道都没装时，
-         * 没有可当基础的客户端，就退回「选路径」（用户已经装好官服的情况）。
-         */
-        if (server.channel === 'official' && !hasOtherInstalledServer(game, server)) {
-          openServerModal(game.id, server.id);
-        } else {
-          openSophonModal(game.id, server.id, 'prepare');
-        }
       } else {
-        openServerModal(game.id, server.id);
+        /*
+         * 其余情况统一先问一句「怎么补上这份客户端」（硬链接 / 选路径 / 扫描）。
+         * 以前这里替用户猜：有别的渠道就直接开硬链接安装，没有就开文件选择框 ——
+         * 猜错的代价是白等一场安装，或者对着文件框不知道要选什么。
+         */
+        openServerSetupDialog(game.id, server.id);
       }
       break;
     }
-    /** 同一游戏里，除了自己之外，还有没有别的渠道客户端（已配置 path）可当硬链接基础。 */
+    /**
+     * 同一游戏里，除了自己之外，还有没有别的渠道客户端（文件真的还在）可当硬链接基础。
+     *
+     * 这里必须用 exists 而不是「path 字符串非空」：B服 的目录被删掉之后
+     * path 还留在配置里，按老写法会以为还有个可用基础，于是官服点「重建」
+     * 直接进硬链接生成 —— 用户看到的就是「我明明有官服，怎么还让我重建」。
+     */
     function hasOtherInstalledServer(game, server) {
       return (game.servers || []).some(
-        (item) => item.id !== server.id && item.path && item.channel !== server.channel
+        (item) => item.id !== server.id && item.exists && item.channel !== server.channel
       );
     }
-    case 'activate-server': {
-      const result = await api.servers.activate({
-        gameId: element.dataset.game,
-        serverId: element.dataset.server,
-      });
-      const server = (result.servers || []).find((item) => item.id === result.activeServerId);
-      const launch = await api.games.launch(result.id);
-      if (!launch.ok) {
-        if (launch.elevationRequired) {
-          const restart = await confirmDialog({
-            title: '需要管理员权限',
-            message: launch.error,
-            confirmText: '以管理员身份重启',
-          });
-          if (restart) await api.relaunchAdmin();
-        } else {
-          toast(`已切换到 ${server ? server.name : '新服务器'}，但启动失败：${launch.error}`, 'error');
-        }
-      } else {
-        toast(`已切换到 ${server ? server.name : '新服务器'}，正在启动`, 'success');
-      }
+    case 'activate-server':
+      // 服务器行上的「切换」= 只换服（切完按钮会变成「启动」）。以前这里点一下
+      // 游戏自己就起来了，而启动页下拉里点同一行只切换，两处手感对不上。
+      await switchServerProfile(element.dataset.game, element.dataset.server, { launch: false });
       break;
-    }
     case 'prepare-endfield': {
       const game = state.games.find((item) => item.id === element.dataset.game);
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
-      toast('正在用渠道差异包创建链接运行时，请稍候…', 'info');
-      const result = await api.servers.prepareEndfield({
-        gameId: element.dataset.game,
-        serverId: element.dataset.server,
-      });
-      toast(
-        `已切换到 ${server ? server.name : '新服务器'}：链接 ${result.linked} 个文件，覆盖 ${result.overlay} 个差异文件`,
-        'success'
-      );
+      // 和「切换服务器」用同一条提示：进度可见，别让人对着一条不会动的 toast 等几十秒
+      const busy = beginBusyToast(`正在为 ${server ? server.name : '渠道'}生成运行时…`);
+      const offProgress =
+        typeof api.onEndfieldProgress === 'function'
+          ? api.onEndfieldProgress((progress) => {
+              if (!progress) return;
+              busy.update(endfieldProgressText({ ...progress, serverName: progress.serverName || server?.name }));
+            })
+          : null;
+      try {
+        const result = await api.servers.prepareEndfield({
+          gameId: element.dataset.game,
+          serverId: element.dataset.server,
+        });
+        busy.done(
+          `「${server ? server.name : '新服务器'}」运行时已就绪：链接 ${result.linked} 个文件，覆盖 ${result.overlay} 个差异文件`,
+          'success'
+        );
+      } catch (error) {
+        busy.done(humanError(error), 'error');
+      } finally {
+        if (offProgress) offProgress();
+      }
       break;
     }
     case 'prepare-sophon':
@@ -14032,16 +15625,73 @@ async function handleAction(action, id, element, event = null) {
       const game = state.games.find((item) => item.id === gameId);
       const server = game && (game.servers || []).find((item) => item.id === serverId);
       if (!server) break;
-      await switchNteChannel(game, server, channel);
+      /*
+       * 异环的「渠道卡片」和「服务器行的切换」是同一件事：改 Config.ini 之后还要把
+       * activeServerId 指过去、路径跟着走。以前这里只调 set-channel，于是点完卡片
+       * 渠道变了、当前服务器还停在原来那行，和点服务器行切换的结果不一样。
+       * 现在统一交给 switchServerProfile。
+       */
+      const target = (game.servers || []).find((item) => item.channel === channel);
+      if (target) await switchServerProfile(gameId, target.id, { launch: false });
+      else await switchNteChannel(game, server, channel);
       refreshNtePanel();
       break;
     }
+    case 'focus-sophon': {
+      const jobId = element.dataset.id;
+      const job = sophonJobs.find((item) => item.id === jobId);
+      if (!job) break;
+      if (job.status === 'queued') {
+        toast(`「${job.serverName}」还在排队，前面的任务结束后会自动开始`, 'info');
+        break;
+      }
+      if (job.status === 'starting' || job.status === 'running') {
+        // 收起来过：原样挂回去（进度条、阶段条、监听都还在）
+        if (restoreTaskModal()) break;
+        // 没收起说明弹窗就在眼前；真找不到 DOM 才提示一句
+        if (!document.querySelector('#sophon-progress, #dl-stages')) {
+          toast('任务正在后台进行，先看任务条上的进度', 'info');
+        }
+        break;
+      }
+      // 结束态：重新打开这个界面，让用户还能回来看结果或再操作一次
+      if (sophonJobs.some((item) => ['starting', 'running'].includes(item.status))) {
+        toast('还有任务在跑，等它结束再打开这个界面', 'info');
+        break;
+      }
+      // 下载任务走下载界面，硬链接 / 更新走硬链接界面，别把两种界面串了
+      if (job.mode === 'download') openGameDownloadModal(job.gameId);
+      else openSophonModal(job.gameId, job.serverId, job.mode);
+      break;
+    }
+    case 'dismiss-sophon-job': {
+      const jobId = element.dataset.id;
+      sophonJobs = sophonJobs.filter((item) => item.id !== jobId);
+      renderTaskDock();
+      break;
+    }
     case 'restore-sophon':
-      if (sophonUi) sophonUi.restore();
+      if (!restoreTaskModal() && sophonUi) sophonUi.restore();
       break;
-    case 'cancel-sophon-dock':
-      if (sophonUi) sophonUi.cancel();
+    case 'cancel-sophon-dock': {
+      if (sophonUi) {
+        sophonUi.cancel();
+        break;
+      }
+      /*
+       * 弹窗还开在前台时 sophonUi 是空的，以前点任务条上的 ✕ 完全没反应。
+       * 这里兜底：直接按 jobId 取消，并把这一条收进「已停止」。
+       */
+      const jobId = element.dataset.id;
+      const job = sophonJobs.find((item) => item.id === jobId);
+      if (!job) break;
+      api.servers.cancelSophon(jobId).catch(() => {});
+      job.status = 'cancelled';
+      pruneSophonHistory();
+      renderTaskDock();
+      toast('已停止任务', 'info');
       break;
+    }
     case 'remove-sophon-queue': {
       const queueId = element.dataset.id;
       sophonJobs = sophonJobs.filter((job) => job.id !== queueId);
@@ -14053,9 +15703,18 @@ async function handleAction(action, id, element, event = null) {
       const game = state.games.find((item) => item.id === element.dataset.game);
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
       if (!game || !server) break;
+      /*
+       * 用户点这个垃圾桶，多半是想「把 B服 删掉」。
+       * 但官服和 B服 常常共用同一个安装目录 —— 他转头去资源管理器删文件夹，
+       * 官服就一起没了。所以只要存在共用关系，就先把这层说破。
+       */
+      const shared = sharedRootWith(game, server);
+      const message = shared
+        ? `只会清除「${server.name}」的路径记录，不会删除任何文件，也不会移除这张服务器卡片。\n\n注意：「${shared.name}」用的是同一个安装目录（${server.root}）。如果你想彻底卸载这个渠道，删掉这个文件夹会连「${shared.name}」一起失效 —— 要删文件请先确认另一个渠道换到了别的目录。`
+        : `只会清除「${server.name}」的路径记录，不会删除客户端文件，也不会移除这张服务器卡片。`;
       const ok = await confirmDialog({
         title: '清除服务器路径',
-        message: `只会清除「${server.name}」的路径记录，不会删除客户端文件，也不会移除这张服务器卡片。`,
+        message,
         confirmText: '清除路径',
         danger: true,
       });
@@ -14082,6 +15741,113 @@ async function handleAction(action, id, element, event = null) {
         await api.servers.remove({ gameId: element.dataset.game, serverId: element.dataset.server });
         toast('服务器配置已移除', 'success');
       }
+      break;
+    }
+    case 'uninstall-server': {
+      const game = state.games.find((item) => item.id === element.dataset.game);
+      const server =
+        game && (game.servers || []).find((item) => item.id === element.dataset.server);
+      if (!game || !server) break;
+      // 老版本主进程没有这两个方法：这里先拦住，别让它变成一句看不懂的英文报错
+      if (typeof api.servers?.uninstall !== 'function') {
+        toast('启动器本体和界面版本不一致，重启一次启动器再试', 'error');
+        break;
+      }
+      // 游戏开着的时候文件被占着，问了也白问：先给一句能照着做的话
+      if (game.running) {
+        toast('游戏正在运行，先关掉游戏再卸载客户端', 'error');
+        break;
+      }
+      /*
+       * 卸载 = 真删文件，和「清除路径」是两件事，所以先问主进程能不能删：
+       * 共用同一目录的（官服 / B服 常见）、盘符根目录、游戏正开着，都会被挡回来。
+       */
+      let plan;
+      try {
+        plan = await api.servers.uninstallPlan({ gameId: game.id, serverId: server.id });
+      } catch (error) {
+        toast(error?.message || '读不到这个服务器的安装目录', 'error');
+        break;
+      }
+      if (!plan?.ok) {
+        /*
+         * 共用目录是最常见的拦路虎：官服/B服、异环官服/B服 很多时候压根就是同一个
+         * 文件夹，删谁都是两边一起没。不能硬来，但也不能只丢一句「删不了」就完事 ——
+         * 用户真实的诉求往往是「让这个服从列表里消失」，那就把这条路给出来。
+         */
+        if (plan?.shared?.length) {
+          const removeOnly = await confirmDialog({
+            title: '这个目录和别的服共用',
+            message: `「${server.name}」和「${plan.shared.join(
+              '」「'
+            )}」用的是同一个文件夹：\n\n${plan.root}\n\n删掉它，这几边会一起失效，所以卸载被拦下来了。\n\n可以只把「${server.name}」从列表里去掉（客户端文件一个都不动）；想让两边都能删，得先去服务器管理里给它们各指一个独立目录。`,
+            confirmText: '只移出列表',
+          });
+          if (removeOnly) {
+            await api.servers.remove({ gameId: game.id, serverId: server.id });
+            toast(`「${server.name}」已移出列表，客户端文件没有动`, 'success');
+            repaintServerRows();
+          }
+          break;
+        }
+        toast(plan?.reason || '这个服务器暂时不能卸载', 'error');
+        break;
+      }
+      if (plan.running) {
+        toast('游戏还开着，先关掉游戏再卸载', 'error');
+        break;
+      }
+      const choice = await uninstallDialog({
+        title: `卸载「${server.name}」`,
+        message: plan.exists
+          ? `会把下面这个文件夹整个删掉，只动这一个目录，其它服务器的客户端不受影响。启动器里的「${server.name}」卡片会留着，之后可以重新下载。`
+          : `「${server.name}」记录的目录已经不在了，这一步只会清掉启动器里的路径记录。`,
+        root: plan.exists ? plan.root : '',
+        exists: Boolean(plan.exists),
+      });
+      if (!choice) break;
+      /*
+       * 主进程现在返回结果对象而不是抛异常：失败原因分得清（占用 / 回收站不可用 /
+       * 其它），文案也是中文的。选了回收站但系统不给用，再问一次要不要改成永久删除。
+       */
+      const runUninstall = async (force) => {
+        try {
+          return await api.servers.uninstall({
+            gameId: game.id,
+            serverId: server.id,
+            force: force === true,
+          });
+        } catch (error) {
+          return { ok: false, code: 'OTHER', reason: humanError(error) };
+        }
+      };
+      let result = await runUninstall(choice === 'force');
+      if (!result?.ok && result?.code === 'TRASH') {
+        const forceIt = await confirmDialog({
+          title: '回收站用不了',
+          message: `系统不让把文件挪进回收站：${result.reason || ''}\n\n改成「永久删除」吗？这一步删掉就找不回来了。`,
+          confirmText: '永久删除',
+          danger: true,
+        });
+        if (!forceIt) {
+          toast('已取消，文件没有动', 'info');
+          break;
+        }
+        result = await runUninstall(true);
+      }
+      if (!result?.ok) {
+        toast(result?.reason || '卸载没成功', 'error');
+        break;
+      }
+      toast(
+        plan.exists
+          ? result.forced || choice === 'force'
+            ? '客户端已永久删除'
+            : '客户端已移到回收站'
+          : '路径记录已清除',
+        'success'
+      );
+      repaintServerRows();
       break;
     }
     case 'open-server-folder':
@@ -14289,17 +16055,37 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
     case 'quick-launch': {
+      // 快捷面板的语义是「一键进游戏」：切换 + 启动，走和别处同一条切换流程
       const gameId = element.dataset.game;
       const serverId = element.dataset.server;
-      const result = await api.servers.activate({ gameId, serverId });
-      const launch = await api.games.launch(gameId);
-      if (!launch.ok) toast(launch.error, 'error');
-      else toast(`正在启动 ${result.name}`, 'success');
-      if (!state.settings.quickPanelPinned) quickOpen = false;
+      const switched = await switchServerProfile(gameId, serverId, { launch: true });
+      // 用户在确认框里点了取消：面板留着，让他接着选
+      if (!switched.cancelled && !state.settings.quickPanelPinned) quickOpen = false;
       renderQuickPanel();
       break;
     }
     case 'toggle-sidebar': {
+      /*
+       * 启动页抽屉开着的时候，侧栏底下那颗「收起侧栏」= 把抽屉收回去。
+       *
+       * 以前这里不分场合，直接走全局的「侧栏收成 72px 图标条」：抽屉是露出一条
+       * 238px 的面板，缩成 72 之后窗口还停在展开后的宽度，左边空出一大条 —— 看着
+       * 就像侧栏被搞掉了。抽屉里的收起，语义本来就该是收抽屉。
+       */
+      if (state.startNavOpen) {
+        setStartNavOpen(false).catch(() => {});
+        break;
+      }
+      /*
+       * 启动页、抽屉关着：这颗 chevron 的含义是「展开大侧栏」。
+       * 之前这里直接落到下面的全局分支，变成把小侧栏再收一格 ——
+       * 大侧栏永远出不来。启动页没有「收成 72px 图标条」这个语义，
+       * 开关都归抽屉管。
+       */
+      if (state.route === 'start') {
+        setStartNavOpen(true).catch(() => {});
+        break;
+      }
       const collapsed = !(state.settings.sidebarCollapsed === true);
       state.settings.sidebarCollapsed = collapsed;
       applySettings();
@@ -14420,6 +16206,44 @@ async function handleAction(action, id, element, event = null) {
       }
       state.settings.updateManifest = value;
       render();
+      break;
+    }
+    case 'fill-mirror-source': {
+      const input = document.querySelector('#update-manifest');
+      if (input) input.value = GITEE_MANIFEST_URL;
+      await api.updateSettings({ updateManifest: GITEE_MANIFEST_URL });
+      toast('已换成国内镜像源，正在检查…', 'success');
+      try {
+        const result = await api.checkUpdate();
+        if (result && result.hasUpdate) openUpdateModal(result);
+        else if (result && result.ok) toast('已经是最新版本', 'success');
+        else toast((result && result.error) || '检查失败', 'error');
+      } catch (error) {
+        toast(`检查失败：${humanError(error)}`, 'error');
+      }
+      render();
+      break;
+    }
+    case 'rollback-update': {
+      const backup = state.update && state.update.backup;
+      const target = backup && backup.version ? `v${backup.version}` : '上一个版本';
+      const ok = await confirmDialog({
+        title: '回到上一个版本',
+        message: `会把程序文件还原到升级前的 ${target}，游戏、账号、抽卡记录和设置都不受影响。还原完成后自动重启。`,
+        confirmText: '还原并重启',
+      });
+      if (!ok) break;
+      try {
+        const result = await api.rollbackUpdate();
+        if (result && result.ok) toast('正在还原并重启…', 'success');
+        else toast((result && result.message) || '没有找到可回滚的备份', 'error');
+      } catch (error) {
+        toast(`回滚失败：${humanError(error)}`, 'error');
+      }
+      break;
+    }
+    case 'open-changelog': {
+      navigate('news');
       break;
     }
     case 'pick-update-source': {
@@ -14641,10 +16465,10 @@ async function handleAction(action, id, element, event = null) {
         });
       }
       if (key === 'enabled' && state.sound.enabled) {
-        playUiSound('click', true);
-      } else if (key !== 'enabled' && state.sound.enabled && state.sound[key]) {
-        playUiSound(key, true);
+        // 总开关是在「音效还关着」的状态下按下的，按下那一刻没有声音，这里补一声
+        playUiSound('toggle', true);
       }
+      // 其余开关：pointerdown 已经出过 toggle 音，这里不再补第二声
       break;
     }
     case 'preview-sound': {
@@ -14724,12 +16548,31 @@ async function handleAction(action, id, element, event = null) {
       toast(next ? '角色背景水印已开启' : '角色背景水印已关闭', next ? 'success' : 'info');
       break;
     }
+    case 'toggle-sidebar-char': {
+      const next = !(state.settings.sidebarChar !== false);
+      paintSwitch(element, next);
+      expectSettingsEcho({ ...state.settings, sidebarChar: next });
+      await applySettingLocally({ sidebarChar: next });
+      toast(next ? '侧栏立绘已开启' : '侧栏立绘已关闭', next ? 'success' : 'info');
+      break;
+    }
     case 'news-tab': {
       const next = element.dataset.value || 'all';
       if (next !== state.newsFilter) {
         state.newsFilter = next;
         render({ preserveScroll: false });
       }
+      break;
+    }
+    case 'news-feature-prev':
+    case 'news-feature-next': {
+      // 循环翻页：到尾再点回到第一条，按钮永远有响应
+      const total = noticeFeaturePool(noticeEntries()).length;
+      if (total < 2) break;
+      const cur = Math.min(Math.max(state.newsFeatureIndex || 0, 0), total - 1);
+      const delta = element.dataset.action === 'news-feature-next' ? 1 : -1;
+      state.newsFeatureIndex = (cur + delta + total) % total;
+      render({ preserveScroll: true });
       break;
     }
     case 'news-toggle-releases': {
@@ -15182,12 +17025,12 @@ async function handleAction(action, id, element, event = null) {
      * 不用 <details> 是因为卡片结构里还有「其它已接入」列表，收起来时要连它一起收，
      * 状态放在 state 里才能在 render 后保留。
      */
+    case 'tools-game-pick':
     case 'tools-game-toggle': {
+      // tools-game-toggle 是旧卡片墙的 action 名，留着兼容没重载的旧 DOM
       const key = element.dataset.value || '';
       if (!key) break;
-      // 每张游戏卡默认收缩，点谁展开谁，再点一次收回；展开表存 state.toolsExpanded
-      state.toolsExpanded = state.toolsExpanded || {};
-      state.toolsExpanded[key] = !state.toolsExpanded[key];
+      state.toolsGame = key;
       render({ preserveScroll: true });
       break;
     }
@@ -15238,6 +17081,20 @@ function openModal(html, options = {}) {
 function closeModal() {
   const callback = modalOnClose;
   modalOnClose = null;
+  /*
+   * 跑着的任务弹窗被关掉（Esc / ✕ / 点遮罩都走这里）时，先把它的 DOM 收进任务坞，
+   * 再走正常的清空流程 —— 否则 #modal-root 一清空，任务条就再也回不到这个界面了。
+   * 守卫只对「当前就在 #modal-root 里的那个任务弹窗」生效，不误伤别的弹窗。
+   */
+  if (taskModalGuard) {
+    const guard = taskModalGuard;
+    taskModalGuard = null;
+    try {
+      guard();
+    } catch {
+      /* 守卫只是尽力保住界面，失败也照常关 */
+    }
+  }
   dom.modalRoot.innerHTML = '';
   document.body.classList.remove('modal-open');
   if (callback) callback(false);
@@ -15278,8 +17135,72 @@ function confirmDialog({ title, message, confirmText = '确定', danger = false 
   });
 }
 
-function field(label, input, hint = '', required = false) {
-  return `<div class="field">
+/**
+ * 卸载前让用户在「回收站」和「永久删除」之间自己选。
+ *
+ * 不塞进 confirmDialog：那边只有一个「确定」，而这两条路的代价完全不同 ——
+ * 一条还能捞回来，一条删了就没了。放在同一个按钮里，用户会默认点下去然后后悔。
+ * 返回 'trash' / 'force' / null（取消）。
+ */
+function uninstallDialog({ title, message, root, exists }) {
+  return new Promise((resolve) => {
+    if (!exists) {
+      // 目录本来就不在了：没有删文件这回事，只剩清记录
+      confirmDialog({
+        title,
+        message,
+        confirmText: '清除记录',
+        danger: true,
+      }).then((ok) => resolve(ok ? 'force' : null));
+      return;
+    }
+    openModal(
+      `<div class="modal-backdrop" data-backdrop>
+        <div class="modal narrow" role="alertdialog" aria-modal="true">
+          <div class="modal-head">
+            <div><h2>${esc(title)}</h2></div>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
+          <div class="modal-body">
+            <p class="confirm-copy">${esc(message)}</p>
+            ${
+              root
+                ? `<p class="uninstall-path" title="${esc(root)}">${esc(root)}</p>`
+                : ''
+            }
+            <ul class="uninstall-pick">
+              <li>
+                <strong>移到回收站</strong>
+                <span>推荐。删错了还能从回收站拖回来。</span>
+              </li>
+              <li>
+                <strong>永久删除</strong>
+                <span>不进回收站，删完就找不回来了。回收站用不了时选这个。</span>
+              </li>
+            </ul>
+          </div>
+          <div class="modal-foot uninstall-foot">
+            <button class="btn btn-ghost" data-close>取消</button>
+            <button class="btn btn-danger" data-uninstall-choice="force">永久删除</button>
+            <button class="btn btn-primary" data-uninstall-choice="trash">移到回收站</button>
+          </div>
+        </div>
+      </div>`,
+      { onClose: () => resolve(null) }
+    );
+    dom.modalRoot.querySelectorAll('[data-uninstall-choice]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const value = btn.dataset.uninstallChoice;
+        modalOnClose = null;
+        dom.modalRoot.innerHTML = '';
+        document.body.classList.remove('modal-open');
+        resolve(value);
+      });
+    });
+  });
+}
+
+function field(label, input, hint = '', required = false) {  return `<div class="field">
     <label>${esc(label)}${required ? '<span class="req">*</span>' : ''}</label>
     ${input}
     ${hint ? `<span class="hint">${esc(hint)}</span>` : ''}
@@ -15755,6 +17676,8 @@ function openGameDownloadModal(gameId) {
     toast('这个游戏还没有可用的服务器渠道', 'error');
     return;
   }
+  // 新任务开始：把上一次收在坞里的旧弹窗丢掉，免得点任务条时挂回来的是上一单的界面
+  dropStashedTaskModal();
   const jobId = `dl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const channelOptions = choices
@@ -15854,20 +17777,23 @@ function openGameDownloadModal(gameId) {
       </div>
     </div>`;
 
+  /* 关窗回调单独拿个名字：任务收进任务坞再从任务条挂回来时，要把它一起装回去 */
+  const taskOnClose = () => {
+    if (running) {
+      // 窗口在跑任务时被关掉：不取消下载，缩进任务面板继续跑
+      minimized();
+    } else {
+      // 完成 / 失败的那一条留在坞里，用户回头看还能点回来
+      pruneSophonHistory();
+      renderTaskDock();
+    }
+    if (finishedOk) {
+      // 关窗后按最新状态重绘启动页：已装好的游戏这里会变回「开始游戏」
+      render({ preserveScroll: true });
+    }
+  };
   openModal(html, {
-    onClose: () => {
-      if (running) {
-        // 窗口在跑任务时被关掉：不取消下载，缩进任务面板继续跑
-        minimized();
-      } else {
-        sophonJobs = sophonJobs.filter((item) => item !== job);
-        renderTaskDock();
-      }
-      if (finishedOk) {
-        // 关窗后按最新状态重绘启动页：已装好的游戏这里会变回「开始游戏」
-        render({ preserveScroll: true });
-      }
-    },
+    onClose: taskOnClose,
     onBackdrop: () => {
       if (running) minimized();
       else closeModal();
@@ -15908,33 +17834,42 @@ function openGameDownloadModal(gameId) {
   const hideDock = () => {
     if (activeSophonJob === job) activeSophonJob = null;
     sophonUi = null;
+    taskModalGuard = null;
     document.body.classList.remove('sophon-minimized');
     renderTaskDock();
+  };
+
+  // 跑着的时候被关窗（✕ / Esc / 点遮罩）→ 收进任务坞，而不是把界面销毁
+  taskModalGuard = () => {
+    if (!running || !backdrop || !dom.modalRoot.contains(backdrop)) return false;
+    hiddenTaskModalClose = taskOnClose;
+    stashTaskModal(backdrop);
+    return true;
   };
 
   // 最小化：弹窗藏起来，任务留在左下角任务面板里继续跑
   const minimized = () => {
     if (!running) return;
-    if (backdrop) backdrop.style.display = 'none';
-    document.body.classList.remove('modal-open');
+    // 整块 DOM 拔下来存着：中途开别的弹窗也不会把它冲掉，点任务条能原样挂回去
+    hiddenTaskModalClose = taskOnClose;
+    stashTaskModal(backdrop);
     document.body.classList.add('sophon-minimized');
     job.status = 'running';
     activeSophonJob = job;
     renderTaskDock();
     sophonUi = {
       restore: () => {
-        if (backdrop) backdrop.style.display = '';
-        document.body.classList.add('modal-open');
-        document.body.classList.remove('sophon-minimized');
-        renderTaskDock();
+        restoreTaskModal();
       },
       cancel: () => {
         cancelled = true;
         running = false;
         job.status = 'cancelled';
         api.servers.cancelSophon(jobId).catch(() => {});
+        dropStashedTaskModal();
         closeModal();
         hideDock();
+        pruneSophonHistory();
       },
     };
   };
@@ -16180,6 +18115,7 @@ function openGameDownloadModal(gameId) {
       }
       if (result.cancelled || cancelled) {
         job.status = 'cancelled';
+        pruneSophonHistory();
         toast('下载已取消', 'info');
         closeModal();
         hideDock();
@@ -16190,6 +18126,7 @@ function openGameDownloadModal(gameId) {
       running = false;
       job.status = 'done';
       job.percent = 100;
+      pruneSophonHistory();
       // 最小化到任务面板时完成的：先把窗口恢复出来给用户看结果
       if (document.body.classList.contains('sophon-minimized') && sophonUi) sophonUi.restore();
       hideDock();
@@ -16222,7 +18159,8 @@ function openGameDownloadModal(gameId) {
         unsubscribe = null;
       }
       running = false;
-      job.status = 'error';
+      job.status = cancelled ? 'cancelled' : 'error';
+      pruneSophonHistory();
       // 最小化状态下出错的：先恢复窗口，错误信息才看得见
       if (document.body.classList.contains('sophon-minimized') && sophonUi) sophonUi.restore();
       hideDock();
@@ -16302,11 +18240,80 @@ function sophonProgressStats(event, compact = false) {
   )} / ${formatSize(event.totalBytes)}`;
 }
 
+/*
+ * 任务弹窗的「最小化 / 恢复」。
+ *
+ * 以前最小化只是把 backdrop 设成 display:none。只要中途打开任何别的弹窗
+ * （openModal 会直接清空 #modal-root），任务弹窗的 DOM 就被销毁了；
+ * 再点任务坞条目只会给 body 加一个 modal-open —— 界面灰着、什么也没有，
+ * 于是「点任务条再也回不到硬链接界面」。
+ * 现在最小化时把整块 DOM 拔出来存着，恢复时原样挂回去：
+ * 进度条、阶段条、事件监听、滚动位置都还在。
+ */
+let hiddenTaskModal = null;
+/**
+ * 任务弹窗自己的 onClose。
+ *
+ * 恢复时要把它一起装回去：中途用户可能开过设置别的弹窗，modalOnClose 已经被
+ * 那个弹窗接管了。只把 DOM 挂回来而不管它，关任务窗时会去跑别人的关闭回调。
+ */
+let hiddenTaskModalClose = null;
+
+/** 把任务弹窗从 DOM 里拔下来存好（不是删掉），留着自己能原样挂回去。 */
+function stashTaskModal(backdrop) {
+  if (!backdrop || !backdrop.parentNode) return;
+  backdrop.parentNode.removeChild(backdrop);
+  hiddenTaskModal = backdrop;
+  if (!dom.modalRoot.querySelector('.modal-backdrop')) {
+    document.body.classList.remove('modal-open');
+  }
+}
+
+/**
+ * 把收起来的任务弹窗挂回前台。返回是否真的挂回去了。
+ *
+ * 先清空 #modal-root：这时用户可能正开着别的弹窗（设置 / 确认框），
+ * 他点任务条就是要回到任务界面，旧的留在下面只会叠成两层。
+ */
+function restoreTaskModal() {
+  const node = hiddenTaskModal;
+  if (!node) return false;
+  hiddenTaskModal = null;
+  dom.modalRoot.innerHTML = '';
+  dom.modalRoot.appendChild(node);
+  modalOnClose = hiddenTaskModalClose || null;
+  hiddenTaskModalClose = null;
+  document.body.classList.add('modal-open');
+  document.body.classList.remove('sophon-minimized');
+  renderTaskDock();
+  return true;
+}
+
+/**
+ * 任务弹窗的关闭守卫：跑着的时候被关窗，先把 DOM 收进任务坞。
+ * closeModal() 会调它，返回真表示「这次关窗已经被拦成了最小化」。
+ */
+let taskModalGuard = null;
+
+/** 丢掉收起来的任务弹窗（任务被停止 / 已结束时用，避免留着僵尸节点）。 */
+function dropStashedTaskModal() {
+  hiddenTaskModal = null;
+  hiddenTaskModalClose = null;
+  taskModalGuard = null;
+}
+
 function renderTaskDock() {
   // 一键下载的任务也走这个坞：mode=download 显示「下载」，别混进「生成」
   const dock = document.querySelector('#task-dock');
   const list = document.querySelector('#task-dock-list');
   if (!dock || !list) return;
+  /*
+   * 坞里只放「还在跑 / 排队」的任务。
+   *
+   * 以前结束的任务会留两条在这儿，理由是「跑完想再看一眼」；实际用起来它就一直
+   * 赖在左下角，96% 的空间和时间都没人点它。结果那一屏本来就留在前台，关掉之后
+   * 也没必要再从坞里捡回来。
+   */
   const visible = sophonJobs.filter((job) => ['queued', 'starting', 'running'].includes(job.status));
   if (!visible.length) {
     dock.hidden = true;
@@ -16314,17 +18321,38 @@ function renderTaskDock() {
     return;
   }
   dock.hidden = false;
+  const jobTitle = (job) =>
+    `${job.mode === 'update' ? '更新' : job.mode === 'download' ? '下载' : '生成'} ${job.serverName}`;
   list.innerHTML = `
-    <div class="task-dock-head"><strong>硬链接任务</strong><span>${visible.length} 个</span></div>
+    <div class="task-dock-head"><strong>硬链接任务</strong><span>${visible.length} 个进行中</span></div>
     ${visible
       .map((job) => {
-        const active = job.status === 'running' || job.status === 'starting';
-        if (!active) {
+        if (job.status === 'queued') {
           return `
             <div class="task-dock-item task-dock-queued">
-              <span class="task-dock-icon">${icon('clock')}</span>
-              <span class="task-dock-copy"><strong>${esc(job.serverName)}</strong><small>排队中 · ${esc(job.gameName)}</small></span>
+              <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="排队中，前面的任务结束后自动开始">
+                <span class="task-dock-icon">${icon('clock')}</span>
+                <span class="task-dock-copy"><strong>${esc(job.serverName)}</strong><small>排队中 · ${esc(job.gameName)}</small></span>
+              </button>
               <button class="task-dock-stop" data-action="remove-sophon-queue" data-id="${esc(job.id)}" title="取消排队">✕</button>
+            </div>`;
+        }
+        if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+          const label =
+            job.status === 'done' ? '已完成' : job.status === 'cancelled' ? '已停止' : '失败了';
+          const glyph = job.status === 'done' ? 'check' : job.status === 'cancelled' ? 'clock' : 'alert';
+          return `
+            <div class="task-dock-item task-dock-ended is-${job.status}">
+              <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="重新打开这个界面">
+                <span class="task-dock-icon">${icon(glyph)}</span>
+                <span class="task-dock-copy">
+                  <strong>${jobTitle(job)}</strong>
+                  <small>${label}${job.percent >= 100 && job.status === 'done' ? ' · 100%' : ''}${
+                    job.stats ? ` · ${esc(job.stats)}` : ''
+                  }</small>
+                </span>
+              </button>
+              <button class="task-dock-stop" data-action="dismiss-sophon-job" data-id="${esc(job.id)}" title="从列表里移除">✕</button>
             </div>`;
         }
         // 阶段文案和弹窗里的阶段条同源，缩到任务坞里也不会换一套说法
@@ -16332,18 +18360,28 @@ function renderTaskDock() {
         const phaseText = job.percent >= 100 ? '完成' : stepText || job.phase || '准备中…';
         return `
           <div class="task-dock-item">
-            <button class="task-dock-main" data-action="restore-sophon" title="展开任务">
+            <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="打开任务界面">
               <span class="task-dock-icon">${icon('download')}</span>
               <span class="task-dock-copy">
-                <strong>${job.mode === 'update' ? '更新' : job.mode === 'download' ? '下载' : '生成'} ${esc(job.serverName)}</strong>
+                <strong>${jobTitle(job)}</strong>
                 <small>${esc(phaseText)}${job.stats ? ` · ${esc(job.stats)}` : ''}</small>
                 <span class="task-dock-bar"><span style="width:${Math.max(0, Math.min(100, job.percent || 0))}%"></span></span>
               </span>
             </button>
-            <button class="task-dock-stop" data-action="cancel-sophon-dock" title="停止">✕</button>
+            <button class="task-dock-stop" data-action="cancel-sophon-dock" data-id="${esc(job.id)}" title="停止">✕</button>
           </div>`;
       })
       .join('')}`;
+}
+
+/** 结束态的历史只留最近两条，否则坞会越堆越长。 */
+function pruneSophonHistory() {
+  const ended = sophonJobs.filter((job) =>
+    ['done', 'error', 'cancelled'].includes(job.status)
+  );
+  if (ended.length <= 2) return;
+  const dropped = new Set(ended.slice(0, ended.length - 2));
+  sophonJobs = sophonJobs.filter((job) => !dropped.has(job));
 }
 
 function startNextSophonJob() {
@@ -16363,23 +18401,29 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   if (!game || !server) return;
   const isUpdate = mode === 'update';
   const jobId = `sophon-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  if (!options.job && (activeSophonJob || sophonJobs.some((job) => ['starting', 'running'].includes(job.status)))) {
-    sophonJobs.push({
-      id: jobId,
-      gameId,
-      serverId,
-      gameName: game.name,
-      serverName: server.name,
-      mode,
-      status: 'queued',
-      percent: 0,
-      phase: '排队中',
-      stats: '',
-    });
-    renderTaskDock();
-    toast(`已加入硬链接队列：${server.name}`, 'info');
-    return;
+  /*
+   * 生成中不再允许再开一个（以前是往后排队）。
+   *
+   * 排队这个设计在「硬链接」这种一跑几十分钟、又要占着客户端目录的操作上只会
+   * 让人误会：点下去以为又要开始了，实际在后面排队，界面还停在原地。
+   * 现在直接拦住，并把正在跑的那个界面捧回前台 —— 想看进度、想停，都在那一屏里。
+   */
+  if (!options.job) {
+    const busy = activeSophonJob || sophonJobs.find((item) => ['starting', 'running'].includes(item.status));
+    if (busy) {
+      const same = busy.gameId === gameId && busy.serverId === serverId;
+      if (same) restoreTaskModal();
+      toast(
+        same
+          ? `${server.name} 正在生成，这一屏已经给你调回来了`
+          : `「${busy.serverName}」正在生成，等它跑完再开下一个`,
+        'info'
+      );
+      return;
+    }
   }
+  // 新任务开始：把上一次收在坞里的旧弹窗丢掉，免得点任务条时挂回来的是上一单的界面
+  dropStashedTaskModal();
   const job = {
     id: jobId,
     gameId,
@@ -16402,7 +18446,7 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
 
   const html = `
     <div class="modal-backdrop" data-backdrop>
-      <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal modal-sophon" role="dialog" aria-modal="true">
         <div class="modal-head">
           <div>
             <h2>${isUpdate ? '更新' : '硬链接安装'} ${esc(server.name)} 客户端</h2>
@@ -16450,8 +18494,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
           </div>
           <div class="sophon-target">
             <span>目标目录</span>
-            <code id="sophon-target-dir">${esc(server.root || '自动：游戏盘\\VelaRuntimes')}</code>
-            <button type="button" class="btn btn-ghost btn-sm" id="sophon-pick-dir">选择目录</button>
+            <code id="sophon-target-dir">正在确定…</code>
+            <button type="button" class="btn btn-ghost btn-sm" id="sophon-pick-dir" title="选一个目录当运行时根目录，启动器会在里面按 游戏\\渠道 建子目录">选择目录</button>
           </div>
           <ol class="sw-stages" id="sophon-stages">
             ${SOPHON_STAGES.map(
@@ -16490,18 +18534,25 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       </div>
     </div>`;
 
+  /* 关窗回调单独拿个名字：任务收进任务坞再从任务条挂回来时，要把它一起装回去 */
+  const taskOnClose = () => {
+    if (running) {
+      /*
+       * 跑着的时候关窗 = 收进任务坞继续跑，和下载弹窗同一套语义。
+       * 以前这里是「关窗即取消」：误点一下 ✕ 几十秒的硬链接就白做了，
+       * 而且任务条上再也点不回这个界面。真要停，界面里有「停止」。
+       */
+      minimizeTask();
+    } else {
+      // 完成 / 失败的那一条留在坞里，用户回头看还能点回来
+      pruneSophonHistory();
+      renderTaskDock();
+    }
+    // 队列在「完成」时没有被放行（那时窗口还开着看结果），关窗这一步才轮到下一个
+    if (finishedOk) startNextSophonJob();
+  };
   openModal(html, {
-    onClose: () => {
-      if (running) {
-        cancelled = true;
-        api.servers.cancelSophon(jobId).catch(() => {});
-      } else {
-        sophonJobs = sophonJobs.filter((item) => item !== job);
-        renderTaskDock();
-      }
-      // 队列在「完成」时没有被放行（那时窗口还开着看结果），关窗这一步才轮到下一个
-      if (finishedOk) startNextSophonJob();
-    },
+    onClose: taskOnClose,
     onBackdrop: () => {
       if (running) minimizeTask();
       else closeModal();
@@ -16522,32 +18573,41 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   const hideDock = () => {
     if (activeSophonJob === job) activeSophonJob = null;
     sophonUi = null;
+    taskModalGuard = null;
     document.body.classList.remove('sophon-minimized');
     renderTaskDock();
   };
 
+  // 跑着的时候被关窗（✕ / Esc / 点遮罩）→ 收进任务坞，而不是把界面销毁
+  taskModalGuard = () => {
+    if (!running || !backdrop || !dom.modalRoot.contains(backdrop)) return false;
+    hiddenTaskModalClose = taskOnClose;
+    stashTaskModal(backdrop);
+    return true;
+  };
+
   const minimizeTask = () => {
     if (!running) return;
-    if (backdrop) backdrop.style.display = 'none';
-    document.body.classList.remove('modal-open');
+    // 整块 DOM 拔下来存着：中途开别的弹窗也不会把它冲掉，点任务条能原样挂回去
+    hiddenTaskModalClose = taskOnClose;
+    stashTaskModal(backdrop);
     document.body.classList.add('sophon-minimized');
     job.status = 'running';
     activeSophonJob = job;
     renderTaskDock();
     sophonUi = {
       restore: () => {
-        if (backdrop) backdrop.style.display = '';
-        document.body.classList.add('modal-open');
-        document.body.classList.remove('sophon-minimized');
-        renderTaskDock();
+        restoreTaskModal();
       },
       cancel: () => {
         cancelled = true;
         running = false;
         job.status = 'cancelled';
         api.servers.cancelSophon(jobId).catch(() => {});
+        dropStashedTaskModal();
         closeModal();
         hideDock();
+        pruneSophonHistory();
         startNextSophonJob();
       },
     };
@@ -16672,6 +18732,10 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         }
         return;
       }
+      if (result.targetRoot) {
+        const label = document.querySelector('#sophon-target-dir');
+        if (label) label.textContent = result.targetRoot;
+      }
       const free = Number(result.freeBytes) || 0;
       const base = Number(result.baseBytes) || 0;
       sumFree.textContent = free ? `${formatSize(free)}（${result.drive || '目标盘'}）` : '读不到磁盘信息';
@@ -16732,8 +18796,10 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       const dir = await api.pick.directory();
       if (!dir) return;
       selectedRuntimeRoot = dir;
+      // 选的是「运行时根目录」，真正的客户端目录是 根目录\游戏\渠道，由主进程补全，
+      // 所以这里先显示占位，等预估回来再写真实路径
       const label = document.querySelector('#sophon-target-dir');
-      if (label) label.textContent = `${dir}（直接作为目标目录）`;
+      if (label) label.textContent = `${dir}（根目录，正在确定子目录…）`;
       // 换了目标盘，剩余空间就变了，预估得跟着重算
       refreshEstimate();
     });
@@ -16837,6 +18903,9 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
             runtimeRoot: selectedRuntimeRoot || undefined,
           }));
       if (result.cancelled || cancelled) {
+        // 停了就是停了：坞里不留残影，免得左下角一直挂着一条什么都没有的条目
+        job.status = 'cancelled';
+        sophonJobs = sophonJobs.filter((item) => item !== job);
         hideDock();
         toast('已停止生成，可以下次继续', 'info');
         return;
@@ -16844,6 +18913,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       running = false;
       job.status = 'done';
       job.percent = 100;
+      // 任务结束就从坞里摘掉：坞只负责「还在跑的」，结果这一屏本来就在前台开着，
+      // 再挂一条「已完成」只会一直赖在那个角落
       sophonJobs = sophonJobs.filter((item) => item !== job);
       hideDock();
       if (unsubscribe) {
@@ -16868,6 +18939,7 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       );
     } catch (error) {
       job.status = cancelled ? 'cancelled' : 'error';
+      // 失败 / 停止同样不在坞里留残影：错误就写在这一屏上，坞只放还在跑的任务
       sophonJobs = sophonJobs.filter((item) => item !== job);
       hideDock();
       if (cancelled) toast('已停止生成', 'info');
@@ -17627,7 +19699,10 @@ function toast(message, type = 'info') {
   // 后端偶尔会返回一个没有 error 字段的结果对象，直接 toast(undefined) 会弹一个空提示；
   // 这里兜底成一句能看懂的话，避免「点了没反应」。
   if (message === undefined || message === null || message === '') message = '操作失败，请重试';
-  playUiSound('notify');
+  // 主进程抛回来的错误常带着「Error invoking remote method 'xxx': Error:」这层壳，
+  // 直接弹出去就是一句英文开头的提示。这里统一剥掉，只留人话。
+  if (type === 'error') message = humanError(message);
+  playUiSound(type === 'error' ? 'error' : 'notify');
   const node = document.createElement('div');
   node.className = `toast ${type}`;
   const iconName = type === 'success' ? 'check' : type === 'error' ? 'alert' : 'info';
@@ -17764,6 +19839,42 @@ document.addEventListener('change', async (event) => {
   await importMusicSource({ text });
 });
 
+/* 点击涟漪：跟随指针的一层径向高光，圆角跟随宿主，不会溢到按钮外面。
+ * 只在少数「扁平、纯色、有明确边界」的控件上用；卡片类自带 hover 抬升，不叠这一层。 */
+const TAP_FLASH_HOSTS =
+  '.btn, .btn-primary, .btn-ghost, .btn-quiet, .btn-danger, .mini-chip, .chip, .segmented button, .fx-card, .tg-rail-item';
+
+function spawnTapFlash(element, event) {
+  if (!element || !element.matches(TAP_FLASH_HOSTS)) return;
+  if (element.dataset.noRipple !== undefined) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const rect = element.getBoundingClientRect();
+  if (rect.width < 12 || rect.height < 12) return;
+  const node = document.createElement('span');
+  node.className = 'tap-flash';
+  const x = event && typeof event.clientX === 'number' ? event.clientX - rect.left : rect.width / 2;
+  const y = event && typeof event.clientY === 'number' ? event.clientY - rect.top : rect.height / 2;
+  node.style.setProperty('--tap-x', `${Math.round(x)}px`);
+  node.style.setProperty('--tap-y', `${Math.round(y)}px`);
+  element.appendChild(node);
+  window.setTimeout(() => node.remove(), 460);
+}
+
+/* 按下就出声、出光：等 click（松手）才反馈，手感会慢半拍。
+ * 键盘激活没有 pointerdown，靠 click 里 detail===0 兜底。 */
+document.addEventListener(
+  'pointerdown',
+  (event) => {
+    if (event.button !== 0) return;
+    const element = event.target.closest('button, [data-nav], [data-action]');
+    if (!element || element.disabled) return;
+    if (element.dataset.noSound !== undefined || element.dataset.sound === 'off') return;
+    playUiSound(uiSoundKindFor(element));
+    spawnTapFlash(element, event);
+  },
+  true,
+);
+
 document.addEventListener('click', async (event) => {
   const feedback = event.target.closest('button, [data-nav], [data-action]');
   if (
@@ -17772,7 +19883,11 @@ document.addEventListener('click', async (event) => {
     feedback.dataset.noSound === undefined &&
     feedback.dataset.sound !== 'off'
   ) {
-    playUiSound('click');
+    // 键盘（Enter / Space）激活的点击 detail 为 0，没有 pointerdown，这里补一次
+    if (event.detail === 0) {
+      playUiSound(uiSoundKindFor(feedback));
+      spawnTapFlash(feedback, null);
+    }
   }
 
   const close = event.target.closest('[data-close]');
@@ -17899,9 +20014,11 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && dom.modalRoot.childElementCount) {
     closeModal();
   }
-  /* Esc：启动页上先收侧栏；侧栏没收起时就回主界面（原返回键的承诺） */
+  /* Esc：启动页上先收服务器弹层，再收侧栏；侧栏没收起时就回主界面（原返回键的承诺） */
   if (event.key === 'Escape' && !dom.modalRoot.childElementCount && !event.target.closest?.('input, textarea, select')) {
-    if (state.route === 'start' && state.startNavOpen) {
+    if (state.route === 'start' && state.startServerMenu) {
+      closeStartServerMenu();
+    } else if (state.route === 'start' && state.startNavOpen) {
       setStartNavOpen(false).catch(() => {});
     } else if (state.route === 'start') {
       navigate('home');
@@ -18080,6 +20197,30 @@ async function boot() {
     api.onToast((payload) => {
       if (payload && payload.message) toast(payload.message, payload.type || 'info');
     });
+    /*
+     * 「更新游戏」按钮的进度直显：dock 上那颗按钮的文案跟着进度走，
+     * 不整页重绘（重绘会把 <video> 背景重启，闪一下静态图）。
+     * 只在 gameUpdate 挂着且 jobId 对得上时才改，预下载面板自己的订阅不受影响。
+     */
+    if (typeof api.onPredownloadProgress === 'function') {
+      api.onPredownloadProgress((event) => {
+        const current = state.gameUpdate;
+        if (!current || !event || event.jobId !== current.jobId) return;
+        let label = String(event.current || '');
+        if (event.phase === 'download' && Number(event.total) > 0) {
+          label = `更新中 ${event.processed || 0}/${event.total}`;
+        } else if (event.phase === 'apply' || event.phase === 'link') {
+          label = '正在应用更新…';
+        } else if (event.phase === 'done') {
+          label = '更新完成';
+        }
+        if (label) {
+          current.label = label;
+          const el = document.querySelector('.start-dock-update-label');
+          if (el) el.textContent = label;
+        }
+      });
+    }
     api.onUpdateAvailable((info) => {
       if (!info || !info.hasUpdate) return;
       if (state.update && state.update.downloading) return;
@@ -18099,6 +20240,16 @@ async function boot() {
     }
 
     /*
+     * 界面重载（Ctrl+R）时窗口可能还带着上次的外扩宽度：主进程没重启，
+     * 那个宽度还在，但页面这一侧已经没有补偿了，画面会整体偏左 220px。
+     * 开机先把外扩收回来，收不到也没关系（本来就没扩时它返回 0）。
+     */
+    if (typeof api.startNavCollapse === 'function') {
+      Promise.resolve(api.startNavCollapse()).catch(() => {});
+      document.body.classList.remove('start-nav-outward');
+    }
+
+    /*
      * 更新公告弹窗：等主进程开机后那次自动检查（15 秒）把清单读完。
      *
      * 主进程那边发现 hasUpdate 才会 push update:available，装完新版本时
@@ -18112,14 +20263,20 @@ async function boot() {
 
     api.onUpdateProgress((progress) => {
       if (!progress) return;
-      state.update = { ...state.update, downloading: true, percent: Number(progress.percent) || 0 };
+      state.update = {
+        ...state.update,
+        downloading: true,
+        percent: Number(progress.percent) || 0,
+        received: Number(progress.received) || 0,
+        total: Number(progress.total) || Number(state.update?.total) || 0,
+      };
       setUpdateProgress(state.update.percent, progress.label);
       if (state.route === 'settings') {
         const bar = document.querySelector('.update-progress-bar span');
         if (bar) {
           bar.style.width = state.update.percent + '%';
           const label = document.querySelector('.update-progress small');
-          if (label) label.textContent = progress.label || '正在下载 ' + state.update.percent + '%';
+          if (label) label.textContent = updateProgressText(state.update.percent, progress.label);
         }
       }
     });

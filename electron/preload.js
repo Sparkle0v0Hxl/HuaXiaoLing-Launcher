@@ -94,8 +94,16 @@ contextBridge.exposeInMainWorld('launcher', {
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   moveWindowBy: (dx, dy) => ipcRenderer.invoke('window:move-by', { dx, dy }),
-  // 启动页唤出侧栏时把窗口向左外扩；扩不出去返回 { ok:false }，前端改走浮层
-  expandWindowLeft: (payload) => ipcRenderer.invoke('window:expand-left', payload),
+
+  /*
+   * 启动页侧栏的「往外推」：窗口向左外扩一块放侧栏，画面原地不动。
+   * room 先问空间（渲染层据此同步决定用外扩还是往里推），
+   * expand / collapse 是真正改窗口（渲染层不等返回值，才能和画面补偿同帧生效）。
+   */
+  startNavRoom: () => ipcRenderer.invoke('window:start-nav-room'),
+  // 单向 send：补间期间每帧都调，不需要回值，也不该为它排一条请求-响应往返
+  startNavResize: (delta) => ipcRenderer.send('window:start-nav-resize', { delta }),
+  startNavCollapse: () => ipcRenderer.invoke('window:start-nav-collapse'),
 
   onState: (callback) => subscribe('state:changed', callback),
   onToast: (callback) => subscribe('toast', callback),
@@ -109,6 +117,9 @@ contextBridge.exposeInMainWorld('launcher', {
   onLinkPreviewDone: (callback) => subscribe('link:preview-done', callback),
   onSophonProgress: (callback) => subscribe('sophon:progress', callback),
   onPredownloadProgress: (callback) => subscribe('predownload:progress', callback),
+  // 终末地切非官服渠道时要现做链接运行时（几十秒），进度必须能看到，
+  // 否则「点切换」和「卡死」在界面上是同一件事。
+  onEndfieldProgress: (callback) => subscribe('endfield:progress', callback),
 
   // 窗口全屏状态（Electron 原生全屏不会触发 CSS :fullscreen，只能由主进程告知）
   onFullscreenChange: (callback) => subscribe('window:fullscreen', callback),
@@ -154,6 +165,8 @@ contextBridge.exposeInMainWorld('launcher', {
     remove: (id) => ipcRenderer.invoke('games:remove', id),
     clearDemo: () => ipcRenderer.invoke('games:clear-demo'),
     detect: (id) => ipcRenderer.invoke('games:detect', id),
+    // 按渠道扫：只认这个服自己的客户端，不会把官服 exe 记到 B服 那一行
+    detectServer: (id, serverId) => ipcRenderer.invoke('games:detect-server', id, serverId),
     syncOfficial: () => ipcRenderer.invoke('games:sync-official'),
     launch: (id) => ipcRenderer.invoke('games:launch', id),
     stop: (id) => ipcRenderer.invoke('games:stop', id),
@@ -178,6 +191,9 @@ contextBridge.exposeInMainWorld('launcher', {
     pauseSophon: (input) => ipcRenderer.invoke('servers:pause-sophon', input),
     cancelLink: (jobId) => ipcRenderer.invoke('servers:cancel-link', jobId),
     openFolder: (input) => ipcRenderer.invoke('servers:open-folder', input),
+    // 卸载这个渠道的客户端：先问能不能删（共用目录 / 盘符根目录会被拒），再真删
+    uninstallPlan: (input) => ipcRenderer.invoke('servers:uninstall-plan', input),
+    uninstall: (input) => ipcRenderer.invoke('servers:uninstall', input),
   },
 
   pick: {
@@ -239,6 +255,11 @@ contextBridge.exposeInMainWorld('launcher', {
     danmakuStop: (id) => ipcRenderer.invoke('live:danmaku-stop', id),
     danmuInfo: (roomId) => ipcRenderer.invoke('live:danmu-info', roomId),
     biliLogin: () => ipcRenderer.invoke('bili:login'),
+    // 弹幕长连接已迁到主进程：渲染层只发 connect/disconnect（send，不等回值），
+    // 再用 onDanmuEvent 订阅主进程转发过来的 open/pushing/danmu/status/closed/reconnecting 事件。
+    danmuConnect: (payload) => ipcRenderer.send('live:danmu-connect', payload),
+    danmuDisconnect: (roomId) => ipcRenderer.send('live:danmu-disconnect', roomId),
+    onDanmuEvent: (callback) => ipcRenderer.on('live:danmu-event', (_event, payload) => callback(payload)),
   },
 
   importCover: (path) => ipcRenderer.invoke('cover:import', path),

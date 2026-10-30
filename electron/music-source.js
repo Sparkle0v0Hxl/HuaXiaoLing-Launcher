@@ -17,6 +17,12 @@
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+/*
+ * 换源必须「对得上歌名 + 歌手」：pickBest 在一条都不沾边时会把第一条兜底返回，
+ * 那等于「搜出来谁就给谁」，能放但放的是别人的歌。判定规则与 music-resolve 共用一份。
+ */
+const { sameSongEnough } = require('./music-resolve');
+
 function httpsify(url) {
   let out = String(url || '').replace(/^http:/i, 'https:');
   // 酷我图片的 kwcdn 子域不提供 https（实测 img1.kwcdn.kuwo.cn 的 https 直接握手失败，
@@ -514,9 +520,20 @@ async function byKeyword(provider, keyword, song, extra) {
   const candidates = await provider.search(keyword, 8, extra);
   const best = pickBest(candidates, song);
   if (!best) throw new Error('没搜到同名曲');
+  // 搜到的不是同一首歌就不用：宁可这家不出声，也不能放错歌
+  if (!sameSongEnough(song?.title || song?.name, song?.artist, best.title, best.artist)) {
+    throw new Error('搜到的不是同一首歌');
+  }
   const url = await provider.url(best, extra);
   return {
     ...url,
+    /*
+     * matchedTitle / matchedArtist 是「实际拿到地址的那一份」，回到渲染层用来核身份。
+     * 不能覆盖 title / artist：那样加进队列的歌名会被换成对方平台的写法
+     * （多一个 (Live版) 之类），用户会以为点错歌。
+     */
+    matchedTitle: best.title,
+    matchedArtist: best.artist,
     matched: `${best.title} - ${best.artist}`,
     runtime: best,
     cover: best.cover || url.cover || '',

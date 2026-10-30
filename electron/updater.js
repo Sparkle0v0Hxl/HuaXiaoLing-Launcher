@@ -516,13 +516,13 @@ async function extractZip(zipPath, extractRoot) {
 
 function findPackageRoot(extractRoot) {
   const candidates = [path.join(extractRoot, '花筱灵启动器'), extractRoot];
-  return (
-    candidates.find(
-      (dir) =>
-        fs.existsSync(path.join(dir, EXE_NAME)) &&
-        fs.existsSync(path.join(dir, 'resources', 'app', 'package.json'))
-    ) || ''
-  );
+  // 两种打包形态都认：asar 包（resources/app.asar）和展开目录（resources/app/package.json）。
+  // electron-builder 默认打 asar，老的安装是展开目录，两边互相更新都要能装。
+  const looksLikePackage = (dir) =>
+    fs.existsSync(path.join(dir, EXE_NAME)) &&
+    (fs.existsSync(path.join(dir, 'resources', 'app', 'package.json')) ||
+      fs.existsSync(path.join(dir, 'resources', 'app.asar')));
+  return candidates.find(looksLikePackage) || '';
 }
 
 /** 递归列出目录下的所有文件（相对路径统一用 / 分隔）。 */
@@ -601,8 +601,10 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
 
   const listing = await listFiles(source);
   if (!listing.length) throw new Error('更新包是空的');
-  if (!listing.includes('resources/app/electron/main.js')) {
-    throw new Error('更新包里缺少 resources/app/electron/main.js，覆盖后启动器会打不开');
+  const hasAsar = listing.includes('resources/app.asar');
+  const hasAppDir = listing.includes('resources/app/electron/main.js');
+  if (!hasAsar && !hasAppDir) {
+    throw new Error('更新包里既没有 resources/app.asar 也没有 resources/app/electron/main.js，覆盖后启动器会打不开');
   }
 
   const files = listing.filter((rel) => !isProtected(rel));
@@ -612,11 +614,18 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
   // 覆盖脚本是更新包的一部分，缺了这次的更新就等于装不上——必须在动程序目录之前拦下来
   const installerSource = path.join(source, 'resources', 'updater', 'HXL-Updater.ps1');
   const selfHealSource = path.join(source, 'resources', 'updater', 'self-heal.ps1');
-  if (!fs.existsSync(installerSource)) {
-    throw new Error('更新包里缺少 resources/updater/HXL-Updater.ps1，无法完成覆盖');
-  }
-  if (!fs.existsSync(selfHealSource)) {
-    throw new Error('更新包里缺少 resources/updater/self-heal.ps1，升级失败后无法自动还原');
+  const applyJsSource = path.join(source, 'resources', 'updater', 'apply.js');
+  // 覆盖器优先用 Node 版（不受安全软件拦 PowerShell 的影响）；
+  // 老版本打出来的包里没有 apply.js，那种情况退回 ps1 兜底，所以不能一上来就抛错——
+  // 只有「两套覆盖器都没有」才是真的装不上。
+  const hasApplyJs = fs.existsSync(applyJsSource);
+  if (!hasApplyJs) {
+    if (!fs.existsSync(installerSource)) {
+      throw new Error('更新包里既没有 resources/updater/apply.js 也没有 HXL-Updater.ps1，无法完成覆盖');
+    }
+    if (!fs.existsSync(selfHealSource)) {
+      throw new Error('更新包里缺少 resources/updater/self-heal.ps1，升级失败后无法自动还原');
+    }
   }
 
   // 新包里已经没有、但旧目录里还在的程序文件：覆盖时一起清掉，避免新旧掺杂
@@ -634,12 +643,16 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
     target,
     version,
     packageVersion,
+    // 新包是 asar 还是展开目录：覆盖脚本据此清掉目标里另一套旧结构
+    hasAsar,
+    hasAppDir,
     files,
     removed: [],
     protectedExisting: [...protectedExisting],
     locks,
     installerSource,
     selfHealSource,
+    applyJsSource,
   };
 }
 
@@ -656,10 +669,10 @@ function relaunchPath() {
 /**
  * 生成并启动覆盖脚本。
  *
- * 脚本（resources/updater/HXL-Updater.ps1）负责：
+ * 覆盖脚本（优先 resources/updater/apply.js，PowerShell 版 HXL-Updater.ps1 兜底）负责：
  *   1. 等旧进程退出；
  *   2. 把要覆盖的程序文件逐个备份到 data\tmp\backup-<版本>；
- *   3. 按清单覆盖（用 -LiteralPath 逐项复制，绝不镜像整个目录）；
+ *   3. 按清单覆盖（逐项复制，绝不镜像整个目录）；
  *   4. 写「升级成功」标记，重新拉起启动器；
  *   5. 用户要求回滚时，先把旧备份还原回去再拉起。
  *
@@ -687,22 +700,7 @@ async function apply({ staged, onReadyToQuit }) {
   }
 
   let spawnError = null;
-  const child = spawn(
-    powershellCommand(),
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-WindowStyle',
-      'Hidden',
-      '-File',
-      meta.installer,
-      '-MetaPath',
-      metaPath,
-    ],
-    { detached: true, windowsHide: true, stdio: 'ignore' }
-  );
+  const child = spawnApplyInstaller({ meta, metaPath });
   child.on('error', (error) => {
     spawnError = error;
   });
@@ -736,6 +734,42 @@ async function apply({ staged, onReadyToQuit }) {
 
   if (typeof onReadyToQuit === 'function') onReadyToQuit();
   return { ok: true, restarting: true, version: meta.targetVersion, target: meta.target };
+}
+
+/**
+ * 拉起覆盖安装器。
+ *
+ * 首选 JS 版（resources/updater/apply.js）：它是这个 Electron 自带的 Node 跑起来的，
+ * 不经过 PowerShell。这里踩过坑——不少机器的安全软件/策略会拦「Electron 进程调
+ * PowerShell 执行脚本」，脚本压根没被执行，更新永远停在 100%。
+ * PowerShell 那条路留作兜底：只有两份 apply.js 都不在时才走。
+ */
+function spawnApplyInstaller({ meta, metaPath }) {
+  const applyJs = String((meta && meta.applyJs) || '');
+  if (applyJs && fs.existsSync(applyJs)) {
+    return spawn(process.execPath, [applyJs, '--meta', metaPath], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+  }
+  return spawn(
+    powershellCommand(),
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-WindowStyle',
+      'Hidden',
+      '-File',
+      meta.installer,
+      '-MetaPath',
+      metaPath,
+    ],
+    { detached: true, windowsHide: true, stdio: 'ignore' }
+  );
 }
 
 /** 覆盖脚本报到的等待上限。脚本起来后要先建目录、写日志，给它留够时间。 */
@@ -815,11 +849,11 @@ function describeApplyProblem({ staged, currentVersion }) {
 
 /** 把 staged 对象整理成覆盖脚本要读的 apply-meta.json。 */
 function buildApplyMeta(staged) {
-  const installer =
-    staged.installerSource && fs.existsSync(staged.installerSource)
-      ? staged.installerSource
-      : path.join(__dirname, 'updater-installer.ps1');
-  if (!fs.existsSync(installer)) throw new Error('找不到覆盖脚本，更新包里缺少 resources/updater/HXL-Updater.ps1');
+  const applyJs = applyJsPath(staged);
+  const installer = installerPs1Path(staged);
+  if (!applyJs && !installer) {
+    throw new Error('找不到覆盖脚本，更新包里缺少 resources/updater/apply.js 或 HXL-Updater.ps1');
+  }
   return {
     action: staged.action || 'update',
     fromVersion: String(staged.fromVersion || ''),
@@ -834,7 +868,32 @@ function buildApplyMeta(staged) {
     backupDir: staged.backupDir || '',
     staging: staged.tempRoot || '',
     installer,
+    applyJs,
   };
+}
+
+/**
+ * 覆盖安装器的路径：优先用更新包里那份（跟着版本走、能持续升级），
+ * 包里没有就退回程序目录里现有的那份。两份都不在时返回空串。
+ */
+function applyJsPath(staged) {
+  const fromPackage = String(staged.applyJsSource || '');
+  if (fromPackage && fs.existsSync(fromPackage)) return fromPackage;
+  const fallback = staged.source ? path.join(staged.source, 'resources', 'updater', 'apply.js') : '';
+  if (fallback && fs.existsSync(fallback)) return fallback;
+  const local = path.join(path.dirname(process.execPath), 'resources', 'updater', 'apply.js');
+  return fs.existsSync(local) ? local : '';
+}
+
+/**
+ * PowerShell 版覆盖脚本（兜底用）。同样优先包里那份，其次程序目录里那份。
+ * 回滚时 staged 里没有 installerSource，必须能退到程序目录那份，否则回滚永远失败。
+ */
+function installerPs1Path(staged) {
+  const fromPackage = String(staged.installerSource || '');
+  if (fromPackage && fs.existsSync(fromPackage)) return fromPackage;
+  const local = path.join(path.dirname(process.execPath), 'resources', 'updater', 'HXL-Updater.ps1');
+  return fs.existsSync(local) ? local : '';
 }
 
 /**

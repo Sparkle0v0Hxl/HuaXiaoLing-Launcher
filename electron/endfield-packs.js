@@ -16,6 +16,17 @@ const AES_IV = Buffer.from([
 const COMMON_ROOT = ['U8CoreUI.dll', 'U8SDK.dll', 'u8_channel.dll'];
 const COMMON_DIRS = ['sdkdata/', 'U8Data/config/'];
 
+/*
+ * EndfieldBase.dll（游戏平台基座，约 37MB）官方清单实锤分渠道：
+ *   official/bilibili = fb6986b7…，global = 94ff01ac…。
+ * 渠道包不带它的话，国际服运行时里永远是基础客户端（国服）的版本，
+ * 官方完整性校验直接报「游戏文件缺失或损坏」——第三方切服器要求手动替换的
+ * HGP.dll / EndfieldBase.dll / OneChannelLC.dll 三件套里的前者和后者
+ * 我们的渠道包本来就有，缺的只有这一颗。
+ * WebviewConfig 文件夹经切换器作者确认不需要处理，不收。
+ */
+const COMMON_CHANNEL_ROOT = [...COMMON_ROOT, 'EndfieldBase.dll'];
+
 const PROFILES = [
   {
     iconName: 'Endfield',
@@ -26,7 +37,7 @@ const PROFILES = [
     channel: '1',
     subChannel: '1',
     seq: '5',
-    rootFiles: [...COMMON_ROOT, 'eld_Endfield.db', 'hgsdk.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [...COMMON_CHANNEL_ROOT, 'eld_Endfield.db', 'hgsdk.dll', 'OneChannelLC.dll', 'HGP.dll'],
     dirs: COMMON_DIRS,
   },
   {
@@ -38,7 +49,7 @@ const PROFILES = [
     channel: '2',
     subChannel: '2',
     seq: '5',
-    rootFiles: [...COMMON_ROOT, 'eld_Endfield.db', 'PCGameSDK.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [...COMMON_CHANNEL_ROOT, 'eld_Endfield.db', 'PCGameSDK.dll', 'OneChannelLC.dll', 'HGP.dll'],
     dirs: ['BLPlatform64/', 'U8Data/config/'],
   },
   {
@@ -50,7 +61,7 @@ const PROFILES = [
     channel: '6',
     subChannel: '6',
     seq: '3',
-    rootFiles: [...COMMON_ROOT, 'gfsdk.dll', 'glfoundation.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [...COMMON_CHANNEL_ROOT, 'gfsdk.dll', 'glfoundation.dll', 'OneChannelLC.dll', 'HGP.dll'],
     dirs: COMMON_DIRS,
   },
   {
@@ -63,7 +74,7 @@ const PROFILES = [
     subChannel: '802',
     seq: '3',
     rootFiles: [
-      ...COMMON_ROOT,
+      ...COMMON_CHANNEL_ROOT,
       'gfsdk.dll',
       'glextra.dll',
       'glfoundation.dll',
@@ -84,7 +95,7 @@ const PROFILES = [
     subChannel: '803',
     seq: '3',
     rootFiles: [
-      ...COMMON_ROOT,
+      ...COMMON_CHANNEL_ROOT,
       'gfsdk.dll',
       'glextra.dll',
       'glfoundation.dll',
@@ -114,7 +125,7 @@ const PROFILES = [
     channel: '1',
     subChannel: '1',
     seq: '5',
-    rootFiles: [...COMMON_ROOT, 'eld_Arknights.db', 'hgsdk.dll', 'OneChannelLC.dll'],
+    rootFiles: [...COMMON_CHANNEL_ROOT, 'eld_Arknights.db', 'hgsdk.dll', 'OneChannelLC.dll'],
     dirs: COMMON_DIRS,
     entry: 'Arknights.exe',
   },
