@@ -142,6 +142,8 @@ t = t.replace(OLD_NOTICE, '原创实现，与米哈游 / HoYoverse、Hypergryph�
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8'));
 t = t.replace(/版本-v\d+\.\d+\.\d+/g, `版本-v${pkg.version}`);
 t = t.replace(/(当前版本[：:]\s*)v?\d+\.\d+\.\d+/g, `$1v${pkg.version}`);
+// 上手步骤里的便携包文件名也跟版本走（底稿硬编码 1.0.0，2026-10-31 用户发现）
+t = t.replace(/HuaXiaoLing-\d+\.\d+\.\d+-Portable\.zip/g, `HuaXiaoLing-${pkg.version}-Portable.zip`);
 
 // 「展开版本历史」范围跟随最新条目走，避免下次升版又停在旧号
 const newest = ENTRIES[0][0];
