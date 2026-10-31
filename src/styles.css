@@ -411,17 +411,6 @@ button.recent-row {
   font-weight: 700;
   box-shadow: 0 4px 14px var(--accent-soft);
 }
-.avatar::after {
-  content: "";
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid var(--bg);
-}
 .profile-text {
   min-width: 0;
   display: flex;
@@ -3136,17 +3125,6 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
   font-weight: 700;
   box-shadow: 0 4px 14px var(--accent-soft);
 }
-.avatar::after {
-  content: "";
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid var(--bg);
-}
 .profile-text {
   min-width: 0;
   display: flex;
@@ -5574,13 +5552,6 @@ html[data-theme="light"] body {
   height: 42px;
   flex: none;
 }
-.avatar-preview::after {
-  display: none;
-}
-.avatar::after {
-  background: var(--gold);
-  border-color: var(--bg);
-}
 
 .eyebrow {
   color: var(--gold);
@@ -6135,6 +6106,237 @@ html[data-theme="light"] body {
   color: var(--muted);
   font-size: 14px;
 }
+/* ── 渠道包管理窗口（2.6.0）：逐渠道列状态 / 占用 / 单独下载与释放 ──
+   窗口刻意做窄（520px）：内容就是 7 行同构列表，760px 只会拉出大片空白。
+   行高、间距、字号整体压一档，整窗高度落在 560px 上下，1080p 下不顶屏幕。 */
+.modal.modal-pack {
+  width: min(520px, 100%);
+  border-radius: 14px;
+}
+
+.modal-pack .modal-head {
+  padding: 13px 15px 10px;
+}
+
+.modal-pack .modal-head h2 {
+  font-size: 16px;
+}
+
+.modal-pack .modal-head p {
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.modal-pack .modal-body {
+  padding: 11px 15px 13px;
+}
+
+.pack-summary {
+  margin-bottom: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.pack-summary-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pack-summary-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pack-summary-copy span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.pack-groups {
+  display: grid;
+  gap: 11px;
+}
+
+.pack-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.pack-group-head strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.pack-group-head span {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pack-group-hint {
+  margin: 0 0 5px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.pack-rows {
+  display: grid;
+  gap: 4px;
+}
+
+.pack-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.pack-row.is-downloading {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.pack-row-main {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.pack-row-main strong {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pack-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.pack-row-note {
+  max-width: 168px;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: right;
+  color: var(--muted);
+}
+
+.pack-badge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.pack-badge.is-ready {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.pack-badge.is-muted {
+  opacity: 0.7;
+}
+
+.pack-size {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pack-size.is-muted {
+  opacity: 0.6;
+}
+
+.pack-progress {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+}
+
+.pack-progress[hidden] {
+  display: none;
+}
+
+.pack-progress-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.pack-progress-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.pack-progress small {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pack-manager-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.pack-manager-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* 这窗口里的按钮统一小一档：默认 .btn 是 44px，放在 7 行列表里太抢眼 */
+.modal-pack .btn {
+  height: 28px;
+  padding: 0 10px;
+  gap: 5px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.modal-pack .btn .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.modal-pack .form-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .update-options {
   display: grid;
   gap: 8px;
@@ -6250,6 +6452,34 @@ html[data-theme="light"] body {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+/* 渠道包下载确认：把「要下多少」做成两栏数字，别让人从一段话里找 */
+.pack-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0 6px;
+}
+.pack-facts div {
+  padding: 10px 12px;
+  border: 1px solid var(--gold-line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .pack-facts div {
+  background: rgba(255, 255, 255, 0.55);
+}
+.pack-facts span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.pack-facts strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
 }
 .link-progress {
   margin-top: 14px;
@@ -6406,29 +6636,12 @@ body.sidebar-collapsed .profile {
   justify-content: center;
   padding: 7px;
 }
-body.sidebar-collapsed .sidebar-toggle {
-  width: 34px;
-  justify-content: center;
-  padding: 0;
-}
 body.sidebar-collapsed .sidebar-toggle .icon {
   transform: rotate(180deg);
 }
 body.sidebar-collapsed .sidebar-toggle span {
   display: none;
 }
-/* 收起态那个箭头是唯一能「展开导航栏」的入口，给它一圈主题色描边，
- * 别藏成一个不起眼的灰点——以前不少人收起来之后就找不到怎么展开。 */
-body.sidebar-collapsed .sidebar-toggle {
-  color: var(--gold);
-  border: 1px solid color-mix(in srgb, var(--gold) 42%, transparent);
-  background: color-mix(in srgb, var(--gold) 9%, transparent);
-}
-body.sidebar-collapsed .sidebar-toggle:hover {
-  color: var(--gold);
-  background: color-mix(in srgb, var(--gold) 17%, transparent);
-}
-
 /* minimized download task */
 .task-dock {
   position: fixed;
@@ -7313,9 +7526,16 @@ body.sidebar-collapsed .nav-item.active::before {
   left: -8px;
 }
 
+/* 收起态这颗箭头 = 展开态「收起侧栏」的同款样式（用户 2026-10-31 澄清：
+ * 「只是和收起侧栏一样的样式」——指配色/悬停那套语言，不是加文字）。
+ * 共用基础规则的 muted 默认 + 悬停火花金/gold-soft，这里只做小尺寸适配。
+ * 加文字 pill 方案（侧栏放宽到 120px 容「展开侧栏」）已否决：窄栏放
+ * 文字太散，还不如原版，回退到 72px 窄栏 + 纯箭头。 */
 body.sidebar-collapsed .sidebar-toggle {
   width: 38px;
   height: 32px;
+  justify-content: center;
+  padding: 0;
 }
 
 .page-head {
@@ -9679,10 +9899,21 @@ body.start-mode .view {
   user-select: none;
 }
 
+/*
+ * 拖动中：只留合成层能做的事。
+ *
+ * 之前拖动是每帧写 left/top（布局属性）+ 卡片自带 backdrop-filter: blur(16px)，
+ * 等于每帧「重排 + 重绘整块模糊」。鼠标动得越快掉帧越明显，体感就是
+ * 「拖半天才挪一点」。拖动期间摘掉模糊、把位移交给 transform（见 song.js 的
+ * paintDrag），松手后再恢复 —— 拖完的观感和之前完全一样。
+ */
 .mini-player.dragging {
   cursor: grabbing;
   transition: none;
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.46);
+  will-change: transform;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.42);
 }
 
 .mini-grip {
@@ -10628,7 +10859,8 @@ body.start-mode .view {
   .dock-volume {
     width: 56px;
   }
-  .song-fx-btn span {
+  /* 只在小播放器里藏文字；音乐页播放条的音效按钮现在只有文字，藏了就成空按钮 */
+  .mini-player .song-fx-btn span {
     display: none;
   }
 }
@@ -13647,13 +13879,20 @@ body.start-mode .mini-player {
   display: flex !important;
 }
 
-#mini-player.is-on-start {
+#mini-player.is-on-start.is-chip {
   position: fixed !important;
-  /* 吸在右下角（用户确认这个位置就好，不要挪到左边） */
+  /* 窄条兜底位置：正常情况下它内嵌在抽屉标题行的槽里（内联 static），
+     这里只防它偶尔掉到 body 上时飘到左上角 */
   left: auto !important;
   right: clamp(20px, 2.6vw, 44px) !important;
   top: auto !important;
   bottom: 92px !important;
+  z-index: 80;
+}
+
+/* 展开卡片：位置由 positionStartMiniCard() 算（按窄条锚点生长 + 避开开始面板），
+   这里绝对不能再用 !important 钉 right/bottom —— 那样会把卡片压在开始游戏上 */
+#mini-player.is-on-start:not(.is-chip) {
   z-index: 80;
 }
 
@@ -13676,11 +13915,8 @@ body.start-mode .mini-player {
   stroke-width: 2.8;
 }
 
-/* 启动页展开时仍贴着右下，不要跑到抽屉下面 */
-#mini-player.is-on-start:not(.is-ball) {
-  left: auto !important;
-  right: clamp(20px, 2.6vw, 44px) !important;
-  bottom: 92px !important;
+/* 启动页展开卡片只定尺寸，位置交给 JS（见 positionStartMiniCard） */
+#mini-player.is-on-start:not(.is-chip) {
   width: 320px;
 }
 
@@ -13753,8 +13989,8 @@ body.start-mode .start-games {
   padding-bottom: 84px;
 }
 
-/* 小球吸附在抽屉顶沿右侧 */
-.mini-player.is-on-start {
+/* 窄条吸附在抽屉顶沿右侧（只对窄条生效，展开卡片的位置由 JS 算） */
+.mini-player.is-on-start.is-chip {
   bottom: 92px !important;
 }
 
@@ -14282,6 +14518,18 @@ body.start-mode .start-games {
   backdrop-filter: blur(14px);
   color: var(--hero-ink);
   overflow: hidden;
+  /* 整条都能拖（含按钮区，按住不动仍是点击），给个抓手提示 */
+  cursor: grab;
+}
+
+#mini-player.dragging,
+#mini-player.dragging .mini-chip,
+#mini-player.dragging .mini-chip * {
+  cursor: grabbing;
+}
+
+.mini-chip button {
+  cursor: pointer;
 }
 
 #mini-player.is-start-chip .mini-chip {
@@ -15311,6 +15559,9 @@ body.start-mode .start-games {
   gap: 14px;
 }
 .song-bar-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
   border: 0;
   background: none;
   color: var(--muted);
@@ -15321,6 +15572,11 @@ body.start-mode .start-games {
 }
 .song-bar-btn:hover {
   color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+}
+.song-bar-btn .icon {
+  width: 17px;
+  height: 17px;
 }
 .song-bar-play {
   width: 38px;
@@ -15333,6 +15589,11 @@ body.start-mode .start-games {
   color: var(--accent-ink);
   cursor: pointer;
   transition: 0.16s;
+  flex: none;
+}
+.song-bar-play .icon {
+  width: 18px;
+  height: 18px;
 }
 .song-bar-play:hover {
   transform: scale(1.05);
@@ -15369,6 +15630,13 @@ body.start-mode .start-games {
 .song-bar-volume {
   width: 78px;
   accent-color: var(--accent);
+}
+/* 播放条上的音效按钮：开着时点亮提示，关着和其它工具键一致 */
+.song-fx-btn.is-on {
+  color: var(--accent);
+}
+.song-fx-btn.is-on:hover {
+  color: var(--accent);
 }
 
 /* 音乐账号面板 */
@@ -21147,7 +21415,10 @@ body:not(.sidebar-collapsed) .nav-item.active::after {
   pointer-events: none;
 }
 
-body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge)::after {
+/* 只有徽章真的显示出来才让位：下载项的徽章常驻 DOM、只是 hidden，
+ * :has(.nav-badge) 不看可见性，会把水印永久挪到 30px，和其它页不统一
+ * （用户 2026-10-31 反馈「下载的星星去对上动态页的统一」）。 */
+body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge:not([hidden]))::after {
   right: 30px;
 }
 
@@ -28676,7 +28947,10 @@ body.start-mode.start-nav-open .start-top .start-window-controls {
   right: 34px;
   bottom: 22px;
   width: 320px;
-  height: 356px;
+  /* 角色图 character.png 是 1536×1536 正方形：容器必须同为正方形。
+     早前高度写成 356，object-fit:contain + 居中靠底会把图压在下方，
+     卡片顶部凭空空出 36px 深色带（用户 2026-10-31 反馈「空出来了」）。 */
+  height: 320px;
   border-radius: 20px;
   overflow: hidden;
 }
@@ -28685,13 +28959,13 @@ body.start-mode.start-nav-open .start-top .start-window-controls {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  object-position: center bottom;
+  object-position: center;
 }
 
 @media (max-width: 1180px) {
   .home-page .hero-portrait {
     width: 260px;
-    height: 300px;
+    height: 260px;
   }
 }
 
@@ -28908,6 +29182,17 @@ body.start-mode.start-nav-open .start-top .start-window-controls {
   font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* 最近一条弹幕：一眼分清「弹幕没到」还是「到了但没匹配上点歌」 */
+.song-live-last {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ------------------------------------------------------------------ */
@@ -32964,4 +33249,912 @@ body.sidebar-collapsed .sidebar::after {
 }
 @keyframes hxl-spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── 启动页背景：从「顶部一排 5 个小按钮」收成一个按钮 + 弹出面板 ──
+   .start-video-tools 本身是 absolute 定位（见上文），面板相对它定位即可，
+   不要再给它加 position，否则会把按钮拉回 start-top 的文档流。 */
+.start-screen .start-video-tools.is-open .start-bg-trigger {
+  background: rgba(255, 255, 255, 0.16);
+}
+.start-screen .start-bg-trigger.is-pinned {
+  /* 固定态只换图标（填充图钉），不做颜色变化 */
+}
+.start-screen .start-bg-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 212px;
+  padding: 8px;
+  border-radius: 14px;
+  background: rgba(16, 18, 24, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.start-screen .start-bg-panel[hidden] {
+  display: none;
+}
+.start-screen .start-bg-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 7px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.start-screen .start-bg-step {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.86);
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+.start-screen .start-bg-step:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+.start-screen .start-bg-step .icon {
+  width: 14px;
+  height: 14px;
+}
+.start-screen .start-bg-name {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.76);
+  white-space: nowrap;
+}
+.start-screen .start-bg-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.start-screen .start-bg-action:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.start-screen .start-bg-action .icon {
+  width: 15px;
+  height: 15px;
+  opacity: 0.82;
+  flex: 0 0 auto;
+}
+.start-screen .start-bg-action span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.start-screen .start-bg-action.is-pinned {
+  /* 固定态只换图标，不变色 */
+}
+.start-screen .start-bg-action.is-pinned .icon {
+  opacity: 1;
+}
+
+/* ── 服务器管理弹窗内的修复/校验进度槽 ──
+   进度直接显示在弹窗内部，替代右下角任务框，避免盖住服务器列表。 */
+.modal .server-progress-slot {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.modal .server-progress-slot[hidden] {
+  display: none;
+}
+.modal .server-progress-slot .sps-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.85);
+  min-width: 0;
+}
+.modal .server-progress-slot .sps-line span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal .server-progress-slot .sps-line .icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+.modal .server-progress-slot .sps-line.is-busy .icon {
+  color: var(--accent);
+  animation: hxl-spin 1.1s linear infinite;
+}
+.modal .server-progress-slot .sps-line.is-ok .icon {
+  color: #6fd6b0;
+}
+.modal .server-progress-slot .sps-line.is-err .icon {
+  color: #ff8c8c;
+}
+
+/* ── 音乐：歌单卡片与歌曲行更贴主题 ─────────────────────────
+   封面底色与边框混入一点主题色，歌手/副标题不再是纯灰；
+   网格收紧一点，一屏多放几张，少滚动。 */
+.playlist-cards {
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+}
+.playlist-card {
+  gap: 5px;
+}
+.playlist-card-cover {
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-3));
+  border-color: color-mix(in srgb, var(--accent) 14%, var(--line));
+}
+.playlist-card:hover .playlist-card-cover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.playlist-card-sub {
+  color: color-mix(in srgb, var(--accent) 30%, var(--muted));
+}
+.song-chart-copy small {
+  color: color-mix(in srgb, var(--accent) 24%, var(--muted));
+}
+
+/* 「我的歌单」底部 → 歌单广场的引导条 */
+.plaza-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 14px 0 12px;
+  padding: 9px 12px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+.plaza-hint:hover {
+  color: var(--text);
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.plaza-hint b {
+  color: var(--accent);
+  font-weight: 600;
+}
+.plaza-hint .icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+/* ══ 音乐界面重做（布局参考主流播放器，视觉沿用启动器主题） ══════
+   1. 底部播放条：玻璃 + 主题色描边，三分区更分明
+   ─────────────────────────────────────────────── */
+.song-bar {
+  height: 88px;
+  padding: 0 16px;
+  gap: 20px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 62%),
+    rgba(14, 12, 18, 0.8);
+  backdrop-filter: blur(22px) saturate(1.1);
+  -webkit-backdrop-filter: blur(22px) saturate(1.1);
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.3);
+}
+.song-bar-cover {
+  width: 60px;
+  height: 60px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.song-bar-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.song-bar-copy small {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--accent) 28%, var(--muted));
+}
+.song-bar-controls {
+  gap: 16px;
+}
+/* 进度条做细：自绘轨道 + 主题色小圆点，滑块严格压在中线上
+ *
+ * 之前只在 ::-webkit-slider-thumb 上写 -webkit-appearance:none，输入框本身还是原生
+ * 外观：原生滑块把自定义圆点按它自己的内部盒模型摆放，margin-top:-3.5px 就不再是
+ * 「相对 4px 轨道居中」，实测圆点比轨道中线低了 2~3px —— 截图里那个「不在线上」。
+ * 现在输入框也 appearance:none，几何全由我们定；代价是原生那条「已播放」上色没了，
+ * 改由 --song-progress（由 updateSongChrome 每帧写）在轨道上画渐变。 */
+.song-bar-progress input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.song-bar-progress input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      to right,
+      var(--accent) 0,
+      var(--accent) var(--song-progress, 0%),
+      rgba(255, 255, 255, 0.14) var(--song-progress, 0%),
+      rgba(255, 255, 255, 0.14) 100%
+    );
+}
+.song-bar-progress input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -3.5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.song-bar-progress input[type="range"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* 2. 歌单卡片墙：放大卡片、悬浮上浮（QQ 音乐 / 网易云的卡片墙观感） */
+.playlist-cards {
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.playlist-card {
+  gap: 7px;
+  transition: transform 0.16s ease;
+}
+.playlist-card:hover {
+  transform: translateY(-2px);
+}
+.playlist-card-cover {
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+.playlist-card-name {
+  font-size: 12.5px;
+}
+.playlist-card-sub {
+  font-size: 11px;
+}
+.playlist-card-play {
+  width: 38px;
+  height: 38px;
+  right: 10px;
+  bottom: 10px;
+}
+.playlist-card-play .icon {
+  width: 17px;
+  height: 17px;
+}
+
+/* 3. 音乐设置弹窗：播放 / 音源 / 弹幕点歌三块，从右栏搬来 */
+.music-settings-modal {
+  width: min(620px, 92vw);
+}
+.mset-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.mset-block {
+  display: flex;
+  flex-direction: column;
+}
+.mset-block .song-rail-head {
+  margin-bottom: 4px;
+}
+.mset-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.mset-body .song-rail-card.is-source {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+/* 左栏底部的音乐设置入口 */
+.kr-nav-settings {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+.kr-nav-settings:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.kr-nav-settings .icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* 4. 右栏瘦身后：「正在播放」成为主视觉，歌词拿到更多高度 */
+.song-rail-card.is-now .song-rail-cover {
+  width: 64px;
+  height: 64px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+}
+.song-rail-card.is-now .song-rail-now-copy strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.song-rail-card.is-now .song-rail-now-copy small {
+  color: color-mix(in srgb, var(--accent) 28%, var(--muted));
+}
+.song-rail-card.is-lyrics {
+  min-height: 240px;
+}
+.song-lyric-line {
+  padding: 3px 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+  opacity: 0.55;
+  transition: color 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+}
+/*
+ * 唱到哪句就哪句亮：主题色 + 加粗 + 放大，没唱到的压到 55% 透明。
+ * 选择器写全两处作用域，否则右栏那条 (0,3,0) 的旧规则会把主题色盖成白字，
+ * 白字和灰字挨在一起几乎看不出哪句是当前的。
+ */
+.song-rail-lyrics .song-lyric-line.active,
+.song-rail-lyrics .song-lyric-line.is-current,
+.song-lyric-line.active,
+.song-lyric-line.is-current {
+  color: var(--accent);
+  font-size: 14.5px;
+  font-weight: 700;
+  opacity: 1;
+  transform: scale(1.02);
+}
+
+/* 5. 右栏瘦身后收窄，宽度让给主区的卡片墙 */
+.kr-body {
+  grid-template-columns: 208px minmax(0, 1fr) 300px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 音乐页头部 v5：标题独占第一排，说明（左）与账号 / 加歌按钮（右）同占第二排。
+ * 用户要的就是「账号和三个按钮对齐描述那一行字」。
+ * ═══════════════════════════════════════════════════════════════════ */
+.song-app-head > .song-app-title {
+  flex: 1 1 100%;
+}
+.song-app-head > .song-app-desc {
+  order: 0;
+  flex: 1 1 320px;
+  align-self: center;
+}
+.song-app-head > .song-app-toolrow {
+  order: 99;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+/* 链接导入歌单：单独做成文字按钮。酷狗的歌单只能靠链接导入，这里要摆在明面 */
+/* 左栏酷狗那一行：不再放「链接导入」按钮，只留一句说明文字 */
+.kr-sync-row.is-import-only {
+  cursor: default;
+}
+.kr-sync-note {
+  flex: none;
+  color: var(--muted);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+/* 窄窗口：说明退回标题下面独占一行，右上那排控件留在标题行右侧 */
+@media (max-width: 1080px) {
+  .song-app-head > .song-app-desc {
+    order: 3;
+    flex: 1 1 100%;
+  }
+  .song-app-head > .song-app-toolrow {
+    order: 2;
+  }
+}
+
+/* 右栏弹幕卡：和正在播放 / 歌词同一套卡片语言，链接输入压成一行 */
+.song-rail-card.is-live {
+  flex: none;
+  padding: 12px 12px 13px;
+}
+.song-rail-card.is-live .song-live-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.song-rail-card.is-live .song-live-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.song-rail-card.is-live .song-live-btn {
+  flex: none;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.song-rail-card.is-live .song-live-history {
+  flex-wrap: wrap;
+}
+
+/* 播放条上的音效：文字胶囊，不再是孤零零一个小图标 */
+.song-bar .song-fx-btn {
+  width: auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.song-bar .song-fx-btn:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.song-bar .song-fx-btn.active {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/* 音效小窗口：贴着播放条弹出一小块，不再整屏弹窗 */
+.fx-pop {
+  position: fixed;
+  right: 18px;
+  bottom: 98px;
+  z-index: 420;
+  width: 322px;
+  max-width: calc(100vw - 32px);
+  padding: 12px 14px 13px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(30, 24, 38, 0.97), rgba(18, 14, 24, 0.98));
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(20px) saturate(1.2);
+  animation: fxPopIn 0.16s ease-out;
+}
+:root[data-theme="light"] .fx-pop {
+  border-color: rgba(0, 0, 0, 0.1);
+  background: linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(246, 242, 237, 0.99));
+}
+@keyframes fxPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+.fx-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.fx-pop-head strong {
+  font-size: 13px;
+}
+.fx-pop-head small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.fx-pop-x {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: 0.14s;
+}
+.fx-pop-x:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+.fx-pop-x .icon {
+  width: 14px;
+  height: 14px;
+}
+.fx-pop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.fx-pop-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.fx-pop-group-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.fx-pop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.fx-chip {
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: 0.14s;
+}
+.fx-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.fx-chip.active {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.fx-pop-intensity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+.fx-pop-intensity > span {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.fx-pop-intensity input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.fx-pop-intensity small {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.fx-pop-hint {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* 空闲降跑：窗口最小化 / 不可见时停掉装饰动画                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * webPreferences.backgroundThrottling = false（缩在后台也要继续放歌）的副作用：
+ * 窗口缩到任务栏后，CSS 合成动画照跑 —— 火花漂移、轨道、pan、浮动加起来三十多个
+ * infinite 动画，不可见时没有观众，纯烧 GPU。
+ * body.is-idle 由 app.js 的 setIdleMode() 切换（主进程 window:minimize-state
+ * 推送 + visibilitychange 双闸），视频的暂停/恢复也在那边（只停视频不停音频）。
+ * 功能型动画（spinner / 进度条）一起停没有副作用：不可见时没人看；
+ * restore 时 animation-play-state 从暂停处继续，不跳变。
+ */
+body.is-idle *,
+body.is-idle *::before,
+body.is-idle *::after {
+  animation-play-state: paused !important;
+}
+
+/*
+ * 最小化时把弹窗遮罩的模糊关掉（2026-10-31）。
+ *
+ * .modal-backdrop 是 position:fixed + backdrop-filter:blur(7px) 的整窗合成层，
+ * 窗口缩到任务栏再恢复时，这一层最容易出现「回来先糊一下 / 糊完不散」的残影，
+ * 看上去就像有个半透明窗口挡在前面动不了。不可见的时候本来也没人欣赏模糊，
+ * 直接摘掉；恢复时 body.is-idle 一去掉，模糊自己会回来，不需要额外重绘。
+ */
+body.is-idle .modal-backdrop {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 小按钮全透明化 v15（2026-10-31 用户反馈）
+ *  默认态：无底、无框、无底光、不光轨 —— 只有一颗图标，和窗口背景融为一体
+ *          （参照 Win11 标题栏按钮：干净、不抢画面）
+ *  悬停态：浮出启动器自己的风格元素 —— 花火粉×火花金流光轨环缓缓绕行 +
+ *          金色描边、金色晕、图标提亮；关闭键保留花火红
+ *  位置：主页标题栏窗口键改为垂直居中；启动页顶栏「背景键 + 三颗窗口键」
+ *        统一 4px 间距收成一整组
+ *  作用范围：主页标题栏 .window-control / 启动页顶栏 .chrome-btn（菜单、
+ *            窗口键）与 .start-video-toggle（背景键）/ 各页页首
+ *            .page-head-actions .btn-ghost
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ---- 1）默认态：全透明。border 留 1px 透明占位，悬停直接上色、不改几何 ---- */
+.window-control,
+.window-controls .window-control,
+.chrome-btn,
+.start-video-toggle,
+.page-head-actions .btn-ghost,
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition: color 0.14s ease, background 0.14s ease, border-color 0.14s ease,
+    box-shadow 0.18s ease, transform 0.14s ease;
+}
+
+/* 图标常亮但克制：没有玻璃底提对比，亮度比旧玻璃态略升 */
+.window-control,
+.chrome-btn,
+.start-video-toggle,
+.page-head-actions .btn-ghost,
+.start-screen .start-top .chrome-btn,
+.start-screen .start-top .start-video-toggle {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* 浅色主题：主页标题栏 / 页首是浅底，图标转深；
+   启动页顶栏压在游戏封图上，仍用浅色图标（不随主题转深）。
+   注意：20876/20877 那两条旧规则是 0,4,0，会把 0.045 的深色底塞回来，
+   所以这里必须同权重把 background/box-shadow 一并重置。 */
+:root[data-theme="light"] .window-control,
+:root[data-theme="light"] .window-controls .window-control,
+:root[data-theme="light"] .page-head-actions .btn-ghost {
+  color: rgba(28, 20, 44, 0.72);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 浅色聚焦环补回：上面的默认重置会同权重压掉 20849 行的旧聚焦阴影，
+   这里用更高权重（0,5,0）把花火紫聚焦环加回来（暗色主题不受影响，
+   暗色的聚焦规则 0,3,0 本来就高于暗色默认的 0,2,0） */
+:root[data-theme="light"] .window-control:focus-visible,
+:root[data-theme="light"] .window-controls .window-control:focus-visible,
+:root[data-theme="light"] .page-head-actions .btn-ghost:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px rgba(178, 148, 255, 0.75),
+    0 0 0 2px rgba(178, 148, 255, 0.28);
+}
+
+/* ---- 2）伪元素全灭：::after 底光、::before 光轨默认不亮 ---- */
+.window-control::before,
+.window-control::after,
+.window-controls .window-control::before,
+.window-controls .window-control::after,
+.page-head-actions .btn-ghost::before,
+.page-head-actions .btn-ghost::after,
+.start-screen .start-top .chrome-btn::before,
+.start-screen .start-top .chrome-btn::after,
+.start-screen .start-top .start-video-toggle::before,
+.start-screen .start-top .start-video-toggle::after {
+  opacity: 0;
+}
+
+/* ---- 3）悬停态：风格元素浮出（!important 压过旧悬停规则的 !important）---- */
+.window-control:hover,
+.window-controls .window-control:hover,
+.chrome-btn:hover,
+.start-video-toggle:hover,
+.page-head-actions .btn-ghost:hover,
+.start-screen .start-top .chrome-btn:hover,
+.start-screen .start-top .start-video-toggle:hover {
+  color: #fff !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(240, 198, 116, 0.6) !important;
+  box-shadow: 0 0 14px rgba(240, 198, 116, 0.22) !important;
+}
+
+/* 浅色主题悬停：暖金底 + 花火粉描边，图标转深 */
+:root[data-theme="light"] .window-control:hover,
+:root[data-theme="light"] .window-controls .window-control:hover,
+:root[data-theme="light"] .page-head-actions .btn-ghost:hover {
+  color: #1c142c !important;
+  background: rgba(240, 198, 116, 0.16) !important;
+  border-color: rgba(232, 67, 90, 0.45) !important;
+  box-shadow: 0 0 14px rgba(232, 67, 90, 0.18) !important;
+}
+
+/* 关闭键悬停：花火红实底，危险语义保留 */
+.window-control-close:hover,
+.window-controls .window-control-close:hover,
+.chrome-close:hover,
+.chrome-btn.chrome-close:hover,
+.start-screen .start-top .chrome-btn.chrome-close:hover {
+  color: #fff !important;
+  background: rgba(216, 68, 63, 0.88) !important;
+  border-color: transparent !important;
+  box-shadow: 0 0 14px rgba(216, 68, 63, 0.4) !important;
+}
+
+/* ---- 4）位置 ---- */
+
+/* 主页标题栏：窗口键垂直居中。原来是 flex-start + padding-top:10px，
+   34px 的键上 10px、下 0px 贴着标题栏底边，左侧文字也跟着偏 */
+.titlebar {
+  align-items: center;
+  padding-top: 0;
+}
+
+/* 启动页顶栏：背景键与三颗窗口键并成一整组，统一 4px 间距
+   （顶栏 gap 8px，window-controls 用 -4px 抵消成 4px；内部 gap 同步 4px） */
+.start-screen .start-top .start-video-tools {
+  margin-right: 0;
+}
+.start-screen .start-top .start-window-controls {
+  margin-left: -4px;
+  gap: 4px;
+}
+
+/* 主页标题栏 / 页首的光轨环也挂上自转（启动页顶栏那几颗在 20816 行早有），
+   hover 时上面那条 :hover::before 规则会把时长压到 2.6s 加速 */
+.window-controls .window-control::before,
+.page-head-actions .btn-ghost::before {
+  animation: hx-trail-spin 9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-controls .window-control::before,
+  .page-head-actions .btn-ghost::before {
+    animation: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 预下载面板的窄窗口加固（2026-10-31）
+ * 底部按钮从 4 个涨到 6 个（关闭 / 暂停 / 停止 / 清除 / 重新检查 / 应用·开始），
+ * 在 1060×680 + 125% DPI 这种小窗口里一行放不下会横向溢出，
+ * 按钮被挤到可视区外面就变成「点不到、像被挡住」。
+ * 允许换行、按钮不拆词；更窄时让它们均分整行，别留半个空按钮。
+ * ═══════════════════════════════════════════════════════════════════ */
+.pd-modal .modal-foot {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.pd-modal .modal-foot .btn {
+  white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .pd-modal .modal-foot {
+    justify-content: stretch;
+  }
+  .pd-modal .modal-foot .btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * 启动页槽内的迷你播放器：发光与阴影一律不许向上溢（2026-10-31）
+ *
+ * 它嵌在「选择游戏」标题行右侧的槽里，正上方紧贴着游戏卡片的边框。
+ * 原来两处都会向上散出十几像素：
+ *   .mini-player 的 box-shadow 0 14px 34px —— 模糊半径比偏移大，顶部溢出约 20px；
+ *   .mini-chip:hover 的 0 0 16px 金色外发光 —— 四周均匀散开。
+ * 鼠标一移上去，上面那个框就被糊住一道边。
+ * 槽内改成「只往下溢一点」的收法，视觉上依旧是浮起，但不再碰到上一行。
+ * ═══════════════════════════════════════════════════════════════ */
+#start-mini-slot #mini-player {
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+}
+#start-mini-slot .mini-chip:hover {
+  /* 上移 1px 会顶到上面的框，槽内保持不动 */
+  transform: none;
+  box-shadow: 0 0 0 1px var(--gold-line), 0 3px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 关闭询问框：「以后不再询问」那行
+ * modal-body 里问句和勾选框贴太近，单独拉开一点，别看着像同一个句子的
+ * 两半（勾选框是独立决定，不是对问句的回答）。
+ * ═══════════════════════════════════════════════════════════════════ */
+#close-choice .check-line {
+  margin: 10px 0 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 我的歌单 · 卡片右上角的「移除」
+ * 和右下角播放按钮同一套交互：平时藏着，鼠标移上卡片（或键盘聚焦）才出现，
+ * 免得卡片墙一排删字按钮看着像在催人删东西。
+ * 只出现在「链接导入」的卡片上 —— 账号同步来的歌单本地删了会复活。
+ * ═══════════════════════════════════════════════════════════════════ */
+.playlist-card-del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(12, 10, 14, 0.62);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.86);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.playlist-card:hover .playlist-card-del,
+.playlist-card:focus-within .playlist-card-del {
+  opacity: 1;
+  transform: none;
+}
+
+.playlist-card-del:hover,
+.playlist-card-del:focus-visible {
+  background: rgba(214, 62, 62, 0.9);
+  border-color: transparent;
+}
+
+.playlist-card-del .icon {
+  width: 13px;
+  height: 13px;
 }

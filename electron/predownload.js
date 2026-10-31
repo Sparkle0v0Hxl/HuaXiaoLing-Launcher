@@ -40,7 +40,21 @@ const SUPPORT = {
   genshin: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   starrail: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   zzz: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
+  bh3: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（仅官服）' },
   endfield: { supported: true, kind: 'endfield', note: '鹰角 zip 分包预下载（Diffs/）' },
+  /*
+   * 明日方舟（Hypergryph）：没有预下载。
+   * PC 端走的是启动器渠道包（ArkOfficial / ArkBilibili 整包），官方没有公开
+   * 「新版本预下载分支 + 分包清单」这类接口 —— 米哈游那套 Sophon pre_download、
+   * 终末地那套 Diffs 预下载包都不适用于它。硬做只能自造差分包，风险和收益不成比例。
+   * 这里显式登记成「不支持 + 原因」，而不是让它落到默认的「这个游戏没有接入预下载」，
+   * 是因为将来要加「为什么不支持」的说明时，这句话就是唯一来源。
+   */
+  arknights: {
+    supported: false,
+    kind: 'none',
+    reason: '明日方舟 PC 版没有公开的预下载清单接口，版本更新由官方客户端自己完成',
+  },
   neverness: {
     supported: true,
     kind: 'nte',

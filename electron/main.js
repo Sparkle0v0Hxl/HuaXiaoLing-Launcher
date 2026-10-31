@@ -30,8 +30,7 @@ const { JsonStore } = require('./store');
 const { DownloadManager } = require('./downloads');
 const { ensureSeedData } = require('./seed');
 const { linkTrees, previewTrees } = require('./link');
-const { prepareLinkedRuntime, walkFiles } = require('./runtime');
-const { hardlinkTree } = require('./runtime');
+const { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree } = require('./runtime');
 const { loadGachaHistory } = require('./gacha');
 const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
@@ -109,6 +108,17 @@ const { syncEndfieldGacha } = require('./endfield-gacha');
 const { getStarRailFps, setStarRailFps } = require('./starrail-fps');
 const {
   updateEndfieldPacks,
+  updateEndfieldProfile,
+  // 渠道包不再随安装包分发（安装包瘦 632 MB）：切服前要预问体积、按需下载
+  measureChannelPack,
+  channelPackFilesReady,
+  profileByDirectory,
+  verifyArknightsSource,
+  ARKNIGHTS_BILIBILI_PROFILE,
+  ARKNIGHTS_BILIBILI_READY,
+  ARKNIGHTS_OFFICIAL_PROFILE,
+  ARKNIGHTS_OFFICIAL_READY,
+  PROFILES: ENDFIELD_PACK_PROFILES,
   updateEndfieldGame,
   checkEndfieldGame,
   fetchLatest,
@@ -128,6 +138,8 @@ const { launchEndfield, launchEndfieldElevated } = require('./endfield-launch');
 const { prepareSophon, prepareBilibiliRuntime, normalizeAudioLanguages, fetchLauncherConfig } = require('./sophon');
 const { applyHdiffPrepass } = require('./hdiff');
 const predownload = require('./predownload');
+// 预下载演练模式：官方没开预下载时也能把整条链路走完（见 predownload-sim.js 顶部）。
+const predownloadSim = require('./predownload-sim');
 const nevernessChannels = require('./neverness-channels');
 
 app.setName('花筱灵启动器');
@@ -428,6 +440,11 @@ let tray = null;
 let store = null;
 let downloads = null;
 let quitting = false;
+/*
+ * 右上角关闭键第一次被按时，主进程拦下 close 事件、问渲染层要「收托盘还是退出」。
+ * 这个标志防止用户连点关闭时叠出第二个询问框（回答 / 取消后都会复位）。
+ */
+let closeAskPending = false;
 let neteaseServiceProcess = null;
 let pushTimer = null;
 
@@ -772,17 +789,36 @@ function defaultSettings() {
     // 界面缩放：100% 为原始大小，范围 80% - 130%
     uiScale: 100,
     quickPanelPinned: false,
-    alwaysAdmin: false,
+    alwaysAdmin: null,
+    // 是否已经就「开游戏要管理员」问过一次：只问一次，选过就按选过的走
+    elevationAsked: false,
     // 用户在上一次 UAC 弹窗里点了「否」。记住这个选择，
     // 不要每次冷启动都再弹一次授权（否则启动器一开就被拦住）。
     // 在设置里重新打开「总是以管理员身份运行」会把它清掉。
     elevationDeclined: false,
     nevernessUseOfficialLauncher: true,
     closeToTray: true,
+    /*
+     * 关闭按钮的行为，用户第一次点关闭时由那个询问框写入：
+     * 'tray' = 收进托盘，'quit' = 退出程序，null = 还没选过（要问一次）。
+     * closeToTray 保留下来给设置页的开关用，两者由同一处逻辑同步写入。
+     */
+    closeAction: null,
     launchAtLogin: false,
     minimizeOnLaunch: true,
     autoSyncOfficial: true,
-    autoUpdateEndfieldPacks: true,
+    /*
+     * 终末地渠道包的自动更新：null = 还没切过服，不自动更新（本机也没包可更新）；
+     * true = 切过服，自动跟着官方更新；false = 用户手动关掉。
+     * 只在明确 true 时才跑，undefined / null 一律不动手。
+     */
+    autoUpdateEndfieldPacks: null,
+    /*
+     * 明日方舟渠道包的自动更新：和上面那条同一套三态，但**分开一个键**。
+     * 两个游戏的包互不相干，一个开关管两边会让「只玩终末地」的人也被拉去查方舟清单。
+     */
+    autoUpdateArknightsPacks: null,
+    hasSwitchedServer: false,
     autoGacha: true,
     // 终末地语音包：只下勾中的语言。默认只要中文，多勾一种就多占好几个 GB。
     audioLanguages: ['zh-cn'],
@@ -809,6 +845,10 @@ function defaultSettings() {
     // 更新公告弹窗已经弹过的版本号；空串表示这次升级还没看，启动时弹一次
     notesSeenVersion: '',
     endfieldPackRoot: detectEndfieldPackRoot(),
+    // 本机实际已有的渠道包（官服 / B服 / 国际服 / Play / Steam），界面按它显示
+    // 「缺哪个会在切过去时自动补下」，避免用户以为渠道包没被识别。
+    endfieldPackChannels: [],
+    arknightsPackChannels: [],
     starwardDbPath: detectStarwardDbPath(),
     runtimeRoot: '',
     // 默认下载目录：固定在启动器自身文件夹内的「花筱灵下载」专门子目录，
@@ -833,6 +873,9 @@ function createStore() {
       launches: 0,
       playSeconds: 0,
     },
+    // 主窗口位置 / 尺寸 / 最大化状态记忆：每台电脑的屏幕不一样，
+    // 启动时按 initialWindowBounds 还原，超出的部分按当前屏夹取。
+    window: { width: 0, height: 0, x: -1, y: -1, maximized: false },
   });
 }
 
@@ -889,6 +932,12 @@ function slimCachedPlaylists(group) {
       playcount: Number(item?.playcount) || 0,
       plaza: Boolean(item?.plaza),
       subscribed: Boolean(item?.subscribed),
+      /*
+       * imported 必须存：冷启动时未登录的平台只捞回链接导入的歌单，
+       * 全靠这个标记过滤；丢了它，导入的歌单会在重启后既显示成「自建歌单」，
+       * 也失去卡片上的移除按钮。
+       */
+      imported: Boolean(item?.imported),
     });
   }
   return {
@@ -2709,6 +2758,44 @@ async function syncNewerFiles(srcDir, dstDir) {
   return synced;
 }
 
+/*
+ * 每个终末地渠道「运行时里绝对不能有」的其它渠道专属件。
+ *
+ * 2026-10-31 报障：切到国际服点开始游戏，进程 3 秒就退，Windows 事件日志是
+ * BEX64 / 0xc0000005（模块 unknown），Faulting 路径指向 global\Endfield.exe。
+ * 根因是运行时里同时躺着两套平台 SDK：国服/B服 的 hgsdk.dll（从基础客户端
+ * 硬链接/补缺进来的）和国际服包自带的 gfsdk.dll + glfoundation.dll。
+ * 两套 SDK 在平台层初始化时抢同一批符号，直接访问冲突。
+ *
+ * B服 例外：它走鹰角账号，仍然需要 hgsdk.dll，所以 B服 只清 Gryphline 那套。
+ * 方舟不走这张表（它有自己的运行时目录，且官服/B服 都只用 hgsdk）。
+ */
+const ENDFIELD_FOREIGN_FILES = {
+  official: ['gfsdk.dll', 'glfoundation.dll', 'PCGameSDK.dll', 'BLPlatform64'],
+  bilibili: ['gfsdk.dll', 'glfoundation.dll'],
+  global: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
+  play: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
+  steam: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
+};
+
+/** 按上表把别的渠道的 SDK 文件从运行时里清掉，返回删掉的条数。 */
+async function purgeForeignChannelFiles(runtimeRoot, channel) {
+  const list = ENDFIELD_FOREIGN_FILES[channel] || [];
+  let removed = 0;
+  for (const name of list) {
+    const full = path.join(runtimeRoot, name);
+    try {
+      const stat = await fsp.stat(full);
+      if (stat.isDirectory()) await fsp.rm(full, { recursive: true, force: true });
+      else await fsp.rm(full, { force: true });
+      removed += 1;
+    } catch {
+      /* 本来就不在 */
+    }
+  }
+  return removed;
+}
+
 async function reconcileEndfieldRuntime(runtimeRoot, packDir, channel) {
   const KNOWN = new Set([
     'gfsdk.dll',
@@ -2729,6 +2816,9 @@ async function reconcileEndfieldRuntime(runtimeRoot, packDir, channel) {
   //   - hgsdk.dll：鹰角官方 SDK，B服差异包不带，误删后 B服同样报完整性异常。
   //   - onechannellc.dll：官方 OneChannel 组件，两渠道包虽都带，但保底不能靠包。
   const KNOWN_DIRS = new Set(['blplatform64']);
+  // 本渠道不该有的外渠道 SDK（hgsdk ↔ gfsdk 两套互斥）也当成已知件处理，
+  // 具体清单和根因见 ENDFIELD_FOREIGN_FILES 上方注释。
+  for (const name of ENDFIELD_FOREIGN_FILES[channel] || []) KNOWN.add(name.toLowerCase());
   // 目标渠道包自己携带的 SDK 特征（首层 basename + 首层目录），这些是目标权威文件，必须保留。
   const keepArtifacts = new Set();
   const keepDirs = new Set();
@@ -2838,6 +2928,532 @@ async function reconcileDirSubset(runtimeSub, packSub) {
   }
 }
 
+/* ── 渠道包：按需下载与本机状态 ───────────────────────────────────── */
+
+const ENDFIELD_CHANNEL_LABEL = {
+  official: '官服',
+  bilibili: 'B服',
+  global: '国际服',
+  play: 'Play',
+  steam: 'Steam',
+};
+
+/** 写渠道包用的目录：用户指定的目录优先，不可写时落到我们自己的数据目录。 */
+function endfieldPackWritableRoot() {
+  const configured = String(store.data.settings.endfieldPackRoot || '').trim();
+  if (configured) {
+    try {
+      fs.accessSync(configured, fs.constants.W_OK);
+      return configured;
+    } catch {
+      /* 别人只读的 load 目录 / 随包目录，不往里写 */
+    }
+  }
+  return path.join(app.getPath('userData'), 'endfield-packs');
+}
+
+/**
+ * 随安装包分发的内置渠道包：在程序目录里，只读。全新机器靠它开箱即用。
+ * 判定交给 bundledEndfieldPackRoot，两边只认同一个地方。
+ */
+function builtinPackRoot() {
+  return bundledEndfieldPackRoot();
+}
+
+/**
+ * Xel-Launcher 把切服差异文件放在「自己目录下的 load\」里，渠道目录名和我们
+ * 完全一致（EndOfficial / EndBilibili / ArkBilibili / …）。装了它的机器上这些包
+ * 是现成的，借用一下就不用再下一遍 —— 只读，不往里写。
+ */
+function xelLauncherLoadDirs() {
+  const bases = [
+    process.env['ProgramFiles(x86)'],
+    process.env.ProgramFiles,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : '',
+    process.env.LOCALAPPDATA,
+  ].filter(Boolean);
+  const dirs = [];
+  for (const base of bases) dirs.push(path.join(base, 'XelLauncher', 'load'));
+  return dirs;
+}
+
+/**
+ * 渠道包目录的所有候选位置，按优先级排列。
+ *
+ * 用户指认的最优先；其次是我们自己数据目录里那份（自动更新在维护它，通常比
+ * 发版那一刻新）；然后才是随安装包分发的内置包 —— 它是「新装机开箱即用」的
+ * 保底，也是用户数据被清光之后的退路。Xel-Launcher 的 load 目录垫底。
+ */
+/** 各渠道包目录名：终末地五个 + 明日方舟两个。 */
+const ENDFIELD_PACK_DIRS = Object.values(ENDFIELD_PACK_NAMES);
+const ARKNIGHTS_PACK_DIRS = [
+  ARKNIGHTS_OFFICIAL_PROFILE.directory,
+  ARKNIGHTS_BILIBILI_PROFILE.directory,
+];
+
+function dirSize(dir) {
+  let total = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      try {
+        if (entry.isDirectory()) stack.push(path.join(current, entry.name));
+        else total += fs.statSync(path.join(current, entry.name)).size;
+      } catch {
+        /* 跳过读不到的 */
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * 渠道包现在占了多少空间、都放在哪。
+ * 界面要能直说「点一下能释放 630MB」，而不是让用户自己去资源管理器里猜。
+ */
+function describePackUsage() {
+  const measure = (root, dirs) => {
+    let bytes = 0;
+    const found = [];
+    for (const name of dirs) {
+      const dir = path.join(root, name);
+      if (!fs.existsSync(dir)) continue;
+      bytes += dirSize(dir);
+      found.push(name);
+    }
+    return { bytes, dirs: found };
+  };
+  const builtin = builtinPackRoot();
+  const writable = endfieldPackWritableRoot();
+  const empty = { bytes: 0, dirs: [] };
+  return {
+    builtin: {
+      root: builtin,
+      endfield: builtin ? measure(builtin, ENDFIELD_PACK_DIRS) : empty,
+      arknights: builtin ? measure(builtin, ARKNIGHTS_PACK_DIRS) : empty,
+    },
+    writable: {
+      root: writable,
+      endfield: measure(writable, ENDFIELD_PACK_DIRS),
+      arknights: measure(writable, ARKNIGHTS_PACK_DIRS),
+    },
+  };
+}
+
+function endfieldPackCandidateRoots() {
+  const roots = [String(store.data.settings.endfieldPackRoot || '').trim()].filter(Boolean);
+  roots.push(endfieldPackWritableRoot());
+  const builtin = builtinPackRoot();
+  if (builtin) roots.push(builtin);
+  roots.push(...xelLauncherLoadDirs());
+  return roots.filter((root, index, list) => list.indexOf(root) === index);
+}
+
+/**
+ * 保证某个渠道的渠道包在本机存在，没有就现下那一个。
+ *
+ * 以前切服前要求「渠道包目录已存在」，而渠道包既不随安装包分发、也只在
+ * 装了 XelLauncher 的机器上才能被扫到 —— 新用户看到的就是「渠道差异包不
+ * 存在」，扫到别人只装了 B服 的 load 目录时又只有 B服 能用。
+ * 现在：缺哪个渠道就下哪个（单渠道几十 MB，比一次下齐五个轻得多）。
+ */
+async function ensureEndfieldPackFor(channel, onProgress, options = {}) {
+  const packName = ENDFIELD_PACK_NAMES[channel];
+  if (!packName) throw new Error(`这个服务器没有对应的渠道差异包（${channel}）`);
+  const label = ENDFIELD_CHANNEL_LABEL[channel] || packName;
+  const profile = (ENDFIELD_PACK_PROFILES || []).find((item) => item.directory === packName);
+  if (!profile) throw new Error(`没有找到 ${packName} 的渠道配置`);
+  /*
+   * 先扫一遍所有候选位置（含 Xel-Launcher 的 load 目录）：那边有就直接借。
+   * 「有」的判断和切服弹窗、设置页徽章共用 channelPackFilesReady —— 差异渠道
+   * 必须是完整下过一遍的那份，2.6.0 之前随安装包发的小 SDK 包不算数。
+   */
+  for (const root of endfieldPackCandidateRoots()) {
+    const dir = path.join(root, packName);
+    if (channelPackFilesReady(profile, dir)) return { packDir: dir, downloaded: false };
+  }
+  const root = endfieldPackWritableRoot();
+  const packDir = path.join(root, packName);
+  if (channelPackFilesReady(profile, packDir)) {
+    await rememberEndfieldPackRoot(root);
+    return { packDir, downloaded: false };
+  }
+  // 启动游戏这种「已经能跑就别等」的场景不下：几十 MB 会把「点开始游戏」拖成一次等待
+  if (options.download === false) {
+    throw new Error(`本机还没有${label}渠道包（切到${label}时会自动补下，也可以在设置 → 终末地渠道包里点一次下载）`);
+  }
+  if (typeof onProgress === 'function') {
+    onProgress({ phase: 'pack', processed: 0, total: 0, current: `正在下载${label}渠道包…` });
+  }
+  await updateEndfieldProfile(profile, root);
+  await rememberEndfieldPackRoot(root);
+  return { packDir, downloaded: true };
+}
+
+async function rememberEndfieldPackRoot(root) {
+  if (String(store.data.settings.endfieldPackRoot || '') !== root) {
+    store.data.settings.endfieldPackRoot = root;
+    await store.saveNow();
+  }
+  refreshPackChannels();
+}
+
+/**
+ * 明日方舟 B服 渠道包：把 B服 专属的那套 SDK 备到本机。
+ *
+ * 官服和 B服 共用同一个安装目录，B服 只是多出渠道 SDK 那几样；以前没有时只能
+ * 让用户自己先用 B服 官方启动器装一遍。这里试着从官方接口取一次 —— 但接口上
+ * 到底有没有明日方舟 B服 的清单还没在真机上验证过，所以每一步都有闸门：
+ * 先确认清单确实是方舟的（verifyArknightsBilibiliSource），取不到就返回空串，
+ * 由调用方退回原来的提示。取到的包按渠道包目录缓存，不会每次切服都重下。
+ * 装了 Xel-Launcher 的机器上，它的 load\ArkBilibili / load\ArkOfficial 会先被借来用。
+ */
+async function ensureArknightsPack(profile, readyFiles, label, onProgress) {
+  const ready = (dir) => readyFiles.every((item) => fs.existsSync(path.join(dir, ...item.split('/'))));
+  // 装了 Xel-Launcher 的机器上这两个包是现成的，先借再谈下载
+  for (const root of endfieldPackCandidateRoots()) {
+    const found = path.join(root, profile.directory);
+    if (ready(found)) return found;
+  }
+  const root = endfieldPackWritableRoot();
+  const packDir = path.join(root, profile.directory);
+  // 两家用同一个接口，只靠 appcode / channel 区分：配错也会照常返回一份清单，
+  // 而终末地的清单里同样有这些通用件。先看清单里有没有 Arknights.exe 再动手。
+  if (!(await verifyArknightsSource(profile))) return '';
+  const relay = (progress) => {
+    if (typeof onProgress !== 'function') return;
+    onProgress({
+      phase: 'pack',
+      processed: progress.processed || 0,
+      total: progress.total || 0,
+      current: `正在下载${label}渠道文件：${progress.current || ''}`,
+    });
+  };
+  relay({ processed: 0, total: 0, current: `正在获取${label}渠道清单…` });
+  try {
+    await updateEndfieldProfile(profile, root, relay);
+  } catch {
+    return '';
+  }
+  return ready(packDir) ? packDir : '';
+}
+
+async function ensureArknightsBilibiliPack(onProgress) {
+  return ensureArknightsPack(
+    ARKNIGHTS_BILIBILI_PROFILE,
+    ARKNIGHTS_BILIBILI_READY,
+    'B服',
+    onProgress
+  );
+}
+
+async function ensureArknightsOfficialPack(onProgress) {
+  return ensureArknightsPack(
+    ARKNIGHTS_OFFICIAL_PROFILE,
+    ARKNIGHTS_OFFICIAL_READY,
+    '官服',
+    onProgress
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────
+ * 渠道包按需下载（2.5.0 起不再随安装包分发）
+ *
+ * 以前 resources/endfield-packs 整包 632 MB 跟着安装包走：终末地五个渠道 +
+ * 明日方舟两个渠道，用户往往只用得上其中一个。现在第一次切到某个服时，
+ * 先算出「这个渠道包多大」，弹窗问一句，点了才下，下完照常切服。
+ *
+ * 三件事分开：spec（这个渠道对应哪个目录）→ status（本机有没有 / 要下多少）
+ * → download（真下）。切服流程只调 status，用户点了才进 download。
+ * ──────────────────────────────────────────────────────────────── */
+
+/** 明日方舟两个渠道包：目录 + 配置 + 「算齐了」的文件清单。 */
+const ARKNIGHTS_PACK_CHANNELS = {
+  official: {
+    directory: ARKNIGHTS_OFFICIAL_PROFILE.directory,
+    profile: ARKNIGHTS_OFFICIAL_PROFILE,
+    ready: ARKNIGHTS_OFFICIAL_READY,
+    label: '官服',
+  },
+  bilibili: {
+    directory: ARKNIGHTS_BILIBILI_PROFILE.directory,
+    profile: ARKNIGHTS_BILIBILI_PROFILE,
+    ready: ARKNIGHTS_BILIBILI_READY,
+    label: 'B服',
+  },
+};
+
+/**
+ * 某个渠道对应哪个渠道包。
+ * 终末地和明日方舟都有 official / bilibili，靠 gameKey 区分，不能只看渠道名。
+ */
+function channelPackSpec(gameKey, channel) {
+  const key = String(channel || '');
+  if (gameKey === 'arknights') {
+    const spec = ARKNIGHTS_PACK_CHANNELS[key];
+    return spec ? { ...spec, game: 'arknights' } : null;
+  }
+  const directory = ENDFIELD_PACK_NAMES[key];
+  if (!directory) return null;
+  const profile = profileByDirectory(directory);
+  if (!profile) return null;
+  return {
+    directory,
+    profile,
+    ready: null,
+    label: ENDFIELD_CHANNEL_LABEL[key] || directory,
+    game: 'endfield',
+  };
+}
+
+/**
+ * 某个根目录下的渠道包算不算齐了。
+ *
+ * 方舟看 ARKNIGHTS_*_READY 那几件；终末地交给 endfield-packs 的
+ * channelPackFilesReady —— 差异渠道（国际服 / Play / Steam）必须确认
+ * 「按这套差异完整下过一遍」，否则会把 2.6.0 之前那份只有 SDK 的旧包
+ * 当成已就绪，铺出来的运行时一启动就崩。
+ */
+function channelPackReady(spec, root) {
+  const dir = path.join(root, spec.directory);
+  if (spec.ready) return spec.ready.every((item) => fs.existsSync(path.join(dir, ...item.split('/'))));
+  return channelPackFilesReady(spec.profile, dir);
+}
+
+/**
+ * 切服前问一句「这个渠道包本机有没有」。
+ *
+ * 有 → ready:true，切服流程照常走（一个字都不下载）。
+ * 没有 → ready:false 并带上官方清单算出来的真实体积；弹窗直接写「194 MB」。
+ * Steam 渠道的清单接口取不到（返回的不是有效密文），标成不能自动补。
+ */
+async function channelPackStatus(gameKey, channel) {
+  const spec = channelPackSpec(gameKey, channel);
+  if (!spec) return { ok: false, reason: '这个服务器没有渠道差异包，不需要下载' };
+  for (const root of endfieldPackCandidateRoots()) {
+    if (channelPackReady(spec, root)) {
+      return {
+        ok: true,
+        ready: true,
+        game: gameKey,
+        channel,
+        directory: spec.directory,
+        label: spec.label,
+        root,
+      };
+    }
+  }
+  const base = {
+    ok: true,
+    ready: false,
+    game: gameKey,
+    channel,
+    directory: spec.directory,
+    label: spec.label,
+    root: endfieldPackWritableRoot(),
+    bytes: 0,
+    fileCount: 0,
+    version: '',
+    canDownload: spec.directory !== 'EndSteam',
+    reason:
+      spec.directory === 'EndSteam'
+        ? 'Steam 渠道的清单接口取不到，只能先在 Steam 客户端里装一次'
+        : '',
+    error: '',
+  };
+  try {
+    const measured = await measureChannelPack(spec.profile);
+    base.bytes = measured.totalBytes;
+    base.fileCount = measured.fileCount;
+    base.version = measured.version;
+  } catch (error) {
+    // 离线 / 接口抽风不该把切服路堵死：体积留 0，界面显示「大小未知」再让用户点
+    base.error = error.message;
+  }
+  return base;
+}
+
+/** 正在下载的渠道包：同一时间只允许一个，取消靠这里存的 controller。 */
+const channelPackJobs = new Map();
+
+/**
+ * 真正下载一个渠道包。
+ *
+ * 进度统一走 endfield:progress 通道（phase:'pack'），渲染层已经订阅了它，
+ * 不用再开一条；取消用 channelPackJobs 里的 AbortController。
+ *
+ * @returns {Promise<{root:string, directory:string, downloaded:boolean}>}
+ */
+async function downloadChannelPack(gameKey, channel, onProgress) {
+  const spec = channelPackSpec(gameKey, channel);
+  if (!spec) throw new Error('这个服务器没有渠道差异包');
+  if (spec.directory === 'EndSteam') {
+    throw new Error('Steam 渠道暂不支持自动补齐：请先在 Steam 客户端里安装一次终末地');
+  }
+  const jobKey = `${gameKey}:${channel}`;
+  if (channelPackJobs.has(jobKey)) throw new Error('这个渠道包正在下载');
+  const controller = new AbortController();
+  channelPackJobs.set(jobKey, controller);
+  const root = endfieldPackWritableRoot();
+  try {
+    await fsp.mkdir(root, { recursive: true });
+    if (gameKey === 'arknights') {
+      // 两家共用同一个接口，只靠 appcode / channel 区分：先确认清单里真有 Arknights.exe
+      const valid = await verifyArknightsSource(spec.profile);
+      if (!valid) {
+        throw new Error(
+          `官方接口没有返回明日方舟的清单，暂时没法自动补齐${spec.label}渠道文件：` +
+            '先用官方启动器在这个目录里装一次，就能正常切换'
+        );
+      }
+    }
+    const result = await updateEndfieldProfile(
+      spec.profile,
+      root,
+      (progress) =>
+        onProgress?.({
+          ...progress,
+          phase: 'pack',
+          channel,
+          game: gameKey,
+          label: spec.label,
+          directory: spec.directory,
+        }),
+      { signal: controller.signal }
+    );
+    if (!channelPackReady(spec, root)) throw new Error(`${spec.label}渠道包下载完成但校验没通过`);
+    await rememberEndfieldPackRoot(root);
+    refreshEndfieldPackChannels();
+    refreshArknightsPackChannels();
+    return { root, directory: spec.directory, downloaded: !result?.skipped };
+  } finally {
+    channelPackJobs.delete(jobKey);
+  }
+}
+
+/** 取消正在进行的渠道包下载（弹窗上的「取消」）。 */
+function cancelChannelPack(gameKey, channel) {
+  const jobKey = `${gameKey}:${channel}`;
+  const controller = channelPackJobs.get(jobKey);
+  if (!controller) return false;
+  controller.abort();
+  channelPackJobs.delete(jobKey);
+  return true;
+}
+
+/**
+ * 这次切服到底用不用得上渠道包？
+ *
+ * 前端如果只看「本机有没有这个渠道包」就弹下载框，会误伤两种根本不需要包的场景：
+ *   · 终末地官服自己装了客户端 —— 走直启分支，一个渠道包都用不上（见
+ *     ensureEndfieldChannelRuntime 里的 directBase）；直接下 50 MB 纯属白问。
+ *   · 明日方舟基础目录本来就是目标渠道 —— 装的已经是 B服，切 B服不用换文件。
+ * 判断条件照抄两条实际链路的前置分支，保证「弹窗说要不要下」和「真要切时下不下」一致。
+ */
+function channelPackNeededFor(game, server) {
+  if (!game || !server) return null;
+  const channel = String(server.channel || '');
+  if (game.builtinKey === 'endfield') {
+    if (!ENDFIELD_PACK_NAMES[channel]) return null;
+    if (channel === 'official') {
+      const ownRoot = endfieldBaseRoot(server);
+      if (ownRoot && fs.existsSync(path.join(ownRoot, 'Endfield.exe'))) return null;
+    }
+    return { game: 'endfield', channel };
+  }
+  if (game.builtinKey === 'arknights') {
+    if (!ARKNIGHTS_PACK_CHANNELS[channel]) return null;
+    const root = String(server.root || '');
+    // 已经生成过独立运行时的，渠道件必然齐了，不必再问
+    if (!root || root.includes('VelaRuntimes')) return null;
+    if (channelFromArknightsRoot(root) === channel) return null;
+    return { game: 'arknights', channel };
+  }
+  return null;
+}
+
+/** 界面要知道本机已经有哪几个渠道包：缺的会在切到那个服时自动补下。 */
+function refreshEndfieldPackChannels() {
+  const roots = endfieldPackCandidateRoots();
+  const list = [];
+  for (const [channel, packName] of Object.entries(ENDFIELD_PACK_NAMES)) {
+    // 用和切服同一套判定：状态没写过的差异包（2.6.0 之前随包分发的旧 EndGlobal）
+    // 不算就绪，设置页才会显示「按需下载」，而不是装作有、切过去却崩。
+    const profile = profileByDirectory(packName);
+    if (roots.some((root) => channelPackFilesReady(profile, path.join(root, packName)))) list.push(channel);
+  }
+  store.data.settings.endfieldPackChannels = list;
+}
+
+/**
+ * 明日方舟的两个渠道包（ArkOfficial / ArkBilibili）有没有就位。
+ * 这两条还没在真机上验证过，所以状态单独报，不和终末地的五个混在一起。
+ */
+function refreshArknightsPackChannels() {
+  const roots = endfieldPackCandidateRoots();
+  const groups = [
+    ['official', ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_OFFICIAL_READY],
+    ['bilibili', ARKNIGHTS_BILIBILI_PROFILE, ARKNIGHTS_BILIBILI_READY],
+  ];
+  const list = [];
+  for (const [channel, profile, readyFiles] of groups) {
+    const hit = roots.some((root) =>
+      readyFiles.every((item) => fs.existsSync(path.join(root, profile.directory, ...item.split('/'))))
+    );
+    if (hit) list.push(channel);
+  }
+  store.data.settings.arknightsPackChannels = list;
+}
+
+/** 渠道包状态一起刷新：终末地五个和明日方舟两个现在都归设置页管。 */
+function refreshPackChannels() {
+  refreshEndfieldPackChannels();
+  refreshArknightsPackChannels();
+}
+
+/**
+ * 渠道包的内容签名：文件数 + 总字节数。
+ *
+ * 用途只有一个 —— 判断「运行时是不是按现在这份渠道包铺出来的」。渠道包换了内容
+ * （比如国际服从 10 个 SDK 文件变成 126 个文件的整包差异），签名就变，运行时重建。
+ * 不拿 mtime：包是先下到 staging 再整体 rename 过来的，目录 mtime 会一起变，
+ * 但内容没变的情况下重建一次几十秒的硬链接纯属浪费。
+ */
+function packSignatureOf(dir) {
+  let count = 0;
+  let bytes = 0;
+  const walk = (current) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      try {
+        bytes += fs.statSync(full).size;
+        count += 1;
+      } catch {
+        /* 文件刚好被删：跳过 */
+      }
+    }
+  };
+  walk(dir);
+  return `${count}:${bytes}`;
+}
+
 async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   if (game?.builtinKey !== 'endfield' || !server) {
     throw new Error('这个功能只用于明日方舟：终末地');
@@ -2845,13 +3461,6 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   const channel = String(server.channel || '');
   const packName = ENDFIELD_PACK_NAMES[channel];
   if (!packName) throw new Error('这个服务器没有对应的渠道差异包');
-
-  const packRootSetting = store.data.settings.endfieldPackRoot;
-  if (!packRootSetting || !fs.existsSync(packRootSetting)) {
-    throw new Error('还没有设置终末地渠道包目录，请先在设置里指向 XelLauncher 的 load 文件夹');
-  }
-  const packDir = path.join(packRootSetting, packName);
-  if (!fs.existsSync(packDir)) throw new Error(`渠道差异包不存在：${packDir}`);
 
   // 官服记住的是它自己的原始安装目录；其它渠道优先用官服/别的完整客户端当基础。
   let baseRoot = '';
@@ -2903,6 +3512,13 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     }
   }
 
+  // 渠道包不在本机就现下这一个渠道的：新用户没装 XelLauncher、或只扫到别人
+  // 的 B服 load 目录时，缺哪个下哪个，不再把「请先设置渠道包目录」扔给用户。
+  // 放在官服直启分支之后：直接启动原客户端时一个渠道包都用不上，不必先下 50MB。
+  const { packDir, downloaded: packDownloaded } = await ensureEndfieldPackFor(channel, options.onProgress, {
+    download: options.allowPackDownload !== false,
+  });
+
   const runtime = runtimePaths(baseRoot, 'endfield', channel, options.runtimeRoot || '');
   if (!runtime.sameDrive) {
     throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
@@ -2914,7 +3530,22 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
 
   const existingExecutable = path.join(runtimeRoot, 'Endfield.exe');
   const marker = path.join(runtimeRoot, '.hxl-endfield-runtime-v2');
-  const needsBuild = !fs.existsSync(existingExecutable) || !fs.existsSync(marker);
+  /*
+   * 标记里存的是「这个运行时是按哪一份渠道包铺出来的」：文件数 + 总字节数。
+   *
+   * 以前只判断标记在不在，于是渠道包升级（典型：国际服从 10 个 SDK 文件变成
+   * 126 个文件、936 MB 的整包差异）之后，旧运行时不会被重建，游戏还是那份拼错的
+   * 二进制。现在签名一变就重建 —— 渠道包更新后本来也该重新铺一遍。
+   */
+  const packSignature = packSignatureOf(packDir);
+  let markerText = '';
+  try {
+    markerText = fs.readFileSync(marker, 'utf8').trim();
+  } catch {
+    markerText = '';
+  }
+  const needsBuild =
+    !fs.existsSync(existingExecutable) || !markerText || markerText !== packSignature;
 
   // 重建前把旧运行时里的登录态/SDK 配置暂存，生成完拷回来，避免用户重新登录。
   // ⚠️ 但「跨渠道」时绝不能把旧渠道的配置复活：例如官服运行时目录之前装过国际服，
@@ -2979,7 +3610,7 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     // 这是 XelLauncher 用 manifest Removed 字段做的那一步，补上后官服运行时不再混装多套 SDK。
     await reconcileEndfieldRuntime(runtimeRoot, packDir, channel);
 
-    await fsp.writeFile(marker, new Date().toISOString(), 'utf8');
+    await fsp.writeFile(marker, packSignature, 'utf8');
   }
 
   // 渠道包是持续自动更新的（EndfieldBase.dll 等渠道差异文件随官方版本变化），
@@ -3014,7 +3645,15 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   //   - webviewsdk.dll：登录/活动页 WebView，官方完整性校验必查（10-29 根因二）。
   //   - hgsdk.dll：鹰角官方 SDK，B服差异包不带，只能从基础客户端补。
   //   - onechannellc.dll：官方 OneChannel 组件，保底不能靠包。
-  for (const name of ['PlatformProcess.exe', 'webviewsdk.dll', 'hgsdk.dll', 'onechannellc.dll']) {
+  const refill = ['PlatformProcess.exe', 'webviewsdk.dll', 'onechannellc.dll'];
+  /*
+   * hgsdk.dll 只属于「国服 / B服 / 方舟」那一套鹰角 SDK。
+   * 国际服、Play、Steam 走的是 Gryphline（gfsdk.dll + glfoundation.dll），
+   * 补上 hgsdk 会和渠道包的 SDK 抢符号，平台层初始化时直接 0xc0000005
+   * （2026-10-31 国际服启动崩溃根因），所以只给国服系补。
+   */
+  if (channel === 'official' || channel === 'bilibili') refill.push('hgsdk.dll');
+  for (const name of refill) {
     const runtimeFile = path.join(runtimeRoot, name);
     if (fs.existsSync(runtimeFile)) continue;
     const baseFile = path.join(baseRoot, name);
@@ -3024,6 +3663,15 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     } catch {
       await fsp.copyFile(baseFile, runtimeFile).catch(() => {});
     }
+  }
+
+  /*
+   * 补缺会把基础客户端（国服）的 hgsdk.dll 带回来，而已建好的运行时不会重建，
+   * 光靠 reconcile 那一次清不干净。这里最后再按渠道扫一遍外渠道件 —— 幂等。
+   */
+  const purged = await purgeForeignChannelFiles(runtimeRoot, channel);
+  if (purged) {
+    writeLaunchLog(`[endfield] ${server.name} 清掉外渠道 SDK 文件 ${purged} 项（${channel}）`);
   }
 
   let launchPath = null;
@@ -3051,7 +3699,91 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     launchPath,
     linked: result.linked || 0,
     overlay: result.overlay?.processed || 0,
+    packDownloaded,
   };
+}
+
+/**
+ * 经「官方签名父进程」启动游戏。
+ *
+ * 终末地会校验自己的直接父进程：父进程文件必须名为 Games.exe 且带鹰角官方签名，
+ * 直接拉起游戏会被判成 10100「请通过官方启动器打开游戏」。明日方舟 PC 端走同一套
+ * 鹰角平台，所以两款游戏共用这条链路。
+ *
+ * @param {boolean} options.requireElevation 终末地创建游戏进程时就要求提权，必须走 UAC；
+ *   明日方舟先按当前权限试一次，真拿到 740 再弹，免得每次开游戏都要授权。
+ * @param {boolean} options.strict 终末地失败就如实报错（绝不能再退化成直接拉起，
+ *   那样只会弹出官方启动器或让游戏报 10100）；明日方舟这条链路还没在真机上验证过，
+ *   失败时退回原来的直接启动，不把用户挡在门外。
+ * @returns {{handled:boolean, result?:object}} handled=false 表示这条路不适用，调用方按普通方式启动。
+ */
+async function launchWithSignedParent(game, target, cwd, options = {}) {
+  const id = game.id;
+  const base = path.basename(target);
+  const { requireElevation = true, strict = true } = options;
+  const isElevated = currentElevation();
+  /*
+   * 第一次遇到「必须提权」的游戏：先问一次要不要让启动器自己以管理员运行。
+   *
+   * 以前这里直接 Start-Process -Verb RunAs 起游戏 —— 每点一次「开始游戏」就弹
+   * 一次 UAC，用户的原话是「老是要什么管理员启动，特别难用」。游戏侧 740
+   * （实测非提权创建进程直接 failed to create game process 740）是硬限制，
+   * 唯一能省掉的是「让父进程已经是管理员」：提权一次，整场都不再问。
+   * elevationAsked 记「问过了没有」，只问一次；选过就按选过的走。
+   */
+  if (requireElevation && !isElevated && store.data.settings.elevationAsked !== true) {
+    return {
+      handled: true,
+      result: {
+        ok: false,
+        elevationRequired: true,
+        elevationUndecided: true,
+        error: '终末地 / 明日方舟创建游戏进程需要管理员权限，这是官方客户端自己的限制，绕不过去。',
+      },
+    };
+  }
+  const plans = requireElevation
+    ? isElevated
+      ? [false, true]
+      : [true]
+    : isElevated
+      ? [false]
+      : [false, true];
+
+  let lastError = '';
+  for (const useUac of plans) {
+    launching.set(id, Date.now());
+    const result = useUac
+      ? await launchEndfieldElevated(cwd, target, game.args)
+      : await launchEndfield(cwd, target, game.args);
+    if (result.ok) {
+      await markLaunched(game);
+      writeLaunchLog(`launch ${id}: 签名父进程=${result.parent || ''} uac=${useUac ? 1 : 0} exe=${base}`);
+      trackGameProcess(id, base, Date.now()).catch(() => {});
+      return {
+        handled: true,
+        result: { ok: true, pid: result.pid, official: true, elevated: useUac },
+      };
+    }
+    lastError = result.error;
+    launching.delete(id);
+    writeLaunchLog(`launch ${id}: 签名父进程失败（uac=${useUac ? 1 : 0}）：${result.error}`);
+    if (useUac) break;
+    // 不是权限问题就别再试 UAC 了（父进程缺失、签名无效这些试多少次都一样）
+    if (!/740|elevation|管理员/i.test(result.error)) break;
+  }
+
+  if (strict) {
+    return {
+      handled: true,
+      result: {
+        ok: false,
+        error: `没能通过官方签名父进程启动：${lastError}。常见原因是安全软件拦下了 PowerShell（本启动器要靠它准备签名父进程），把 powershell.exe 加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
+        endfieldDecoy: true,
+      },
+    };
+  }
+  return { handled: false };
 }
 
 // 官服保持历史上的「尽力而为」语义：设置/差异包缺失时不阻断普通启动。
@@ -3090,58 +3822,137 @@ function channelFromArknightsRoot(root) {
  * 生成一份独立运行时——大文件硬链接回基础安装目录，渠道 SDK 换成目标服的。
  * 这样官服和 B服 各自有独立的游戏目录和独立的 sdkdata，账号不会串。
  */
-const ARKNIGHTS_BILIBILI_PAYLOAD = ['PCGameSDK.dll', 'BLPlatform64', 'U8SDK.dll'];
+/*
+ * 明日方舟两个国服渠道共用一套安装目录，切服要换的不只是「B服 多出来的那两样」。
+ * 按 Xel-Launcher 的渠道清单（Helpers/GameChannelCatalog.cs），下面这些是**两个
+ * 渠道都有、但内容不同**的：U8CoreUI.dll / U8SDK.dll / u8_channel.dll 三家通用件、
+ * 平台层的 PlatformProcess 两件套 + webviewsdk.dll，以及决定登录到哪个渠道的
+ * U8Data\config\（config.bin / config.gryph / u8ExtraConfig.bin）。
+ * 只换 PCGameSDK.dll 是不够的：config 还是官服的，进游戏照样是官服。
+ */
+const ARKNIGHTS_CHANNEL_FILES = [
+  'U8CoreUI.dll',
+  'U8SDK.dll',
+  'u8_channel.dll',
+  'PlatformProcess.dll',
+  'PlatformProcess.exe',
+  'webviewsdk.dll',
+  'U8Data/config',
+];
+/** 只有 B服 才有的两样：官服运行时里绝不能残留。 */
+const ARKNIGHTS_BILIBILI_ONLY = ['PCGameSDK.dll', 'BLPlatform64'];
+/** 切到 B服 时要用渠道件铺进去的全部条目。 */
+const ARKNIGHTS_BILIBILI_PAYLOAD = [...ARKNIGHTS_CHANNEL_FILES, ...ARKNIGHTS_BILIBILI_ONLY];
 /** 国服的两个渠道共用同一套安装目录；国际服 / 台服是各自独立的客户端。 */
 const ARKNIGHTS_CN_CHANNELS = ['official', 'bilibili'];
 
-async function ensureArknightsRuntime(game, server) {
+function arknightsSegments(name) {
+  return name.split('/');
+}
+
+/** 把渠道件从 sourceDir 铺进运行时：渠道包是长期缓存，只复制不硬链接。 */
+async function placeArknightsChannelFile(runtime, sourceDir, name) {
+  const segments = arknightsSegments(name);
+  const target = path.join(runtime, ...segments);
+  const from = path.join(sourceDir, ...segments);
+  if (!fs.existsSync(from)) return false;
+  if (fs.existsSync(target)) await fsp.rm(target, { recursive: true, force: true });
+  const stat = await fsp.stat(from);
+  if (stat.isDirectory()) await copyTree(from, target).catch(() => {});
+  else await fsp.copyFile(from, target).catch(() => {});
+  return true;
+}
+
+async function ensureArknightsRuntime(game, server, options = {}) {
   if (game.builtinKey !== 'arknights') return false;
   if (!server.root || server.root.includes('VelaRuntimes')) return false;
   // 国际服（EN / JP / KR）和台服由另外的发行商发行，主程序和国服不是一份，
   // 没法从国服目录硬链接拼出来，只能用它们自己的安装目录。
   if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) return false;
-  const runtime = runtimePaths(server.root, 'arknights', server.channel);
+  const runtime = runtimePaths(server.root, 'arknights', server.channel, options.runtimeRoot || '');
   if (!runtime.sameDrive) return false;
 
+  const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
   await fsp.mkdir(runtime.target, { recursive: true });
-  for (const entry of await fsp.readdir(server.root, { withFileTypes: true })) {
-    // 已生成的运行时、以及渠道载荷都跳过，下面单独处理
-    if (entry.name === '.vela-runtime' || ARKNIGHTS_BILIBILI_PAYLOAD.includes(entry.name)) continue;
+  const entries = await fsp.readdir(server.root, { withFileTypes: true });
+  let index = 0;
+  for (const entry of entries) {
+    /*
+     * 已生成的运行时跳过；B服 独有的两样也跳过（官服运行时里不能有它们）。
+     * 其余渠道件照常链进来：官服运行时要用它们，切 B服 时下面会先删除再覆盖
+     * —— 直接往硬链接上写会改到基础客户端的文件，所以必须先删后拷。
+     */
+    if (entry.name === '.vela-runtime' || ARKNIGHTS_BILIBILI_ONLY.includes(entry.name)) continue;
+    index += 1;
+    emit({ phase: 'link', processed: index, total: entries.length, current: `正在准备 ${entry.name}` });
     const target = path.join(runtime.target, entry.name);
     if (fs.existsSync(target)) continue;
     const from = path.join(server.root, entry.name);
     if (entry.isDirectory()) {
-      await hardlinkTree({ sourceRoot: from, targetRoot: target }).catch(() => {});
+      await hardlinkTree({
+        sourceRoot: from,
+        targetRoot: target,
+        signal: options.signal,
+        onProgress: (progress) => emit({ ...progress, current: `${entry.name}\\${progress.current || ''}` }),
+      }).catch(() => {});
     } else if (entry.isFile()) {
       await fsp.link(from, target).catch(() => fsp.copyFile(from, target).catch(() => {}));
     }
   }
 
+  /*
+   * 渠道件一律不能沿用上面那一趟通用硬链接 —— 装的是官服时，链进来的就是官服的
+   * 那一份，B服 拿它进了游戏还是官服。所以这一步先把它们移出通用链接，再按
+   * 目标渠道整包换掉：基础目录本身就是目标渠道装的就用基础目录，否则从渠道包取。
+   */
+  const baseIsBilibili = ARKNIGHTS_BILIBILI_ONLY.every((name) =>
+    fs.existsSync(path.join(server.root, name))
+  );
   if (server.channel === 'bilibili') {
-    // B服 独有文件优先从基础目录拿；基础目录没有就报错，不能假装切过去
-    let missing = [];
+    const packDir = baseIsBilibili ? '' : await ensureArknightsBilibiliPack(emit).catch(() => '');
+    const missing = [];
     for (const name of ARKNIGHTS_BILIBILI_PAYLOAD) {
-      const from = path.join(server.root, name);
-      if (!fs.existsSync(from)) {
-        missing.push(name);
-        continue;
+      // 基础目录是 B服 装的话它自己就是权威来源，否则渠道包优先、基础目录兜底
+      const order = baseIsBilibili
+        ? [server.root]
+        : [packDir, server.root].filter(Boolean);
+      let placed = false;
+      for (const sourceDir of order) {
+        if (await placeArknightsChannelFile(runtime.target, sourceDir, name)) {
+          placed = true;
+          break;
+        }
       }
-      const target = path.join(runtime.target, name);
-      if (fs.existsSync(target)) await fsp.rm(target, { recursive: true, force: true });
-      const stat = await fsp.stat(from);
-      if (stat.isDirectory()) await hardlinkTree({ sourceRoot: from, targetRoot: target }).catch(() => {});
-      else await fsp.link(from, target).catch(() => fsp.copyFile(from, target).catch(() => {}));
+      if (!placed) missing.push(name);
     }
     if (missing.length) {
       throw new Error(
-        `这个目录里没有 B服 的渠道文件（${missing.join('、')}）。` +
-          '明日方舟官服和 B服 共用同一个安装目录，需要先放入 B服 渠道文件才能切换。'
+        `这个目录里没有 B服 的渠道文件（${missing.join('、')}），官方接口也没取到。` +
+          '明日方舟官服和 B服 共用同一个安装目录：先用官方 B服 启动器在这个目录里装一次，就能自动切过去。'
       );
     }
+    emit({ phase: 'link', processed: 1, total: 1, current: 'B服 渠道文件已按官方清单补齐' });
   } else {
-    // 官服运行时里不能残留 B服 的 SDK，否则会带着 B站凭据启动
-    for (const name of ARKNIGHTS_BILIBILI_PAYLOAD) {
-      await fsp.rm(path.join(runtime.target, name), { recursive: true, force: true });
+    // 官服运行时里不能残留 B服 专属的两样，否则会带着 B站凭据启动
+    for (const name of ARKNIGHTS_BILIBILI_ONLY) {
+      await fsp.rm(path.join(runtime.target, ...arknightsSegments(name)), {
+        recursive: true,
+        force: true,
+      });
+    }
+    /*
+     * 反过来：手上装的是 B服 时，通用件（U8SDK.dll、U8Data\config\…）链进来的
+     * 全是 B站 的，官服运行时拿了它照样登录 B站。这时整包从官服渠道包换掉。
+     * 基础目录本来就是官服的（baseIsBilibili=false）则什么都不用做。
+     */
+    if (baseIsBilibili) {
+      const packDir = await ensureArknightsOfficialPack(emit).catch(() => '');
+      if (packDir) {
+        for (const name of ARKNIGHTS_CHANNEL_FILES) {
+          await placeArknightsChannelFile(runtime.target, packDir, name);
+        }
+        emit({ phase: 'link', processed: 1, total: 1, current: '官服渠道文件已按官方清单补齐' });
+      }
     }
   }
 
@@ -4429,12 +5240,18 @@ function normalizeUiScale(value) {
   return Math.round(Math.max(80, Math.min(130, number)));
 }
 
+/** 当前实际生效的缩放系数；变更时按新旧系数的比例缩放窗口，避免累计放大。 */
+let appliedUiFactor = 1;
+
 /**
  * 按缩放比例放大/缩小整个窗口内容。
  * 用 setZoomFactor 而不是 CSS 变量：字号、间距、图标一起等比变化，
- * 不用逐条改 479 处 px 字号。
- * 同时把窗口尺寸按比例放大/缩小，让可见内容保持和 100% 一样多，
+ * 不用逐条改几百处 px 字号。
+ * 窗口尺寸按「当前尺寸 × 新旧系数比」同步调整，可见内容保持一样多，
  * 不会因为放大把右边或下面挤掉；启动页是固定尺寸的独立窗口，不跟着缩放。
+ *
+ * 启动路径不要走这里的尺寸调整：did-finish-load 里会先把 appliedUiFactor
+ * 置成存档值（bounds 是上次退出时的物理尺寸，已含当时缩放），只补 zoom。
  */
 function applyUiScale(scale) {
   const factor = normalizeUiScale(scale) / 100;
@@ -4445,41 +5262,144 @@ function applyUiScale(scale) {
     console.warn('setZoomFactor failed:', error.message);
   }
   resizeWindowForScale(factor);
-}
-
-/** 主窗口的基准尺寸，缩放时按它来算，避免一直累计放大。 */
-function defaultWindowSize() {
-  return { width: 1400, height: 880 };
+  appliedUiFactor = factor;
 }
 
 /**
- * 缩放时同步调整窗口尺寸：factor * 基准尺寸，夹在屏幕可用区域内。
+ * 缩放时同步调整窗口尺寸：当前尺寸 × (新系数 / 旧系数)，夹在屏幕可用区域内。
  * 窗口最大化 / 全屏时不动，退出后下次缩放再调整。
  */
 function resizeWindowForScale(factor) {
   if (!win || win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return;
-  if (Math.abs(factor - 1) < 0.001) return;
-  const base = defaultWindowSize();
+  const previous = appliedUiFactor > 0 ? appliedUiFactor : 1;
+  if (Math.abs(factor - previous) < 0.001) return;
+  const current = win.getBounds();
+  const ratio = factor / previous;
+  const min = adaptiveMinSize(current);
   const wanted = {
-    width: Math.round(base.width * factor),
-    height: Math.round(base.height * factor),
+    width: Math.round(current.width * ratio),
+    height: Math.round(current.height * ratio),
   };
   try {
-    const screen = require('electron').screen;
-    const display = screen.getDisplayMatching(win.getBounds());
-    const area = display.workArea;
-    wanted.width = Math.min(wanted.width, area.width - 24);
-    wanted.height = Math.min(wanted.height, area.height - 24);
+    const area = workAreaFor(current);
+    wanted.width = Math.max(min.width, Math.min(wanted.width, area.width - 16));
+    wanted.height = Math.max(min.height, Math.min(wanted.height, area.height - 16));
   } catch {
     /* 拿不到屏幕信息就按原尺寸来 */
   }
-  const current = win.getBounds();
-  if (Math.abs(current.width - wanted.width) < 8 && Math.abs(current.height - wanted.height) < 8) return;
   try {
     win.setBounds({ x: current.x, y: current.y, width: wanted.width, height: wanted.height });
   } catch (error) {
     console.warn('setBounds failed:', error.message);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 多电脑环境适配：窗口尺寸 / 位置 / 最小尺寸                              */
+/* ------------------------------------------------------------------ */
+
+/** 主窗口基准尺寸：首启默认值。 */
+const WINDOW_BASE_SIZE = { width: 1400, height: 880 };
+/** 写死的最小尺寸（大屏够用）；小屏 / 高 DPI 屏由 adaptiveMinSize 收缩。 */
+const WINDOW_MIN_SIZE = { width: 1060, height: 680 };
+/** 屏幕再小也不低于这个值，纯粹是防呆。 */
+const WINDOW_MIN_ABS = { width: 320, height: 240 };
+
+/** 取能容纳某个矩形的工作区；匹配不到（屏拔了）就退主屏。 */
+function workAreaFor(bounds) {
+  try {
+    const display = screen.getDisplayMatching({
+      x: Number(bounds?.x) || 0,
+      y: Number(bounds?.y) || 0,
+      width: Number(bounds?.width) || WINDOW_BASE_SIZE.width,
+      height: Number(bounds?.height) || WINDOW_BASE_SIZE.height,
+    });
+    return (display || screen.getPrimaryDisplay()).workArea;
+  } catch {
+    return screen.getPrimaryDisplay().workArea;
+  }
+}
+
+/**
+ * 按当前屏幕算窗口最小尺寸。
+ *
+ * 原来 minWidth/minHeight 写死 1060×680，在 Windows 125% 缩放的 1366×768
+ * 笔记本上直接翻车：工作区折合 DIP 只有 1092×614，最小高 680 超出屏幕，
+ * 窗口既没法缩小、也不会被任务栏让位，界面底下一条永远够不着。
+ * 现在按工作区夹取：大屏照旧 1060×680，小屏缩到「工作区减 24px」。
+ */
+function adaptiveMinSize(bounds) {
+  const area = workAreaFor(bounds);
+  return {
+    width: Math.max(WINDOW_MIN_ABS.width, Math.min(WINDOW_MIN_SIZE.width, area.width - 24)),
+    height: Math.max(WINDOW_MIN_ABS.height, Math.min(WINDOW_MIN_SIZE.height, area.height - 24)),
+  };
+}
+
+/**
+ * 启动时的窗口 bounds：优先还原上次记住的位置/尺寸；
+ * 超出当前屏幕（换了台电脑、拔了外接屏）就按工作区夹回来或居中。
+ */
+function initialWindowBounds() {
+  const saved = store?.data?.window;
+  let width = WINDOW_BASE_SIZE.width;
+  let height = WINDOW_BASE_SIZE.height;
+  let x = null;
+  let y = null;
+  if (saved && saved.width > 200 && saved.height > 200) {
+    width = Math.round(saved.width);
+    height = Math.round(saved.height);
+    if (Number.isFinite(saved.x)) x = Math.round(saved.x);
+    if (Number.isFinite(saved.y)) y = Math.round(saved.y);
+  }
+  const area = workAreaFor({ x, y, width, height });
+  const min = adaptiveMinSize({ x, y, width, height });
+  width = Math.max(min.width, Math.min(width, area.width - 16));
+  height = Math.max(min.height, Math.min(height, area.height - 16));
+  if (x === null || y === null) {
+    // 没有记忆位置：主屏工作区里水平居中、垂直略偏上（视觉重心舒服些）
+    x = Math.round(area.x + (area.width - width) / 2);
+    y = Math.round(area.y + Math.max(0, (area.height - height) / 2 - 24));
+  } else {
+    // 有记忆位置：保证标题栏抓得到，不会整个卡到屏幕外
+    x = Math.max(area.x - width + 120, Math.min(x, area.x + area.width - 120));
+    y = Math.max(area.y, Math.min(y, area.y + area.height - 120));
+  }
+  return { width, height, x, y };
+}
+
+/** 换屏 / 改分辨率 / 改 DPI 时重算最小尺寸并把窗口收回可见区域（只绑一次）。 */
+let displayMetricsWatching = false;
+function watchDisplayMetrics() {
+  if (displayMetricsWatching) return;
+  displayMetricsWatching = true;
+  screen.on('display-metrics-changed', () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      const current = win.getBounds();
+      const min = adaptiveMinSize(current);
+      win.setMinimumSize(min.width, min.height);
+      // 最大化 / 全屏时位置由系统管，不动
+      if (win.isMaximized() || win.isFullScreen()) return;
+      const area = workAreaFor(current);
+      const next = {
+        x: Math.max(area.x - current.width + 120, Math.min(current.x, area.x + area.width - 120)),
+        y: Math.max(area.y, Math.min(current.y, area.y + area.height - 120)),
+        width: Math.max(min.width, Math.min(current.width, area.width)),
+        height: Math.max(min.height, Math.min(current.height, area.height)),
+      };
+      if (
+        next.x !== current.x ||
+        next.y !== current.y ||
+        next.width !== current.width ||
+        next.height !== current.height
+      ) {
+        win.setBounds(next);
+      }
+    } catch {
+      /* 显示信息拿不到就保持原样 */
+    }
+  });
 }
 
 function applyTitlebar() {
@@ -4518,6 +5438,16 @@ function createSplashWindow() {
     },
   });
   splashWindow.loadFile(path.join(ROOT, 'src', 'splash.html'));
+  // 启动页版本号跟随 app.getVersion() 注入（splash.html 里那份只是兜底文案，
+  // 之前硬编码 v2.4.0 一直没跟着升版，2026-10-31 用户指出）
+  splashWindow.webContents.once('did-finish-load', () => {
+    if (!splashWindow || splashWindow.isDestroyed()) return;
+    splashWindow.webContents
+      .executeJavaScript(
+        `(function(){var el=document.getElementById('splash-version');if(el)el.textContent='VERSION v'+${JSON.stringify(app.getVersion())};})()`
+      )
+      .catch(() => {});
+  });
   splashWindow.once('ready-to-show', () => {
     if (!splashWindow || splashWindow.isDestroyed()) return;
     splashWindow.center();
@@ -4544,11 +5474,16 @@ function createSplashWindow() {
 }
 
 function createWindow() {
+  // 启动尺寸/位置：还原上次记住的；超出的按当前屏夹取（适配每台电脑的屏幕）
+  const bounds = initialWindowBounds();
+  const minSize = adaptiveMinSize(bounds);
   win = new BrowserWindow({
-    width: 1400,
-    height: 880,
-    minWidth: 1060,
-    minHeight: 680,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
+    minWidth: minSize.width,
+    minHeight: minSize.height,
     show: false,
     backgroundColor: '#0b060b',
     title: '花筱灵启动器',
@@ -4565,9 +5500,47 @@ function createWindow() {
     },
   });
 
+  // 上次退出时是最大化就还原（放在 show 之前，避免先还原再放大的闪烁）
+  if (store?.data?.window?.maximized) win.maximize();
+
+  /* 窗口位置/尺寸记忆：拖动、缩放、最大化、隐藏到托盘前都记，
+     下次启动按 initialWindowBounds 还原。store 自身有 400ms 防抖。 */
+  let boundsSaveTimer = null;
+  const saveWindowBounds = (now = false) => {
+    if (!win || win.isDestroyed() || !store?.data) return;
+    try {
+      const current = win.getBounds();
+      store.data.window = {
+        width: current.width,
+        height: current.height,
+        x: current.x,
+        y: current.y,
+        maximized: win.isMaximized(),
+      };
+      // now = true 用于真正关闭前：防抖可能来不及落盘
+      if (now) store.saveNow().catch(() => {});
+      else store.save();
+    } catch {
+      /* 记忆失败不影响使用 */
+    }
+  };
+  const scheduleBoundsSave = () => {
+    clearTimeout(boundsSaveTimer);
+    boundsSaveTimer = setTimeout(() => saveWindowBounds(false), 400);
+  };
+  win.on('move', scheduleBoundsSave);
+  win.on('resize', scheduleBoundsSave);
+  win.on('maximize', () => saveWindowBounds(false));
+  win.on('unmaximize', () => saveWindowBounds(false));
+  watchDisplayMetrics();
+
   win.loadFile(path.join(ROOT, 'src', 'index.html'));
   // 页面加载完再套缩放：loadFile 触发的导航会把提前设好的 zoomFactor 重置回 1
   win.webContents.on('did-finish-load', () => {
+    // 启动路径只补 zoom：导航会把 zoomFactor 重置回 1，而窗口 bounds 是上次
+    // 退出时的物理尺寸（已含当时缩放）。先把 appliedUiFactor 置成存档值，
+    // applyUiScale 里的尺寸调整就会自动跳过，不会把窗口撑大一倍。
+    appliedUiFactor = normalizeUiScale(store?.data?.settings?.uiScale ?? 100) / 100;
     applyUiScale(store?.data?.settings?.uiScale ?? 100);
     // 音乐服务预热：VIP 曲目的换源解锁全靠本地 NeteaseCloudMusicApi，
     // 开机就把它拉起来，用户点歌时不用干等（拉不起来就算了，不影响启动）。
@@ -4580,6 +5553,9 @@ function createWindow() {
       const warm = globalThis.__hxlNeteaseWarmup;
       if (typeof warm === 'function') warm();
     }, 3000);
+    // 提权重启之后把刚才点的那款游戏接上：用户点「开始游戏」→ 弹一次 UAC →
+    // 启动器以管理员重开 → 这里自动继续开，不用他再点第二次。
+    setTimeout(() => resumePendingLaunch(), 1600);
   });
 
   // 原生全屏不触发 CSS :fullscreen 伪类，只能由主进程把状态推给渲染进程
@@ -4592,6 +5568,20 @@ function createWindow() {
   win.on('leave-full-screen', () => pushFullscreen(false));
   win.webContents.on('did-finish-load', () => {
     setTimeout(() => pushFullscreen(win && !win.isDestroyed() && win.isFullScreen()), 0);
+  });
+
+  // 最小化状态推给渲染层：据此停掉循环背景视频和装饰动画，别白烧 GPU
+  // （backgroundThrottling 是 false，缩到任务栏后 CSS 动画和 video 解码照跑）。
+  // minimizeOnLaunch 开机即最小化时补推一次当前状态。
+  const pushMinimize = (value) => {
+    try {
+      if (win && !win.isDestroyed()) win.webContents.send('window:minimize-state', !!value);
+    } catch (_) {}
+  };
+  win.on('minimize', () => pushMinimize(true));
+  win.on('restore', () => pushMinimize(false));
+  win.webContents.on('did-finish-load', () => {
+    setTimeout(() => pushMinimize(win && !win.isDestroyed() && win.isMinimized()), 0);
   });
 
   win.once('ready-to-show', () => {
@@ -4632,10 +5622,34 @@ function createWindow() {
   });
 
   win.on('close', (event) => {
-    if (!quitting && store && store.data.settings.closeToTray) {
+    // 真正关闭前立刻落盘（防抖可能来不及）；隐藏到托盘也记一份，位置可能刚变过
+    saveWindowBounds(true);
+    if (quitting || !store) return;
+    const action = store.data.settings.closeAction;
+    /*
+     * tray 要真的存在才敢 hide：托盘图标没装上（图标缺失 / 系统托盘不可用）时
+     * 把窗口藏起来，用户就再也叫不回来了。那种情况下按「退出」处理更安全。
+     */
+    if (action === 'tray' && tray) {
       event.preventDefault();
       win.hide();
+      return;
     }
+    if (action === 'quit' || action === 'tray') return;
+    /*
+     * 还没选过（首次点关闭）：先别关，问一句「收进托盘还是退出」。
+     * 选择存在 settings.closeAction 里，之后都按它执行；
+     * 想改去 设置 → 行为 → 关闭时收进托盘。
+     *
+     * 渲染层可能还没加载完（启动早期被系统关掉、页面崩了），这时候没人接
+     * 这个询问，拦着就等于关不掉窗口 —— 那就直接放行。
+     */
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed() || wc.isLoading()) return;
+    event.preventDefault();
+    if (closeAskPending) return;
+    closeAskPending = true;
+    wc.send('window:close-ask');
   });
 
   win.on('closed', () => {
@@ -4994,6 +6008,24 @@ function relaunchElevated() {
     writeLaunchLog(`alwaysAdmin: 提权重启调度失败，继续以普通权限运行: ${error.message}`);
     return false;
   }
+}
+
+/**
+ * 提权重启之后，把刚才点的那款游戏接着开起来。
+ *
+ * 为什么要这一步：终末地 / 明日方舟创建游戏进程必须提权（实测 740）。以前
+ * 每点一次「开始游戏」弹一次 UAC；现在第一次问一次、之后启动器自己以管理员
+ * 运行。重启过程中那一次点击要接上 —— 否则重启完还得再点一次，用户会以为
+ * 点了个寂寞。
+ */
+async function resumePendingLaunch() {
+  const gameId = String(store?.data?.settings?.pendingLaunchGameId || '');
+  if (!gameId) return;
+  store.data.settings.pendingLaunchGameId = '';
+  await store.saveNow().catch(() => {});
+  if (!currentElevation()) return; // 这次没提权成功：等用户再点一次，走普通 UAC 路线
+  if (!(store.data.games || []).some((item) => item.id === gameId)) return;
+  send('game:autolaunch', { gameId });
 }
 
 function startWithShellExecute(target, args, cwd) {
@@ -5585,6 +6617,41 @@ function installIpc() {
   });
 
   /*
+   * 首次点关闭时那个询问框的结果：执行选择，记住了以后就都按它走。
+   * remember=false（弹窗里没勾「以后不再询问」）只执行这一次，不写设置 ——
+   * 下次点 ✕ 还会问。
+   * closeToTray 一起写，设置页的开关才不会和真实行为打架。
+   */
+  ipcMain.handle('window:close-choice', async (_event, payload) => {
+    const choice = typeof payload === 'string' ? payload : payload?.action;
+    const remember = typeof payload === 'object' && payload !== null ? payload.remember !== false : true;
+    const action = choice === 'tray' || choice === 'quit' ? choice : null;
+    if (!action || !store) return { ok: false };
+    closeAskPending = false;
+    if (remember) {
+      store.data.settings.closeAction = action;
+      store.data.settings.closeToTray = action === 'tray';
+      await store.saveNow().catch(() => {});
+      pushState(true);
+    }
+    if (!win || win.isDestroyed()) return { ok: true, action };
+    if (action === 'tray' && tray) {
+      win.hide();
+      return { ok: true, action };
+    }
+    // 托盘图标没装上：不能 hide（否则再也叫不回来），按用户选「退出」处理
+    quitting = true;
+    app.quit();
+    return { ok: true, action: action === 'tray' ? 'quit' : action };
+  });
+
+  /* 用户把询问框关掉了（没选）：允许下次点关闭再问一次 */
+  ipcMain.handle('window:close-cancel', () => {
+    closeAskPending = false;
+    return true;
+  });
+
+  /*
    * 侧栏品牌图标既是设置页入口，也要能拖动窗口。
    * 它原本靠 -webkit-app-region: drag 拖，但拖拽区会吞掉鼠标事件，
    * 点不了；改成 no-drag + 这里按位移移动窗口，两种行为就能共存。
@@ -5952,13 +7019,20 @@ function installIpc() {
       'quickPanelPinned',
       'uiScale',
       'alwaysAdmin',
+      // 「开游戏要管理员」这件事问过一次没有：界面点过「以管理员重启」或
+      // 「每次弹一次」之后置 true，免得每次启动都重新问
+      'elevationAsked',
       'elevationDeclined',
       'nevernessUseOfficialLauncher',
       'closeToTray',
+      // 关闭按钮的真实行为（tray / quit）。和 closeToTray 由同一处逻辑同时写，
+      // 不放进白名单的话设置页改完会被快照回推抹掉。
+      'closeAction',
       'launchAtLogin',
       'minimizeOnLaunch',
       'autoSyncOfficial',
       'autoUpdateEndfieldPacks',
+      'autoUpdateArknightsPacks',
       'autoGacha',
       'audioLanguages',
       'includeStoryResources',
@@ -6012,6 +7086,17 @@ function installIpc() {
         settings.elevationDeclined = patch.elevationDeclined === true;
       } else if (key === 'nevernessUseOfficialLauncher') {
         settings.nevernessUseOfficialLauncher = patch.nevernessUseOfficialLauncher !== false;
+      } else if (key === 'closeAction') {
+        /*
+         * 关闭按钮的行为。字符串不能走下面那个 Boolean() 兜底（会被压成 true）。
+         * null 是「还没选过」，允许清空，下次点关闭会重新问一遍。
+         */
+        if (patch.closeAction === 'tray' || patch.closeAction === 'quit') {
+          settings.closeAction = patch.closeAction;
+          settings.closeToTray = patch.closeAction === 'tray';
+        } else if (patch.closeAction === null) {
+          settings.closeAction = null;
+        }
       } else if (key === 'endfieldPackRoot') {
         const dir = String(patch.endfieldPackRoot || '').trim();
         if (dir && fs.existsSync(dir)) settings.endfieldPackRoot = dir;
@@ -6225,16 +7310,193 @@ function installIpc() {
     });
   });
 
-  ipcMain.handle('endfield:update-official-packs', async () => {
-    const root = path.join(app.getPath('userData'), 'endfield-packs');
+  ipcMain.handle('arknights:update-game', async () => {
+    const game = store.data.games.find((item) => item.builtinKey === 'arknights');
+    const server = game?.servers.find((item) => item.id === game.activeServerId);
+    if (!game || !server?.root || !targetExists(server.path)) {
+      throw new Error('先配置明日方舟客户端路径');
+    }
+    if (running.has(game.id)) throw new Error('请先退出明日方舟再更新');
+    /*
+     * 明日方舟本体走的是鹰角同一套加密逐文件清单（GET {base}/game_files），
+     * 与终末地同构，直接用 updateEndfieldGame + profileForChannel('arknights') 重放即可，
+     * 不需要拉起官方启动器。启动前的渠道 SDK 注入由 games:launch 里的 ensureArknightsRuntime 负责，
+     * 更新完再启动依旧能正常进游戏。
+     */
+    return updateEndfieldGame({
+      root: server.root,
+      channel: 'arknights',
+      onProgress: (progress) => send('arknights:game-progress', progress),
+    });
+  });
+
+  /*
+   * 全游戏通用的「修复游戏」：按官方清单逐文件校验，重新下载损坏/缺失的文件。
+   * - 终末地 / 明日方舟：直接复用鹰角那套加密逐文件清单（force 重校，版本号没变也会重扫）
+   * - 米哈游系（原神 / 星铁 / 绝区零 / 崩坏3）：走 Sophon 逐 chunk 校验补齐
+   * - 异环：本体修复由官方启动器接管，这里直接拉起它
+   */
+  ipcMain.handle('games:repair-game', async (_event, input) => {
+    const game = store.data.games.find((item) => item.id === input?.gameId);
+    if (!game) throw new Error('没有找到该游戏');
+    const server =
+      game.servers.find((item) => item.id === input?.serverId) ||
+      game.servers.find((item) => item.id === game.activeServerId) ||
+      game.servers[0];
+    if (!server?.root || !server.path || !targetExists(server.path)) {
+      throw new Error('这个服务器还没有可修复的客户端');
+    }
+    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修复');
+    const key = game.builtinKey;
+    if (key === 'endfield') {
+      return updateEndfieldGame({
+        root: server.root,
+        channel: server.channel,
+        force: true,
+        onProgress: (progress) => send('repair:progress', progress),
+      });
+    }
+    if (key === 'arknights') {
+      return updateEndfieldGame({
+        root: server.root,
+        channel: 'arknights',
+        force: true,
+        onProgress: (progress) => send('repair:progress', progress),
+      });
+    }
+    if (['genshin', 'starrail', 'zzz', 'bh3'].includes(key)) {
+      const signal = { cancelled: false };
+      const result = await prepareSophon({
+        gameKey: key,
+        channel: server.channel,
+        baseRoot: server.root,
+        targetRoot: server.root,
+        cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
+        audioLanguages: store.data?.settings?.audioLanguages,
+        includeStoryResources: storyResourcesEnabled(game, server),
+        signal,
+        onProgress: (progress) => send('repair:progress', progress),
+      });
+      game.version = result.tag;
+      game.versionName = result.tag;
+      game.lastOfficialSync = Date.now();
+      await store.saveNow();
+      pushState(true);
+      return { ok: true, version: result.tag, updated: result.files, root: server.root };
+    }
+    if (key === 'neverness') {
+      const root = nevernessChannels.findConfigRoot(server?.root || server?.path || game.target || '');
+      if (!root) throw new Error('没有找到异环安装目录，先在服务器设置里指好游戏路径');
+      const launcher = path.join(root, 'NTELauncher.exe');
+      if (!fs.existsSync(launcher)) throw new Error(`没有找到官方启动器：${launcher}`);
+      const error = await shell.openPath(launcher);
+      if (error) throw new Error(`官方启动器打开失败：${error}`);
+      return { ok: true, official: true };
+    }
+    throw new Error('这个游戏暂不支持修复');
+  });
+
+  ipcMain.handle('endfield:update-official-packs', async (_event, options = {}) => {
+    const root = endfieldPackWritableRoot();
+    /*
+     * 默认只补本机还缺的那几个渠道 —— 全新机器上五个一起下是约 400MB，把第一次
+     * 用的人直接劝退。真要备齐是用户在弹窗里点「下载全部」（all=true）的事。
+     */
+    const missing = Object.entries(ENDFIELD_PACK_NAMES)
+      .filter(([channel]) => !(store.data.settings.endfieldPackChannels || []).includes(channel))
+      .map(([, packName]) => packName);
     const result = await updateEndfieldPacks({
       root,
+      only: options.all ? null : missing,
       onProgress: (progress) => send('endfield:pack-progress', progress),
     });
     store.data.settings.endfieldPackRoot = root;
+    refreshPackChannels();
     await store.saveNow();
     pushState(true);
-    return result;
+    return { ...result, requested: options.all ? 'all' : 'missing', missingCount: missing.length };
+  });
+
+  ipcMain.handle('endfield:pack-usage', async () => describePackUsage());
+
+  /*
+   * 释放渠道包占的空间。
+   *
+   * 内置包（随安装包分发的那份）默认装在 %LOCALAPPDATA%\Programs 下，是用户自己的
+   * 目录，可以直接删，不需要管理员。删完界面上就是「按需下载」，想要了随时能下回来。
+   * 连带删掉 .state 里的记录：不然 updateProfile 会以为这个包还是最新的，
+   * 重新下载时直接跳过，结果就是「显示能切，实际缺文件」。
+   */
+  ipcMain.handle('endfield:delete-packs', async (_event, options = {}) => {
+    const scope = ['endfield', 'arknights', 'all'].includes(options.scope)
+      ? options.scope
+      : 'endfield';
+    /*
+     * 单渠道释放：管理窗口里每一行都有自己的「释放」，只删那一个目录。
+     * 目录名过一遍白名单再拼路径 —— 这个值来自渲染层，不能直接当路径用。
+     */
+    const allDirs = new Set([...ENDFIELD_PACK_DIRS, ...ARKNIGHTS_PACK_DIRS]);
+    const requested = Array.isArray(options.directories)
+      ? options.directories.filter((name) => allDirs.has(String(name)))
+      : [];
+    const dirs = requested.length
+      ? requested
+      : scope === 'arknights'
+        ? ARKNIGHTS_PACK_DIRS
+        : scope === 'endfield'
+          ? ENDFIELD_PACK_DIRS
+          : [...ENDFIELD_PACK_DIRS, ...ARKNIGHTS_PACK_DIRS];
+    const roots = [endfieldPackWritableRoot(), builtinPackRoot()].filter(Boolean);
+    let freed = 0;
+    const removed = [];
+    for (const root of roots) {
+      for (const name of dirs) {
+        const dir = path.join(root, name);
+        if (!fs.existsSync(dir)) continue;
+        freed += dirSize(dir);
+        await fsp.rm(dir, { recursive: true, force: true });
+        await fsp.rm(path.join(root, '.state', `${name}.json`), { force: true }).catch(() => {});
+        removed.push(name);
+      }
+    }
+    refreshPackChannels();
+    refreshArknightsPackChannels();
+    pushState(true);
+    return { ok: true, freed, removed: Array.from(new Set(removed)) };
+  });
+
+  /*
+   * 明日方舟的两个渠道包。和终末地分开成一条：这两条是照着 Xel-Launcher 的
+   * 清单配的，虽然实测取得到（78.0.0），但还没在真机切服上验证过，
+   * 让用户单独点、单独看结果，不跟着终末地一起静默发生。
+   */
+  ipcMain.handle('arknights:update-packs', async () => {
+    const root = endfieldPackWritableRoot();
+    const results = [];
+    for (const [profile, label] of [
+      [ARKNIGHTS_OFFICIAL_PROFILE, '官服'],
+      [ARKNIGHTS_BILIBILI_PROFILE, 'B服'],
+    ]) {
+      if (!(await verifyArknightsSource(profile))) {
+        results.push({ iconName: profile.iconName, skipped: true, error: '官方接口上没有这份清单' });
+        continue;
+      }
+      try {
+        await updateEndfieldProfile(profile, root, (progress) =>
+          send('endfield:pack-progress', {
+            ...progress,
+            directory: profile.directory,
+            current: `[${label}] ${progress.current || ''}`,
+          })
+        );
+        results.push({ iconName: profile.iconName, skipped: false, updated: true });
+      } catch (error) {
+        results.push({ iconName: profile.iconName, skipped: false, error: error.message });
+      }
+    }
+    refreshPackChannels();
+    pushState(true);
+    return { ok: true, results };
   });
 
   ipcMain.handle('endfield:sync-packs', async () => {
@@ -6288,6 +7550,7 @@ function installIpc() {
         }
       }
       store.data.settings.endfieldPackRoot = target;
+      refreshPackChannels();
       await store.saveNow();
       pushState(true);
     }
@@ -6311,11 +7574,94 @@ function installIpc() {
         recursive: true,
         force: true,
       });
+      /*
+       * 顺手把状态文件带过来：从另一台机器整个 endfield-packs 拷过来的机器，
+       * 差异渠道（国际服 / Play / Steam）靠它证明「这份包是按整套差异下完的」，
+       * 不带过来的话会被判成待下载、白问一遍。
+       */
+      try {
+        await fsp.mkdir(path.join(target, '.state'), { recursive: true });
+        await fsp.cp(
+          path.join(source, '.state', `${name}.json`),
+          path.join(target, '.state', `${name}.json`),
+          { force: true }
+        );
+      } catch {
+        /* XelLauncher 的 load 目录没有状态文件，正常 */
+      }
     }
     store.data.settings.endfieldPackRoot = target;
+    refreshPackChannels();
     await store.saveNow();
     pushState(true);
     return { ok: true, imported: found, path: target };
+  });
+
+  /*
+   * 渠道包按需下载（2.5.0）：安装包不再内置这 632 MB，第一次切到某个服时
+   * 由渲染层先问一次「有没有 / 要下多少」，用户点了才下。
+   * 三条 IPC 分开是刻意的：查状态不该顺带下载，下载不该阻塞查状态。
+   */
+  ipcMain.handle('endfield:channel-pack-status', async (_event, input) => {
+    const { game, channel } = input || {};
+    return channelPackStatus(String(game || ''), String(channel || ''));
+  });
+
+  ipcMain.handle('endfield:channel-pack-download', async (_event, input) => {
+    const { game, channel } = input || {};
+    // 进度单独走一条通道：切服时的 busy toast 也在用 endfield:progress，
+    // 两套进度混在一条通道里，界面会收到对方的百分比
+    return downloadChannelPack(String(game || ''), String(channel || ''), (progress) => {
+      if (win && !win.isDestroyed()) win.webContents.send('endfield:pack-progress', progress);
+    });
+  });
+
+  ipcMain.handle('endfield:channel-pack-cancel', async (_event, input) => {
+    const { game, channel } = input || {};
+    return { ok: cancelChannelPack(String(game || ''), String(channel || '')) };
+  });
+
+  /** 设置页「释放空间」：列出现在占了哪些渠道包、各多大。 */
+  ipcMain.handle('endfield:channel-pack-list', async () => {
+    const rows = [];
+    for (const game of ['endfield', 'arknights']) {
+      const channels =
+        game === 'arknights'
+          ? Object.keys(ARKNIGHTS_PACK_CHANNELS)
+          : Object.keys(ENDFIELD_PACK_NAMES);
+      for (const channel of channels) {
+        const spec = channelPackSpec(game, channel);
+        if (!spec) continue;
+        const root = endfieldPackCandidateRoots().find((item) => channelPackReady(spec, item));
+        rows.push({
+          game,
+          channel,
+          directory: spec.directory,
+          label: spec.label,
+          ready: Boolean(root),
+          root: root || '',
+          bytes: root ? dirSize(path.join(root, spec.directory)) : 0,
+        });
+      }
+    }
+    return { ok: true, rows };
+  });
+
+  /**
+   * 切服前的唯一入口：这次切换需不需要先下渠道包、要下多少。
+   *
+   * 只回答「需不需要」（channelPackNeededFor），不下载；
+   * 用户点了弹窗里的下载才走 endfield:channel-pack-download。
+   */
+  ipcMain.handle('servers:channel-pack-plan', async (_event, input) => {
+    const game = store.data.games.find((item) => item.id === input?.gameId);
+    const server = game && (game.servers || []).find((item) => item.id === input?.serverId);
+    if (!game || !server) return { needed: false };
+    const need = channelPackNeededFor(game, server);
+    if (!need) return { needed: false };
+    const status = await channelPackStatus(need.game, need.channel);
+    if (status.ready) return { needed: false, ready: true };
+    return { needed: true, ...status, serverName: server.name };
   });
 
   ipcMain.handle('media:url', async (_event, source) => {
@@ -7144,6 +8490,11 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
                 const message = String(item.info?.[1] || '');
                 const user = String(item.info?.[2]?.[1] || '');
                 state.captured += 1;
+                /*
+                 * 前 5 条落日志：卡片上「最近弹幕」还是 — 时，翻 launch.log 就能分清
+                 * 「主进程根本没收到」和「收到了但渲染层没画出来」。
+                 */
+                if (state.captured <= 5) writeLaunchLog(`danmu ${roomId}: ${user}: ${message}`);
                 safeSend(sender, 'live:danmu-event', { roomId, type: 'danmu', message, user, captured: state.captured });
               }
             }
@@ -7908,6 +9259,35 @@ function musicLoginWindow(target) {
     // JsonStore.save() 自带 400ms 防抖 + 串行写 + 原子 rename，不用自己再拼一遍
     cache.save();
     return { ok: true, savedAt: cache.data.savedAt };
+  });
+
+  /*
+   * 从「我的歌单」缓存里剔掉一张具体的歌单（链接导入的那种）。
+   *
+   * 为什么不复用 music:playlists-cache-save：那个是**合并写 + 空列表跳过**，
+   * 删掉某平台最后一张歌单时前端传上来的 list 是空的，主进程会直接 continue，
+   * 磁盘上的旧缓存原封不动 —— 重启后歌单原样复活，「删了没用」。
+   * 所以删除必须按 id 精确落到缓存上：剔完为空就把这个平台整组丢掉。
+   */
+  ipcMain.handle('music:playlist-remove', async (_event, input) => {
+    const key = String(input?.platform || '').trim().toLowerCase();
+    const id = String(input?.id || '').trim();
+    if (!PLAYLIST_CACHE_PLATFORMS.includes(key) || !id) {
+      return { ok: false, removed: 0, reason: '参数不完整' };
+    }
+    const cache = playlistCache();
+    const groups = cache.data.groups && typeof cache.data.groups === 'object' ? cache.data.groups : null;
+    const group = groups?.[key];
+    if (!Array.isArray(group?.list)) return { ok: true, removed: 0 };
+    const before = group.list.length;
+    const list = group.list.filter((item) => String(item?.id || '') !== id);
+    const removed = before - list.length;
+    if (!removed) return { ok: true, removed: 0 };
+    if (list.length) cache.data.groups[key] = { ...group, list };
+    else delete cache.data.groups[key];
+    // JsonStore.save() 自带防抖 + 串行写 + 原子 rename
+    cache.save();
+    return { ok: true, removed };
   });
 
   ipcMain.handle('music:playlists-cache-drop', async (_event, input) => {
@@ -8948,13 +10328,27 @@ function musicLoginWindow(target) {
       if (prepared) {
         server.path = prepared.launchPath;
         server.root = prepared.runtimeRoot;
-        server.runtimeLinked = true;
+        // 官服直接指自己客户端时不算「差异运行时」，别在界面上贴那个标签
+        server.runtimeLinked = !prepared.directBase;
       }
     }
     // 明日方舟（2.4.0 合并）：官服 / B服 在同一套安装目录里，按终末地那套运行时
     // 方案复制出独立目录，大文件硬链接、渠道 SDK 换成目标服的。缺 B服 载荷时直接抛错。
     if (game.builtinKey === 'arknights') {
       await ensureArknightsRuntime(game, server);
+    }
+    /*
+     * 切成功了：记下「用过切服」，并在这个用户还没表过态（null）时把对应游戏的
+     * 渠道包自动更新打开。两个游戏各一个开关：只切过终末地的人，不该被顺手打开
+     * 明日方舟那条。手动关掉的（false）保持关着 —— 用户明确表过态就不替他改。
+     */
+    store.data.settings.hasSwitchedServer = true;
+    if (game.builtinKey === 'arknights') {
+      if (store.data.settings.autoUpdateArknightsPacks == null) {
+        store.data.settings.autoUpdateArknightsPacks = true;
+      }
+    } else if (store.data.settings.autoUpdateEndfieldPacks == null) {
+      store.data.settings.autoUpdateEndfieldPacks = true;
     }
     game.activeServerId = server.id;
     game.target = server.path;
@@ -9105,19 +10499,13 @@ function musicLoginWindow(target) {
     if (!server) throw new Error('没有找到这个服务器');
     if (server.channel === 'official') throw new Error('官服请直接指定官服客户端');
 
-    const packRoot = store.data.settings.endfieldPackRoot;
-    if (!packRoot || !fs.existsSync(packRoot)) {
-      throw new Error('还没有设置终末地渠道包目录，请先在设置里指向 XelLauncher 的 load 文件夹');
-    }
-    const packName = {
-      bilibili: 'EndBilibili',
-      global: 'EndGlobal',
-      play: 'EndPlay',
-      steam: 'EndSteam',
-    }[server.channel];
-    if (!packName) throw new Error('这个服务器没有对应的渠道差异包');
-    const packDir = path.join(packRoot, packName);
-    if (!fs.existsSync(packDir)) throw new Error(`渠道差异包不存在：${packDir}`);
+    if (!ENDFIELD_PACK_NAMES[server.channel]) throw new Error('这个服务器没有对应的渠道差异包');
+    // 缺哪个渠道就现下哪个：这是「重建」按钮以前在没有 XelLauncher 的机器上
+    // 直接报「渠道差异包不存在」的根子。
+    const { packDir, downloaded: packDownloaded } = await ensureEndfieldPackFor(
+      server.channel,
+      (progress) => send('endfield:progress', { ...progress, serverName: server.name })
+    );
 
     // 基础客户端不再要求必须是官服：只装了 B服 / 国际服 / Play / Steam 的玩家，
     // 用他自己装好的那个客户端当基础一样能生成（链接+覆盖渠道差异文件，与渠道无关）。
@@ -9206,6 +10594,7 @@ function musicLoginWindow(target) {
         path: launchPath,
         linked: result.linked,
         overlay: result.overlay?.processed || 0,
+        packDownloaded,
       };
     } catch (error) {
       pushState(true);
@@ -9269,9 +10658,148 @@ function musicLoginWindow(target) {
     return { ok: true, estimate: true, drive, freeBytes, baseBytes, baseFiles, partial, targetRoot };
   }
 
+  /**
+   * 终末地走自己的链路（硬链接基础客户端 + 覆盖渠道差异包），不读 Sophon 清单。
+   *
+   * 以前这个函数只认米哈游三游，于是终末地服务器面板 / 切换引导里点
+   * 「硬链接生成一份」，拿到的是「这个游戏没有接入 Sophon 清单」，
+   * 界面只把开始按钮置灰 —— 用户只能绕到服务器管理里点「重建」。
+   */
+  async function prepareEndfieldRuntimeJob(game, input = {}) {
+    const server = (game.servers || []).find((item) => item.id === input?.serverId);
+    if (!server) throw new Error('没有找到这个服务器');
+    if (await pruneStaleRunning()) pushState(true);
+    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
+
+    // 目标目录必须和真正写入的地方是同一个：这里算的目录和
+    // ensureEndfieldChannelRuntime 用的是同一套 runtimePaths。
+    const base = endfieldBaseServer(game, server.id) || endfieldBaseServer(game);
+    const baseRoot = base ? base.baseRoot : endfieldBaseRoot(server);
+    if (!baseRoot) {
+      throw new Error(
+        `没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`
+      );
+    }
+    const runtime = runtimePaths(baseRoot, 'endfield', server.channel, input?.runtimeRoot);
+    if (!runtime.sameDrive) {
+      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
+    }
+    if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
+      throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
+    }
+    if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
+
+    const jobId = String(input?.jobId || crypto.randomUUID());
+    const signal = { cancelled: false };
+    sophonJobs.set(jobId, signal);
+    beginBackgroundTask();
+    try {
+      const emit = (progress) =>
+        send('sophon:progress', {
+          jobId,
+          phase: progress.phase === 'pack' ? 'pack' : progress.phase || 'link',
+          processed: progress.processed || 0,
+          total: progress.total || 0,
+          current: progress.current || '',
+        });
+      emit({ phase: 'start', current: '正在准备运行时…' });
+      const result = await ensureEndfieldChannelRuntime(game, server, {
+        runtimeRoot: input?.runtimeRoot,
+        onProgress: emit,
+      });
+      if (signal.cancelled) return { ok: false, cancelled: true };
+      server.incomplete = false;
+      game.activeServerId = server.id;
+      game.target = result.launchPath;
+      game.workDir = result.runtimeRoot;
+      ensureServers(game);
+      await store.saveNow();
+      pushState(true);
+      send('sophon:progress', {
+        jobId,
+        phase: 'done',
+        processed: 1,
+        total: 1,
+        current: '完成',
+      });
+      return {
+        ok: true,
+        tag: result.directBase ? '官方客户端' : '差异运行时',
+        linked: result.linked || 0,
+        downloaded: 0,
+        packDownloaded: Boolean(result.packDownloaded),
+        files: (result.linked || 0) + (result.overlay || 0),
+        targetRoot: result.runtimeRoot,
+        built: Boolean(result.built),
+        directBase: Boolean(result.directBase),
+      };
+    } finally {
+      endBackgroundTask();
+      sophonJobs.delete(jobId);
+    }
+  }
+
+  /**
+   * 明日方舟：官服 / B服 共用同一个安装目录，切服就是「把整份客户端硬链接一份，
+   * 再把目标渠道的 SDK 换掉」，和米哈游的 Sophon 清单不是一回事。
+   * 以前这里同样被「没有接入 Sophon 清单」挡住，于是明日方舟在服务器面板里
+   * 点「硬链接生成一份」没有任何反应。
+   */
+  async function prepareArknightsRuntimeJob(game, input = {}) {
+    const server = (game.servers || []).find((item) => item.id === input?.serverId);
+    if (!server) throw new Error('没有找到这个服务器');
+    if (await pruneStaleRunning()) pushState(true);
+    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
+    if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
+      throw new Error('国际服 / 台服是各自独立的客户端，请直接指到它们自己的安装目录，不能用国服生成');
+    }
+    const baseRoot = String(server.root || '').trim();
+    if (!baseRoot || !fs.existsSync(baseRoot)) {
+      throw new Error('这个服务器还没有客户端目录，先在它那一行点“编辑”把目录指到明日方舟的安装目录');
+    }
+    const runtime = runtimePaths(baseRoot, 'arknights', server.channel, input?.runtimeRoot);
+    if (!runtime.sameDrive) {
+      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
+    }
+    if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
+      throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
+    }
+    if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
+
+    const jobId = String(input?.jobId || crypto.randomUUID());
+    const signal = { cancelled: false };
+    sophonJobs.set(jobId, signal);
+    beginBackgroundTask();
+    try {
+      const emit = (progress) => send('sophon:progress', { jobId, ...progress });
+      emit({ phase: 'start', processed: 0, total: 0, current: '正在准备运行时…' });
+      const ok = await ensureArknightsRuntime(game, server, {
+        runtimeRoot: input?.runtimeRoot,
+        onProgress: emit,
+        signal,
+      });
+      if (signal.cancelled) return { ok: false, cancelled: true };
+      if (!ok) throw new Error('没有生成出运行时：这个目录里没找到 Arknights.exe，请确认选中的是明日方舟的安装目录');
+      server.incomplete = false;
+      game.activeServerId = server.id;
+      game.target = server.path;
+      game.workDir = server.root;
+      await store.saveNow();
+      pushState(true);
+      emit({ phase: 'done', processed: 1, total: 1, current: '完成' });
+      return { ok: true, tag: server.name, linked: 1, downloaded: 0, targetRoot: server.root };
+    } finally {
+      endBackgroundTask();
+      sophonJobs.delete(jobId);
+    }
+  }
+
   ipcMain.handle('servers:prepare-sophon', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game || !['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
+    if (!game) throw new Error('没有找到这个游戏');
+    if (game.builtinKey === 'endfield') return prepareEndfieldRuntimeJob(game, input);
+    if (game.builtinKey === 'arknights') return prepareArknightsRuntimeJob(game, input);
+    if (!['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
       throw new Error('这个游戏没有接入 Sophon 清单');
     }
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再准备服务器');
@@ -9388,13 +10916,16 @@ function musicLoginWindow(target) {
 
   ipcMain.handle('servers:update-sophon', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game || !['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
+    if (!game || !['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey)) {
       throw new Error('这个游戏没有接入 Sophon 更新');
     }
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再更新');
     const server = game.servers.find((item) => item.id === input?.serverId);
     if (!server || !server.root || !server.path || !targetExists(server.path)) {
       throw new Error('这个服务器还没有可更新的客户端');
+    }
+    if (game.builtinKey === 'bh3' && server.channel && server.channel !== 'official') {
+      throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
     }
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
@@ -9825,6 +11356,14 @@ function musicLoginWindow(target) {
    * 正式版上线后用 predownload:apply 应用，两个厂商都是「命中本地产物 → 0 流量，缺的才补下」。
    */
   /*
+   * 演练模式的开关文件放在 userData 里：存在即启用，删掉即恢复真实链路。
+   * 关掉的时候顺手把上次演练写进 server.predownload 的假状态摘掉 ——
+   * 不然卡片会一直挂着「可以预下载」，而官方根本没有那个版本。
+   */
+  predownloadSim.setup({ userDataDir: app.getPath('userData') });
+  predownloadSim.cleanup(store).catch(() => {});
+
+  /*
    * 剧情等分类资源包的开关继承链：server → game → settings → false。
    * 默认是关的 —— 绝区零那 111 份分类包要 19.73GB，而主安装链路那边也是「默认不包含」，
    * 预下载要是默认开就会白下 20GB。
@@ -9911,18 +11450,24 @@ function musicLoginWindow(target) {
     const now = Date.now();
     for (const game of store.data.games || []) {
       if (quitting) return;
-      if (!game.installed) continue;
+      /*
+       * 这里原来写的是 `if (!game.installed) continue;` —— 那是错的：
+       * store.data.games 上没有 installed 字段，它是 publicGame() 拼给渲染层时才加的。
+       * 结果是这个「自动检查」从上线起一次都没跑过，预下载按钮只会在用户手动点
+       * 「检查」之后才出现。改成看有没有可用客户端目录（下面本来就要用它）。
+       */
       const servers = (game.servers || []).filter((item) => item.root);
       // 只查当前在用的那个渠道：别的渠道在启动页点不到，问了也是白问
       const server = servers.find((item) => item.active) || servers[0];
       if (!server) continue;
-      const fresh = Date.parse(server.predownload?.updatedAt || '') || 0;
+      // 演练模式下每次启动都重查，否则 2 小时 TTL 会让人以为开关没生效
+      const fresh = predownloadSim.enabled() ? 0 : Date.parse(server.predownload?.updatedAt || '') || 0;
       if (server.predownload && now - fresh < PREDOWNLOAD_AUTO_TTL) continue;
       // 正在预下载 / 正在更新时别插队，免得两边抢同一份清单
       if (predownloadJobs.size) return;
       try {
         const { base } = resolvePredownload({ gameId: game.id, serverId: server.id });
-        const report = await predownload.check({ ...base, verify: false });
+        const report = await predownloadSim.check({ ...base, verify: false });
         if (report) await savePredownloadState(server, report);
       } catch (error) {
         writeLaunchLog(`predownload auto-check ${game.id}: ${error.message}`);
@@ -9931,9 +11476,24 @@ function musicLoginWindow(target) {
     }
   }
 
+  /*
+   * 启动后先查一轮官方预下载状态，之后每 30 分钟补查。
+   *
+   * 这段定时器以前挂在 app.whenReady() 里，而 autoRefreshPredownloadStatus 定义在
+   * 本闭包内 —— 跨作用域拿不到，每次触发都是
+   * `ReferenceError: autoRefreshPredownloadStatus is not defined`（crash.log 里刷了几十次）。
+   * 所以「启动后自动检查预下载」从上线起一次都没跑过，预下载入口只能靠手动点「检查」
+   * 才出现。定时器必须和函数待在同一个作用域里，别再挪出去。
+   */
+  setTimeout(
+    () => autoRefreshPredownloadStatus().catch(() => {}),
+    predownloadSim.enabled() ? 2500 : 18000
+  );
+  setInterval(() => autoRefreshPredownloadStatus().catch(() => {}), 30 * 60 * 1000);
+
   ipcMain.handle('predownload:check', async (_event, input) => {
     const { server, base } = resolvePredownload(input);
-    const report = await predownload.check({ ...base, verify: input?.verify === true });
+    const report = await predownloadSim.check({ ...base, verify: input?.verify === true });
     await savePredownloadState(server, report);
     return report;
   });
@@ -9947,13 +11507,13 @@ function musicLoginWindow(target) {
     beginBackgroundTask();
     send('predownload:progress', { jobId, phase: 'start', current: '正在读取官方清单…' });
     try {
-      const result = await predownload.start({
+      const result = await predownloadSim.start({
         ...base,
         signal,
         onProgress: (progress) => send('predownload:progress', { jobId, ...progress }),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
-      await savePredownloadState(server, await predownload.check(base));
+      await savePredownloadState(server, await predownloadSim.check(base));
       send('predownload:progress', { jobId, phase: 'done', current: '预下载完成' });
       return { ok: true, ...result };
     } catch (error) {
@@ -9983,7 +11543,7 @@ function musicLoginWindow(target) {
     beginBackgroundTask();
     send('predownload:progress', { jobId, phase: 'start', current: '正在校验并应用预下载内容…' });
     try {
-      const result = await predownload.apply({
+      const result = await predownloadSim.apply({
         ...base,
         signal,
         onProgress: (progress) => send('predownload:progress', { jobId, ...progress }),
@@ -9993,7 +11553,8 @@ function musicLoginWindow(target) {
       server.predownload = null;
       // 更新落在了真实安装目录，把链接运行时的标记清掉，下次启动自动重建
       invalidateRuntimesAfterUpdate(game);
-      if (tag) {
+      // 演练模式不能改写游戏真实版本号，否则卡片会挂一个官方根本没发布过的版本
+      if (tag && !result?.simulated) {
         game.version = tag;
         game.versionName = tag;
       }
@@ -10018,7 +11579,7 @@ function musicLoginWindow(target) {
 
   ipcMain.handle('predownload:clear', async (_event, input) => {
     const { server, base } = resolvePredownload(input);
-    const result = await predownload.clear({ gameKey: base.gameKey, installRoot: base.installRoot });
+    const result = await predownloadSim.clear({ gameKey: base.gameKey, installRoot: base.installRoot });
     server.predownload = null;
     await store.saveNow();
     pushState(true);
@@ -10394,7 +11955,10 @@ function musicLoginWindow(target) {
       // 缺标记/缺文件就重建，并把 incomplete 清掉让启动页状态点变绿。
       const efServer = (game.servers || []).find((server) => server.id === game.activeServerId);
       if (efServer) {
-        const prepared = await ensureEndfieldChannelRuntime(game, efServer).catch((error) => {
+        // 已经能直接启动时就不要再为了补渠道包让「开始游戏」等上一场下载
+        const prepared = await ensureEndfieldChannelRuntime(game, efServer, {
+          allowPackDownload: !(activeServer && targetExists(activeServer.path)),
+        }).catch((error) => {
           // 已经有可用路径时尽力而为：重建失败不阻断启动；连路径都没有就只能报错。
           if (activeServer && targetExists(activeServer.path)) return null;
           return { ok: false, error: '自动生成' + efServer.name + '运行时失败：' + error.message };
@@ -10501,6 +12065,42 @@ function musicLoginWindow(target) {
         }
       }
 
+      if (game.builtinKey === 'arknights') {
+        /*
+         * 明日方舟官服 / B服 的目录里同样躺着 PlatformProcess.exe（鹰角两家游戏
+         * 共用同一套平台层，Xel-Launcher 的方舟渠道清单里就包含它）。扫描时我们
+         * 只认 Arknights.exe 当入口，不会存成它；但用户手改过路径、或者数据是从
+         * 更早的版本升上来的，server.path 有可能已经指向平台进程 —— 跑起来就是
+         * 官方平台界面。这里同样修正到本体。
+         */
+        const baseName = path.basename(target).toLowerCase();
+        if (baseName !== 'arknights.exe') {
+          const rootDir =
+            game.workDir && fs.existsSync(path.join(game.workDir, 'Arknights.exe'))
+              ? game.workDir
+              : path.dirname(target);
+          const gameExe = [
+            path.join(path.dirname(target), 'Arknights.exe'),
+            path.join(rootDir, 'Arknights.exe'),
+            path.join(path.dirname(target), 'games', 'Arknights Game', 'Arknights.exe'),
+            path.join(rootDir, 'games', 'Arknights Game', 'Arknights.exe'),
+          ].find((candidate) => fs.existsSync(candidate));
+          if (gameExe) {
+            writeLaunchLog(`launch ${id}: 明日方舟启动路径被修正 ${target} -> ${gameExe}`);
+            target = gameExe;
+            game.workDir = path.dirname(gameExe);
+          } else if (/platformprocess|hypergryphlauncher/i.test(baseName)) {
+            writeLaunchLog(`launch ${id}: 明日方舟路径指向平台进程且找不到游戏本体：${target}`);
+            return {
+              ok: false,
+              error:
+                '这个服务器指向的是官方启动器的平台进程，不是游戏本体（Arknights.exe 缺失）。' +
+                '请在这个服务器上点「重建运行时」，或到服务器设置里把路径指到 Arknights.exe。',
+            };
+          }
+        }
+      }
+
       const lower = target.toLowerCase();
       let cwd = game.workDir && fs.existsSync(game.workDir) ? game.workDir : path.dirname(target);
       if (
@@ -10519,6 +12119,16 @@ function musicLoginWindow(target) {
       }
 
       if (lower.endsWith('.lnk') || lower.endsWith('.url')) {
+        /*
+         * 终末地不允许走快捷方式：快捷方式可能指向官方启动器（那就白弹一次界面），
+         * 而且绕过签名父进程后游戏会报 10100。直接让用户指到本体。
+         */
+        if (game.builtinKey === 'endfield') {
+          return {
+            ok: false,
+            error: '终末地不能用快捷方式启动（可能指向官方启动器）。请在这个服务器上把路径直接指到 Endfield.exe。',
+          };
+        }
         const openError = await shell.openPath(target);
         if (openError) return { ok: false, error: openError };
         await markLaunched(game);
@@ -10532,52 +12142,23 @@ function musicLoginWindow(target) {
         return { ok: true, external: true };
       }
 
-      if (game.builtinKey === 'endfield' && path.basename(target).toLowerCase() === 'endfield.exe') {
-        /*
-         * 终末地的启动链路会 CreateProcess 子进程，非管理员身份一定拿到 740（ERROR_ELEVATION_REQUIRED）。
-         * 以前是先跑一遍注定失败的官方登录流程、等它报错再弹 UAC，
-         * 用户看到的就是「点了打开游戏，半天没反应，最后说要管理员权限」。
-         * 现在直接判断当前权限：没提权就直接走 UAC 那一条，省掉那次必然失败的尝试。
-         */
-        if (!currentElevation()) {
-          launching.set(id, Date.now());
-          writeLaunchLog(`launch ${id}: 当前非管理员，直接请求 UAC 启动终末地`);
-          const elevated = await launchEndfieldElevated(cwd, target, game.args);
-          if (elevated.ok) {
-            await markLaunched(game);
-            trackGameProcess(id, 'Endfield.exe', Date.now()).catch(() => {});
-            return { ok: true, pid: elevated.pid, official: true, elevated: true };
-          }
-          launching.delete(id);
-          writeLaunchLog(`launch ${id}: Endfield UAC failed: ${elevated.error}`);
-          return { ok: false, error: elevated.error, elevationRequired: true };
-        }
-        launching.set(id, Date.now());
-        const official = await launchEndfield(cwd, target, game.args);
-        if (official.ok) {
-          await markLaunched(game);
-          trackGameProcess(id, 'Endfield.exe', Date.now()).catch(() => {});
-          return { ok: true, pid: official.pid, official: true };
-        }
-        launching.delete(id);
-        writeLaunchLog(`launch ${id}: Endfield decoy failed: ${official.error}`);
-        if (/740|elevation|管理员/i.test(official.error)) {
-          launching.set(id, Date.now());
-          writeLaunchLog(`launch ${id}: Endfield requesting UAC for official parent`);
-          const elevated = await launchEndfieldElevated(cwd, target, game.args);
-          if (elevated.ok) {
-            await markLaunched(game);
-            trackGameProcess(id, 'Endfield.exe', Date.now()).catch(() => {});
-            return { ok: true, pid: elevated.pid, official: true, elevated: true };
-          }
-          launching.delete(id);
-          writeLaunchLog(`launch ${id}: Endfield UAC failed: ${elevated.error}`);
-          return {
-            ok: false,
-            error: `终末地需要管理员权限：${elevated.error}`,
-            elevationRequired: true,
-          };
-        }
+      /*
+       * 终末地：不论 exe 叫什么名字（含用户改过名的 Endfield_cn.exe），一律经签名
+       * 父进程 —— 只要落到下面的通用启动，父进程就是花筱灵自己，游戏立刻报
+       * 10100「请通过官方启动器打开游戏」。指向平台进程的那种在上面已经被拦下。
+       *
+       * 明日方舟**不走**这条链路：它不校验父进程，双击本体就能开。Xel-Launcher 里
+       * 也是同一条界线 —— 它的 decoy 父进程桥只对 Endfield / BiliEndfield /
+       * GlobalEndfield / PlayEndfield 四个渠道启用，Arknights 系一律普通启动。
+       * 套上去只会让每次开方舟都白跑一次 PowerShell，在没装终末地的机器上
+       * 还会必然失败。
+       */
+      if (game.builtinKey === 'endfield') {
+        const signed = await launchWithSignedParent(game, target, cwd, {
+          requireElevation: true,
+          strict: true,
+        });
+        if (signed.handled) return signed.result;
       }
 
       launching.set(id, Date.now());
@@ -10900,8 +12481,17 @@ function musicLoginWindow(target) {
     return { ok: true, path: shortcutPath, existed };
   });
 
-  ipcMain.handle('app:relaunch-admin', async () => {
+  ipcMain.handle('app:relaunch-admin', async (_event, input) => {
     if (!app.isPackaged) return { ok: false, error: '开发模式下请直接用管理员终端运行' };
+    /*
+     * 带上「重启后要开哪个游戏」：界面上点的是「以管理员重启」，用户的本意是
+     * 「把游戏打开」「别再问权限」，重启完必须接着开，不能让他再点一次。
+     */
+    const gameId = String(input?.launchGameId || '');
+    if (gameId) {
+      store.data.settings.pendingLaunchGameId = gameId;
+      await store.saveNow().catch(() => {});
+    }
     if (currentElevation()) return { ok: true, already: true };
     /*
      * 必须走 relaunchElevated()：它确认提权脚本进程真的起来了才退当前实例。
@@ -12542,25 +14132,107 @@ function startEndfieldGachaWatcher() {
   endfieldGachaWatcher = setInterval(check, 5000);
 }
 
-let endfieldPackAutoRunning = false;
-async function autoUpdateEndfieldPacks() {
-  if (endfieldPackAutoRunning || store.data.settings.autoUpdateEndfieldPacks === false) return;
-  const game = store.data.games.find((item) => item.builtinKey === 'endfield');
-  if (!game) return;
-  if (!(game.servers || []).some((server) => targetExists(server.path))) return;
-  endfieldPackAutoRunning = true;
-  try {
-    const configured = String(store.data.settings.endfieldPackRoot || '').trim();
-    let root = path.join(app.getPath('userData'), 'endfield-packs');
-    if (configured) {
-      try {
-        await fsp.access(configured, fs.constants.W_OK);
-        root = configured;
-      } catch {
-        /* bundled resources are read-only: update a writable copy */
+/**
+ * 只比对版本号，不下任何东西。
+ *
+ * 自动更新开着时它会顺手把包装上，关着时也照比 —— 关掉自动更新的人多半是不想
+ * 被后台下载，不是不想知道有新版本。更关键的是：渠道包现在随安装包分发，装在
+ * 只读资源目录里，用户数据目录是空的，只更新「已存在」的自动更新会全部跳过，
+ * 那样用户永远看不到有更新。这里直接对全部候选取到的渠道包做版本比对。
+ */
+async function checkPackUpdates() {
+  const groups = [];
+  for (const profile of ENDFIELD_PACK_PROFILES || []) {
+    groups.push([profile, profile.directory, 'U8Data']);
+  }
+  groups.push([ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_OFFICIAL_PROFILE.directory, '']);
+  groups.push([ARKNIGHTS_BILIBILI_PROFILE, ARKNIGHTS_BILIBILI_PROFILE.directory, '']);
+  const candidates = endfieldPackCandidateRoots();
+  const updates = [];
+  for (const [profile, dirName] of groups) {
+    let localRoot = '';
+    for (const root of candidates) {
+      if (fs.existsSync(path.join(root, dirName, 'U8Data'))) {
+        localRoot = root;
+        break;
       }
     }
-    const result = await updateEndfieldPacks({ root });
+    if (!localRoot) continue;
+    let localVersion = '';
+    try {
+      localVersion =
+        JSON.parse(await fsp.readFile(path.join(localRoot, '.state', `${dirName}.json`), 'utf8'))
+          .Version || '';
+    } catch {
+      continue;
+    }
+    if (!localVersion) continue;
+    try {
+      const latest = await fetchLatest(profile);
+      if (latest.version && String(latest.version) !== String(localVersion)) {
+        updates.push({ iconName: profile.iconName, from: localVersion, to: latest.version });
+      }
+    } catch {
+      /* 比版本是尽力的，网络不通就算了 */
+    }
+  }
+  return updates;
+}
+
+async function notifyPackUpdates() {
+  if (!(store.data.games || []).some((item) => item.builtinKey === 'endfield')) return;
+  const updates = await checkPackUpdates().catch(() => []);
+  if (!updates.length) return;
+  const endfield = updates.filter((item) => item.iconName.startsWith('End')).length;
+  const names = updates.map((item) => item.iconName).join('、');
+  send('toast', {
+    type: 'info',
+    message: `${endfield ? '终末地' : '明日方舟'}渠道包有新版本（${names}），可在设置 → 渠道包里更新`,
+  });
+}
+
+let endfieldPackAutoRunning = false;
+/**
+ * 后台自动更新渠道包：终末地、明日方舟各跑各的。
+ *
+ * 两个游戏一共 7 个渠道包，但开关是分开的两个（settings.autoUpdateEndfieldPacks /
+ * autoUpdateArknightsPacks）—— 一个键管两边会让「只玩终末地」的机器在启动时
+ * 平白去拉方舟清单，反过来也一样。
+ */
+async function autoUpdateChannelPacksFor(family) {
+  const isArknights = family === 'arknights';
+  const flagKey = isArknights ? 'autoUpdateArknightsPacks' : 'autoUpdateEndfieldPacks';
+  /*
+   * 只在明确开启时跑。原来写的是 `=== false` 才跳过，于是「从没表过态」（undefined / null）
+   * 也当成开着——没切过服、本机一个渠道包都没有的机器，照样会在后台去碰官方清单。
+   * 现在必须这个键 === true 才动手，它只在成功切过对应游戏的服之后才自动打开。
+   */
+  if (store.data.settings[flagKey] !== true) return;
+  if (endfieldPackAutoRunning) return;
+  const game = store.data.games.find((item) => item.builtinKey === family);
+  if (!game) return;
+  if (!(game.servers || []).some((server) => targetExists(server.path))) return;
+  const configured = String(store.data.settings.endfieldPackRoot || '').trim();
+  let root = path.join(app.getPath('userData'), 'endfield-packs');
+  if (configured) {
+    try {
+      await fsp.access(configured, fs.constants.W_OK);
+      root = configured;
+    } catch {
+      /* bundled resources are read-only: update a writable copy */
+    }
+  }
+  // 只更新本机已经存在的渠道包：全部下下来几百 MB，没装过客户端的新用户不该在
+  // 后台被悄悄塞这么多东西。缺的渠道等切到那个服时按需下载。
+  const exists = isArknights
+    ? (store.data.settings.arknightsPackChannels || []).length > 0
+    : (store.data.settings.endfieldPackChannels || []).length > 0;
+  if (!exists) return;
+  endfieldPackAutoRunning = true;
+  try {
+    const result = await updateEndfieldPacks({ root, onlyExisting: true, family });
+    if (isArknights) refreshArknightsPackChannels();
+    else refreshPackChannels();
     const updated = (result.results || []).filter((item) => !item.skipped && !item.error);
     if (updated.length) {
       store.data.settings.endfieldPackRoot = root;
@@ -12568,7 +14240,7 @@ async function autoUpdateEndfieldPacks() {
       pushState(true);
       send('toast', {
         type: 'success',
-        message: `终末地渠道包已自动更新：${updated.map((item) => item.iconName).join('、')}`,
+        message: `${isArknights ? '明日方舟' : '终末地'}渠道包已自动更新：${updated.map((item) => item.iconName).join('、')}`,
       });
     }
   } catch {
@@ -12576,6 +14248,12 @@ async function autoUpdateEndfieldPacks() {
   } finally {
     endfieldPackAutoRunning = false;
   }
+}
+
+/** 启动时按各自开关跑两条（谁开着就更新谁）。 */
+async function autoUpdateEndfieldPacks() {
+  await autoUpdateChannelPacksFor('endfield');
+  await autoUpdateChannelPacksFor('arknights');
 }
 
 async function autoCheckLauncherUpdate() {
@@ -12612,6 +14290,30 @@ async function checkEndfieldUpdateNotice() {
   }
 }
 
+async function checkArknightsUpdateNotice() {
+  const game = store.data.games.find((item) => item.builtinKey === 'arknights');
+  const server = game?.servers.find((item) => item.id === game.activeServerId);
+  if (!game || !server?.root) return;
+  try {
+    const stateFile = path.join(server.root, '.vela-game-state.json');
+    let local = null;
+    try {
+      local = JSON.parse(await fsp.readFile(stateFile, 'utf8'));
+    } catch {
+      return;
+    }
+    const remote = await checkEndfieldGame({ root: server.root, channel: 'arknights' });
+    if (local?.version && remote.version !== local.version) {
+      send('toast', {
+        type: 'info',
+        message: `明日方舟发现新版本 ${remote.version}，可在设置 → 明日方舟渠道包 → 更新游戏本体`,
+      });
+    }
+  } catch {
+    /* update check is best effort */
+  }
+}
+
 app.whenReady().then(async () => {
   // 便携模式：Chromium 缓存也放进启动器目录（必须在 ready 之后设置）
   if (portableData && !process.env.HX_USER_DATA) {
@@ -12633,11 +14335,27 @@ app.whenReady().then(async () => {
   if (!previousUiRevision) store.data.settings.sidebarCollapsed = true;
   const bundledPacks = bundledEndfieldPackRoot();
   if (bundledPacks) store.data.settings.endfieldPackRoot = bundledPacks;
+  /*
+   * 2.6.0：渠道包自动更新改成「切过服才默认开」。
+   * 老版本把 autoUpdateEndfieldPacks 默认写成 true，从没切过服的机器（本机一个渠道包都没下）
+   * 也会在后台去碰官方清单并更新。这里做一次性迁移：没有切服记录的机器回到「未决定」（null），
+   * 下次成功切服时由 servers:activate 自动勾上；用户手动设过的 false 不受影响。
+   */
+  if (!store.data.settings.channelPackAutoMigrated) {
+    store.data.settings.channelPackAutoMigrated = true;
+    if (!store.data.settings.hasSwitchedServer && store.data.settings.autoUpdateEndfieldPacks === true) {
+      store.data.settings.autoUpdateEndfieldPacks = null;
+    }
+    await store.saveNow().catch(() => {});
+  }
   // 启动时补一次自动探测：用户换了机器、装了 XelLauncher / Starward 都能直接被认出来
   if (!store.data.settings.endfieldPackRoot || !fs.existsSync(store.data.settings.endfieldPackRoot)) {
     const detectedPacks = detectEndfieldPackRoot();
     if (detectedPacks) store.data.settings.endfieldPackRoot = detectedPacks;
   }
+  // 界面要知道「哪几个渠道的包已经在机器上」：一个都没有时不再显示成"未识别"，
+  // 而是说明会在切到那个服时自动补下。
+  refreshPackChannels();
   // 下载目录默认迁移：旧版本可能落在系统下载、系统文档或 AppData 下，
   // 也可能指向一台根本不存在的机器 / 用户的路径。这些都统一迁回启动器自身文件夹内的专门子目录；
   // 用户自己挑的、且现在还能正常写入的路径保持不变。
@@ -12726,12 +14444,14 @@ app.whenReady().then(async () => {
   setTimeout(repairErasedStartCovers, 2500);
   startNoticeAutoSync();
   setTimeout(checkEndfieldUpdateNotice, 8000);
-  setTimeout(autoUpdateEndfieldPacks, 12000);
-  // 游戏更新自动检测：启动后 18 秒查一轮，之后每 30 分钟补查。
-  // 之前这个函数只有定义没有调用，是「官方更新了我们却一直不显示」的直接原因。
-  // autoRefreshPredownloadStatus 内部有 2 小时 TTL，不会把官方接口当轮询打。
-  setTimeout(() => autoRefreshPredownloadStatus().catch(() => {}), 18000);
-  setInterval(() => autoRefreshPredownloadStatus().catch(() => {}), 30 * 60 * 1000);
+  setTimeout(checkArknightsUpdateNotice, 11000);
+  setTimeout(async () => {
+    await autoUpdateEndfieldPacks();
+    // 自动更新只管用户数据目录里已有的包；内置那一份靠这里单独提醒
+    await notifyPackUpdates();
+  }, 12000);
+  // 游戏更新自动检测与预下载自动检查都在 registerIpc 闭包里注册（函数也在那边，
+  // 放这里会 ReferenceError —— 以前就这么错过一次，见那个函数上方的说明）。
   setTimeout(startEndfieldGachaWatcher, 5000);
   // 自更新：开机后 15 秒查一次，之后每 6 小时一次（老版本机器靠这个收到提示）
   settlePreviousUpdate();
@@ -12966,7 +14686,12 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin' && !store?.data?.settings?.closeToTray) app.quit();
+  /*
+   * 窗口真的没了才走到这里（「收进托盘」只是 hide，窗口还在）。
+   * 判断用 closeAction：它和 closeToTray 由同一处写入，但语义更直接 ——
+   * 选过「收进托盘」就留着托盘图标准备唤回，选「退出」就退进程。
+   */
+  if (process.platform !== 'darwin' && store?.data?.settings?.closeAction !== 'tray') app.quit();
 });
 
 app.on('child-process-gone', (_event, details) => {

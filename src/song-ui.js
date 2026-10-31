@@ -103,12 +103,11 @@ function songSearchPanel() {
 
 /* ── 账号状态 ─────────────────────────────────────────────── */
 
-/** 四个平台，顺序固定：左栏、账号列表、登录面板都用这一份，别再各写一份漏掉酷我。 */
+/** 三个平台，顺序固定：左栏、账号列表、登录面板都用这一份。酷我已从歌单/账号入口移除。 */
 const MUSIC_ACCOUNTS = [
   ['netease', '网易云音乐'],
   ['qq', 'QQ 音乐'],
   ['kugou', '酷狗音乐'],
-  ['kuwo', '酷我音乐'],
 ];
 
 function musicAccountLoggedIn(platform) {
@@ -206,7 +205,7 @@ function krAccountListMarkup() {
     <div class="modal-head kr-login-head">
       <div class="kr-login-title">
         <h2>音乐账号</h2>
-        <p>四个平台各登各的，想登哪个点进去。</p>
+        <p>三个平台各登各的，想登哪个点进去。</p>
       </div>
       <button class="icon-btn" data-close>${icon('x')}</button>
     </div>
@@ -534,23 +533,15 @@ function krSyncRow(platform) {
    * 行里只留平台名和入口，有导入的歌单就显示个数。
    */
   if (platform === 'kugou') {
-    const ready = group && !group.error && (group.list || []).length;
-    const kugouSync = syncing
-      ? sync
-      : ready
-        ? { tone: 'ready', text: `${group.list.length} 个` }
-        : { tone: 'idle', text: '' };
+    // 酷狗不再放同步/导入按钮：这一行只留一句说明，入口统一在头顶那一排图标里。
+    const count = (group?.list || []).length;
     return `
-    <div class="kr-sync-row is-${kugouSync.tone}">
+    <div class="kr-sync-row is-import-only"
+      title="酷狗的账号歌单接口官方已经关掉了，歌单只能通过链接导入：在酷狗里分享歌单 → 复制链接 → 点右上角的下载图标粘贴进来">
       <span class="mp-dot" data-platform="${esc(platform)}"></span>
       <span class="kr-sync-name">${esc(label)}</span>
-      <span class="kr-sync-state">${esc(kugouSync.text)}</span>
-      <span class="kr-sync-when">${esc(when)}</span>
-      <button class="kr-sync-btn is-import" data-action="import-playlist-link"
-        title="用歌单链接导入，导入的歌单会进「我的歌单」"
-        style="width:auto;gap:3px;padding:0 7px;font-size:10.5px;">
-        ${icon('download', 'xs')}链接导入
-      </button>
+      <span class="kr-sync-note">需链接导入</span>
+      ${count ? `<span class="kr-sync-state">${count} 个</span>` : ''}
     </div>`;
   }
   return `
@@ -575,9 +566,9 @@ function krSyncRow(platform) {
  */
 function krNavMarkup() {
   const tab = state.songTab || 'queue';
-  // 酷狗排到最后：账号同步已被官方关掉，它在四家里最不重要，
-  // 留在中间只会把能用的平台隔开。顺序固定：网易云 / QQ / 酷我 / 酷狗。
-  const PLATFORM_ORDER = ['netease', 'qq', 'kuwo', 'kugou'];
+  // 酷狗排到最后：账号同步已被官方关掉，它在剩下的几家里最不重要。
+  // 酷我已从歌单入口移除（用户要求），这里不再列它。
+  const PLATFORM_ORDER = ['netease', 'qq', 'kugou'];
   const logged = PLATFORM_ORDER.filter((key) => musicLoggedIn(key));
   const syncingAll = Boolean(state.myPlaylists.loadingAll);
   const myCount = logged.reduce((sum, key) => sum + (krPlaylistGroupOf(key)?.list || []).length, 0);
@@ -633,6 +624,9 @@ function krNavMarkup() {
         ${syncBody}
         ${syncMeta && !syncingAll ? `<p class="kr-sync-meta">${esc(syncMeta)}</p>` : ''}
       </div>
+      <button class="kr-nav-settings" data-action="music-settings" title="播放 / 音源 / 弹幕点歌，都收在这里">
+        ${icon('settings', 'xs')}<span>音乐设置</span>
+      </button>
       <p class="kr-nav-hint">点歌单封面进去看曲目，卡片右下角的播放键直接整张开播。</p>
     </nav>`;
 }
@@ -772,12 +766,16 @@ function songMineMarkup() {
   // 「我的歌单」按平台分区，所有已登录平台的歌单一起列出来。
   // 登录入口只有页头那排账号按钮（打开统一的「音乐账号」面板），这里不再放登录按钮。
   // 未登录也不再直接给空态：歌单广场不依赖登录，先让用户有东西可看。
-  const anyLogged = ['netease', 'qq', 'kugou', 'kuwo'].some((key) => musicAccountLoggedIn(key));
+  const anyLogged = ['netease', 'qq', 'kugou'].some((key) => musicAccountLoggedIn(key));
   if (anyLogged) ensureAllPlaylistsLoaded();
   /*
    * 点开某张歌单后主区换成曲目页，广场被钻取页盖住了。
    * 这时候还去拉广场第一页等于白发一次请求，所以只在浏览态预取。
    */
-  if (!state.myPlaylists.detail) ensurePlaza(state.myPlaylists.plazaPlatform || 'netease');
+  // 酷我已从广场移除：历史残留的 plazaPlatform 归一回网易云，别为看不见的平台发请求
+  if (!['netease', 'qq', 'kugou'].includes(state.myPlaylists.plazaPlatform)) {
+    state.myPlaylists.plazaPlatform = 'netease';
+  }
+  if (!state.myPlaylists.detail) ensurePlaza(state.myPlaylists.plazaPlatform);
   return allPlaylistsMarkup();
 }

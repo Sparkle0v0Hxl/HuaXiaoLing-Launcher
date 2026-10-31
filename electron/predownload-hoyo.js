@@ -49,7 +49,7 @@ const UA =
 /** chunk 缓存目录名（固定，官方启动器和 Starward 都用这个，不能改）。 */
 const CHUNK_DIR = 'chunk';
 
-const HOYO_GAME_KEYS = ['genshin', 'starrail', 'zzz'];
+const HOYO_GAME_KEYS = ['genshin', 'starrail', 'zzz', 'bh3'];
 
 function supported(gameKey) {
   return HOYO_GAME_KEYS.includes(String(gameKey || ''));
@@ -343,6 +343,32 @@ async function writeMeta(installRoot, meta) {
   await fsp.writeFile(metaPath(installRoot), JSON.stringify(meta, null, 2), 'utf8');
 }
 
+/**
+ * 数出 chunk/ 里已有的分块（不含元信息文件，也不含下到一半的 .pd_tmp）。
+ *
+ * 这套数字有两个用途：告诉用户「上次下了一半，现在有多少」，
+ * 以及在没有标记的情况下判断「到底有没有下过东西」（没下过就别显示残留）。
+ * 目录不存在 / 读不动都当 0，不让一次 IO 失败把整个状态查询带崩。
+ */
+async function measureStoredChunks(dir) {
+  let files = 0;
+  let bytes = 0;
+  let entries = [];
+  try {
+    entries = await fsp.readdir(dir);
+  } catch {
+    return { files: 0, bytes: 0 };
+  }
+  for (const name of entries) {
+    if (name === META_FILE || name.endsWith('.pd_tmp')) continue;
+    const stat = await fsp.stat(path.join(dir, name)).catch(() => null);
+    if (!stat?.isFile()) continue;
+    files += 1;
+    bytes += stat.size;
+  }
+  return { files, bytes };
+}
+
 async function inspect({
   gameKey,
   channel,
@@ -401,6 +427,13 @@ async function checkHoyoPredownload({
     }
     const { localVersion, latestVersion, targetVersion } = base;
     const dir = chunkDirOf(installRoot);
+    /*
+     * 先把 chunk/ 里已经躺着的东西数出来。
+     * 预下载中途停掉、关窗、断电，产物都留在 chunk/ 里，而「下完了」的三段标记
+     * 只在全部走完时才写 —— 所以没标记不等于没有进度。界面要能说出
+     * 「已经下了多少、接着来能省多少」，全靠这两个数字，所有分支都带上。
+     */
+    const stored = await measureStoredChunks(dir);
     const answer = {
       supported: true,
       kind: 'hoyo',
@@ -413,6 +446,8 @@ async function checkHoyoPredownload({
       includeCategory: base.includeCategory,
       state: 'none',
       completed: false,
+      storedFiles: stored.files,
+      storedBytes: stored.bytes,
     };
     if (compareVersion(latestVersion, localVersion) > 0) {
       // 正式版已上线：顺带把这次更新的体积拆解算出来给界面看
@@ -433,29 +468,28 @@ async function checkHoyoPredownload({
       Boolean(meta) &&
       Boolean(meta.includeCategory) === base.includeCategory &&
       meta.audioKey === audioKey(audioLanguages);
-    if (!marked || !sameScope) return { ...answer, ...sizes, state: 'available' };
-    // 标记对了还要看东西还在不在：chunk/ 被人删了就是白标。
-    let storedBytes = 0;
-    let storedFiles = 0;
-    try {
-      for (const name of await fsp.readdir(dir)) {
-        if (name === META_FILE) continue;
-        const stat = await fsp.stat(path.join(dir, name)).catch(() => null);
-        if (!stat?.isFile()) continue;
-        storedFiles += 1;
-        storedBytes += stat.size;
-      }
-    } catch {
-      storedFiles = 0;
+    if (!marked || !sameScope) {
+      /*
+       * 两种「没下完」都落到这里：
+       *   - 手动停止 / 关窗 / 报错：标记没写成，但 chunk 在，下次接着用；
+       *   - 改了语音或剧情分类开关：标记对不上，而且旧范围下的分块有一批用不上了。
+       * 后者不能打包票说「接着用」，只提示「范围变了」，别让用户以为进度白攒。
+       */
+      return {
+        ...answer,
+        ...sizes,
+        state: 'available',
+        partial: stored.files > 0 && sameScope,
+        scopeChanged: stored.files > 0 && !sameScope,
+      };
     }
-    if (!storedFiles) return { ...answer, ...sizes, state: 'available' };
+    // 标记对了还要看东西还在不在：chunk/ 被人删了就是白标。
+    if (!stored.files) return { ...answer, ...sizes, state: 'available' };
     const report = {
       ...answer,
       ...sizes,
       state: 'done',
       completed: true,
-      storedFiles,
-      storedBytes,
       expectedChunks: meta?.chunkCount || 0,
     };
     if (!verify) return report;
@@ -1040,6 +1074,7 @@ module.exports = {
   applyHoyoPredownload,
   clearHoyoPredownload,
   chunkDirOf,
+  measureStoredChunks,
   compareVersion,
   readGameVersion,
   classifyManifests,

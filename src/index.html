@@ -151,6 +151,10 @@
         <path d="M9 3.5h6l-1 5.5 3.5 2.5v2H6.5v-2L10 9 9 3.5Z" />
         <path d="M12 13.5v7" />
       </symbol>
+      <symbol id="i-pin-fill" viewBox="0 0 24 24">
+        <path d="M9 3.5h6l-1 5.5 3.5 2.5v2H6.5v-2L10 9 9 3.5Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+        <path d="M12 13.5v7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" />
+      </symbol>
       <symbol id="i-chevron-down" viewBox="0 0 24 24">
         <path d="m5.5 9 6.5 6.5L18.5 9" />
       </symbol>
@@ -382,7 +386,75 @@
       <div class="task-dock-list" id="task-dock-list"></div>
     </div>
 
+    <!-- 通用工具（拆分第三批）：esc / icon 被几百处模板调用，必须排在最前 -->
+    <script src="services/helpers.js"></script>
+    <!-- 音效服务（拆分第一批）：必须早于 app.js —— app.js 的 state 初始化会读
+       AUDIO_FX_STORAGE，排错就是 TDZ ReferenceError、直接白屏 -->
+    <script src="services/audio-fx.js"></script>
+    <!-- 界面音效合成（拆分第二批）：同样必须早于 app.js，启动时会调 playUiSound -->
+    <script src="services/ui-sound.js"></script>
+    <!-- 更新域（拆分第三批）：发现新版本弹窗 / 更新内容公告 / 版本配图 -->
+    <script src="services/update.js"></script>
     <script src="song-ui.js"></script>
+    <!-- 视图层 chrome + 路由 + render 主循环（拆分第四批）：必须早于 app.js -->
+    <script src="views/chrome.js"></script>
+    <!-- 视图层首页 + 启动页（拆分第五批）：必须早于 app.js -->
+    <script src="views/home.js"></script>
+    <!-- 视图层游戏库（拆分第六批）：必须早于 app.js -->
+    <script src="views/library.js"></script>
+    <!-- 视图层服务器/更新面板（拆分第七批）：服务器卡片、切服、预下载、修游戏。
+       必须早于 app.js —— views/home.js 的启动页服务器面板运行时调 serverRow -->
+    <script src="views/servers.js"></script>
+    <!-- 视图层抽卡记录页（拆分第八批）：固定游戏表、卡片、整页、导入/同步弹窗。
+       chrome.js 的视图表 gacha → gachaView2，必须早于 app.js -->
+    <script src="views/gacha.js"></script>
+    <!-- 视图层音乐播放器核心（拆分第九批）：点歌队列存档、播放模式、音质档位、
+       播不动跳下一首、进度记忆、迷你播放器、歌词区、直播间点歌桥接。
+       与其他 views 一样统一排在 app.js 之前：函数是调用时才解析名字，
+       但这里的顶层常量（PLAY_MODES / QUALITY_LEVELS / SONG_PROGRESS_KEY 等）
+       若哪天被 app.js 顶层用到，排在后面就是 TDZ 白屏 -->
+    <script src="views/song.js"></script>
+    <!-- 视图层音乐歌单数据层（拆分第十批）：歌单广场、我的歌单同步与缓存、歌单详情、
+       播放歌单与队列填充、音乐登录状态、榜单入队、歌单搜索、直播间弹幕点歌、音质档位。
+       同样必须早于 app.js：这里的顶层常量（PLAYLIST_CACHE_TTL / PLAYLIST_DETAIL_TTL /
+       PLAYLIST_LINK_API_DEFAULT 等）若被 app.js 顶层读到，排后面就是 TDZ 白屏 -->
+    <script src="views/song-playlist.js"></script>
+    <!-- 视图层音乐视图与弹窗（拆分第十一批）：导入歌单 / 添加歌曲弹窗、音乐源与播放设置、
+       直播间房间与弹幕面板、点歌台整页与 songView（chrome.js 视图表指向它）、
+       歌单卡片与详情、我的歌单分组、榜单面板。
+       同样排在 app.js 之前；顶层常量（MUSIC_SOURCE_LABELS / MUSIC_PLATFORM_LABELS /
+       PLAYLIST_LINK_API_DEFAULT 等）不能移出本文件之后，否则 app.js 里设置页读它们会 TDZ -->
+    <script src="views/song-view.js"></script>
+    <!-- 下载任务队列（downloadsView / downloadRow / statusInfo）+ 渠道资源补齐链路：
+         NTE 预下载窗、抓包状态、账号同步面板、终末地打包弹窗。
+         同样排在 app.js 之前，跨文件全局解析，调用关系不变 -->
+    <script src="views/downloads.js"></script>
+    <!-- 工具页 / 动态页 / 官方公告（能力注册表、米游社·HoYoLAB 登录、截图管理、
+         插件面板、画质配置、战绩页、更新日志与公告）。
+         排在 app.js 之前：顶层只有纯字面量常量与函数声明，函数体内才读 state / dom；
+         插件相关的调用也在函数体内，运行时才跑，早于 plugin-runtime.js 加载不影响 -->
+    <script src="views/tools.js"></script>
+    <!-- 设置页（拆分第十四批）：开关组件、设置回显、界面缩放、主题与强调色候选值、
+         设置页分组与整页渲染。
+         排在 app.js 之前：顶层只有纯字面量常量表（THEME_OPTIONS / ACCENT_OPTIONS /
+         SETTINGS_TABS / AUDIO_LANGUAGE_LABELS）与 settingsEcho（初值 null），
+         没有 DOM 读取或立即执行的副作用 -->
+    <script src="views/settings.js"></script>
+    <!-- 视图层事件绑定（拆分第十五批）：封面 / 头像 / 战绩头像 / 抽卡头像的破图兜底，
+         外加每次整页重绘后重挂监听（bindView）。顶层只有两个函数声明 -->
+    <script src="views/bindings.js"></script>
+    <!-- 全站动作分发（拆分第十五批）：toggleFavorite + handleAction 巨型 switch。
+         顶层只有两个函数声明、零立即执行副作用；case 里调用的 openXxxModal / 各 api.*
+         都在 app.js 与 views/* 里，运行时才解析 -->
+    <script src="views/actions.js"></script>
+    <!-- 弹窗装配（拆分第十六批）：openModal / closeModal / confirmDialog / 关闭三态询问框 /
+         游戏、服务器、下载、Sophon 差异更新、任务坞、链接与动态详情。
+         顶层有 5 个纯字面量常量表 + 3 个 let 游标（初值 null），加载期无副作用，
+         且这 8 个名字在 app.js 剩余部分零引用 -->
+    <script src="views/modals.js"></script>
+    <!-- 提示条与状态回推（拆分第十七批）：toast / canPatchDownloads / patchDownloads / onState。
+         顶层零声明、零立即执行，只注册函数；被全站上百处调用，所以必须早于 app.js -->
+    <script src="views/toasts.js"></script>
     <!-- 战绩数据归一化：必须早于 app.js，app.js 渲染时会直接读 window.HXLRecord -->
     <script src="record-model.js"></script>
     <!-- 插件运行时：视图渲染（纯函数）+ Worker 宿主，必须早于 app.js -->

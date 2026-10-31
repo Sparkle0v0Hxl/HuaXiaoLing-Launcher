@@ -151,4 +151,19 @@ async function prepareLinkedRuntime({ baseRoot, packRoot, targetRoot, onProgress
   };
 }
 
-module.exports = { prepareLinkedRuntime, walkFiles, hardlinkTree };
+/**
+ * 把一棵目录完整复制过去（不做硬链接）。
+ *
+ * 渠道包是长期缓存，往运行时里铺的时候必须复制：用硬链接的话，用户哪天在设置里
+ * 「清理渠道包」就等于把游戏文件一起删了。
+ */
+async function copyTree(sourceRoot, targetRoot) {
+  const files = await walkFiles(sourceRoot);
+  for (const file of files) {
+    const target = path.join(targetRoot, file.rel);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.copyFile(file.full, target);
+  }
+}
+
+module.exports = { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree };

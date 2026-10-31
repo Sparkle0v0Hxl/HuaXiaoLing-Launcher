@@ -93,6 +93,11 @@ contextBridge.exposeInMainWorld('launcher', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  // 首次点关闭：主进程问「收托盘还是退出」，渲染层答完由主进程记住并执行
+  // remember=false 表示这一次不记住（弹窗里没勾「以后不再询问」）
+  closeChoice: (choice, remember = true) =>
+    ipcRenderer.invoke('window:close-choice', { action: choice, remember }),
+  closeAskCancel: () => ipcRenderer.invoke('window:close-cancel'),
   moveWindowBy: (dx, dy) => ipcRenderer.invoke('window:move-by', { dx, dy }),
 
   /*
@@ -111,6 +116,8 @@ contextBridge.exposeInMainWorld('launcher', {
   onUpdateProgress: (callback) => subscribe('update:progress', callback),
   onGachaUpdated: (callback) => subscribe('gacha:updated', callback),
   onGameExited: (callback) => subscribe('game:exited', callback),
+  // 提权重启之后接着开刚才点的那款游戏（主进程在页面加载完后发）
+  onGameAutolaunch: (callback) => subscribe('game:autolaunch', callback),
   onLinkProgress: (callback) => subscribe('link:progress', callback),
   onLinkDone: (callback) => subscribe('link:done', callback),
   onLinkPreviewProgress: (callback) => subscribe('link:preview-progress', callback),
@@ -120,9 +127,17 @@ contextBridge.exposeInMainWorld('launcher', {
   // 终末地切非官服渠道时要现做链接运行时（几十秒），进度必须能看到，
   // 否则「点切换」和「卡死」在界面上是同一件事。
   onEndfieldProgress: (callback) => subscribe('endfield:progress', callback),
+  // 修复游戏时主进程会逐文件 / 逐 chunk 回传进度，不显示的话界面看起来像卡死。
+  onRepairProgress: (callback) => subscribe('repair:progress', callback),
 
   // 窗口全屏状态（Electron 原生全屏不会触发 CSS :fullscreen，只能由主进程告知）
   onFullscreenChange: (callback) => subscribe('window:fullscreen', callback),
+
+  // 窗口最小化状态（渲染层据此停循环视频 + 装饰动画省 GPU；音频不停）
+  onMinimizeChange: (callback) => subscribe('window:minimize-state', callback),
+
+  // 第一次点关闭按钮：主进程拦下 close 事件，让这里弹「收进托盘 / 退出程序」
+  onCloseAsk: (callback) => subscribe('window:close-ask', callback),
 
   // 预下载：新版本上线前先把内容拉到本地，上线后再应用
   predownload: {
@@ -154,8 +169,18 @@ contextBridge.exposeInMainWorld('launcher', {
   endfield: {
     importPacks: () => ipcRenderer.invoke('endfield:import-packs'),
     syncPacks: () => ipcRenderer.invoke('endfield:sync-packs'),
-    updateOfficial: () => ipcRenderer.invoke('endfield:update-official-packs'),
+    updateOfficial: (options) => ipcRenderer.invoke('endfield:update-official-packs', options),
+    packUsage: () => ipcRenderer.invoke('endfield:pack-usage'),
+    deletePacks: (options) => ipcRenderer.invoke('endfield:delete-packs', options),
+    updateArknights: () => ipcRenderer.invoke('arknights:update-packs'),
+    updateArknightsGame: () => ipcRenderer.invoke('arknights:update-game'),
     updateGame: () => ipcRenderer.invoke('endfield:update-game'),
+    // 渠道包按需下载（安装包不再内置）：查状态 → 用户确认 → 下载 → 可取消
+    packStatus: (input) => ipcRenderer.invoke('endfield:channel-pack-status', input),
+    packDownload: (input) => ipcRenderer.invoke('endfield:channel-pack-download', input),
+    packCancel: (input) => ipcRenderer.invoke('endfield:channel-pack-cancel', input),
+    packList: () => ipcRenderer.invoke('endfield:channel-pack-list'),
+    onPackProgress: (callback) => subscribe('endfield:pack-progress', callback),
   },
 
   games: {
@@ -171,6 +196,7 @@ contextBridge.exposeInMainWorld('launcher', {
     launch: (id) => ipcRenderer.invoke('games:launch', id),
     stop: (id) => ipcRenderer.invoke('games:stop', id),
     reveal: (id) => ipcRenderer.invoke('games:reveal', id),
+    repair: (input) => ipcRenderer.invoke('games:repair-game', input),
   },
 
   servers: {
@@ -182,6 +208,8 @@ contextBridge.exposeInMainWorld('launcher', {
     link: (input) => ipcRenderer.invoke('servers:link', input),
     linkPreview: (input) => ipcRenderer.invoke('servers:link-preview', input),
     prepareEndfield: (input) => ipcRenderer.invoke('servers:prepare-endfield', input),
+    // 切服前问一句「这个服要不要先下渠道包」：不需要就返回 { needed:false }
+    channelPackPlan: (input) => ipcRenderer.invoke('servers:channel-pack-plan', input),
     prepareSophon: (input) => ipcRenderer.invoke('servers:prepare-sophon', input),
     updateSophon: (input) => ipcRenderer.invoke('servers:update-sophon', input),
     // 一键下载：未安装游戏的全新安装（进度仍走 sophon:progress 通道）
@@ -226,6 +254,8 @@ contextBridge.exposeInMainWorld('launcher', {
   musicPlaylistsCache: () => ipcRenderer.invoke('music:playlists-cache'),
   musicSavePlaylistsCache: (payload) => ipcRenderer.invoke('music:playlists-cache-save', payload || {}),
   musicDropPlaylistsCache: (payload) => ipcRenderer.invoke('music:playlists-cache-drop', payload || {}),
+  /* 删掉一张链接导入的歌单：按 id 精确从缓存剔除（合并写遇到空列表会跳过，救不了删除） */
+  musicRemovePlaylist: (payload) => ipcRenderer.invoke('music:playlist-remove', payload || {}),
   musicResolve: (input) => ipcRenderer.invoke('music:resolve', input),
   musicLyric: (input) => ipcRenderer.invoke('music:lyric', input),
   musicPlaylistSongs: (input) => ipcRenderer.invoke('music:playlist-songs', input),
@@ -273,7 +303,7 @@ contextBridge.exposeInMainWorld('launcher', {
   createDesktopShortcut: () => ipcRenderer.invoke('app:create-desktop-shortcut'),
   setUiScale: (value) => ipcRenderer.invoke('app:ui-scale', value),
   exportStartVideo: (gameId) => ipcRenderer.invoke('start:export-video', gameId),
-  relaunchAdmin: () => ipcRenderer.invoke('app:relaunch-admin'),
+  relaunchAdmin: (input) => ipcRenderer.invoke('app:relaunch-admin', input),
   quit: () => ipcRenderer.invoke('app:quit'),
 
   news: {

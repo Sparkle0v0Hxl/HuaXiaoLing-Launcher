@@ -70,6 +70,27 @@ const GAME_DEFS = [
     bangbooBanners: [5],
   },
   {
+    key: 'bh3',
+    name: '崩坏3',
+    table: 'BH3GachaItem',
+    infoTable: 'BH3GachaInfo',
+    infoId: 'ItemId',
+    infoName: 'ItemName',
+    infoIcon: 'IconUrl',
+    fiveRank: 5,
+    fourRank: 4,
+    // 崩坏3 补给类型：1=标配补给（常驻），2=精准补给（武器/圣痕），其余为活动限定。
+    // 卡池具体编号以 Starward 数据库实际为准；即便个别编号对不上，总抽数与五星/垫数统计不受影响。
+    banners: {
+      1: '标配补给',
+      2: '精准补给',
+      11: '活动补给',
+      12: '扩充补给',
+    },
+    standard: [1],
+    weaponBanners: [2],
+  },
+  {
     key: 'endfield',
     name: '明日方舟：终末地',
     table: '',

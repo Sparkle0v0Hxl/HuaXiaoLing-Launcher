@@ -18,7 +18,7 @@
     不会动：
       - data\          用户数据（账号 / 抽卡 / 歌单）
       - downloads\     下载缓存
-      - resources\     程序本体
+      - resources\     程序本体（含 endfield-packs\ 内置渠道包，删了会导致首启无渠道包可用）
       - locales\       Electron 运行时
       - 当前版本的 zip 与 latest.json
 

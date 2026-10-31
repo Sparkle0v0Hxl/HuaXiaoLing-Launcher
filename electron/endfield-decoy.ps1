@@ -1,23 +1,19 @@
 param(
-  [Parameter(Mandatory = $true)][string]$ParentExe,
-  [Parameter(Mandatory = $true)][string]$GameExe,
-  [Parameter(Mandatory = $true)][string]$WorkDir,
+  [string]$ParentExe = "",
+  [string]$GameExe = "",
+  [string]$WorkDir = "",
   [string]$GameArgs = "",
-  [Parameter(Mandatory = $true)][string]$TempDir,
-  [string]$PidFile = ""
+  [string]$TempDir = "",
+  [string]$PidFile = "",
+  # prebuilt assembly: skips the C# compile (a few hundred ms instead of several seconds)
+  [string]$Assembly = "",
+  # compile the C# source into an assembly and exit (called once by the launcher)
+  [string]$CompileOnly = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-try {
-  $signature = Get-AuthenticodeSignature -FilePath $ParentExe
-  if ($signature.Status -ne "Valid") {
-    Write-Output "ERROR:invalid official launcher signature"
-    if ($PidFile) { Set-Content -LiteralPath $PidFile -Value "ERROR:invalid official launcher signature" -Encoding ASCII }
-    exit 2
-  }
-
-  Add-Type -TypeDefinition @'
+$TypeSource = @'
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -179,12 +175,42 @@ public static class VelaEndfield
 }
 '@
 
+function Write-Fail($message) {
+  Write-Output ("ERROR:" + $message)
+  if ($PidFile) { Set-Content -LiteralPath $PidFile -Value ("ERROR:" + $message) -Encoding ASCII }
+  exit 1
+}
+
+try {
+  # compile-only mode: the launcher calls this once, then loads the assembly
+  if ($CompileOnly) {
+    Add-Type -TypeDefinition $TypeSource -OutputAssembly $CompileOnly
+    if (-not (Test-Path -LiteralPath $CompileOnly)) { exit 3 }
+    exit 0
+  }
+
+  if (-not $ParentExe) { Write-Fail "missing parent exe" }
+  if (-not $GameExe) { Write-Fail "missing game exe" }
+
+  $signature = Get-AuthenticodeSignature -FilePath $ParentExe
+  if ($signature.Status -ne "Valid") {
+    Write-Fail ("invalid official launcher signature (" + $signature.Status + ") on " + $ParentExe)
+  }
+
+  if ($Assembly -and (Test-Path -LiteralPath $Assembly)) {
+    Add-Type -Path $Assembly
+  } else {
+    Add-Type -TypeDefinition $TypeSource
+  }
+
+  # hold the file handle between validation and process creation so the image cannot be swapped
   $imageLock = $null
   try {
     $imageLock = [System.IO.File]::Open($ParentExe, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
   } catch {
     $imageLock = $null
   }
+
   $parent = [VelaEndfield]::StartSuspended($ParentExe)
   try {
     $game = [VelaEndfield]::StartChild($parent, $GameExe, $WorkDir, $GameArgs)
@@ -195,7 +221,7 @@ public static class VelaEndfield
   finally {
     [VelaEndfield]::Terminate($parent)
     if ($imageLock) { $imageLock.Dispose() }
-    Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($TempDir) { Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
   }
 }
 catch {
@@ -205,4 +231,4 @@ catch {
   exit 1
 }
 
-
+exit 0

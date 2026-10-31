@@ -456,6 +456,37 @@ async function downloadChunk(chunk, prefix, signal) {
   throw new Error(`分块下载失败 ${chunk.id}：${lastError?.message || '未知错误'}`);
 }
 
+/*
+ * 带持久缓存的分块获取：先查 sophon-cache/chunks/<md5>，命中就直接读盘（跳过网络）；
+ * 未命中才下载，并 best-effort 落盘进缓存（下次更新 / 跨游戏复用同一分块时零流量）。
+ * 缓存写入失败不影响安装，只是少了一次复用机会。
+ */
+async function fetchChunk(chunk, prefix, chunkCacheDir, signal) {
+  if (chunkCacheDir && chunk.uncompressedMd5) {
+    const cachePath = path.join(chunkCacheDir, chunk.uncompressedMd5);
+    try {
+      const cached = await fsp.readFile(cachePath);
+      if (md5Buffer(cached) === chunk.uncompressedMd5.toLowerCase()) {
+        return { raw: cached, fromCache: true };
+      }
+    } catch {
+      /* 缓存未命中或已损坏，走网络 */
+    }
+  }
+  const raw = await downloadChunk(chunk, prefix, signal);
+  if (chunkCacheDir && chunk.uncompressedMd5) {
+    try {
+      await fsp.mkdir(chunkCacheDir, { recursive: true });
+      const tmp = path.join(chunkCacheDir, `${chunk.uncompressedMd5}.tmp`);
+      await fsp.writeFile(tmp, raw);
+      await fsp.rename(tmp, path.join(chunkCacheDir, chunk.uncompressedMd5));
+    } catch {
+      /* 缓存写失败不影响安装 */
+    }
+  }
+  return { raw, fromCache: false };
+}
+
 async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal) {
   if (!info || !info.launcher || !info.game) return '';
   const query =
@@ -653,20 +684,23 @@ async function prepareSophon({
   }
 
   onProgress?.({ phase: 'manifest', current: '读取本地分块索引' });
-  const localChunks =
-    path.resolve(baseRoot) === path.resolve(targetRoot)
-      ? new Map()
-      : await loadLocalChunkIndex({
-          gameKey,
-          info: CHANNELS[gameKey]?.[detectLocalChannel(baseRoot)] || info,
-          audioLanguages,
-          includeStory: includeStoryResources,
-          branchPackage: branch.main,
-          baseRoot,
-          cacheDir,
-          onProgress,
-          signal,
-        });
+  /*
+   * 就地更新（baseRoot === targetRoot）也要建本地分块索引：
+   * 以往这里直接给空 Map，导致「更新已有客户端」会重新下载全部分块，明明没变的分块也白下。
+   * 现在总是按旧版本清单建索引，写文件时未变的分块直接复用本地字节（reusedChunks），
+   * 这正是 Starward 的「就地更新复用旧版 chunk」思路。索引读取失败会自动回退到空 Map（全量下载）。
+   */
+  const localChunks = await loadLocalChunkIndex({
+    gameKey,
+    info: CHANNELS[gameKey]?.[detectLocalChannel(baseRoot)] || info,
+    audioLanguages,
+    includeStory: includeStoryResources,
+    branchPackage: branch.main,
+    baseRoot,
+    cacheDir,
+    onProgress,
+    signal,
+  });
 
   let normalized = [];
   for (const file of files.values()) {
@@ -683,6 +717,7 @@ async function prepareSophon({
   let downloaded = 0;
   let skipped = 0;
   let reusedChunks = 0;
+  let cacheHits = 0;
   let bytesDone = 0;
   const localHandles = new Map();
 
@@ -701,6 +736,8 @@ async function prepareSophon({
   }
 
   await fsp.mkdir(targetRoot, { recursive: true });
+  // 持久分块缓存目录：sophon-cache/chunks/<md5>，跨版本 / 跨游戏复用同一分块时不再走网络
+  const chunkCacheDir = cacheDir ? path.join(cacheDir, 'chunks') : '';
   for (const file of normalized) {
     if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
     await waitIfPaused(signal);
@@ -709,7 +746,7 @@ async function prepareSophon({
     processed += 1;
     if (file.isFolder) {
       await fsp.mkdir(target, { recursive: true });
-      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, reusedChunks, cacheHits, bytesDone, totalBytes, current: file.file });
       continue;
     }
     await fsp.mkdir(path.dirname(target), { recursive: true });
@@ -723,12 +760,36 @@ async function prepareSophon({
     if (targetValid) {
       skipped += 1;
       bytesDone += file.size;
-      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, reusedChunks, cacheHits, bytesDone, totalBytes, current: file.file });
       continue;
     }
 
+    // 单分块文件 + 持久分块缓存命中：直接从缓存硬链接落地（同卷瞬时，跨卷退化为常规写盘）。
+    // 「分块缓存 + chunk 级硬链接」的落点：跨版本 / 跨游戏复用的分块不再走网络，也不读回内存再写。
+    if (file.chunks.length === 1 && chunkCacheDir) {
+      const only = file.chunks[0];
+      const cachePath = path.join(chunkCacheDir, only.uncompressedMd5);
+      try {
+        await fsp.access(cachePath);
+        await fsp.unlink(target).catch(() => {});
+        await fsp.link(cachePath, target);
+        if (await quickFileMatches(file, target)) {
+          linked += 1;
+          cacheHits += 1;
+          bytesDone += file.size;
+          onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, reusedChunks, cacheHits, bytesDone, totalBytes, current: file.file });
+          continue;
+        }
+        await fsp.unlink(target).catch(() => {});
+      } catch {
+        /* 缓存没有该分块，或硬链接失败（跨卷 / 权限），走常规流程 */
+      }
+    }
+
+    // 就地更新时 source 与 target 是同一文件，硬链接自己无意义，直接跳过这一支
+    const sourceIsTarget = path.resolve(source) === path.resolve(target);
     let sourceValid = false;
-    const candidates = [source];
+    const candidates = sourceIsTarget ? [] : [source];
     if (gameKey === 'genshin') {
       if (file.file.startsWith('GenshinImpact_Data/')) {
         candidates.push(safeJoin(baseRoot, file.file.replace(/^GenshinImpact_Data/, 'YuanShen_Data')));
@@ -761,20 +822,47 @@ async function prepareSophon({
       }
       linked += 1;
       bytesDone += file.size;
-      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, reusedChunks, cacheHits, bytesDone, totalBytes, current: file.file });
       continue;
     }
 
+    // 就地更新时，若某个分块的本地源就是当前文件自身（entry.file === 该文件），
+    // 必须在截断 target 之前先把它的字节读出来，否则截断后源被清空、只能退回重新下载。
+    const selfSourced = new Map();
+    if (path.resolve(baseRoot) === path.resolve(targetRoot)) {
+      for (const chunk of file.chunks) {
+        const localEntry = localChunks.get(chunk.uncompressedMd5);
+        if (localEntry && safeJoin(baseRoot, localEntry.file) === target) {
+          try {
+            const buf = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
+            if (buf) selfSourced.set(chunk.uncompressedMd5, buf);
+          } catch {
+            /* 读不到就走下载 */
+          }
+        }
+      }
+    }
+
+    // 就地更新时 target 可能也是某个分块复用源：先关掉它的读句柄，避免 Windows 共享冲突
+    const targetKey = safeJoin(baseRoot, file.file);
+    const openHandle = localHandles.get(targetKey);
+    if (openHandle) {
+      await openHandle.close().catch(() => {});
+      localHandles.delete(targetKey);
+    }
     const handle = await fsp.open(target, 'w');
     try {
       await handle.truncate(file.size);
       for (const chunk of file.chunks) {
         const localEntry = localChunks.get(chunk.uncompressedMd5);
-        let raw = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
+        let raw = selfSourced.get(chunk.uncompressedMd5);
+        if (!raw) raw = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
         if (raw) {
           reusedChunks += 1;
         } else {
-          raw = await downloadChunk(chunk, file.chunkPrefix, signal);
+          const fetched = await fetchChunk(chunk, file.chunkPrefix, chunkCacheDir, signal);
+          raw = fetched.raw;
+          if (fetched.fromCache) cacheHits += 1;
         }
         await handle.write(raw, 0, raw.length, chunk.offset);
         bytesDone += chunk.uncompressedSize;
@@ -786,6 +874,7 @@ async function prepareSophon({
           downloaded,
           skipped,
           reusedChunks,
+          cacheHits,
           bytesDone,
           totalBytes,
           current: file.file,
@@ -826,6 +915,7 @@ async function prepareSophon({
     downloaded,
     skipped,
     reusedChunks,
+    cacheHits,
     targetRoot,
     executable: exe || '',
   };

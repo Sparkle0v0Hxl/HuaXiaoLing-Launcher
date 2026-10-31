@@ -148,19 +148,10 @@ function walk(dir, out) {
   if (!nt.ok) { console.error('tree 失败', nt.status, JSON.stringify(nt.json).slice(0, 300)); process.exit(1); }
   console.log('new tree:', nt.json.sha.slice(0, 8));
 
-  // 6. 提交
+  // 6. 提交（提交信息必须显式传 COMMIT_MSG；默认兜底只写版本号，避免再出现
+  //    2026-10-30 那种「内容推的是 2.5.0、提交信息还停在 2.0.4」的事故）
   const version = JSON.parse(fs.readFileSync(path.join(WS, 'package.json'), 'utf8')).version;
-  const msg = process.env.COMMIT_MSG || [
-    `2.0.4: 更新弹窗置顶美图 + 设置页精简 + 动态页收更新说明`,
-    ``,
-    `- 更新弹窗: 每次发版配一张官方美术图(五款游戏全覆盖), 标注图片来源; 图片加载失败自动收起`,
-    `- 设置页: 「行为」「存储」两组收起为折叠面板, 页面显著变短`,
-    `- 动态页: 恢复「这一版改了什么」, 从设置页搬回`,
-    `- 启动页: 每个游戏的抽屉卡片改成封面在上、标题条在下, 不再压字`,
-    `- 抽卡/战绩/登录/截图/歌单: 路径识别、酷狗歌单、截图指向游戏目录等修复`,
-    ``,
-    `package.json -> ${version}`,
-  ].join('\n');
+  const msg = process.env.COMMIT_MSG || `v${version}: 源码同步`;
 
   const nc = await api('POST', `/repos/${REPO}/git/commits`, { message: msg, tree: nt.json.sha, parents: [headSha] });
   if (!nc.ok) { console.error('commit 失败', nc.status, JSON.stringify(nc.json).slice(0, 300)); process.exit(1); }
