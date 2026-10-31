@@ -135,6 +135,7 @@ const SETTINGS_TABS = [
   ['sound', '音效', 'volume', '界面反馈音、试听与音乐行为'],
   ['behavior', '行为', 'settings', '托盘、开机自启与自动同步'],
   ['storage', '存储', 'folder-open', '下载目录、运行时与终末地渠道包'],
+  ['files', '文件管理', 'trash', '分类查看占用，自己决定清掉哪些缓存'],
   ['update', '更新', 'download', '更新源、自动检查与手动更新'],
   ['community', '社区', 'link', '项目主页、发布页与问题反馈'],
   ['about', '关于', 'info', '版本信息与相关链接'],
@@ -181,11 +182,248 @@ function audioLanguagesOf() {
   return picked.length ? picked : ['zh-cn'];
 }
 
+/* ------------------------------------------------------------------ */
+/* 抽卡记录云备份                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 网盘预设：只放「官方自带 WebDAV」的那几家。
+ * 百度网盘要走开放平台 OAuth，等于要求每个用户去注册开发者；夸克没有任何对外
+ * API（私有协议 + 设备指纹，逆向既违规又随时失效）。这两家不给预设，
+ * 用户确实有别的 WebDAV 服务就用「自定义」自己填。
+ *
+ * 第 3 项是点选后自动填进地址栏的模板，第 4 项是开通指引，
+ * keywords 用来「从已填地址反推预设」——用户改过地址之后回来，
+ * 高亮的仍然是对应的那一家，不会永远停在「自定义」。
+ */
+const GACHA_BACKUP_PRESETS = [
+  [
+    'custom',
+    '自定义',
+    '',
+    '任何支持 WebDAV 的网盘 / NAS 都行，把完整地址填进来。优先用 https；只有在你自己内网的 NAS 上才填 http——http 的账号密码是明文上网的。',
+    [],
+  ],
+  [
+    '123pan',
+    '123 云盘',
+    'https://webdav.123pan.cn/webdav',
+    '网页「工具中心 → 第三方挂载 → WebDAV 授权管理 → 添加应用」，勾上读写权限。应用密码只显示一次，记得当场存下来；地址以网页给出那串（webdav-xxx.pd1.123pan.cn/webdav）为准，账号就是手机号。需要会员。',
+    ['123pan'],
+  ],
+  [
+    'alipan',
+    '阿里云盘',
+    'https://openapi.alipan.com/dav',
+    '网页「设置 → 第三方应用」授权后拿到第三方密码。账号填手机号，密码填那串第三方密码（不是登录密码）。需要会员。',
+    ['alipan'],
+  ],
+  [
+    'jianguo',
+    '坚果云',
+    'https://dav.jianguoyun.com/dav/',
+    '网页「账户信息 → 安全选项 → 添加应用密码」，账号填登录邮箱，密码填那串应用密码。免费版每月 1GB 上传流量，抽卡记录这点体积完全够。',
+    ['jianguoyun'],
+  ],
+  [
+    'synology',
+    '群晖 NAS',
+    'https://你的域名:5006/',
+    '群晖「控制面板 → 文件服务 → WebDAV」里开启 HTTPS（默认 5006，HTTP 是 5005）；账号密码就是 NAS 的账号。家里局域网可以直接填内网 IP。',
+    ['5006', ':5005', 'synology'],
+  ],
+  [
+    'nextcloud',
+    'Nextcloud',
+    'https://你的域名/remote.php/dav/files/用户名/',
+    '地址里的「用户名」要换成你自己的。Nextcloud 网页左下角「文件设置 → WebDAV 地址」可以直接复制完整地址。',
+    ['nextcloud', 'remote.php/dav'],
+  ],
+];
+
+/** 云备份状态；没拿到之前给一份安全默认值，免得设置页首帧报错。 */
+function gachaBackupState() {
+  return (
+    state.gachaBackup || {
+      enabled: false,
+      url: '',
+      username: '',
+      keep: 5,
+      lastAt: 0,
+      lastResult: '',
+      lastError: '',
+      hasPassword: false,
+      hasSecret: false,
+      intervalDays: 7,
+    }
+  );
+}
+
+/** 从已填地址反推预设；认不出来就当自定义。 */
+function gachaBackupPresetKey() {
+  const url = String(gachaBackupState().url || '').toLowerCase();
+  if (!url) return 'custom';
+  for (const [key, , , , keywords] of GACHA_BACKUP_PRESETS) {
+    if (key === 'custom' || !keywords.length) continue;
+    if (keywords.some((word) => url.includes(word))) return key;
+  }
+  return 'custom';
+}
+
+function gachaBackupPresetHint() {
+  const preset = GACHA_BACKUP_PRESETS.find(([key]) => key === gachaBackupPresetKey());
+  return preset ? preset[3] : GACHA_BACKUP_PRESETS[0][3];
+}
+
+function gachaBackupTimeText(ms) {
+  const value = Number(ms) || 0;
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * 一行状态。顺序很重要：没开启 → 配置不全 → 缺密码 → 上次失败 → 上次成功 → 等首次。
+ * 「上次失败」优先于「上次成功」，否则用户看到的永远是那句成功，坏了他也不知道。
+ */
+function gachaBackupSummary() {
+  const backup = gachaBackupState();
+  const every = `每 ${Number(backup.intervalDays) || 7} 天自动一次`;
+  if (!backup.enabled) return '当前未开启：抽卡记录只存在这台电脑上。';
+  if (!backup.url || !backup.username) return '已开启，但网盘地址或账号还没填完。';
+  if (!backup.hasPassword) return '已开启，但应用密码还没保存，跑不起来。';
+  if (backup.lastError) return `上次备份没成功：${backup.lastError}`;
+  if (backup.lastAt) {
+    return `上次备份 ${gachaBackupTimeText(backup.lastAt)} · ${backup.lastResult || '已完成'} · ${every}`;
+  }
+  return `已开启，等首次自动备份（${every}）`;
+}
+
+/**
+ * 读表单里用户刚填的值。保存、测试连接、点开关三处都用它，
+ * 免得「点开关时刚打的地址还没保存就被重绘清空」。
+ *
+ * 表单不在当前分组时返回 null——那种情况下不能给主进程发空串，
+ * 否则一次误调用就把已存好的地址和账号抹了。
+ */
+function gachaBackupFormPatch() {
+  const urlInput = document.getElementById('gacha-backup-url');
+  if (!urlInput) return null;
+  const read = (id) => {
+    const node = document.getElementById(id);
+    return node ? String(node.value || '') : '';
+  };
+  return {
+    url: read('gacha-backup-url').trim(),
+    username: read('gacha-backup-user').trim(),
+    // 空串＝沿用已存的那份（密码框回显不了明文，不能逼用户每次重填）
+    password: read('gacha-backup-pass'),
+    secret: read('gacha-backup-secret'),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 文件管理：分类占用与清理                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 分类数据来自主进程（electron/file-manager.js 的 GROUPS），前端只负责画。
+ * 统计要扫几百 MB、上千个文件，不能在渲染里同步等，所以走「先渲染空态 → 拉回来再重绘」。
+ */
+let storageUsage = null;
+let storageLoading = false;
+let storageError = '';
+
+function storageSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** 统计结果回来之前不重复发请求；失败一次就不再自动重试，交给用户点「重新统计」。 */
+function ensureStorageUsage() {
+  if (storageUsage || storageLoading || storageError) return;
+  refreshStorageUsage();
+}
+
+function refreshStorageUsage(force = false) {
+  if (storageLoading && !force) return;
+  if (!api.storage || typeof api.storage.usage !== 'function') {
+    storageError = '当前版本不支持文件统计';
+    return;
+  }
+  storageLoading = true;
+  storageError = '';
+  const run = async () => {
+    try {
+      storageUsage = await api.storage.usage();
+    } catch (error) {
+      storageError = (error && error.message) || String(error);
+    } finally {
+      storageLoading = false;
+      render({ preserveScroll: true });
+    }
+  };
+  // 放到下一帧：直接在这里 await 的话，会把正在进行的这次渲染挂住
+  setTimeout(run, 0);
+}
+
+function storageCardHtml(group) {
+  const empty = !group.bytes;
+  const caution = group.risk === 'caution';
+  return `
+    <div class="storage-card${empty ? ' is-empty' : ''}">
+      <div class="storage-card-head">
+        <strong>${esc(group.label)}</strong>
+        <span class="storage-size">${empty ? '0 B' : storageSize(group.bytes)}</span>
+      </div>
+      <p class="storage-note">${esc(group.note)}</p>
+      <div class="storage-card-foot">
+        <span class="storage-meta">${group.files} 个文件${caution ? ' · 清掉会影响正在进行的下载' : ''}</span>
+        <button class="btn btn-ghost" data-action="clean-storage" data-id="${esc(group.id)}" ${empty ? 'disabled' : ''}>${icon('trash')}清理</button>
+      </div>
+    </div>`;
+}
+
+function storagePanelHtml() {
+  if (storageError) {
+    return `<div class="storage-state">
+      <strong>统计失败</strong>
+      <span>${esc(storageError)}</span>
+      <button class="btn btn-ghost" data-action="refresh-storage">${icon('refresh')}重新统计</button>
+    </div>`;
+  }
+  if (!storageUsage) {
+    return `<div class="storage-state"><strong>正在统计…</strong><span>第一次打开会扫一遍数据目录，通常一两秒。</span></div>`;
+  }
+  const { totalBytes, cleanableBytes, safeBytes, groups } = storageUsage;
+  return `
+    <div class="storage-summary">
+      <div class="storage-summary-copy">
+        <strong>数据目录共 ${storageSize(totalBytes)}</strong>
+        <span>其中可清理 ${storageSize(cleanableBytes)}，一键清理只动安全项那 ${storageSize(safeBytes)}；账号、设置、抽卡记录与你换过的封面都不在清理范围内。</span>
+      </div>
+      <div class="storage-summary-actions">
+        <button class="btn btn-ghost" data-action="open-data-folder">${icon('external')}打开目录</button>
+        <button class="btn btn-ghost" data-action="refresh-storage" title="重新统计">${icon('refresh')}</button>
+        <button class="btn btn-primary" data-action="clean-storage-all" ${safeBytes ? '' : 'disabled'}>${icon('trash')}清理安全项</button>
+      </div>
+    </div>
+    <div class="storage-list">${groups.map(storageCardHtml).join('')}</div>`;
+}
+
 function settingsView() {
   const settings = state.settings;
   const demos = state.games.filter((g) => g.demo).length;
   // 渠道包合并成一行之后，「就绪几个 / 一共几个」由这里一次算清（终末地 5 + 方舟 2）
   const packCount = channelPackCount(settings);
+  // 云备份那几行的状态：开关、已填地址、上次结果都从这里取
+  const backup = gachaBackupState();
+  const backupPresetKey = gachaBackupPresetKey();
   const themeOptions = THEME_OPTIONS;
   const accents = ACCENT_OPTIONS;
   const tab = settingsTab();
@@ -537,6 +775,72 @@ function settingsView() {
                 </div>`
               : ''
           }
+
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>抽卡记录云备份</strong>
+              <span>把抽卡记录传到你自己网盘的 WebDAV 目录，${Number(backup.intervalDays) || 7} 天自动一次（没有手动备份按钮）。换电脑、重装系统之后用下面的「从云端恢复」找回来。只传抽卡记录本体和它的元数据缓存——账号密码、Cookie、下载记录、启动器设置一样都不传。</span>
+              <span class="hint">${esc(gachaBackupSummary())}</span>
+            </div>
+            <div class="setting-control">
+              <button class="switch ${backup.enabled ? 'on' : ''}" role="switch" aria-checked="${Boolean(backup.enabled)}" data-action="toggle-gacha-backup" title="${backup.enabled ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
+          <div class="setting-row gacha-backup-row">
+            <div class="setting-copy">
+              <strong>网盘类型</strong>
+              <span>${esc(gachaBackupPresetHint())}</span>
+              <span class="hint">百度网盘要走开放平台授权，等于要求每个用户去注册开发者；夸克没有对外接口。这两家不做预设，真要接只能自己填地址。</span>
+            </div>
+            <div class="setting-control">
+              <div class="gacha-backup-presets">
+                ${GACHA_BACKUP_PRESETS.map(
+                  ([key, label]) =>
+                    `<button class="btn btn-quiet ${key === backupPresetKey ? 'active' : ''}" data-action="gacha-backup-preset" data-value="${key}">${label}</button>`
+                ).join('')}
+              </div>
+            </div>
+          </div>
+          <div class="setting-row gacha-backup-row">
+            <div class="setting-copy">
+              <strong>WebDAV 连接</strong>
+              <span>应用密码和加密口令都走系统凭据加密（DPAPI）存在 sessions.enc.json 里，不会跟着配置写进明文。两项都留空＝沿用已保存的那份。</span>
+            </div>
+            <div class="setting-control">
+              <div class="gacha-backup-form">
+                <input class="text-input" id="gacha-backup-url" value="${esc(backup.url || '')}" placeholder="https://dav.jianguoyun.com/dav/" spellcheck="false" />
+                <input class="text-input" id="gacha-backup-user" value="${esc(backup.username || '')}" placeholder="账号 / 邮箱" spellcheck="false" autocomplete="off" />
+                <input class="text-input" id="gacha-backup-pass" type="password" placeholder="${backup.hasPassword ? '应用密码（已保存，留空不改）' : '应用密码'}" spellcheck="false" autocomplete="new-password" />
+                <input class="text-input" id="gacha-backup-secret" type="password" placeholder="${backup.hasSecret ? '加密口令（已设置，留空不改）' : '加密口令（留空 = 明文上传）'}" spellcheck="false" autocomplete="new-password" />
+                <div class="gacha-backup-actions">
+                  <button class="btn btn-primary" data-action="save-gacha-backup">${icon('check')}保存</button>
+                  <button class="btn btn-ghost" data-action="test-gacha-backup">${icon('server')}测试连接</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>从云端恢复</strong>
+              <span>拉取云端最新一份，按记录 Id 去重合并进本地。只增不删：本地已有的记录一条都不会被覆盖，云端是旧机器传的也不会把新抽的卡冲掉。</span>
+            </div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="gacha-backup-restore" ${backup.enabled ? '' : 'disabled'}>${icon('download')}从云端恢复</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="${group('files', true)}" ${groupAttr('files')}>
+          <h2>${icon('trash')}文件管理</h2>
+          <p class="desc">缓存、启动背景视频、封面和日志都存在数据目录里。下面按用途分开列，想清哪类就点哪类：清掉的都是会自动重建的东西，账号、设置、抽卡记录和你自己换的封面不会被碰。</p>
+          ${
+            tab === 'files'
+              ? (() => {
+                  ensureStorageUsage();
+                  return storagePanelHtml();
+                })()
+              : ''
+          }
         </section>
 
         <section class="${group('update', true)}" ${groupAttr('update')}>
@@ -627,27 +931,30 @@ function settingsView() {
 
         <section class="${group('about', true)}" ${groupAttr('about')}>
           <h2>${icon('info')}关于</h2>
-          <p class="desc">一个本地优先的桌面游戏书架，会自己管更新，外加一台能放歌的音乐台。</p>
+          <p class="desc">一个本地优先的桌面游戏书架：自己管更新、自己清缓存、把抽卡记录备份到你自己的网盘，外加一台能放歌的音乐台。</p>
           <div class="setting-row" style="border-bottom:0;padding-bottom:0">
             <div class="about-block">
               <div class="about-name">花筱灵启动器</div>
               <div class="about-version">VERSION ${esc(state.app.version || '1.0.0')} · ELECTRON ${esc(state.app.electron || '')}</div>
               <div class="about-note">
                 内置原神、崩坏：星穹铁道、绝区零、崩坏3、明日方舟、异环、明日方舟：终末地的启动入口，也支持添加任意本地游戏；装在哪、切哪个服、缺不缺资源，启动器都会自己认，游戏有官方更新时「开始游戏」会直接变成「更新游戏」，点了就下、下完自动就位。
-                切服不用重下：多渠道游戏（官服 / B服 / 国际服）共用一份客户端，运行时按渠道自动组装，更新一次全服通用。
+                切服不用重下：多渠道游戏（官服 / B服 / 国际服）共用一份客户端，运行时按渠道自动组装，更新一次全服通用；组装在旁边的独立目录里做，你装好的官方客户端一个字节都不动。
                 终末地 / 明日方舟的渠道包不随安装包装：第一次切到某个服时会写清要下多少（官服 9 MB、B服 194 MB、国际服 / Play 约 940 MB），点了才下，带百分比与速度、可取消续传，下过一次就一直在。
                 渠道包有单独的管理窗口：每个渠道一行，写清状态和占用，能单独下载、更新、释放；后台自动更新两个游戏各一个开关，只在你切过那个游戏的服之后才默认开启。
+                终末地 / 明日方舟的启动方式是让游戏看到官方启动器在运行——父进程指向本机带官方签名的 Games.exe，不改游戏文件、不注入、不读内存、不拦网络；介意的话请用官方启动器启动。
+                启动页会先查显卡加速是否真的可用，不可用时自动换成静态版本图，不让软件渲染白烧一个核；显卡正常的机器默认仍然是动态视频。
+                设置里有文件管理：网页缓存、账号分区缓存、临时文件、动态背景、过期封面、下载缓存、日志分七类列清占用，能按类清、也能一次清安全项，登录态和自定义封面都不动。
+                抽卡记录可以自动备份到你自己的网盘：填 WebDAV 地址与应用密码即可，7 天一次、AES-256-GCM 加密、网盘留最近 5 份；恢复只按记录 Id 合并，永不覆盖本地。密码走 Windows 自带加密存储，不落明文。
                 抽卡记录三池一页看完：条形图带真头像、红条 = 吃到保底，自动算平均出金和当前垫数。
                 另带一台音乐台：网易云 / QQ / 酷狗 / 酷我多平台搜歌、歌单链接导入、队列分组与过滤、音效与歌词，直播间连上后还能听观众弹幕点歌。
                 界面与代码为原创实现；启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有。
                 游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。
                 功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。
-                游戏列表、设置、歌单和时长都保存在本地，不会上传。
+                游戏列表、设置、歌单、抽卡记录和时长都保存在本地，默认不上传；只有你自己打开「抽卡记录云备份」之后，抽卡记录才会加密传到你自己填的那个网盘。
               </div>
               <div class="about-links">
                 <button class="link-btn" data-action="open-changelog">${icon('file-text')}版本更新日志</button>
                 <button class="link-btn" data-action="install-update">${icon('download')}导入更新包</button>
-                <button class="link-btn" data-action="open-external" data-url="https://github.com/Scighost/Starward">Starward · MIT ${icon('external')}</button>
                 <button class="link-btn" data-action="quit-app">退出启动器</button>
               </div>
             </div>

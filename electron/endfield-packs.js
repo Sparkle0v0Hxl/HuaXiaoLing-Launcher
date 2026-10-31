@@ -407,38 +407,93 @@ async function downloadFile(url, destination) {
 }
 
 /**
- * 流式下载到文件。
+ * 流式下载到文件，支持断点续传 + 卡顿检测 + 失败由上层重试。
  *
- * 渠道包里最大的单个文件是 B站 SDK 的 libcef.dll（112 MB）—— 老版本先
- * arrayBuffer() 整个读进内存再写盘，峰值内存就是文件本身的大小，
- * 叠加 md5 计算还要再来一份。这里一律走流，边下边写。
+ * 旧版只做了「边下边写 + 出错删半截文件」，没有续传也没有卡顿检测：
+ * 跨海 CDN（beyond.hg-cdn.com，gryphline 节点）大文件（Qt5WebEngineCore 108MB、
+ * 资源 .chk 动辄上 GB）一旦连接中断，要么整文件从 0 重下（永远卡在某个文件），
+ * 要么连接挂起不报错一直等到 30 分钟超时（界面就是「卡在 51% 不动」）。
+ *
+ * 这里改成：
+ *   · 本地已有半截文件就带 Range 续传；服务器不支持 Range（返回 200 而非 206）
+ *     时自动从头重写，绝不会把半截和全量乱拼；
+ *   · 超过 DOWNLOAD_STALL_MS 没收到任何字节就判定卡顿、主动断开让上层重试，
+ *     不再傻等 30 分钟；
+ *   · 单次尝试超时设短（10 分钟），续传场景下每轮只接着下剩下的字节，不从头来。
+ *
+ * 上层（updateProfile）负责在失败时用更小的退避重试若干次。取消信号优先于超时。
  *
  * @param {object} [options]
  * @param {AbortSignal} [options.signal] 取消信号（用户在弹窗里点「取消」）
- * @param {(bytes:number)=>void} [options.onChunk] 每收到一块就报一次增量字节
+ * @param {(bytes:number)=>void} [options.onChunk] 每收到一块就报一次增量字节（用于进度条）
  */
+const DOWNLOAD_STALL_MS = 60 * 1000;
+
 async function downloadToFile(url, destination, options = {}) {
-  const response = await fetch(url, {
-    headers: { 'user-agent': UA },
-    // 有外部信号时以它为准：取消要能立刻生效，不能再套一层 30 分钟超时
-    signal: options.signal || AbortSignal.timeout(30 * 60 * 1000),
-  });
-  if (!response.ok) throw new Error(`下载失败 HTTP ${response.status}`);
-  await fsp.mkdir(path.dirname(destination), { recursive: true });
-  const file = fs.createWriteStream(destination);
   const { Readable } = require('node:stream');
   const { pipeline } = require('node:stream/promises');
-  const source = Readable.fromWeb(response.body);
-  if (typeof options.onChunk === 'function') {
-    source.on('data', (chunk) => options.onChunk(chunk.length));
+  await fsp.mkdir(path.dirname(destination), { recursive: true });
+
+  // 续传起点：本地已下到的字节数（半截文件接着下，而不是从头再来）
+  let start = 0;
+  try {
+    const stat = await fsp.stat(destination);
+    if (stat.size > 0) start = stat.size;
+  } catch {
+    start = 0;
   }
+
+  const headers = { 'user-agent': UA };
+  if (start > 0) headers.range = `bytes=${start}-`;
+
+  const response = await fetch(url, {
+    headers,
+    // 取消信号优先；单次尝试超时 10 分钟，卡顿检测会在更早（60s）就接管
+    signal: options.signal || AbortSignal.timeout(10 * 60 * 1000),
+  });
+  if (!response.ok && response.status !== 206) {
+    throw new Error(`下载失败 HTTP ${response.status}`);
+  }
+  const resumed = response.status === 206;
+  // 服务器不支持续传（返回 200）时，从头写、丢弃本地半截，避免乱 append
+  const writeFlag = resumed && start > 0 ? 'a' : 'w';
+  if (!resumed && start > 0) start = 0;
+
+  const file = fs.createWriteStream(destination, { flags: writeFlag });
+  const source = Readable.fromWeb(response.body);
+
+  let lastDataAt = Date.now();
+  if (typeof options.onChunk === 'function') {
+    source.on('data', (chunk) => {
+      lastDataAt = Date.now();
+      options.onChunk(chunk.length);
+    });
+  } else {
+    source.on('data', () => {
+      lastDataAt = Date.now();
+    });
+  }
+
+  // 卡顿检测：每 5 秒看一眼，超过 DOWNLOAD_STALL_MS 没收任何字节就主动断开，
+  // 让上层以退避重试（续传会从半截文件继续，不会从头重下）。
+  const stallTimer = setInterval(() => {
+    if (Date.now() - lastDataAt > DOWNLOAD_STALL_MS) {
+      try {
+        source.destroy(new Error('下载卡顿（长时间无数据）'));
+      } catch {
+        /* 已结束 */
+      }
+    }
+  }, 5000);
+
   try {
     await pipeline(source, file);
   } catch (error) {
-    // 半截文件留着会被下一轮的 md5 校验当成坏文件反复重下，直接清掉
-    await fsp.rm(destination, { force: true }).catch(() => {});
+    clearInterval(stallTimer);
+    // 半截文件留着：续传时接着下，校验阶段会发现坏文件
     throw error;
   }
+  clearInterval(stallTimer);
   return destination;
 }
 
@@ -812,40 +867,55 @@ async function updateProfile(profile, root, onProgress, options = {}) {
     const file = remote.files[index];
     report(index, file.path);
     const temporary = path.join(staging, file.path);
-    if (!fs.existsSync(temporary)) {
-      /*
-       * 已下过的文件按 md5 复用：上次取消时留下的那一半、以及「先下了 B服、
-       * 后来又切官服」这种重复渠道件，都不该重下。复用走 copyFile 不读进内存。
-       */
-      let reused = false;
-      try {
-        if ((await md5File(path.join(target, file.path))) === file.md5) {
-          await fsp.mkdir(path.dirname(temporary), { recursive: true });
-          await fsp.copyFile(path.join(target, file.path), temporary);
-          reused = true;
-        }
-      } catch {
-        reused = false;
+
+    /*
+     * 目标目录里已有且 md5 一致：直接复用，省一次下载（切服时复用基础客户端里的
+     * 同版本文件）。注意：只信 md5，不信「文件在不在」，否则半截/旧版本会被当成
+     * 已完成混进包里。
+     */
+    let reused = false;
+    try {
+      if ((await md5File(path.join(target, file.path))) === file.md5) {
+        await fsp.mkdir(path.dirname(temporary), { recursive: true });
+        await fsp.copyFile(path.join(target, file.path), temporary);
+        reused = true;
       }
-      if (!reused) {
+    } catch {
+      reused = false;
+    }
+
+    if (!reused) {
+      /*
+       * 失败重试：跨海 CDN 大文件极易中途断流 / 503，单次失败不该让整包重来。
+       * 临时文件若已存在（上次中断留下的半截），downloadToFile 会带 Range 续传，
+       * 不会从头重下。上限 5 次，仍失败才如实报错（避免无限卡死）。
+       */
+      let lastError = null;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
         try {
           await downloadToFile(`${remote.base}/${file.urlPath}`, temporary, {
             signal,
-            // 单个大文件内部也要推进进度条，否则 112 MB 的 libcef 一下载界面就是死的
             onChunk: (chunkBytes) => {
               downloadedBytes += chunkBytes;
               report(index, file.path);
             },
           });
+          lastError = null;
+          break;
         } catch (error) {
           if (signal?.aborted) throw abortedError();
-          throw error;
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(2000 * attempt, 10000)));
         }
-        downloaded += 1;
-        if ((await md5File(temporary)) !== file.md5) {
-          await fsp.rm(temporary, { force: true });
-          throw new Error(`${file.path} MD5 校验失败`);
-        }
+      }
+      if (lastError) {
+        await fsp.rm(temporary, { force: true }).catch(() => {});
+        throw new Error(`${file.path} 多次下载失败：${lastError.message}`);
+      }
+      downloaded += 1;
+      if ((await md5File(temporary)) !== file.md5) {
+        await fsp.rm(temporary, { force: true });
+        throw new Error(`${file.path} MD5 校验失败`);
       }
     }
     processedBytes += file.size || 0;

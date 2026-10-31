@@ -298,6 +298,12 @@ contextBridge.exposeInMainWorld('launcher', {
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   openDataFolder: () => ipcRenderer.invoke('app:open-data-folder'),
   openDownloadFolder: () => ipcRenderer.invoke('app:open-download-folder'),
+
+  /* 文件管理：分类统计与按类清理（只碰 userData 里明确列出的目录） */
+  storage: {
+    usage: () => ipcRenderer.invoke('fs:usage'),
+    clean: (id) => ipcRenderer.invoke('fs:clean', { id }),
+  },
   openUpdateLog: () => ipcRenderer.invoke('app:open-update-log'),
   readUpdateLog: () => ipcRenderer.invoke('app:read-update-log'),
   createDesktopShortcut: () => ipcRenderer.invoke('app:create-desktop-shortcut'),
@@ -326,6 +332,12 @@ contextBridge.exposeInMainWorld('launcher', {
     nteToolCancel: () => ipcRenderer.invoke('gacha:nte-tool-cancel'),
     onNteTool: (callback) => subscribe('nte-tool', callback),
     refreshMeta: () => ipcRenderer.invoke('gacha:refresh-meta'),
+    /* 抽卡记录云备份：设置项 + 测试连接 + 列云端 + 从云端恢复（没有手动备份） */
+    backupStatus: () => ipcRenderer.invoke('gacha:backup-status'),
+    backupSave: (patch) => ipcRenderer.invoke('gacha:backup-save', patch),
+    backupTest: () => ipcRenderer.invoke('gacha:backup-test'),
+    backupList: () => ipcRenderer.invoke('gacha:backup-list'),
+    backupRestore: (name = '') => ipcRenderer.invoke('gacha:backup-restore', { name }),
   },
 
   downloads: {

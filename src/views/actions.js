@@ -37,6 +37,45 @@ async function toggleFavorite(id) {
 }
 
 /**
+ * 文件管理：按分类清理，或一次清掉所有安全项。
+ *
+ * 清完必须重新统计 —— 主进程算的是「当前真实占用」，前端手里那份数字已经过期，
+ * 不重拉的话用户会觉得「点了清理但大小没变」。
+ */
+async function cleanStorageGroup(id) {
+  if (!id) return;
+  const all = id === 'all';
+  const groups = storageUsage?.groups || [];
+  const group = all ? null : groups.find((item) => item.id === id);
+  if (!all && !group) return;
+  const label = all ? '安全缓存' : group.label;
+  const size = all ? storageUsage?.cleanableBytes : group.bytes;
+  const detail = all
+    ? '网页缓存、账号分区缓存、临时文件、过期封面残留与日志。'
+    : group.note;
+  const ok = await confirmDialog({
+    title: `清理${label}`,
+    message: `${detail}\n\n预计释放 ${storageSize(size || 0)}。清掉的内容都会自动重建，账号、设置、抽卡记录和你自己换的封面不会被删。`,
+    confirmText: '清理',
+  });
+  if (!ok) return;
+  try {
+    const result = await api.storage.clean(id);
+    if (result && result.ok === false) throw new Error(result.error || '清理失败');
+    const freed = storageSize(result?.freed || 0);
+    if (result && result.failed) {
+      toast(`已释放 ${freed}，另有 ${result.failed} 处正在使用没删掉`, 'success');
+    } else {
+      toast(`已释放 ${freed}`, 'success');
+    }
+  } catch (error) {
+    toast(`清理失败：${error.message}`, 'error');
+  }
+  storageUsage = null;
+  refreshStorageUsage(true);
+}
+
+/*
  * 释放渠道包空间，按游戏分开做。
  *
  * 两个分区各走自己的 scope，互不误删 —— 以前只有一个「释放渠道包空间」按钮、
@@ -2072,6 +2111,120 @@ async function handleAction(action, id, element, event = null) {
     case 'release-channel-packs':
       await releaseChannelPacks('all');
       break;
+    /* ── 文件管理：分类占用与清理 ──────────────────────────────────── */
+    case 'refresh-storage':
+      storageUsage = null;
+      refreshStorageUsage(true);
+      break;
+    case 'clean-storage':
+      await cleanStorageGroup(element?.dataset?.id || '');
+      break;
+    case 'clean-storage-all':
+      await cleanStorageGroup('all');
+      break;
+    /* ── 抽卡记录云备份 ──────────────────────────────────────────── */
+    /*
+     * 开关只管「开不开」，但会顺手把表单里已经改过的地址 / 账号 / 密码一起存掉：
+     * 用户很自然的顺序是先填地址再开开关，只存 enabled 的话
+     * 紧接着的那次重绘会把刚打的字清空。
+     */
+    case 'toggle-gacha-backup': {
+      const next = !gachaBackupState().enabled;
+      const result = await api.gacha.backupSave({ ...(gachaBackupFormPatch() || {}), enabled: next });
+      if (!result || result.ok === false) {
+        toast(result?.error || '保存失败', 'error');
+        break;
+      }
+      state.gachaBackup = result.backup;
+      paintSwitch(element, next);
+      toast(
+        next
+          ? `已开启：填好网盘信息和应用密码后，启动约 2 分钟会传第一次，之后每 ${Number(state.gachaBackup?.intervalDays) || 7} 天一次`
+          : '已关闭云备份，云端已有的备份不会删',
+        next ? 'success' : 'info'
+      );
+      render({ preserveScroll: true });
+      break;
+    }
+    /* 点预设只改输入框，不落盘：等用户点「保存」才算数 */
+    case 'gacha-backup-preset': {
+      const key = element?.dataset?.value || 'custom';
+      const preset = GACHA_BACKUP_PRESETS.find(([id]) => id === key);
+      if (!preset) break;
+      const input = document.getElementById('gacha-backup-url');
+      if (input && preset[2]) {
+        input.value = preset[2];
+        input.focus();
+      }
+      document.querySelectorAll('[data-action="gacha-backup-preset"]').forEach((node) => {
+        node.classList.toggle('active', node.dataset.value === key);
+      });
+      const row = element.closest('.setting-row');
+      const hint = row ? row.querySelector('.setting-copy > span') : null;
+      if (hint) hint.textContent = preset[3];
+      break;
+    }
+    case 'save-gacha-backup': {
+      const form = gachaBackupFormPatch();
+      if (!form) break;
+      if (!form.url) {
+        toast('先把网盘地址填上', 'error');
+        break;
+      }
+      if (!form.username) {
+        toast('网盘账号也要填', 'error');
+        break;
+      }
+      if (!form.password && !gachaBackupState().hasPassword) {
+        toast('应用密码还没填，备份跑不起来', 'error');
+        break;
+      }
+      const result = await api.gacha.backupSave(form);
+      if (!result || result.ok === false) {
+        toast(result?.error || '保存失败', 'error');
+        break;
+      }
+      state.gachaBackup = result.backup;
+      toast('已保存', 'success');
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'test-gacha-backup': {
+      const form = gachaBackupFormPatch();
+      if (!form) break;
+      // 先存再测：不然测的是上一次的旧地址，用户改完地址会以为没生效
+      const saved = await api.gacha.backupSave(form).catch(() => null);
+      if (saved?.backup) state.gachaBackup = saved.backup;
+      if (saved && saved.ok === false) {
+        toast(saved.error || '保存失败', 'error');
+        break;
+      }
+      toast('正在连网盘…', 'info');
+      const result = await api.gacha.backupTest().catch((error) => ({ ok: false, error: error.message }));
+      if (result?.ok) toast(result.text || '连接正常', 'success');
+      else toast(result?.error || '连不上网盘', 'error');
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'gacha-backup-restore': {
+      const confirmed = await confirmDialog({
+        title: '从云端恢复抽卡记录',
+        message:
+          '会拉云端最新一份备份，按记录 Id 去重合并进本地。只增不删，现在电脑上的记录一条都不会被覆盖。\n\n现在开始？',
+        confirmText: '开始恢复',
+      });
+      if (!confirmed) break;
+      const result = await api.gacha.backupRestore('').catch((error) => ({ ok: false, error: error.message }));
+      if (!result?.ok) {
+        toast(result?.error || '恢复失败', 'error');
+        break;
+      }
+      // 抽卡页下次进去会自己重新加载（和导入后同一套机制）
+      state.gacha = null;
+      toast(result.text || '已从云端恢复', 'success');
+      render({ preserveScroll: true });
+      break;
+    }
     /* ── 渠道包管理窗口里的单渠道动作 ──────────────────────────────── */
     case 'channel-pack-download': {
       const game = element?.dataset?.game || '';

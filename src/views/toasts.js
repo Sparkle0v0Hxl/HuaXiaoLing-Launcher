@@ -81,6 +81,11 @@ function onState(next) {
   // ReferenceError，后面的 applySettings() 直接不执行——改设置时界面
   // 刷不动、主题还停在旧色，都是它先炸掉导致的。快照里的更新状态就叫 update。
   if (next && next.update) state.update = next.update;
+  /*
+   * 云备份状态是逐字段赋值带过来的（这里不是整体替换快照），漏一行就等于
+   * 「主进程算完的状态永远进不了界面」——设置页那几行会一直停在上次的文案。
+   */
+  if (next && next.gachaBackup) state.gachaBackup = next.gachaBackup;
   const previous = {
     downloads: state.downloads,
     games: state.games,

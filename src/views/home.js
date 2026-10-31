@@ -221,7 +221,14 @@ function currentBgPick(game) {
   const cands = bgCandidatesFor(game);
   if (!cands.length) return 'cover';
   let pick = pinnedBgMap()[game.id] || (state.bgPick && state.bgPick[game.id]);
-  if (!cands.includes(pick)) pick = cands.includes('video') ? 'video' : cands[0];
+  if (!cands.includes(pick)) {
+    /*
+     * 显卡加速不可用（软件渲染）时默认退回静态图：视频背景每帧都要 CPU 解码 +
+     * 软件合成，实测常驻吃掉一个核心。用户自己固定过背景就按固定的来，不再改写。
+     */
+    const software = Boolean(state.app && state.app.softwareRendering);
+    pick = cands.includes('video') && !software ? 'video' : cands[0];
+  }
   return pick;
 }
 
@@ -242,6 +249,11 @@ function startView() {
   // 背景候选：静态封面 / 官方动态视频。右上角可切换并固定（vela:pinned-bg）。
   const bgCands = bgCandidatesFor(selected);
   const bgPick = currentBgPick(selected);
+  // 降级提示：显卡加速不可用时默认没播视频，得让用户知道为什么、以及怎么切回去
+  const bgSoftwareHint =
+    Boolean(state.app && state.app.softwareRendering) &&
+    bgCands.includes('video') &&
+    bgPick !== 'video';
   // 画面指纹：切服务器 / 开合面板时画面没变，就能复用同一层 DOM，
   // 视频既不重载也不跳进度，从根上消掉「先闪静态图」
   const artKey = [selected.id, coverSrc, bgPick === 'video' ? selected.backgroundVideo || '' : ''].join('|');
@@ -254,7 +266,7 @@ function startView() {
         <img src="${esc(coverSrc)}" alt="" referrerpolicy="no-referrer" loading="eager" data-cover />
         ${
           hasVideo
-            ? `<video src="${esc(selected.backgroundVideo)}" poster="${esc(coverSrc)}" autoplay muted loop playsinline preload="auto" data-start-video></video>`
+            ? `<video src="${esc(selected.backgroundVideo)}" autoplay muted loop playsinline preload="auto" data-start-video></video>`
             : ''
         }
       </div>
@@ -287,6 +299,11 @@ function startView() {
               <button class="start-bg-step" data-action="bg-cycle" data-dir="1" title="下一个背景" aria-label="下一个背景">${icon('chevron-right')}</button>
             </div>
             <button class="start-bg-action${pinnedNow ? ' is-pinned' : ''}" data-action="bg-pin">${pinnedNow ? icon('pin-fill') : icon('pin')}<span>${pinnedNow ? '已固定，点击取消' : '固定这个背景'}</span></button>`
+                : ''
+            }
+            ${
+              bgSoftwareHint
+                ? `<p class="start-bg-hint">显卡加速在这台机器上不可用，动态背景会持续占用一个 CPU 核心，所以默认用了静态图。想看动态效果可以在上面切到「视频」。</p>`
                 : ''
             }
             ${

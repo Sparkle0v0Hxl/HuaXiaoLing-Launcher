@@ -3038,6 +3038,12 @@ function newsView() {
     body = newsTimeline(releases, { collapsed: true }) + newsUpdateSection();
   } else {
     const entries = noticeEntries();
+    /*
+     * 顶部大卡有两副面孔：有官方公告时是公告，没有公告时才是「最新一版更新」。
+     * 列表原本无条件 slice(1) 跳过最新版——公告一占位，最新那版就再没被渲染过，
+     * 直接在「全部」页里凭空消失（2.7.0 就这么漏的）。只有大卡真的在展示更新时才能跳过。
+     */
+    const featureShown = !entries.length && !state.noticeBoardLoading;
     body = `
       ${
         entries.length
@@ -3048,7 +3054,7 @@ function newsView() {
       ${newsSectionHead('使用指南', '上手、各页面与设置开关，点开看详情')}
       ${newsGuideGrid(guides)}
       ${newsSectionHead('版本更新日志', '每一版改了什么，旧版本可展开')}
-      ${newsTimeline(releases.slice(1), { collapsed: true })}`;
+      ${newsTimeline(featureShown ? releases.slice(1) : releases, { collapsed: true })}`;
   }
 
   return `

@@ -11,6 +11,7 @@ const {
   nativeImage,
   nativeTheme,
   powerSaveBlocker,
+  powerMonitor,
   globalShortcut,
   safeStorage,
   session,
@@ -38,6 +39,7 @@ const nteTool = require('./nte-tool');
 const updater = require('./updater');
 const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
+const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
 const { resolveLiveRoom } = require('./live-rooms');
 const { startDanmaku, pollDanmaku, stopDanmaku } = require('./live-danmaku');
 const {
@@ -103,6 +105,8 @@ let musicLoginDebug = null;
 /** 音乐登录窗口专用的 preload（只要「我已登录」一个能力）。 */
 const MUSIC_LOGIN_PRELOAD = path.join(__dirname, 'music-login-preload.js');
 const { importUigf, importsPath } = require('./gacha-import');
+// 抽卡记录云备份：纯逻辑模块（WebDAV 客户端 + 加密 + 合并），主进程只管配置与调度
+const gachaBackup = require('./gacha-backup');
 const { syncGacha } = require('./gacha-sync');
 const { syncEndfieldGacha } = require('./endfield-gacha');
 const { getStarRailFps, setStarRailFps } = require('./starrail-fps');
@@ -856,6 +860,26 @@ function defaultSettings() {
     // 用户仍可在设置里自定义；首次使用会由主进程自动创建这个空目录。
     downloadDir: path.join(resolvePortableRoot(), '花筱灵下载'),
     lastPage: 'home',
+    /*
+     * 抽卡记录云备份（WebDAV）。
+     *
+     * 只存地址、账号和一个周期常量，密码与加密口令走 safeStorage
+     * （sessions.enc.json，键名见 GACHA_BACKUP_PASSWORD_KEY / _SECRET_KEY），
+     * 这里一个明文字符串都不留。
+     *
+     * 没有 intervalHours：周期固定 7 天（GACHA_BACKUP_INTERVAL_MS），
+     * 做成可调只会让人反复纠结要不要缩短，抽卡记录本来就该攒一批再传。
+     */
+    gachaBackup: {
+      enabled: false,
+      url: '',
+      username: '',
+      keep: 5,
+      lastAt: 0,
+      // 上次的结果文案 / 错误，界面上直接显示，不用再点一次才知道发生了什么
+      lastResult: '',
+      lastError: '',
+    },
   };
 }
 
@@ -962,8 +986,25 @@ function coverUrl(cover) {
   }
 }
 
-function targetExists(target) {
-  if (!target) return false;
+/* 启动页背景专用 URL：带上文件 mtime 做版本号。
+   去字图（-clean3）是后台异步生成的，文件名固定不变；如果前端在文件生成前
+   就已经把同一个 URL 加载失败过，Chromium 会一直沿用那次失败状态，
+   即使文件后来写好了也不会重试 —— 表现就是启动页背景全黑。
+   拼上 mtime 后文件一更新 URL 就变，前端自然会重新拉取。 */
+function startCoverUrlOf(cover) {
+  const base = coverUrl(cover);
+  if (!base) return base;
+  if (/^(data:|https?:)/i.test(cover)) return base;
+  try {
+    const absolute = path.isAbsolute(cover) ? cover : path.join(app.getPath('userData'), cover);
+    const stat = fs.statSync(absolute);
+    return `${base}?v=${Math.round(stat.mtimeMs)}`;
+  } catch {
+    return base;
+  }
+}
+
+function targetExists(target) {  if (!target) return false;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return true;
   try {
     return fs.statSync(target).isFile();
@@ -1883,6 +1924,19 @@ async function fetchArknightsStartVideo() {
   return '';
 }
 
+/* 视频容器嗅探。官方动图有 mp4 也有 webm（崩坏3 官方背景就是 VP9/webm），
+   绝不能一律按调用方给的 .mp4 落盘——否则文件名叫 mp4、内容是 webm，
+   现在靠浏览器嗅探侥幸能播，但缓存一旦被清掉重下就会复现「名实不符」。
+   EBML 头 1A 45 DF A3 → webm；第 4~8 字节 ftyp → mp4。 */
+function sniffVideoExtension(buffer) {
+  if (!buffer || buffer.length < 12) return '';
+  if (buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+    return 'webm';
+  }
+  if (buffer.toString('ascii', 4, 8) === 'ftyp') return 'mp4';
+  return '';
+}
+
 async function cacheStartVideo(source, relativePath, local = false) {
   const destination = path.join(app.getPath('userData'), relativePath);
   await fsp.mkdir(path.dirname(destination), { recursive: true });
@@ -1911,9 +1965,43 @@ async function cacheStartVideo(source, relativePath, local = false) {
     await fsp.rm(temporary, { force: true });
     throw new Error('动图文件为空或过大');
   }
-  await fsp.rm(destination, { force: true });
-  await fsp.rename(temporary, destination);
-  return destination;
+
+  // 按真实容器修正扩展名（webm 不能叫 .mp4），并清掉同基础名的其它格式残留，
+  // 免得 background 目录随「换格式 / 换来源」越堆越多。
+  let finalRelative = relativePath;
+  try {
+    const head = Buffer.alloc(12);
+    const handle = await fsp.open(temporary, 'r');
+    try {
+      await handle.read(head, 0, 12, 0);
+    } finally {
+      await handle.close();
+    }
+    const realExt = sniffVideoExtension(head);
+    const wantExt = path.extname(relativePath).replace(/^\./, '').toLowerCase();
+    if (realExt && realExt !== wantExt) {
+      finalRelative = `${relativePath.replace(/\.[^./\\]+$/, '')}.${realExt}`;
+    }
+  } catch {
+    /* 嗅探失败就按调用方给的扩展名 */
+  }
+  const finalDestination = path.join(app.getPath('userData'), finalRelative);
+  try {
+    const dir = path.dirname(finalDestination);
+    const keep = path.basename(finalDestination);
+    const base = keep.replace(/\.[^./\\]+$/, '');
+    const stale = new RegExp(`^${base}\\.(?:mp4|webm)(?:\\.part)?$`, 'i');
+    for (const old of await fsp.readdir(dir)) {
+      if (old === keep || !stale.test(old)) continue;
+      await fsp.rm(path.join(dir, old), { force: true }).catch(() => {});
+    }
+  } catch {
+    /* 清不掉不影响主流程 */
+  }
+
+  await fsp.rm(finalDestination, { force: true });
+  await fsp.rename(temporary, finalDestination);
+  return finalRelative;
 }
 
 // 2.4.0 合并自对方分支：崩坏3 的 builtin 封面是人工挑选的官方主视觉，按自定义封面保护，
@@ -2010,7 +2098,22 @@ async function convertImageToPngBuffer(imagePath) {
    转出的 PNG 与源图同名换扩展名，mtime 比源旧时重转。
    返回 clean3 文件名（covers 相对），失败返回 null。 */
 async function ensureErasedCover(builtinKey, rawSourcePath) {
+  const cleanName = `official-${builtinKey}-clean3.png`;
+  const cleanPath = path.join(app.getPath('userData'), 'covers', cleanName);
+  // clean3 已经比源图新就直接复用：否则每次启动都要把 webp 转成 4MB 的 PNG
+  // 再跑几秒去字，白耗磁盘和 CPU，中间 PNG 还会把 covers 目录撑大。
+  try {
+    const [srcStat, cleanStat] = await Promise.all([
+      fsp.stat(rawSourcePath),
+      fsp.stat(cleanPath),
+    ]);
+    if (cleanStat.size > 8192 && cleanStat.mtimeMs >= srcStat.mtimeMs) return cleanName;
+  } catch {
+    /* 缺其中一个就继续走完整流程 */
+  }
+
   let sourcePath = rawSourcePath;
+  let converted = false;
   if (!/\.(png|jpe?g)$/i.test(sourcePath)) {
     const pngPath = sourcePath.replace(/\.[^.]+$/, '.png');
     try {
@@ -2023,17 +2126,19 @@ async function ensureErasedCover(builtinKey, rawSourcePath) {
         await fsp.writeFile(pngPath, await convertImageToPngBuffer(sourcePath));
       }
       sourcePath = pngPath;
+      converted = true;
     } catch (error) {
       console.warn(`[背景去字] ${builtinKey} 源图转 PNG 失败：`, error.message);
       return null;
     }
   }
-  const cleanName = `official-${builtinKey}-clean3.png`;
   const cleaned = await ensureErasedBackground({
     nativeImage,
     sourcePath,
-    cachePath: path.join(app.getPath('userData'), 'covers', cleanName),
+    cachePath: cleanPath,
   }).catch(() => null);
+  // 转换用的中间 PNG 用完即删：clean3 才是最终产物，留着只会让 covers 越堆越大。
+  if (converted) await fsp.rm(sourcePath, { force: true }).catch(() => {});
   return cleaned ? cleanName : null;
 }
 
@@ -2052,21 +2157,47 @@ function repairErasedStartCovers() {
     for (const game of store.data.games) {
       if (!ERASED_COVER_KEYS.has(game.builtinKey)) continue;
       if (isCustomCover(game)) continue;
-      if (game.startCover && /-clean3\./.test(game.startCover)) continue;
       const coverRelative = String(game.cover || '');
       if (!/^covers\/official-/.test(coverRelative)) continue;
       const sourcePath = path.join(app.getPath('userData'), coverRelative);
       try {
         if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size < 8192) continue;
+      /*
+       * 已经有启动图就直接用，不再自动去字。
+       *
+       * 原来这里是「每次启动都重新评估一遍」，结果把本就没有文字的官方版本图也过了一遍
+       * 形态学运算，把立绘的脸和头发当文字擦掉（2026-11-01 星铁就是这样被抹糊的，
+       * 用户直接看出来了）。官方图有没有烧录文字，用像素算法判断本来就不靠谱；
+       * 现在只在「这张游戏还没有启动图」时补一次，已有的一律保留原样——
+       * 包括随包内置的、以及用户自己处理过（比如豆包重绘）的。
+       */
+      const startRelative = String(game.startCover || '');
+      if (startRelative) {
+        try {
+          if (fs.statSync(path.join(app.getPath('userData'), startRelative)).size > 8192) continue;
+        } catch {
+          /* 引用存在但文件不在：继续走补生成 */
+        }
+      }
       } catch {
         continue;
       }
+      // 已存在的 clean3 也拉回来重新评估：新鲜就保留，去字被放弃（区域过大/源不支持）
+      // 就删掉旧 clean3 回退清晰原图（启动页左侧有 .start-shade 压暗遮罩，文字会被盖住）。
+      const existingClean = game.startCover && /-clean3\./.test(game.startCover)
+        ? path.join(app.getPath('userData'), game.startCover)
+        : null;
       try {
         const cleanName = await ensureErasedCover(game.builtinKey, sourcePath);
         if (cleanName) {
           game.startCover = `covers/${cleanName}`;
           changed = true;
           console.log(`[背景修补] ${game.builtinKey} 已生成 ${cleanName}`);
+        } else if (existingClean) {
+          try { fs.unlinkSync(existingClean); } catch { /* ignore */ }
+          game.startCover = '';
+          changed = true;
+          console.log(`[背景修补] ${game.builtinKey} 去字放弃，清除旧 clean3 回退原图`);
         }
       } catch (error) {
         console.warn(`[背景修补] ${game.builtinKey} 失败：`, error.message);
@@ -2177,8 +2308,10 @@ function ensureAnimatedStartBackgrounds() {
         continue;
       }
       try {
-        await cacheStartVideo(source, videoRelative, local);
-        game.backgroundVideo = videoRelative;
+        // 落盘后返回的是「按真实容器修正过扩展名」的路径，必须用它回填，
+        // 否则 webm 内容会被记成 .mp4（见 cacheStartVideo 里的嗅探逻辑）。
+        const writtenRelative = await cacheStartVideo(source, videoRelative, local);
+        game.backgroundVideo = writtenRelative;
         game.startMotion = 'video';
         game.backgroundVideoSyncedAt = new Date().toISOString();
         changed = true;
@@ -2360,6 +2493,20 @@ async function syncOfficialGame(game, backgrounds) {
           const dir = path.join(app.getPath('userData'), 'covers');
           await fsp.mkdir(dir, { recursive: true });
           const fileName = `official-${game.builtinKey}${ext}`;
+          // 官方图换格式（png → webp）或重新下载时，清掉同游戏的旧格式原图。
+          // 否则每换一次格式就多留一份，userData/covers 会越堆越大（实测已堆 19MB 残留）。
+          try {
+            const pattern = new RegExp(
+              `^official-${game.builtinKey}\\.(?:png|jpe?g|webp|gif|avif)$`,
+              'i'
+            );
+            for (const old of await fsp.readdir(dir)) {
+              if (old === fileName || !pattern.test(old)) continue;
+              await fsp.unlink(path.join(dir, old)).catch(() => {});
+            }
+          } catch {
+            /* 清不掉不影响主流程，启动时的封面清理会兜底 */
+          }
           await fsp.writeFile(path.join(dir, fileName), buffer);
           game.cover = `covers/${fileName}`;
           game.artUrl = imageUrl;
@@ -2372,7 +2519,7 @@ async function syncOfficialGame(game, backgrounds) {
             ? await ensureErasedCover(game.builtinKey, path.join(dir, fileName)).catch(() => null)
             : null;
           if (cleaned) {
-            game.startCover = `covers/${cleanName}`;
+            game.startCover = `covers/${cleaned}`;
             result.coverCleaned = true;
           } else {
             game.startCover = '';
@@ -3778,7 +3925,7 @@ async function launchWithSignedParent(game, target, cwd, options = {}) {
       handled: true,
       result: {
         ok: false,
-        error: `没能通过官方签名父进程启动：${lastError}。常见原因是安全软件拦下了 PowerShell（本启动器要靠它准备签名父进程），把 powershell.exe 加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
+        error: `没能通过官方签名父进程启动：${lastError}。常见原因是安全软件拦下了 VelaEndfield.exe（本启动器靠它伪造官方签名父进程），把它加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
         endfieldDecoy: true,
       },
     };
@@ -4587,11 +4734,11 @@ function publicGame(game) {
     // 启动页专用：官方图的去文字版本；没有就回退到普通封面
     startMotion: game.startMotion || (game.backgroundVideo ? 'video' : 'pan'),
     startCoverUrl: game.startCover
-      ? coverUrl(game.startCover)
+      ? startCoverUrlOf(game.startCover)
       : hasOfficialCover
-        ? coverUrl(game.cover)
+        ? startCoverUrlOf(game.cover)
         : hasCustomCover
-          ? coverUrl(game.cover)
+          ? startCoverUrlOf(game.cover)
           : game.coverUrl || coverUrl(game.cover),
     installed: targetExists(game.target),
     running: running.has(game.id),
@@ -4865,6 +5012,9 @@ function localUpdateManifest() {
 const OFFICIAL_UPDATE_MANIFESTS = [
   'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
   'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
+  // fastly 节点：国内裸连比 cdn.jsdelivr.net 稳得多，实测三个源里最靠得住的一条。
+  // 放在 jsdelivr 之后，前面的通了就用前面的，不额外增加延迟。
+  'https://fastly.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
   // Gitee 镜像仓库（裸连可达，国内兜底）。每次发版后把正式清单同步过去一份。
   'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json',
 ];
@@ -5167,6 +5317,227 @@ function updateBackupInfo() {
   }
 }
 
+/*
+ * 显卡加速是否可用。
+ *
+ * 显卡加速不可用（GPU 进程起不来 / 驱动被拉黑）时，Chromium 会退到 SwiftShader
+ * 软件渲染：视频背景的每一帧都要 CPU 解码 + 软件合成，实测常驻吃掉一个核心，
+ * 而用户看到的就是「启动器什么都没干却一直占 CPU」。
+ * 渲染层拿到这个标记后，默认改用静态版本图（仍然可以手动切回视频）。
+ */
+let gpuFeatureStatus = null;
+
+function refreshGpuStatus() {
+  let next = {};
+  try {
+    next = app.getGPUFeatureStatus() || {};
+  } catch {
+    next = {};
+  }
+  const before = gpuFeatureStatus ? String(gpuFeatureStatus.gpu_compositing || '') : '';
+  gpuFeatureStatus = next;
+  const after = String(next.gpu_compositing || '');
+  if (before && before !== after) {
+    console.log(`[显卡加速] 状态变化：${before} → ${after || '未知'}`);
+    pushState(true);
+  }
+  return after;
+}
+
+function softwareRendering() {
+  const status = gpuFeatureStatus
+    ? String(gpuFeatureStatus.gpu_compositing || '')
+    : refreshGpuStatus();
+  return status.includes('disabled_software');
+}
+
+/* ------------------------------------------------------------------ */
+/* 抽卡记录云备份（WebDAV）                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 周期固定 7 天，不给用户调。
+ *
+ * 取 7 天而不是更短：抽卡记录是只增不改的东西（一条记录抽出来就不会再变），
+ * 备份之间隔得再密也不会多救回什么，只会让网盘里多几份几乎一样的文件。
+ * 一周一次正好跟「抽卡记录本身也是按卡池周期在长」对上。
+ *
+ * 调度器没有用「setTimeout 睡 7 天」：合盖、待机、系统休眠之后长定时器会漂，
+ * 醒来还得自己算补偿量。这里改成定时醒来看一眼 now - lastAt 够不够 7 天，
+ * 不够继续睡 —— 错过的时段下一轮自然补上，服务重启也不影响判断。
+ *
+ * 醒来的间隔是 1 小时，不取更短：7 天 = 168 小时，1 小时的判断误差对备份周期
+ * 没有任何意义。这一点要说清楚 ——「醒来」只是读内存里的 lastAt 做一次减法，
+ * 不联网、不碰网盘、不读密码，真正带着账号发请求的只有到点那一次（7 天一回）。
+ * 待机回来由 powerMonitor 的 resume 单独补一次检查，所以间隔拉长不会漏。
+ *
+ * 启动后 2 分钟的 kickoff 只做「首次检查」：新用户 lastAt=0，开了开关两分钟内就会
+ * 走第一次备份，之后按 7 天算。
+ */
+const GACHA_BACKUP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const GACHA_BACKUP_TICK_MS = 60 * 60 * 1000;
+const GACHA_BACKUP_KICKOFF_MS = 2 * 60 * 1000;
+/*
+ * 失败退避：密码错、网盘抽风这类问题，不能每小时拿同一份凭据再去敲一次门
+ * —— 连续失败既救不回任何数据，还可能撞上对方的风控。首败等 2 小时，
+ * 之后逐次翻倍，封顶 12 小时。用户改完配置（保存 / 测试通过）会立刻清零重来。
+ */
+const GACHA_BACKUP_RETRY_BASE_MS = 2 * 60 * 60 * 1000;
+const GACHA_BACKUP_RETRY_MAX_MS = 12 * 60 * 60 * 1000;
+const GACHA_BACKUP_PASSWORD_KEY = 'gachaBackupPassword';
+const GACHA_BACKUP_SECRET_KEY = 'gachaBackupSecret';
+
+let gachaBackupTimer = null;
+let gachaBackupKickoff = null;
+let gachaBackupRunning = false;
+let gachaBackupResumeHooked = false;
+// 失败退避：到点前不再尝试，以及连续失败次数（用来算下次等多久）
+let gachaBackupRetryAt = 0;
+let gachaBackupFailStreak = 0;
+
+/**
+ * 口令到底存没存过。
+ *
+ * safeStorage 是异步的，而 snapshot() 必须同步返回，所以这里读一次缓存住；
+ * 保存配置、启动时各刷新一次。不把这个标记写进 launcher-data.json ——
+ * 用户手动删掉 sessions.enc.json 之后，存下来的标记就会开始骗人。
+ */
+const gachaSecretFlags = { password: false, secret: false };
+
+async function refreshGachaSecretFlags() {
+  const [password, secret] = await Promise.all([
+    loadSecret(GACHA_BACKUP_PASSWORD_KEY),
+    loadSecret(GACHA_BACKUP_SECRET_KEY),
+  ]);
+  gachaSecretFlags.password = Boolean(password);
+  gachaSecretFlags.secret = Boolean(secret);
+}
+
+/** 存下来的配置（不含任何明文口令）。 */
+function gachaBackupConfig() {
+  const raw = (store && store.data.settings && store.data.settings.gachaBackup) || {};
+  return {
+    enabled: raw.enabled === true,
+    url: String(raw.url || ''),
+    username: String(raw.username || ''),
+    keep: Math.max(1, Math.min(10, Number(raw.keep) || gachaBackup.DEFAULT_KEEP)),
+    lastAt: Number(raw.lastAt) || 0,
+  };
+}
+
+/** 给渲染层的快照：配置 + 上次结果 + 两个「有没有存口令」的标记。 */
+function gachaBackupSnapshot() {
+  const config = gachaBackupConfig();
+  const raw = (store && store.data.settings && store.data.settings.gachaBackup) || {};
+  return {
+    enabled: config.enabled,
+    url: config.url,
+    username: config.username,
+    keep: config.keep,
+    lastAt: config.lastAt,
+    lastResult: String(raw.lastResult || ''),
+    lastError: String(raw.lastError || ''),
+    hasPassword: gachaSecretFlags.password,
+    hasSecret: gachaSecretFlags.secret,
+    intervalDays: Math.round(GACHA_BACKUP_INTERVAL_MS / 86400000),
+  };
+}
+
+/** 真正调模块时用的配置：把口令从 safeStorage 里取出来。 */
+async function gachaBackupCredentials() {
+  const config = gachaBackupConfig();
+  return {
+    url: config.url,
+    username: config.username,
+    password: await loadSecret(GACHA_BACKUP_PASSWORD_KEY),
+    secret: await loadSecret(GACHA_BACKUP_SECRET_KEY),
+    keep: config.keep,
+  };
+}
+
+/** 跑一次备份，结果（成功或失败）都记进设置，界面直接能看到。 */
+async function runGachaBackup(reason = '自动') {
+  if (!store) return { ok: false, error: '数据还没准备好' };
+  if (gachaBackupRunning) return { ok: false, error: '上一轮备份还在跑' };
+  gachaBackupRunning = true;
+  const settings = store.data.settings.gachaBackup;
+  try {
+    const config = await gachaBackupCredentials();
+    const result = await gachaBackup.backupNow({
+      config,
+      userData: app.getPath('userData'),
+      keep: config.keep,
+    });
+    settings.lastAt = Date.now();
+    settings.lastResult = result.text;
+    settings.lastError = '';
+    gachaBackupFailStreak = 0;
+    gachaBackupRetryAt = 0;
+    await store.saveNow();
+    pushState(true);
+    console.log(`[抽卡云备份] ${reason}成功：${result.text}`);
+    return result;
+  } catch (error) {
+    settings.lastError = error.message;
+    // 失败不改 lastAt（改了就等于整周不重试），改用内存里的退避时间挡一阵
+    gachaBackupFailStreak += 1;
+    const wait = Math.min(
+      GACHA_BACKUP_RETRY_BASE_MS * 2 ** (gachaBackupFailStreak - 1),
+      GACHA_BACKUP_RETRY_MAX_MS
+    );
+    gachaBackupRetryAt = Date.now() + wait;
+    await store.saveNow();
+    pushState(true);
+    console.warn(
+      `[抽卡云备份] ${reason}失败：${error.message}（第 ${gachaBackupFailStreak} 次，` +
+        `${Math.round(wait / 60000)} 分钟后才重试）`
+    );
+    return { ok: false, error: error.message };
+  } finally {
+    gachaBackupRunning = false;
+  }
+}
+
+/** 到点没到点：没开开关、没填地址、还在失败退避里、还没满 7 天，一律不动手。 */
+async function maybeGachaBackup() {
+  const config = gachaBackupConfig();
+  if (!config.enabled || !config.url || !config.username) return;
+  if (Date.now() < gachaBackupRetryAt) return;
+  if (Date.now() - config.lastAt < GACHA_BACKUP_INTERVAL_MS) return;
+  await runGachaBackup('自动备份');
+}
+
+/** 重排定时器：开关一改就重来一遍，免得旧定时器还在按老配置跑。 */
+function scheduleGachaBackup() {
+  if (gachaBackupTimer) {
+    clearInterval(gachaBackupTimer);
+    gachaBackupTimer = null;
+  }
+  if (gachaBackupKickoff) {
+    clearTimeout(gachaBackupKickoff);
+    gachaBackupKickoff = null;
+  }
+  gachaBackupTimer = setInterval(() => {
+    maybeGachaBackup().catch(() => {});
+  }, GACHA_BACKUP_TICK_MS);
+  if (gachaBackupTimer.unref) gachaBackupTimer.unref();
+  gachaBackupKickoff = setTimeout(() => {
+    maybeGachaBackup().catch(() => {});
+  }, GACHA_BACKUP_KICKOFF_MS);
+  if (gachaBackupKickoff.unref) gachaBackupKickoff.unref();
+
+  // 轮询间隔是一小时，靠 resume 补上「合盖那几天正好跨过 7 天」的情况。
+  // 只挂一次：scheduleGachaBackup 会被开关反复调用，重复挂会攒出一串同样的回调。
+  if (!gachaBackupResumeHooked) {
+    gachaBackupResumeHooked = true;
+    const onResume = () => {
+      maybeGachaBackup().catch(() => {});
+    };
+    powerMonitor.on('resume', onResume);
+    powerMonitor.on('unlock-screen', onResume);
+  }
+}
+
 function snapshot() {
   const data = store.data;
   return {
@@ -5183,11 +5554,16 @@ function snapshot() {
       portable: Boolean(portableData),
       portableRoot: portableRoot || '',
       downloadDir: store?.data?.settings?.downloadDir || '',
-  electron: process.versions.electron,
+      // 显卡加速不可用时渲染层默认不播启动页视频（见 file 顶部 softwareRendering 的说明）
+      softwareRendering: softwareRendering(),
+      electron: process.versions.electron,
       chrome: process.versions.chrome,
       node: process.versions.node,
     },
     update: updateStatus,
+    // 云备份的状态单独给一份：渲染层不用从 settings.gachaBackup 里拼，
+    // 也能拿到 hasPassword / intervalDays 这些派生值
+    gachaBackup: gachaBackupSnapshot(),
   };
 }
 
@@ -6117,6 +6493,62 @@ function installShotProtocol() {
 
 function installIpc() {
   ipcMain.handle('app:info', () => snapshot().app);
+
+  /* ---------------- 文件管理：分类统计 + 按类清理 ---------------- */
+
+  /*
+   * 只统计 userData 里明确列出的目录（见 file-manager.js 的 GROUPS），
+   * 不扫游戏本体、不碰存档。bundleCovers 传给清理逻辑，是为了让「随包内置的封面」
+   * 永远进不了待删列表。
+   */
+  const storageOptions = () => ({
+    bundleCovers: path.join(app.getAppPath(), 'data', 'covers'),
+  });
+
+  /*
+   * 清掉动态背景缓存之后，游戏里存的 backgroundVideo 还指着已经不存在的文件。
+   * 界面只看这个字段判「有没有视频可切」，于是会显示成「可切视频」但点开是黑的，
+   * 看起来像功能坏了（2026-11-01 实际发生过一次，用户以为动态背景丢了）。
+   * 这里把失效引用清空，回落到静态版本图；下次打开该游戏时按需重新缓存视频。
+   */
+  const repairMissingBackgrounds = (games) => {
+    const userData = app.getPath('userData');
+    let changed = 0;
+    for (const game of Array.isArray(games) ? games : []) {
+      const rel = String(game?.backgroundVideo || '');
+      if (!rel || /^(?:https?:|file:|data:)/i.test(rel)) continue;
+      if (fs.existsSync(path.join(userData, rel))) continue;
+      game.backgroundVideo = '';
+      if (game.startMotion === 'video') game.startMotion = 'pan';
+      changed += 1;
+    }
+    return changed;
+  };
+
+  ipcMain.handle('fs:usage', () =>
+    describeStorage(app.getPath('userData'), store?.data?.games || [], storageOptions())
+  );
+  ipcMain.handle('fs:clean', async (_event, input = {}) => {
+    const id = String(input.id || '');
+    const userData = app.getPath('userData');
+    const games = store?.data?.games || [];
+    if (id === 'all') {
+      const result = await cleanSafe(userData, games, storageOptions());
+      console.log(`[文件管理] 一键清理释放 ${(result.freed / 1048576).toFixed(1)}MB`);
+      if (repairMissingBackgrounds(games)) {
+        await store.saveNow();
+        pushState(true);
+      }
+      return result;
+    }
+    const result = await cleanGroup(userData, games, id, storageOptions());
+    console.log(`[文件管理] ${id} 释放 ${(result.freed / 1048576).toFixed(1)}MB`);
+    if (id === 'backgrounds' && repairMissingBackgrounds(games)) {
+      await store.saveNow();
+      pushState(true);
+    }
+    return result;
+  });
 
   /* ---------------- 米游社 / HoYoLAB 登录 ---------------- */
 
@@ -12520,6 +12952,84 @@ function musicLoginWindow(target) {
     }
   });
 
+  /* ── 抽卡记录云备份：状态 / 保存 / 测试 / 列云端 / 恢复 ──────────────── */
+  ipcMain.handle('gacha:backup-status', () => gachaBackupSnapshot());
+
+  /*
+   * 保存配置。
+   *
+   * 密码和加密口令走「空串 = 沿用已存的那份」：表单是密码框，回显不了明文，
+   * 用户只是想改地址时不该被迫重填密码。要清掉就传 null。
+   */
+  ipcMain.handle('gacha:backup-save', async (_event, patch = {}) => {
+    const settings = store.data.settings.gachaBackup;
+    if (!settings) return { ok: false, error: '设置还没准备好' };
+    const input = patch && typeof patch === 'object' ? patch : {};
+    if ('enabled' in input) settings.enabled = input.enabled === true;
+    if ('url' in input) settings.url = String(input.url || '').trim().slice(0, 500);
+    if ('username' in input) settings.username = String(input.username || '').trim().slice(0, 200);
+    if ('keep' in input) {
+      settings.keep = Math.max(1, Math.min(10, Number(input.keep) || gachaBackup.DEFAULT_KEEP));
+    }
+    if ('password' in input) {
+      const value = input.password === null ? '' : String(input.password || '').trim();
+      if (input.password === null || value) await saveSecret(GACHA_BACKUP_PASSWORD_KEY, value);
+    }
+    if ('secret' in input) {
+      const value = input.secret === null ? '' : String(input.secret || '');
+      if (input.secret === null || value) await saveSecret(GACHA_BACKUP_SECRET_KEY, value);
+    }
+    await refreshGachaSecretFlags();
+    await store.saveNow();
+    // 用户刚改过地址或密码：失败退避清零，否则他要白等几小时才会重试
+    gachaBackupFailStreak = 0;
+    gachaBackupRetryAt = 0;
+    // 开开关之后要重排定时器，否则要等到下一次启动才会开始算周期
+    scheduleGachaBackup();
+    pushState(true);
+    return { ok: true, backup: gachaBackupSnapshot() };
+  });
+
+  ipcMain.handle('gacha:backup-test', async () => {
+    try {
+      const result = await gachaBackup.testConnection({ config: await gachaBackupCredentials() });
+      // 刚验证通过：说明配置能用，把自动备份的失败退避清掉
+      if (result && result.ok !== false) {
+        gachaBackupFailStreak = 0;
+        gachaBackupRetryAt = 0;
+      }
+      return result;
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('gacha:backup-list', async () => {
+    try {
+      return await gachaBackup.listBackups({ config: await gachaBackupCredentials() });
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('gacha:backup-restore', async (_event, input = {}) => {
+    try {
+      const result = await gachaBackup.restoreFrom({
+        config: await gachaBackupCredentials(),
+        userData: app.getPath('userData'),
+        name: input && input.name ? String(input.name) : '',
+      });
+      const settings = store.data.settings.gachaBackup;
+      settings.lastResult = result.text;
+      settings.lastError = '';
+      await store.saveNow();
+      pushState(true);
+      return result;
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('gacha:load', async (_event, force = false) => {
     // 用户不需要手动选库：路径为空或已失效时自动重新探测一次
     const configured = store.data.settings.starwardDbPath;
@@ -12626,9 +13136,9 @@ function musicLoginWindow(target) {
 
   ipcMain.handle('gacha:pick-db', async () => {
     const result = await dialog.showOpenDialog(win, {
-      title: '选择 Starward 数据库',
+      title: '选择抽卡记录数据库',
       properties: ['openFile'],
-      filters: [{ name: 'Starward 数据库', extensions: ['db', 'sqlite', 'sqlite3'] }],
+      filters: [{ name: '抽卡记录数据库', extensions: ['db', 'sqlite', 'sqlite3'] }],
     });
     if (result.canceled) return null;
     const dbPath = result.filePaths[0];
@@ -14356,6 +14866,9 @@ app.whenReady().then(async () => {
   // 界面要知道「哪几个渠道的包已经在机器上」：一个都没有时不再显示成"未识别"，
   // 而是说明会在切到那个服时自动补下。
   refreshPackChannels();
+  // 云备份：先把「有没有存过密码/口令」读进内存（snapshot 是同步的），再排定时器
+  await refreshGachaSecretFlags().catch(() => {});
+  scheduleGachaBackup();
   // 下载目录默认迁移：旧版本可能落在系统下载、系统文档或 AppData 下，
   // 也可能指向一台根本不存在的机器 / 用户的路径。这些都统一迁回启动器自身文件夹内的专门子目录；
   // 用户自己挑的、且现在还能正常写入的路径保持不变。
@@ -14442,6 +14955,12 @@ app.whenReady().then(async () => {
   ensureAnimatedStartBackgrounds();
   // 去字缓存修补：启动后 2.5 秒跑，不挡首帧（单张约 0.9s，最多三张）
   setTimeout(repairErasedStartCovers, 2500);
+  /*
+   * 显卡加速体检：GPU 进程起不来时 Chromium 要连续崩几次才彻底切成软件渲染，
+   * 所以 2.5s 与 9s 各看一次。状态真的变了会 pushState，启动页当场换成静态背景。
+   */
+  setTimeout(refreshGpuStatus, 2500);
+  setTimeout(refreshGpuStatus, 9000);
   startNoticeAutoSync();
   setTimeout(checkEndfieldUpdateNotice, 8000);
   setTimeout(checkArknightsUpdateNotice, 11000);
@@ -14696,6 +15215,13 @@ app.on('window-all-closed', () => {
 
 app.on('child-process-gone', (_event, details) => {
   writeCrashLog('child-process-gone', JSON.stringify(details));
+  /*
+   * GPU 进程崩溃后 Chromium 会试着重启，连续失败最终切成软件渲染。
+   * 这里等它落定再复查一次，状态真的变了就通知渲染层（它会换成静态背景）。
+   */
+  if (details && details.type === 'GPU') {
+    setTimeout(refreshGpuStatus, 1500);
+  }
 });
 
 app.on('render-process-gone', (_event, _contents, details) => {

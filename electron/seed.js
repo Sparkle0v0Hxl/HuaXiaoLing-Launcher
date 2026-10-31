@@ -1,7 +1,9 @@
 'use strict';
 
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { app } = require('electron');
 
 // 2.4.0 合并：新增明日方舟 / 崩坏3 两个内置游戏，种子版本随之升到 7，
 // 老存档会在下一次 ensureSeedData 时补齐这两个条目和它们的渠道行。
@@ -329,6 +331,9 @@ const BUILTIN_GAMES = [
     args: '',
     workDir: '',
     cover: 'covers/builtin-genshin.svg',
+    // 启动页去字图随包内置：新用户第一次打开原神启动页就是干净的完成品，
+    // 不必等本地去字算法跑一遍（算法效果不如人工/重绘，且要吃掉几秒 CPU）。
+    startCover: 'covers/official-genshin-clean3.png',
     accent: '#7dd3c7',
     favorite: true,
     demo: false,
@@ -351,6 +356,9 @@ const BUILTIN_GAMES = [
     args: '',
     workDir: '',
     cover: 'covers/builtin-starrail.svg',
+    // 星铁官方版本图本来就没有烧录文字，直接用它：清晰、不需要去字。
+    // （以前这里没写 startCover，启动时会被去字流程误擦一遍，把立绘的脸刮花）
+    startCover: 'covers/official-starrail.webp',
     accent: '#b49bff',
     favorite: false,
     demo: false,
@@ -373,6 +381,8 @@ const BUILTIN_GAMES = [
     args: '',
     workDir: '',
     cover: 'covers/builtin-zzz.svg',
+    // 绝区零同理：官方图本身干净，用原图，避免被去字流程重画一遍。
+    startCover: 'covers/official-zzz.webp',
     accent: '#ffb347',
     favorite: false,
     demo: false,
@@ -544,6 +554,76 @@ for (const game of BUILTIN_GAMES) {
   game.activeServerId = game.servers[0].id;
 }
 
+/* 封面目录瘦身：每次启动跑一次，幂等。
+   官方版本图会随版本更换（.png → .webp、带字版 → -clean2/-clean3），旧文件从来没被清理，
+   userData/covers 会一直膨胀（实测 37MB，其中 19MB 是同一张图的旧格式残留：
+   原神 png 4.7M + webp 2.7M、星铁 png 7.8M + webp 4.6M……）。
+   规则（保守，绝不误删正在用的图）：
+     1) 保留所有被游戏 cover / startCover 引用的文件；
+     2) 保留随包内置的 data/covers（删了下次启动又会 seed 回来，白折腾磁盘）；
+     3) 只处理 official-* 前缀；自定义封面（custom-*）与用户自己放的文件一概不碰；
+     4) 只有该游戏「已有被引用的替代文件」时，才删它剩下的多格式残留。
+   这样用户切到自定义封面、官方图暂时没人引用时，一张都不会被删。 */
+function pruneStaleCovers(coversDir, games) {
+  try {
+    const keep = new Set(Object.keys(COVERS));
+    try {
+      const bundleCovers = path.join(app.getAppPath(), 'data', 'covers');
+      for (const name of fs.readdirSync(bundleCovers)) keep.add(name);
+    } catch {
+      /* 没有内置目录就只按引用清 */
+    }
+
+    // builtinKey -> 被引用的文件集合
+    const referencedBy = new Map();
+    const allKeys = new Set();
+    for (const game of Array.isArray(games) ? games : []) {
+      for (const ref of [game.cover, game.startCover]) {
+        if (typeof ref !== 'string') continue;
+        const m = /^covers\/([^/\\]+)$/.exec(ref);
+        if (!m) continue;
+        keep.add(m[1]);
+        // 从文件名反推它属于哪个游戏：official-<key>[-clean][.ext]
+        const km = /^official-([a-z0-9]+)/i.exec(m[1]);
+        if (!km) continue;
+        if (!referencedBy.has(km[1])) referencedBy.set(km[1], new Set());
+        referencedBy.get(km[1]).add(m[1]);
+      }
+    }
+
+    const files = fs.readdirSync(coversDir);
+    for (const name of files) {
+      const km = /^official-([a-z0-9]+)/i.exec(name);
+      if (km) allKeys.add(km[1]);
+    }
+
+    let removed = 0;
+    let freed = 0;
+    for (const name of files) {
+      if (!/^official-.*\.(png|jpe?g|webp|gif|avif)$/i.test(name)) continue;
+      if (keep.has(name)) continue;
+      const km = /^official-([a-z0-9]+)/i.exec(name);
+      // 没有同 key 的替代文件 / 该 key 已无任何引用 → 一律不动（可能是用户自定义封面占了位）
+      if (!km || !referencedBy.has(km[1]) || !referencedBy.get(km[1]).size) continue;
+      try {
+        const size = fs.statSync(path.join(coversDir, name)).size;
+        fs.unlinkSync(path.join(coversDir, name));
+        removed += 1;
+        freed += size;
+      } catch {
+        /* 被占用 / 无权限就下次再说 */
+      }
+    }
+    if (removed) {
+      console.log(
+        `[封面清理] 删除 ${removed} 个过期封面，释放 ${(freed / 1048576).toFixed(1)}MB`
+      );
+    }
+  } catch (err) {
+    console.warn('[封面清理] 跳过：', err.message);
+  }
+}
+
 async function ensureSeedData(store, userData) {
   const coversDir = path.join(userData, 'covers');
   await fsp.mkdir(coversDir, { recursive: true });
@@ -556,6 +636,49 @@ async function ensureSeedData(store, userData) {
       await fsp.writeFile(target, content, 'utf8');
     }
   }
+
+  // 随包内置的官方主视觉 / 占位封面：新用户首次启动直接落到 userData/covers，
+  // 不必等联网下载（下载失败就长期看不到图，见用户反馈「新用户获取不了图」）。
+  // 只拷贝确实随包内置的文件；联网生成的（*-clean2 / *-clean3）不在此列。
+  // 读源用 readFileSync 而非 copyFileSync：源可能在 asar 内，asar 的 fs 不支持
+  // copyFile 跨协议拷贝，但读缓冲再写一定可行。
+  try {
+    const bundleCovers = path.join(app.getAppPath(), 'data', 'covers');
+    if (fs.existsSync(bundleCovers)) {
+      const wanted = new Set();
+      for (const game of BUILTIN_GAMES) {
+        for (const ref of [game.cover, game.startCover]) {
+          if (typeof ref === 'string' && /^covers\/(?:official|builtin)-/.test(ref)) {
+            wanted.add(path.basename(ref));
+          }
+        }
+      }
+      for (const fileName of wanted) {
+        const src = path.join(bundleCovers, fileName);
+        const dst = path.join(coversDir, fileName);
+        if (!fs.existsSync(src)) continue; // 只 seed 真随包内置的
+        let need = false;
+        try {
+          const st = fs.statSync(dst);
+          if (!st.isFile() || st.size < 4096) need = true;
+        } catch {
+          need = true;
+        }
+        if (!need) continue;
+        try {
+          fs.writeFileSync(dst, fs.readFileSync(src));
+          console.log('[封面seed] 已从内置资源补齐：', fileName);
+        } catch (err) {
+          console.warn('[封面seed] 拷贝失败：', fileName, err.message);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[封面seed] 跳过：', err.message);
+  }
+
+  // 放在 seed 之后跑：先把内置图补齐，再按「引用集 + 内置集」清掉历史残留。
+  pruneStaleCovers(coversDir, store.data.games);
 
   // 异环官服行在老存档里叫「国服」，统一规范成「官服」（与其他游戏口径一致）。
   // 必须放在 seedVersion 提前 return 之前，否则存量存档永远走不到；幂等，每次启动跑一遍。
@@ -629,4 +752,4 @@ async function ensureSeedData(store, userData) {
   await store.saveNow();
 }
 
-module.exports = { ensureSeedData, BUILTIN_GAMES };
+module.exports = { ensureSeedData, pruneStaleCovers, BUILTIN_GAMES };

@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.6.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.7.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -15,7 +15,13 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.6.0**
+**当前版本：v2.7.0**
+
+> [!WARNING]
+> **第一次运行时，请把启动器目录加入杀毒软件白名单。**
+> 启动器未签名，且会调用 PowerShell 解压更新包、随包带 `VelaEndfield.exe` / `hpatchz.exe` 两个小工具，这些是杀软的高危特征组合，**会被误报成病毒或直接隔离**。被隔离后典型症状是「更新失败」「终末地点开始游戏没反应」「找不到 VelaEndfield.exe」。
+> 加白名单步骤与核对方法见 [Windows 安全提示](#windows-安全提示)。
+
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -148,7 +154,36 @@
 
 便携包是**未签名**的 Electron 程序，SmartScreen / Defender 可能提示「未知发布者」或「对电脑有危害」。这不是因为包含恶意代码，而是没有代码签名证书、文件没有下载声誉。
 
-**不要为了运行它而关闭系统安全防护。** 请先核对发布页提供的 SHA-256，确认来源可信，再选择「更多信息 → 仍要运行」。正式分发需要 OV / EV 代码签名证书。
+**不要为了运行它而关闭系统安全防护。** 请先核对发布页提供的 SHA-256，确认来源可信，再选择「更多信息 → 仍要运行」。
+
+### 为什么会被误报
+
+启动器里有三样东西，单独看都常见，叠在一起就是杀软的误报特征：
+
+| 行为 | 用在哪 | 为什么看起来可疑 |
+|---|---|---|
+| 未签名的 exe 释放后被启动 | `VelaEndfield.exe`、`hpatchz.exe` | 「从自身目录释放并执行二进制」是木马的常见动作 |
+| 调用 PowerShell | 解压更新包、写入覆盖脚本 | 用 `-ExecutionPolicy Bypass`，是脚本攻击的典型写法 |
+| 以别的进程为父进程启动游戏 | 终末地 / 明日方舟启动 | 伪造父进程关系，行为上接近注入类工具 |
+
+这些能力都是功能需要（不解压就没法更新，不伪造父进程就过不了官方的 10100 校验），但客观上确实与恶意软件重叠，所以**建议主动加白名单**，而不是等它被拦了再排查。
+
+### 加白名单
+
+**Windows 安全中心（Defender）**
+
+1. 设置 → 隐私和安全性 → Windows 安全中心 → 病毒和威胁防护；
+2. 「病毒和威胁防护设置」→ 管理设置 → 拉到底「排除项」→ 添加或删除排除项；
+3. 添加**文件夹**，选启动器所在目录（例如 `D:\花筱灵启动器`，安装版通常是 `C:\Users\<你>\AppData\Local\Programs\花筱灵启动器`）。
+
+**火绒**：防护中心 → 病毒防护 → 信任区 → 添加目录。
+
+**360 / 腾讯电脑管家**：木马查杀 → 信任区 / 白名单 → 添加目录。
+
+**如果已经被隔离了**：先在杀软的「隔离区」把 `花筱灵启动器.exe`、`VelaEndfield.exe` 还原，再按上面加白；否则下次启动仍会缺文件。
+
+> 每次更新后如果杀软又弹窗，是同一个原因——更新会替换 `resources\app.asar`，文件哈希变了，之前基于哈希的放行可能失效。**按目录加白名单不会受更新影响**，这也是推荐按文件夹而不是按文件加的原因。
+
 
 ---
 
@@ -196,7 +231,20 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.6.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.7.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.7.0</b></summary>
+
+
+- 设置页新增「文件管理」：数据目录按七类分开统计（网页缓存、账号分区缓存、临时文件、启动页动态背景、过期封面残留、游戏下载缓存、日志），每类写清占用和文件数，可以单类清理或一键清安全项；自定义封面、存档、账号设置一律不碰。
+- 抽卡记录自动备份到你自己的网盘（任意 WebDAV：123 云盘 / 阿里云盘 / 坚果云 / 群晖 / Nextcloud / 自定义），7 天一次、只增不删；密码走 DPAPI 加密存储，失败退避重试；恢复时按记录 Id 合并，本地已有的一条都不覆盖。
+- 显卡加速真的不可用时（驱动异常、虚拟机、远程桌面）启动页自动改用静态版本图，不再让 CPU 软件渲染吃掉一个核；同时去掉视频层的全屏色彩滤镜和文字遮罩的整层模糊。
+- 背景图修复：崩坏3 新用户第一次打开就有内置封面；终末地启动页不再垫一张被放大的海报（过曝 + 显示不全的根因），超宽屏下完整显示；原神换了一版重新绘制的版本图，没有去字糊斑；旧封面残留会顺手清掉。
+- 终末地 / 明日方舟启动彻底不依赖 PowerShell：伪造父进程的逻辑预编译成原生小程序 `VelaEndfield.exe`，机器上没装 PowerShell 或被组策略禁用也能启动，提权步骤也内置了。
+- **第一次运行请把启动器目录加进杀毒软件白名单**：未签名 + 调系统脚本解压更新包 + 随包带两个小工具，会被误报或隔离。详见 [Windows 安全提示](#windows-安全提示)。
+
+</details>
 
 <details>
 <summary><b>v2.6.0</b></summary>

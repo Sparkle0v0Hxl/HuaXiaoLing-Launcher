@@ -494,7 +494,7 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
   const importGroups = importsPath ? readImportGroups(importsPath) : [];
   const dbExists = Boolean(dbPath && fs.existsSync(dbPath));
   if (!dbExists && !importGroups.length) {
-    throw new Error('没有找到 Starward 数据库，也没有导入过 UIGF 抽卡记录');
+    throw new Error('本机还没有可读取的抽卡记录，先在线同步或用 UIGF 导入一份吧');
   }
   const stat = dbExists ? fs.statSync(dbPath) : null;
   let importMtime = 0;
@@ -532,7 +532,7 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
       try {
         buffer = fs.readFileSync(dbPath);
       } catch (error) {
-        throw new Error(`无法读取 Starward 数据库：${error.message}`);
+        throw new Error(`读取抽卡数据库失败：${error.message}`);
       }
       db = new SQL.Database(buffer);
     }
