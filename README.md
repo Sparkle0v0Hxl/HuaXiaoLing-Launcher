@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.7.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.7.1-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -16,7 +16,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.7.0**
+**当前版本：v2.7.1**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -129,7 +129,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.6.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.7.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -232,7 +232,19 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.7.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.7.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.7.1</b></summary>
+
+
+- 更新包改成 16 条连接分块并发下载：单连接被限速时也能吃满剩下的带宽，实测同一份 179 MB 的包从 53 KB/s 提到 5~10 MB/s；服务器不支持分块时自动退回单连接，不会变成下不动。
+- 去掉全部第三方加速镜像：那些免费前缀要么整片超时、要么只有一两百 KB/s，比直连还慢，还要先花几秒测速、赌一条随时会挂的线路。现在只走官方地址，少一层转发也少一个能篡改下载内容的地方（sha256 仍在最后把关）。
+- 设置页新增「网络代理」：填 http / https / socks5 代理即可，只对启动器自己的请求生效，不写系统代理、不碰注册表，留空就是直连；开着 Steam++ 这类工具的用户不用填。
+- 切服 / 硬链接生成时下载的渠道差异包也改多连接：国际服整包 940 MB、B服 194 MB，里面 Endfield.exe、GameAssembly.dll 都是几十上百 MB 的单文件，以前一条连接慢慢挪，现在按 16 段并发；整包分卷下载的进度条也不再一卷一跳。
+- 下载可以取消了：渠道包下载中点「取消」会立刻掐断所有在途分段，不再等到当前文件下完才停。
+
+</details>
 
 <details>
 <summary><b>v2.7.0</b></summary>

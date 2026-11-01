@@ -845,7 +845,7 @@ function settingsView() {
 
         <section class="${group('update', true)}" ${groupAttr('update')}>
           <h2>${icon('download')}软件更新</h2>
-          <p class="desc">更新源已经内置：先看启动器目录里那份 <code>latest.json</code>，没有就去官方 Release 取，装完就能自己升级。下载失败会自动换国内镜像重试并做 sha256 校验，裸连也能装；开着 Steam++ 这类加速器也不会再因为证书检查失败。</p>
+          <p class="desc">更新源已经内置：先看启动器目录里那份 <code>latest.json</code>，没有就去官方 Release 取，装完就能自己升级。更新包走 16 条连接分块并发下载，单连接被限速时能吃到剩下的带宽；下完做 sha256 校验。开着 Steam++ 这类加速器也不会再因为证书检查失败。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。一直卡在「检查更新」或下载不动时，点右边「用国内镜像源」换成 Gitee 上的清单试一次。</span></div>
             <div class="setting-control update-source-control">
@@ -853,6 +853,16 @@ function settingsView() {
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
               <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}用国内镜像源</button>
               <button class="btn btn-ghost" data-action="pick-update-source">${icon('folder')}选择文件</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>网络代理</strong>
+              <span>启动器自己发出去的请求（更新清单、更新包、封面、公告）走这个代理。只改程序内存里的配置，不写系统代理、不动注册表，关掉启动器对系统没有任何影响。填本地代理软件的地址即可：Clash 是 <code>http://127.0.0.1:7890</code>，v2rayN 是 <code>http://127.0.0.1:10809</code>，Socks5 写成 <code>socks5://127.0.0.1:1080</code>。<b>留空就是直连</b>——装了 Steam++ 这类工具的用户不用填，它靠改 hosts 生效，启动器会自动走。</span>
+            </div>
+            <div class="setting-control update-source-control">
+              <input class="text-input" id="proxy-rules" value="${esc(settings.proxyRules || '')}" placeholder="留空 = 直连，例：http://127.0.0.1:7890" spellcheck="false" />
+              <button class="btn btn-ghost" data-action="save-proxy-rules">保存</button>
             </div>
           </div>
           <div class="setting-row">

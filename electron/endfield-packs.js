@@ -5,6 +5,8 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+const { multiDownload, MIN_PARALLEL_SIZE, DEFAULT_CONNECTIONS } = require('./multi-download');
+
 const AES_KEY = Buffer.from([
   192, 243, 14, 28, 231, 99, 187, 194, 28, 195, 85, 163, 67, 3, 172, 80, 57, 148, 68,
   191, 246, 140, 74, 34, 175, 57, 140, 10, 22, 110, 225, 67,
@@ -510,6 +512,55 @@ function bytesPerSecond(bytes, startedAt) {
   return Math.round(bytes / seconds);
 }
 
+/** 渠道包的连接数。和更新包保持一致，对端按连接限速时才能吃满带宽。 */
+const PACK_CONNECTIONS = DEFAULT_CONNECTIONS;
+
+/**
+ * 下载一个渠道包文件：够大就走多连接分段，其余照旧单连接。
+ *
+ * 差异包体量不小（国际服整包 940 MB，里面 Endfield.exe / GameAssembly.dll 都是
+ * 几十上百 MB 的单文件），而鹰角的 CDN 按连接限速——单连接跑这些大文件只有
+ * 一两 MB/s，「硬链接生成一份」时用户就得干等十几分钟。分段并发之后同样一份包
+ * 能快好几倍，实现直接复用更新包那套（electron/multi-download.js）。
+ *
+ * 分段不可用（服务器不认 Range、探测不到总长、中途出错）就退回单连接：
+ * 单连接本来就有断点续传，慢但一定能下完。退之前必须先删半截文件——分段是
+ * 「按总长预分配 + 各段写各自偏移」，中断后的文件里是洞，拿它当续传起点会把
+ * 洞当成已下好的数据（大小够了，内容却是垃圾，最后卡在 md5 校验上）。
+ *
+ * @param {object} [options]
+ * @param {number} [options.size] 清单里的文件大小，用于判断值不值得分段
+ * @param {AbortSignal} [options.signal]
+ * @param {(bytes:number)=>void} [options.onChunk]
+ */
+async function downloadPackFile(url, destination, options = {}) {
+  const { size = 0, signal, onChunk } = options;
+  if (size >= MIN_PARALLEL_SIZE) {
+    let sent = 0;
+    try {
+      await multiDownload({
+        url,
+        dest: destination,
+        expectedSize: size,
+        headers: { 'user-agent': UA },
+        connections: PACK_CONNECTIONS,
+        signal,
+        report: (percent, received) => {
+          if (typeof onChunk !== 'function') return;
+          const delta = received - sent;
+          sent = received;
+          if (delta > 0) onChunk(delta);
+        },
+      });
+      return destination;
+    } catch (error) {
+      if (signal?.aborted) throw abortedError();
+      await fsp.rm(destination, { force: true }).catch(() => {});
+    }
+  }
+  return downloadToFile(url, destination, options);
+}
+
 /**
  * 分卷 ZIP 整包下载（「全新安装 / 文件全坏」时兜底）。
  *
@@ -546,7 +597,7 @@ async function downloadAndExtractSplit({ profile, root, stagingRoot, onProgress 
   await fsp.mkdir(staging, { recursive: true });
 
   const total = latest.packs.length;
-  const report = (index, phase) => {
+  const report = (index, phase, fraction = 0) => {
     if (typeof onProgress === 'function') {
       onProgress({
         game: profile.iconName,
@@ -554,7 +605,9 @@ async function downloadAndExtractSplit({ profile, root, stagingRoot, onProgress 
         phase,
         index,
         total,
-        percent: Math.round((index / total) * 100),
+        // 卷内进度：下载一卷几百 MB 时进度条得一点点走，不能一卷一跳
+        fraction: Math.max(0, Math.min(0.999, fraction)),
+        percent: Math.round(((index + Math.max(0, Math.min(0.999, fraction))) / total) * 100),
       });
     }
   };
@@ -575,11 +628,20 @@ async function downloadAndExtractSplit({ profile, root, stagingRoot, onProgress 
       reused = false;
     }
     if (reused) continue;
-    await downloadToFile(pack.url, target);
+    // 大卷走 16 连接分段，小卷仍是单连接（分段对小文件没意义，反而多几次探测）
+    let doneInPack = 0;
+    await downloadPackFile(pack.url, target, {
+      size: pack.size,
+      onChunk: (bytes) => {
+        doneInPack += bytes;
+        report(index, 'download', doneInPack / Math.max(1, pack.size));
+      },
+    });
     if (pack.md5) {
       const actual = await md5File(target);
       if (actual !== pack.md5) throw new Error(`${name} 校验失败（md5 不符）`);
     }
+    report(index + 1, 'download', 0);
   }
   report(total, 'download');
 
@@ -679,7 +741,8 @@ async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
       continue;
     }
     const temporary = `${target}.vela-download`;
-    await downloadToFile(`${remote.base}/${file.urlPath}`, temporary);
+    // 大文件同样走多连接；小文件由 downloadPackFile 自己判断走单连接
+    await downloadPackFile(`${remote.base}/${file.urlPath}`, temporary, { size: file.size || 0 });
     const actual = await md5File(temporary);
     if (actual !== file.md5) {
       await fsp.rm(temporary, { force: true });
@@ -893,7 +956,14 @@ async function updateProfile(profile, root, onProgress, options = {}) {
       let lastError = null;
       for (let attempt = 1; attempt <= 5; attempt += 1) {
         try {
-          await downloadToFile(`${remote.base}/${file.urlPath}`, temporary, {
+          /*
+           * 大文件（Endfield.exe / GameAssembly.dll 这类几十上百 MB 的）走
+           * 16 连接分段，小文件仍是单连接：CDN 按连接限速，分段是唯一能让
+           * 「硬链接生成一份」等 940 MB 差异包时快起来的办法。分段不可用时
+           * downloadPackFile 内部就退回单连接了，这里不用再判断。
+           */
+          await downloadPackFile(`${remote.base}/${file.urlPath}`, temporary, {
+            size: file.size || 0,
             signal,
             onChunk: (chunkBytes) => {
               downloadedBytes += chunkBytes;

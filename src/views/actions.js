@@ -1887,6 +1887,29 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
+    case 'save-proxy-rules': {
+      const input = document.querySelector('#proxy-rules');
+      const raw = (input ? input.value : '').trim();
+      // 前端先挡一道，免得用户填完发现「保存了但没生效」
+      if (raw && !/^(https?|socks5h?):\/\/[^\s/]+/i.test(raw)) {
+        toast('地址要以 http:// 、https:// 或 socks5:// 开头', 'error');
+        break;
+      }
+      await api.updateSettings({ proxyRules: raw });
+      state.settings.proxyRules = raw;
+      toast(raw ? '代理已生效，正在重新检查更新…' : '已改回直连', 'success');
+      if (raw) {
+        try {
+          const result = await api.checkUpdate();
+          if (result && result.hasUpdate) openUpdateModal(result);
+        } catch (error) {
+          toast(`走代理后检查失败：${humanError(error)}`, 'error');
+        }
+      }
+      render();
+      break;
+    }
+
     case 'save-update-source': {
       const input = document.querySelector('#update-manifest');
       const value = (input ? input.value : '').trim();

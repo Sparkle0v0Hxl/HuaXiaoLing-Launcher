@@ -846,6 +846,12 @@ function defaultSettings() {
     // 自更新：清单地址留空则不检查；支持 https / 局域网共享 / 本地路径
     updateManifest: '',
     autoCheckUpdate: true,
+    /*
+     * 网络代理：只影响启动器自己发出的请求（更新清单、更新包、封面、公告），
+     * 改的是 Chromium 的内存配置，不写系统代理、不碰注册表，退出即还原。
+     * 留空＝直连。填 `http://127.0.0.1:7890` 这种本地代理地址即可。
+     */
+    proxyRules: '',
     // 更新公告弹窗已经弹过的版本号；空串表示这次升级还没看，启动时弹一次
     notesSeenVersion: '',
     endfieldPackRoot: detectEndfieldPackRoot(),
@@ -5255,7 +5261,6 @@ async function startUpdate(options = {}) {
     try {
       await updater.downloadToFile({
         url: manifest.url,
-        mirrors: manifest.mirrors,
         dest: zipPath,
         expectedSize: manifest.size,
         onProgress: (progress) => {
@@ -5535,6 +5540,40 @@ function scheduleGachaBackup() {
     };
     powerMonitor.on('resume', onResume);
     powerMonitor.on('unlock-screen', onResume);
+  }
+}
+
+/**
+ * 代理地址规范化。只接受 http / https / socks5 形态，其余一律当没填。
+ *
+ * 用户常从别处整段复制，前后带空格或说明文字，这里统一裁掉；
+ * 也挡住「随手填个域名」导致 setProxy 抛错、整个启动器联网全废的情况。
+ */
+function normalizeProxyRules(value) {
+  const text = String(value || '').trim().slice(0, 200);
+  if (!text) return '';
+  if (!/^(https?|socks5h?):\/\/[^\s/]+/i.test(text)) return '';
+  return text;
+}
+
+/**
+ * 把设置里的代理应用到 Electron 默认会话。
+ *
+ * 只改 Chromium 的内存代理配置——不写系统代理、不动注册表，退出启动器
+ * 对系统毫无影响。写错了也只是启动器自己连不上，不会影响用户其他软件。
+ */
+async function applyProxySettings() {
+  const target = session.defaultSession;
+  if (!target) return;
+  const rules = normalizeProxyRules(store?.data?.settings?.proxyRules);
+  try {
+    if (rules) {
+      await target.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' });
+    } else {
+      await target.setProxy({ mode: 'direct' });
+    }
+  } catch {
+    /* 代理填错不该让启动器起不来 */
   }
 }
 
@@ -7478,6 +7517,7 @@ function installIpc() {
       'sidebarChar',
       'updateManifest',
       'autoCheckUpdate',
+      'proxyRules',
       'notesSeenVersion',
       'endfieldPackRoot',
       'starwardDbPath',
@@ -7592,6 +7632,8 @@ function installIpc() {
         clearMusicResolveCache();
       } else if (key === 'updateManifest') {
         settings.updateManifest = String(patch.updateManifest || '').trim().slice(0, 500);
+      } else if (key === 'proxyRules') {
+        settings.proxyRules = normalizeProxyRules(patch.proxyRules);
       } else if (key === 'autoCheckUpdate') {
         settings.autoCheckUpdate = patch.autoCheckUpdate !== false;
       } else if (key === 'notesSeenVersion') {
@@ -7636,6 +7678,8 @@ function installIpc() {
     // 原来顺序反了，机械盘上点一次主题要等几十毫秒才有反应。
     pushState(true);
     await store.saveNow();
+    // 代理改完立刻生效，不用重启：用户点保存就能看到联网行为变化
+    if ('proxyRules' in patch) await applyProxySettings();
     return snapshot();
   });
 
@@ -11695,12 +11739,14 @@ function musicLoginWindow(target) {
                 // 字节按整包体积线性折算，只为进度显示，不做精确承诺
                 const totalPacks = progress.total || 0;
                 const packIndex = progress.index || 0;
+                // 卷内进度（0~1）：几百 MB 的一卷要能看出在走，不能一卷一跳
+                const done = packIndex + (Number(progress.fraction) || 0);
                 send('sophon:progress', {
                   jobId,
                   phase: 'download',
                   processed: packIndex,
                   total: totalPacks,
-                  bytesDone: totalPacks ? Math.round((Number(summary.totalBytes) || 0) * (packIndex / totalPacks)) : 0,
+                  bytesDone: totalPacks ? Math.round((Number(summary.totalBytes) || 0) * (done / totalPacks)) : 0,
                   totalBytes: Number(summary.totalBytes) || 0,
                   current: `下载分卷 ${packIndex} / ${totalPacks}`,
                 });
@@ -14842,6 +14888,8 @@ app.whenReady().then(async () => {
   await ensureSeedData(store, app.getPath('userData'));
   const previousUiRevision = store.data.settings?.uiRevision;
   store.data.settings = { ...defaultSettings(), ...(store.data.settings || {}) };
+  // 代理要在任何联网动作之前生效（更新检查、封面、公告都在后面）
+  await applyProxySettings();
   if (!previousUiRevision) store.data.settings.sidebarCollapsed = true;
   const bundledPacks = bundledEndfieldPackRoot();
   if (bundledPacks) store.data.settings.endfieldPackRoot = bundledPacks;

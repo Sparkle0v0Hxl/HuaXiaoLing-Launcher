@@ -1,5 +1,7 @@
 # 用户数据
-data/
+data/*
+# 内置封面图是随包发布的资源，要纳入版本控制
+!data/covers/
 downloads/
 *.log
 
@@ -22,3 +24,7 @@ desktop.ini
 
 # 超过 GitHub 100MB 限制，从 Release 获取
 resources/endfield-packs/EndBilibili/
+
+# 依赖与本地构建资源
+node_modules/
+package-lock.json

@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
+  <defs>
+    <linearGradient id="bh-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#080b18"/><stop offset=".5" stop-color="#111a33"/><stop offset="1" stop-color="#05070f"/>
+    </linearGradient>
+    <linearGradient id="bh-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#05070f" stop-opacity="0"/><stop offset=".72" stop-color="#05070f" stop-opacity=".88"/><stop offset="1" stop-color="#05070f"/>
+    </linearGradient>
+    <linearGradient id="bh-crystal" x1="0" y1="0" x2=".4" y2="1">
+      <stop stop-color="#eaf3ff"/><stop offset=".55" stop-color="#8fb8ff"/><stop offset="1" stop-color="#3d6fd6"/>
+    </linearGradient>
+    <linearGradient id="bh-crack" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#ff4d5a" stop-opacity="0"/><stop offset=".5" stop-color="#ff4d5a" stop-opacity=".92"/><stop offset="1" stop-color="#ff4d5a" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="bh-blur" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="28"/></filter>
+  </defs>
+  <rect width="600" height="800" fill="url(#bh-bg)"/>
+  <ellipse cx="300" cy="320" rx="200" ry="190" fill="#6f9dff" opacity=".16" filter="url(#bh-blur)"/>
+  <ellipse cx="300" cy="320" rx="120" ry="120" fill="#ff4d5a" opacity=".07" filter="url(#bh-blur)"/>
+  <g stroke="#9cc0ff" stroke-width=".6" opacity=".1">
+    <path d="M0 140h600M0 230h600M0 320h600M0 410h600M0 500h600"/>
+    <path d="M110 0v600M220 0v600M330 0v600M440 0v600M550 0v600"/>
+  </g>
+  <!-- 崩坏结晶：八面体棱面 -->
+  <g transform="translate(300 310)">
+    <path d="M0-190 L118-38 L0 128 L-118-38 Z" fill="url(#bh-crystal)" opacity=".9"/>
+    <path d="M0-190 L118-38 L0 128 Z" fill="#ffffff" opacity=".14"/>
+    <path d="M0-190 L-118-38 L0 128 Z" fill="#2a4a99" opacity=".3"/>
+    <path d="M0-190 L0 128" stroke="#dbe9ff" stroke-width="1.2" opacity=".55"/>
+    <path d="M-118-38 L118-38" stroke="#dbe9ff" stroke-width="1.2" opacity=".4"/>
+    <path d="M0-190 L0 360" stroke="#9cc0ff" stroke-width="1" opacity=".22"/>
+  </g>
+  <!-- 赤色裂隙 -->
+  <path d="M-20 250 L150 330 L118 372 L300 430 L268 470 L560 520" fill="none" stroke="url(#bh-crack)" stroke-width="2.4"/>
+  <path d="M-20 292 L120 366 L92 404 L250 458 L222 496 L540 556" fill="none" stroke="url(#bh-crack)" stroke-width="1" opacity=".55"/>
+  <g fill="#eaf3ff" opacity=".5">
+    <circle cx="150" cy="132" r="1.7"/><circle cx="452" cy="196" r="1.3"/><circle cx="392" cy="96" r="1"/>
+    <circle cx="228" cy="486" r="1.2"/><circle cx="500" cy="386" r="1.1"/>
+  </g>
+</svg>
