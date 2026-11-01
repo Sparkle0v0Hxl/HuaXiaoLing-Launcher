@@ -512,11 +512,27 @@ async function ensureManifests(manifests, cacheDir, onProgress, options = {}) {
   const list = Array.from(manifests || []);
   if (!list.length) return [];
   const perManifest = manifestConnectionsFor(list.length);
-  return mapLimit(list, MANIFEST_CONCURRENCY, (manifest, index) =>
-    signal?.cancelled
-      ? []
-      : ensureManifest(manifest, cacheDir, onProgress, `${label} ${index + 1}/${list.length}`, perManifest)
-  );
+  /*
+   * 份数进度要一路带着走：ensureManifest 内部也会推 manifest 事件（只有 current 没有计数），
+   * 前端拿到没有计数的进度会把条打回 0。所以这里包装一层，任何内部事件都补上当前份数。
+   */
+  let done = 0;
+  const relay = (event) =>
+    onProgress?.({ ...(event || {}), phase: 'manifest', processed: done, total: list.length });
+  relay({ current: `${label} 0/${list.length}` });
+  return mapLimit(list, MANIFEST_CONCURRENCY, async (manifest, index) => {
+    if (signal?.cancelled) return [];
+    const files = await ensureManifest(
+      manifest,
+      cacheDir,
+      relay,
+      `${label} ${index + 1}/${list.length}`,
+      perManifest
+    );
+    done += 1;
+    relay({ current: `${label} ${done}/${list.length}` });
+    return files;
+  });
 }
 
 async function waitIfPaused(signal) {

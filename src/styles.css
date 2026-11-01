@@ -26385,6 +26385,54 @@ body.charms-on .page-deco-sprite { display: block; }
   line-height: 1.35;
 }
 
+/*
+ * 每一步自己的进度条：卡片内一条 3px 细条 + 百分比。
+ * 走到哪一步，哪一步的条在动；走完固定 100% 并打勾，下一步从 0 起 —— 不再是一条总
+ * 进度条跨步骤跳来跳去（读清单 0% 卡住、切到下载又从头开始）。
+ */
+.sw-stage-bar {
+  display: block;
+  width: calc(100% - 8px);
+  height: 3px;
+  margin-top: 1px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.sw-stage-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: rgba(var(--accent-rgb), 0.35);
+  transition: width 0.3s ease;
+}
+
+.sw-stage-value {
+  min-height: 10px;
+  font-size: 9px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.sw-stage.is-active .sw-stage-bar i {
+  background: var(--accent);
+}
+
+.sw-stage.is-active .sw-stage-value {
+  color: var(--text-2);
+}
+
+.sw-stage.is-done .sw-stage-bar i {
+  background: rgba(var(--accent-rgb), 0.6);
+}
+
+.sw-stage.is-skipped .sw-stage-bar {
+  opacity: 0.35;
+}
+
 .sw-stage.is-active {
   border-color: rgba(var(--accent-rgb), 0.55);
   color: var(--text);

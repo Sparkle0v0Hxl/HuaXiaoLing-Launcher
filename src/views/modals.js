@@ -762,6 +762,8 @@ function openGameDownloadModal(gameId) {
               <li class="sw-stage" data-index="${index}">
                 <span class="sw-stage-dot">${index + 1}</span>
                 <span class="sw-stage-label">${esc(stage.label)}</span>
+                <span class="sw-stage-bar"><i></i></span>
+                <span class="sw-stage-value"></span>
               </li>`
             ).join('')}
           </ol>
@@ -918,17 +920,48 @@ function openGameDownloadModal(gameId) {
 
   /* 阶段条只往前走：复用硬链接弹窗那套 SOPHON_STAGES，两处说法保持一致 */
   const stageBox = document.querySelector('#dl-stages');
+  const stageNodes = stageBox ? [...stageBox.querySelectorAll('.sw-stage')] : [];
+  /* 每一步自己的进度：走到哪一步哪一步的条在动，走完停在 100%，下一步从 0 起 */
+  const stagePercent = SOPHON_STAGES.map(() => 0);
+  const stagePhase = SOPHON_STAGES.map(() => '');
   let stageIndex = -1;
-  const paintStages = (index) => {
+
+  const paintStageBars = () => {
+    stageNodes.forEach((node, i) => {
+      const fill = node.querySelector('.sw-stage-bar i');
+      const value = node.querySelector('.sw-stage-value');
+      const percent = Math.max(0, Math.min(100, stagePercent[i] || 0));
+      if (fill) fill.style.width = `${percent}%`;
+      if (value) {
+        value.textContent = percent >= 100 ? '100%' : percent > 0 ? `${percent.toFixed(0)}%` : '';
+      }
+      node.classList.toggle('has-progress', percent > 0);
+    });
+  };
+
+  const paintStages = (index, progress) => {
     if (!stageBox) return;
-    if (index >= 0) stageIndex = Math.max(stageIndex, index);
+    if (index >= 0) {
+      stageIndex = Math.max(stageIndex, index);
+      if (progress) {
+        // 同一步里换了个子阶段（硬链接完开始覆盖渠道文件）就把这条从 0 重走
+        if (progress.phase && progress.phase !== stagePhase[stageIndex]) {
+          stagePhase[stageIndex] = progress.phase;
+          stagePercent[stageIndex] = 0;
+        }
+        const value = Number(progress.percent) || 0;
+        stagePercent[stageIndex] = Math.max(stagePercent[stageIndex], Math.min(100, value));
+      }
+    }
     const finishedAll = stageIndex >= SOPHON_STAGES.length - 1;
-    [...stageBox.querySelectorAll('.sw-stage')].forEach((node, i) => {
+    stageNodes.forEach((node, i) => {
       const isDone = finishedAll || i < stageIndex;
       node.classList.toggle('is-done', isDone);
       node.classList.toggle('is-active', !finishedAll && i === stageIndex);
       node.querySelector('.sw-stage-dot').textContent = isDone ? '✓' : String(i + 1);
+      if (isDone) stagePercent[i] = 100;
     });
+    paintStageBars();
   };
 
   const sumTag = document.querySelector('#dl-sum-tag');
@@ -1103,12 +1136,22 @@ function openGameDownloadModal(gameId) {
         manifest: '读取清单与分块索引',
         install: '写入文件',
         download: '下载分块',
+        patch: '应用补丁',
+        ldiff: '本地补丁修补（省流）',
+        link: '硬链接复用文件',
+        overlay: '覆盖渠道差异文件',
+        pack: '下载渠道差异包',
         done: '完成',
       };
       if (event.tag && sumTag) sumTag.textContent = event.tag;
-      paintStages(percent >= 100 && stage === 2 ? 3 : stage);
-      document.querySelector('#dl-phase').textContent = phases[event.phase] || '处理中…';
+      const activeStage = percent >= 100 && stage === 2 ? 3 : stage;
+      paintStages(activeStage, { percent: event.phase === 'done' ? 100 : percent, phase: event.phase });
+      document.querySelector('#dl-phase').textContent = `第 ${activeStage + 1}/${SOPHON_STAGES.length} 步 · ${
+        phases[event.phase] || '处理中…'
+      }`;
       document.querySelector('#dl-count').textContent = total ? `${processed} / ${total}` : '';
+      const dlWrap = document.querySelector('#dl-progress .progress-bar');
+      dlWrap?.classList.toggle('indeterminate', !total && event.phase !== 'done');
       document.querySelector('#dl-bar').style.width = `${event.phase === 'done' ? 100 : percent}%`;
       const stats = sophonProgressStats(event);
       document.querySelector('#dl-stats').textContent = stats;
@@ -1151,6 +1194,15 @@ function openGameDownloadModal(gameId) {
       start.disabled = false;
       start.textContent = '完成';
       paintStages(SOPHON_STAGES.length - 1);
+      // 结果卡出来时把进度区收口，别停在「处理中…」
+      const dlPhaseDone = document.querySelector('#dl-phase');
+      if (dlPhaseDone) dlPhaseDone.textContent = `第 ${SOPHON_STAGES.length}/${SOPHON_STAGES.length} 步 · 完成`;
+      const dlCountDone = document.querySelector('#dl-count');
+      if (dlCountDone) dlCountDone.textContent = '';
+      const dlWrapDone = document.querySelector('#dl-progress .progress-bar');
+      dlWrapDone?.classList.remove('indeterminate');
+      const dlBarDone = document.querySelector('#dl-bar');
+      if (dlBarDone) dlBarDone.style.width = '100%';
       if (resultBox) {
         resultBox.hidden = false;
         resultBox.querySelector('#dl-result-grid').innerHTML = [
@@ -1220,13 +1272,15 @@ const SOPHON_PHASE_STAGE = {
   start: 0,
   version: 0,
   manifest: 0,
-  // 终末地：切过去时先补下缺的那个渠道包，再进硬链接
-  pack: 0,
+  // 终末地 / 明日方舟生成运行时：先补缺的渠道包，再硬链接、再覆盖差异文件 —— 都算「写入 / 下载」
+  pack: 2,
   ldiff: 1,
   install: 2,
   download: 2,
   patch: 2,
   link: 2,
+  // 硬链接完再把渠道差异文件盖上去（终末地 / 明日方舟的运行时生成）
+  overlay: 2,
   done: 4,
 };
 
@@ -1554,6 +1608,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
               <li class="sw-stage" data-index="${index}">
                 <span class="sw-stage-dot">${index + 1}</span>
                 <span class="sw-stage-label">${esc(stage.label)}</span>
+                <span class="sw-stage-bar"><i></i></span>
+                <span class="sw-stage-value"></span>
               </li>`
             ).join('')}
           </ol>
@@ -1562,7 +1618,7 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
               <strong id="sophon-phase">准备中…</strong>
               <span id="sophon-count"></span>
             </div>
-            <div class="progress-bar"><span id="sophon-bar" style="width:0%"></span></div>
+            <div class="progress-bar" id="sophon-bar-wrap"><span id="sophon-bar" style="width:0%"></span></div>
             <div class="link-progress-meta">
               <span id="sophon-stats"></span>
               <span id="sophon-current"></span>
@@ -1686,13 +1742,42 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
 
   /* 阶段条：只往前走，不往回退。中途重试也从当前阶段继续，免得看着像回到原点。 */
   const stageBox = document.querySelector('#sophon-stages');
+  const stageNodes = stageBox ? [...stageBox.querySelectorAll('.sw-stage')] : [];
+  /* 每一步自己的进度：切到下一步时那条从 0 起走，上一步则停在 100% 并打勾 */
+  const stagePercent = SOPHON_STAGES.map(() => 0);
+  const stagePhase = SOPHON_STAGES.map(() => '');
   let stageIndex = -1;
   let ldiffSeen = false;
-  const paintStages = (index) => {
+
+  const paintStageBars = () => {
+    stageNodes.forEach((node, i) => {
+      const fill = node.querySelector('.sw-stage-bar i');
+      const value = node.querySelector('.sw-stage-value');
+      const percent = Math.max(0, Math.min(100, stagePercent[i] || 0));
+      if (fill) fill.style.width = `${percent}%`;
+      if (value) {
+        value.textContent = percent >= 100 ? '100%' : percent > 0 ? `${percent.toFixed(0)}%` : '';
+      }
+      node.classList.toggle('has-progress', percent > 0);
+    });
+  };
+
+  const paintStages = (index, progress) => {
     if (!stageBox) return;
-    if (index >= 0) stageIndex = Math.max(stageIndex, index);
+    if (index >= 0) {
+      stageIndex = Math.max(stageIndex, index);
+      if (progress) {
+        // 同一步里换了个子阶段（硬链接完开始覆盖渠道文件）就把这条从 0 重走
+        if (progress.phase && progress.phase !== stagePhase[stageIndex]) {
+          stagePhase[stageIndex] = progress.phase;
+          stagePercent[stageIndex] = 0;
+        }
+        const value = Number(progress.percent) || 0;
+        stagePercent[stageIndex] = Math.max(stagePercent[stageIndex], Math.min(100, value));
+      }
+    }
     const finishedAll = stageIndex >= SOPHON_STAGES.length - 1;
-    [...stageBox.querySelectorAll('.sw-stage')].forEach((node, i) => {
+    stageNodes.forEach((node, i) => {
       const isDone = finishedAll || i < stageIndex;
       // 走到写入阶段还没见过 ldiff 事件，说明这个渠道没有本地补丁，第 2 步标成「跳过」而不是让它一直空着
       const isSkipped = !ldiffSeen && i === 1 && stageIndex > 1;
@@ -1703,7 +1788,9 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       node.querySelector('.sw-stage-label').textContent = isSkipped
         ? `${SOPHON_STAGES[i].label}（跳过）`
         : SOPHON_STAGES[i].label;
+      if (isDone || isSkipped) stagePercent[i] = 100;
     });
+    paintStageBars();
   };
 
   const sumTag = document.querySelector('#sw-sum-tag');
@@ -1920,6 +2007,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         // ldiff 预修补阶段：先把能就地补的文件补掉，再进 chunk 校验，界面上要能看出这一步在干什么
         ldiff: '本地补丁修补（省流）',
         link: '硬链接复用文件',
+        // 硬链接完再把渠道差异文件盖上去（终末地 / 明日方舟的运行时生成）
+        overlay: '覆盖渠道差异文件',
         pack: '下载渠道差异包',
         done: '完成',
       };
@@ -1933,10 +2022,18 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
         }
       }
       // 文件都写完了但还没收到 done，说明在收尾校验，阶段条前进一格
-      paintStages(percent >= 100 && stage === 2 ? 3 : stage);
-      document.querySelector('#sophon-phase').textContent = phases[event.phase] || '处理中…';
+      const activeStage = percent >= 100 && stage === 2 ? 3 : stage;
+      // 主进度条只表示「当前这一步走到哪」，切换步骤时自然从 0 起，不和上一步的 100% 混在一起
+      paintStages(activeStage, { percent: event.phase === 'done' ? 100 : percent });
+      document.querySelector('#sophon-phase').textContent = `第 ${activeStage + 1}/${
+        SOPHON_STAGES.length
+      } 步 · ${phases[event.phase] || '处理中…'}`;
       document.querySelector('#sophon-count').textContent = total ? `${processed} / ${total}` : '';
-      document.querySelector('#sophon-bar').style.width = `${event.phase === 'done' ? 100 : percent}%`;
+      const barWrap = document.querySelector('#sophon-bar-wrap');
+      const stepPercent = event.phase === 'done' ? 100 : percent;
+      // 没有计数的一步（比如 just 拿到版本号）用滚动条表示「在跑」，别让它干停在 0%
+      barWrap?.classList.toggle('indeterminate', !total && event.phase !== 'done');
+      document.querySelector('#sophon-bar').style.width = `${stepPercent}%`;
       const stats = sophonProgressStats(event);
       document.querySelector('#sophon-stats').textContent = stats;
       document.querySelector('#sophon-current').textContent = event.current || '';
@@ -1984,6 +2081,15 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
        */
       finishedOk = true;
       paintStages(SOPHON_STAGES.length - 1);
+      // 结果卡出来时把进度区也收口：别停在「处理中… 90/126」让人以为还差一点没跑完
+      const finishPhase = document.querySelector('#sophon-phase');
+      if (finishPhase) finishPhase.textContent = `第 ${SOPHON_STAGES.length}/${SOPHON_STAGES.length} 步 · 完成`;
+      const finishCount = document.querySelector('#sophon-count');
+      if (finishCount) finishCount.textContent = '';
+      const finishBarWrap = document.querySelector('#sophon-bar-wrap');
+      finishBarWrap?.classList.remove('indeterminate');
+      const finishBar = document.querySelector('#sophon-bar');
+      if (finishBar) finishBar.style.width = '100%';
       showResult(result);
       const ldiffNote =
         result.ldiff && result.ldiff.applied > 0
