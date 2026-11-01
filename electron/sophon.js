@@ -9,6 +9,8 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { hardlinkTree } = require('./runtime');
+const { httpFetch } = require('./http-fetch');
+const { multiDownload } = require('./multi-download');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -183,14 +185,28 @@ function safeJoin(root, relative) {
   return target;
 }
 
+/*
+ * 接口结果的短缓存。
+ *
+ * 一次「生成一份」里同一份分支 / build 信息会被问两三遍：界面先按 dryRun 预估体积，
+ * 真正开跑又是一遍；本地分块索引还要按「本地版本」再问一遍。每次都是三百毫秒上下的
+ * 往返，纯属白等。60 秒内同一个 URL 只问一次 —— 版本号不可能在一分钟内变两次。
+ */
+const JSON_MEMO_TTL = 60 * 1000;
+const jsonMemo = new Map();
+
 async function fetchJson(url) {
-  const response = await fetch(url, {
+  const hit = jsonMemo.get(url);
+  if (hit && Date.now() - hit.at < JSON_MEMO_TTL) return hit.data;
+  const response = await httpFetch(url, {
     headers: { 'user-agent': UA, accept: 'application/json' },
     signal: AbortSignal.timeout(30000),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}：${url}`);
   const json = await response.json();
   if (json.retcode !== 0) throw new Error(json.message || `接口返回 ${json.retcode}`);
+  jsonMemo.set(url, { at: Date.now(), data: json.data });
+  if (jsonMemo.size > 32) jsonMemo.delete(jsonMemo.keys().next().value);
   return json.data;
 }
 
@@ -325,32 +341,163 @@ function pickManifests(build, languages, options = {}) {
   return [game, ...(asb ? [asb] : []), ...story, ...audio];
 }
 
-async function ensureManifest(manifest, cacheDir, onProgress) {
-  await fsp.mkdir(cacheDir, { recursive: true });
-  const cacheFile = path.join(cacheDir, manifest.manifest.id);
-  let compressed = null;
-  try {
-    compressed = await fsp.readFile(cacheFile);
-  } catch {
-    compressed = null;
+/**
+ * 一份清单最多同时拉几份。
+ *
+ * 绝区零的 build 里有 120 份清单（本体 + 4 个语音包 + 115 份分类剧情资源），
+ * 每份单独下都要一次往返：串行跑下来光「读清单」这一步就十秒起。这些请求彼此
+ * 独立、单份又都很小，并发才是正解；限 4 是为了不把对端 CDN 打出限流。
+ */
+const MANIFEST_CONCURRENCY = 4;
+
+/**
+ * 同一台 CDN 上能同时开多少条连接。
+ *
+ * Chromium 网络栈对同一个 host 只有 6 条 socket（HTTP/1.1），超出的请求会排队。
+ * 所以「分段下载」和「同时拉多份」是在抢同一份额度：
+ *   · 清单少（原神 / 星铁 5 份）→ 每份开 6 段，打满 6 条 socket，大清单能快好几倍；
+ *   · 清单多（绝区零 113 份）→ 每份还开 6 段的话，678 个分段请求全挤在 6 条 socket
+ *     上排队，实测比单连接还慢（37 秒 vs 4 秒）。这时候一份占一条连接、靠并发数量吃带宽。
+ * 按清单份数在这两种模式之间切换（见 manifestConnectionsFor）。
+ */
+const MANIFEST_CONNECTION_BUDGET = 6;
+
+function manifestConnectionsFor(count) {
+  // 清单少（本体 + 几个语音包）：每份都开到 6 段，大清单能吃满带宽 ——
+  // 原神 8.6 MB 那份实测 2.3 秒，只给 3 段就要 4.9 秒。
+  if (count <= 8) return MANIFEST_CONNECTION_BUDGET;
+  // 清单多（绝区零带上分类剧情共 113 份）：一份一条连接，靠并发吃带宽。
+  return 1;
+}
+
+/*
+ * 解码结果的内存缓存。
+ *
+ * 同一份清单在一次操作里会被读两三遍：体积预估（dryRun）一遍、真正安装一遍，
+ * 目标清单和本地清单索引还可能指向同一个 id。解码是上万条 protobuf（原神 16 MB
+ * 明文要 200 多毫秒，还要先 zstd 解压），缓存下来能省掉这些重复工作。
+ * 只留当前会话用得到的十几份，不落地，进程退出就没了。
+ */
+const manifestMemo = new Map();
+const manifestInflight = new Map();
+const MANIFEST_MEMO_LIMIT = 16;
+
+function memoManifest(id, files) {
+  manifestMemo.delete(id);
+  manifestMemo.set(id, files);
+  while (manifestMemo.size > MANIFEST_MEMO_LIMIT) {
+    manifestMemo.delete(manifestMemo.keys().next().value);
   }
-  if (!compressed) {
-    onProgress?.({ phase: 'manifest', current: manifest.manifest.id });
-    const url = `${manifest.manifest_download.url_prefix.replace(/\/$/, '')}/${manifest.manifest.id}`;
-    const response = await fetch(url, {
-      headers: { 'user-agent': UA, accept: '*/*' },
-      signal: AbortSignal.timeout(60000),
-    });
-    if (!response.ok) throw new Error(`下载清单失败：HTTP ${response.status}`);
-    compressed = Buffer.from(await response.arrayBuffer());
-    await fsp.writeFile(cacheFile, compressed);
+  return files;
+}
+
+/** 并发跑一组任务，最多 limit 个同时进行，结果按原顺序返回。 */
+async function mapLimit(items, limit, worker) {
+  const list = Array.from(items);
+  const results = new Array(list.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= list.length) return;
+      results[index] = await worker(list[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+function manifestUrlOf(manifest) {
+  const id = manifest.manifest.id;
+  const prefix = String(manifest.manifest_download?.url_prefix || '').replace(/\/$/, '');
+  return `${prefix}/${id}`;
+}
+
+/**
+ * 把一份清单的压缩字节拿到手。
+ *
+ * 先按分段并发试（清单通常几百 KB 到十几 MB，正好落在「单连接被限速、总带宽还有
+ * 富余」的区间）；服务器不认 Range、文件太小、中途断了，一律退回单连接 ——
+ * 退之前必须删掉半截文件，分段是按总长预分配写各自偏移的，留下的洞不能当数据。
+ */
+async function downloadManifestBytes(url, cacheFile, { forceSingle = false, connections = MANIFEST_CONNECTION_BUDGET } = {}) {
+  const part = `${cacheFile}.part`;
+  // 只分到 1 条连接时直接走单连接：分段探测本身还要多一次往返
+  if (!forceSingle && connections > 1) {
+    try {
+      await multiDownload({
+        url,
+        dest: part,
+        fetchImpl: httpFetch,
+        headers: { 'user-agent': UA, accept: '*/*' },
+        connections,
+        minSize: 400 * 1024,
+        minSegmentSize: 128 * 1024,
+      });
+      const buffer = await fsp.readFile(part);
+      await fsp.unlink(part).catch(() => {});
+      return buffer;
+    } catch {
+      await fsp.unlink(part).catch(() => {});
+    }
   }
-  const raw = zlib.zstdDecompressSync(compressed);
-  const checksum = md5Buffer(raw);
-  if (manifest.manifest.checksum && checksum.toLowerCase() !== manifest.manifest.checksum.toLowerCase()) {
+  const response = await httpFetch(url, {
+    headers: { 'user-agent': UA, accept: '*/*' },
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok) throw new Error(`下载清单失败：HTTP ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * 读一份清单：磁盘缓存 → 下载 → zstd 解压 → 校验 → 解码。
+ *
+ * 同一份清单被多处同时要求时只下一次（单飞），拿到后进内存缓存；校验不过说明
+ * 磁盘上那份坏了，删掉重下一次，第二次强制单连接（排除分段本身的嫌疑）。
+ */
+async function ensureManifest(manifest, cacheDir, onProgress, label = '', connections = MANIFEST_CONNECTION_BUDGET) {
+  const id = manifest.manifest.id;
+  const memo = manifestMemo.get(id);
+  if (memo) return memo;
+  const running = manifestInflight.get(id);
+  if (running) return running;
+
+  const task = (async () => {
+    await fsp.mkdir(cacheDir, { recursive: true });
+    const cacheFile = path.join(cacheDir, id);
+    const url = manifestUrlOf(manifest);
+    const expected = String(manifest.manifest?.checksum || '').toLowerCase();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let compressed = null;
+      if (attempt === 0) {
+        try {
+          compressed = await fsp.readFile(cacheFile);
+        } catch {
+          compressed = null;
+        }
+      }
+      if (!compressed) {
+        onProgress?.({ phase: 'manifest', current: label || id });
+        compressed = await downloadManifestBytes(url, cacheFile, { forceSingle: attempt > 0, connections });
+        await fsp.writeFile(cacheFile, compressed).catch(() => {});
+      }
+      const raw = zlib.zstdDecompressSync(compressed);
+      if (!expected || md5Buffer(raw).toLowerCase() === expected) {
+        return memoManifest(id, decodeManifest(raw));
+      }
+      // 缓存可能被截断/写坏：删掉重来一次，第二次走单连接
+      await fsp.unlink(cacheFile).catch(() => {});
+    }
     throw new Error('清单校验失败，缓存可能损坏');
+  })();
+
+  manifestInflight.set(id, task);
+  try {
+    return await task;
+  } finally {
+    manifestInflight.delete(id);
   }
-  return decodeManifest(raw);
 }
 
 async function waitIfPaused(signal) {
@@ -384,10 +531,15 @@ async function loadLocalChunkIndex({
   // 本地版本清单必须和目标版本清单用同一个 includeStory 取值，否则两边的文件集合对不上，
   // chunk 级别的去重就会错位（该复用的 chunk 找不到源，白白重下）。
   const manifests = pickManifests(localBuild, audioLanguages, { includeStory });
+  // 本地版本这几份清单和目标版本那几份互不相干，各拉各的、并发跑（原神来一次就 5 份）
+  const perManifest = manifestConnectionsFor(manifests.length);
+  const lists = await mapLimit(manifests, MANIFEST_CONCURRENCY, (manifest, index) =>
+    signal?.cancelled
+      ? []
+      : ensureManifest(manifest, cacheDir, onProgress, `读取本地清单 ${index + 1}/${manifests.length}`, perManifest)
+  );
   const index = new Map();
-  for (const manifest of manifests) {
-    if (signal?.cancelled) break;
-    const files = await ensureManifest(manifest, cacheDir, onProgress);
+  for (const files of lists) {
     for (const file of files) {
       if (file.isFolder || !file.chunks?.length) continue;
       for (const chunk of file.chunks) {
@@ -434,7 +586,7 @@ async function downloadChunk(chunk, prefix, signal) {
     await waitIfPaused(signal);
     if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
     try {
-      const response = await fetch(url, {
+      const response = await httpFetch(url, {
         headers: { 'user-agent': UA, accept: '*/*' },
         signal: AbortSignal.timeout(60000),
       });
@@ -507,7 +659,7 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
   }
   if (!buffer) {
     onProgress?.({ phase: 'manifest', current: '下载 B服渠道 SDK' });
-    const response = await fetch(pkg.url, {
+    const response = await httpFetch(pkg.url, {
       headers: { 'user-agent': UA, accept: '*/*' },
       signal: AbortSignal.timeout(120000),
     });
@@ -672,25 +824,22 @@ async function prepareSophon({
   onProgress?.({ phase: 'version', tag, current: `目标版本 ${tag}` });
   const build = await fetchBuild(info, branch.main);
   const manifests = pickManifests(build, audioLanguages, { includeStory: includeStoryResources });
-  const files = new Map();
-  for (const manifest of manifests) {
-    const list = await ensureManifest(manifest, cacheDir, onProgress);
-    const prefix = manifest.chunk_download?.url_prefix || '';
-    for (const item of list) {
-      if (!item.file) continue;
-      if (files.has(item.file)) continue;
-      files.set(item.file, { ...item, chunkPrefix: prefix });
-    }
-  }
-
-  onProgress?.({ phase: 'manifest', current: '读取本地分块索引' });
+  /*
+   * 目标清单和本地分块索引并行拉。
+   *
+   * 这两件事互相不依赖：本地索引只看「本地客户端装的是哪个版本」，跟目标版本无关。
+   * 以前是先串行把目标清单全拉完、打完包，再去问一遍本地版本 —— 原神那 5 份清单
+   * 加上本地那一份，等于把同样的往返走了两遍。并行之后这一步的总耗时从「两倍」
+   * 降到「较慢的那一路」。
+   */
+  onProgress?.({ phase: 'manifest', current: `读取官方清单（${manifests.length} 份）与本地索引…` });
   /*
    * 就地更新（baseRoot === targetRoot）也要建本地分块索引：
    * 以往这里直接给空 Map，导致「更新已有客户端」会重新下载全部分块，明明没变的分块也白下。
    * 现在总是按旧版本清单建索引，写文件时未变的分块直接复用本地字节（reusedChunks），
    * 这正是 Starward 的「就地更新复用旧版 chunk」思路。索引读取失败会自动回退到空 Map（全量下载）。
    */
-  const localChunks = await loadLocalChunkIndex({
+  const localIndexTask = loadLocalChunkIndex({
     gameKey,
     info: CHANNELS[gameKey]?.[detectLocalChannel(baseRoot)] || info,
     audioLanguages,
@@ -701,6 +850,23 @@ async function prepareSophon({
     onProgress,
     signal,
   });
+
+  // 多份清单并发下：绝区零一次 120 份，串行光排队就要十秒
+  const perManifest = manifestConnectionsFor(manifests.length);
+  const lists = await mapLimit(manifests, MANIFEST_CONCURRENCY, (manifest, index) =>
+    ensureManifest(manifest, cacheDir, onProgress, `读取清单 ${index + 1}/${manifests.length}`, perManifest)
+  );
+  const files = new Map();
+  for (let index = 0; index < manifests.length; index += 1) {
+    const prefix = manifests[index].chunk_download?.url_prefix || '';
+    for (const item of lists[index]) {
+      if (!item.file) continue;
+      if (files.has(item.file)) continue;
+      files.set(item.file, { ...item, chunkPrefix: prefix });
+    }
+  }
+
+  const localChunks = await localIndexTask;
 
   let normalized = [];
   for (const file of files.values()) {

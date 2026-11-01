@@ -180,6 +180,8 @@ async function pullSegment({ id, start, end, url, fd, fetchImpl, headers, counte
  * @param {number} [options.minSpeed] 低于这个速度（字节/秒）就判定这条线路不值得等
  * @param {number} [options.graceMs] 速度判定的观察窗口
  * @param {AbortSignal} [options.signal] 取消信号
+ * @param {number} [options.minSize] 低于这个大小直接退单连接（默认 8 MB）
+ * @param {number} [options.minSegmentSize] 单段最小长度（默认 1 MB）
  */
 async function multiDownload(options) {
   const {
@@ -193,6 +195,8 @@ async function multiDownload(options) {
     minSpeed = 0,
     graceMs = 15000,
     signal = null,
+    minSize = MIN_PARALLEL_SIZE,
+    minSegmentSize = MIN_SEGMENT_SIZE,
   } = options;
 
   if (signal?.aborted) throw abortError();
@@ -201,9 +205,9 @@ async function multiDownload(options) {
   if (!ranges) throw fallbackError('不支持分段');
   const size = total || expectedSize;
   if (!size) throw fallbackError('拿不到文件大小');
-  if (size < MIN_PARALLEL_SIZE) throw fallbackError('文件太小，不值得分段');
+  if (size < minSize) throw fallbackError('文件太小，不值得分段');
 
-  const count = Math.max(1, Math.min(MAX_CONNECTIONS, connections, Math.floor(size / MIN_SEGMENT_SIZE)));
+  const count = Math.max(1, Math.min(MAX_CONNECTIONS, connections, Math.floor(size / minSegmentSize)));
   const chunk = Math.ceil(size / count);
   const counters = new Array(count).fill(0);
   const state = { aborted: null, active: new Set() };
