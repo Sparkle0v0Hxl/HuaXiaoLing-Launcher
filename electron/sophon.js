@@ -500,6 +500,25 @@ async function ensureManifest(manifest, cacheDir, onProgress, label = '', connec
   }
 }
 
+/**
+ * 并发读一组清单，结果按传入顺序返回。
+ *
+ * 安装、更新、预下载、渠道运行时都要「把一个 build 里的清单全读出来」，以前各自
+ * 写了一遍串行循环 —— 绝区零带分类剧情是 113 份，串行就是 113 次往返。这里统一
+ * 一份实现：按份数分配连接额度（见 manifestConnectionsFor），并允许中途取消。
+ */
+async function ensureManifests(manifests, cacheDir, onProgress, options = {}) {
+  const { label = '读取清单', signal = null } = options;
+  const list = Array.from(manifests || []);
+  if (!list.length) return [];
+  const perManifest = manifestConnectionsFor(list.length);
+  return mapLimit(list, MANIFEST_CONCURRENCY, (manifest, index) =>
+    signal?.cancelled
+      ? []
+      : ensureManifest(manifest, cacheDir, onProgress, `${label} ${index + 1}/${list.length}`, perManifest)
+  );
+}
+
 async function waitIfPaused(signal) {
   while (signal?.paused && !signal.cancelled) {
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -532,12 +551,10 @@ async function loadLocalChunkIndex({
   // chunk 级别的去重就会错位（该复用的 chunk 找不到源，白白重下）。
   const manifests = pickManifests(localBuild, audioLanguages, { includeStory });
   // 本地版本这几份清单和目标版本那几份互不相干，各拉各的、并发跑（原神来一次就 5 份）
-  const perManifest = manifestConnectionsFor(manifests.length);
-  const lists = await mapLimit(manifests, MANIFEST_CONCURRENCY, (manifest, index) =>
-    signal?.cancelled
-      ? []
-      : ensureManifest(manifest, cacheDir, onProgress, `读取本地清单 ${index + 1}/${manifests.length}`, perManifest)
-  );
+  const lists = await ensureManifests(manifests, cacheDir, onProgress, {
+    label: '读取本地清单',
+    signal,
+  });
   const index = new Map();
   for (const files of lists) {
     for (const file of files) {
@@ -852,10 +869,7 @@ async function prepareSophon({
   });
 
   // 多份清单并发下：绝区零一次 120 份，串行光排队就要十秒
-  const perManifest = manifestConnectionsFor(manifests.length);
-  const lists = await mapLimit(manifests, MANIFEST_CONCURRENCY, (manifest, index) =>
-    ensureManifest(manifest, cacheDir, onProgress, `读取清单 ${index + 1}/${manifests.length}`, perManifest)
-  );
+  const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单' });
   const files = new Map();
   for (let index = 0; index < manifests.length; index += 1) {
     const prefix = manifests[index].chunk_download?.url_prefix || '';
@@ -1089,6 +1103,11 @@ async function prepareSophon({
 
 module.exports = {
   prepareSophon,
+  // 预下载 / 渠道运行时复用同一套清单管线，避免两边各写一份串行循环
+  ensureManifest,
+  ensureManifests,
+  mapLimit,
+  manifestConnectionsFor,
   prepareBilibiliRuntime,
   CHANNELS,
   decodeManifest,

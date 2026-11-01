@@ -21,6 +21,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 
+const { httpFetch } = require('./http-fetch');
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -42,17 +44,29 @@ function findConfigRoot(startPath, levels = 8) {
   return '';
 }
 
+/*
+ * 版本清单和文件清单都很小（Version.ini 几百字节、AllFiles.xml 约 130 KB），
+ * 但「检查有没有预下载」和「开始预下载」会各读一遍 —— 60 秒内同一地址只请求一次。
+ */
+const TEXT_MEMO_MS = 60 * 1000;
+const textMemo = new Map();
+
 async function fetchText(url, signal) {
-  const response = await fetch(url, {
+  const hit = textMemo.get(url);
+  if (hit && Date.now() - hit.at < TEXT_MEMO_MS) return hit.text;
+  const response = await httpFetch(url, {
     headers: { 'user-agent': USER_AGENT },
     signal,
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
-  return response.text();
+  const text = await response.text();
+  textMemo.set(url, { at: Date.now(), text });
+  while (textMemo.size > 8) textMemo.delete(textMemo.keys().next().value);
+  return text;
 }
 
 async function fetchBuffer(url, signal) {
-  const response = await fetch(url, {
+  const response = await httpFetch(url, {
     headers: { 'user-agent': USER_AGENT },
     signal,
   });

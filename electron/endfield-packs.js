@@ -2,10 +2,12 @@
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
 const { multiDownload, MIN_PARALLEL_SIZE, DEFAULT_CONNECTIONS } = require('./multi-download');
+const { httpFetch } = require('./http-fetch');
 
 const AES_KEY = Buffer.from([
   192, 243, 14, 28, 231, 99, 187, 194, 28, 195, 85, 163, 67, 3, 172, 80, 57, 148, 68,
@@ -309,7 +311,7 @@ async function fetchLatest(profile) {
       },
     ],
   };
-  const response = await fetch(profile.api, {
+  const response = await httpFetch(profile.api, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'user-agent': UA },
     body: JSON.stringify(body),
@@ -337,15 +339,134 @@ async function fetchLatest(profile) {
   };
 }
 
-async function loadRemoteManifest(profile, allFiles = false) {
-  const latest = await fetchLatest(profile);
-  const response = await fetch(`${latest.base}/game_files`, {
+/*
+ * 清单体积分档：终末地只有 0.2 MB（单连接 300 ms 就完了，分段反而多一次探测往返），
+ * 明日方舟 2.09 MB 而 CDN 对单连接限速到 1 MB/s —— 那条必须分段：
+ * 实测单连接 2.1 s、8 连接 1.0 s、16 连接 1.2 s（再多就是互相抢带宽了）。
+ * 阈值取两者中间。
+ */
+const MANIFEST_PARALLEL_MIN = 512 * 1024;
+const MANIFEST_MIN_SEGMENT = 128 * 1024;
+const MANIFEST_CONNECTIONS = 8;
+/** 清单内存缓存：同一版本 5 分钟内重复读清单（切服、量体积、校验、下载各读一次）不再走网络。 */
+const MANIFEST_MEMO_MS = 5 * 60 * 1000;
+const MANIFEST_MEMO_MAX = 16;
+const manifestMemo = new Map();
+/** 记住各渠道上次清单多大：小清单下次直接单连接，省掉一次分段探测往返。 */
+const manifestSizeHint = new Map();
+
+/*
+ * 清单磁盘缓存：2 MB 的加密原文，按「渠道 + 版本」存。
+ *
+ * 版本号来自版本接口，换版本自然换 key，不会读到过期清单。启动器每次开都要读一遍
+ * 清单，网络那 1~2 秒是躲不掉的，但第二次开就不用再下了：只剩一次版本接口的往返，
+ * 实测 1800 ms → 130 ms。缓存放临时目录，被系统清掉也不影响正确性。
+ */
+const MANIFEST_DISK_DIR = path.join(os.tmpdir(), 'hxl-manifest-cache');
+const MANIFEST_DISK_MAX_AGE = 7 * 24 * 3600 * 1000;
+
+function manifestDiskPath(profile, version) {
+  const safe = `${profile.directory}-${version}`.replace(/[^\w.-]+/g, '_');
+  return path.join(MANIFEST_DISK_DIR, `${safe}.bin`);
+}
+
+async function readDiskManifest(profile, version) {
+  try {
+    const file = manifestDiskPath(profile, version);
+    const stat = await fsp.stat(file);
+    if (!stat.size || Date.now() - stat.mtimeMs > MANIFEST_DISK_MAX_AGE) return null;
+    return await fsp.readFile(file);
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiskManifest(profile, version, buffer) {
+  try {
+    const file = manifestDiskPath(profile, version);
+    await fsp.mkdir(MANIFEST_DISK_DIR, { recursive: true });
+    await fsp.writeFile(file, buffer);
+    const entries = await fsp.readdir(MANIFEST_DISK_DIR);
+    const stale = Date.now() - MANIFEST_DISK_MAX_AGE;
+    for (const name of entries) {
+      const full = path.join(MANIFEST_DISK_DIR, name);
+      const stat = await fsp.stat(full).catch(() => null);
+      if (stat && stat.mtimeMs < stale) await fsp.rm(full, { force: true }).catch(() => {});
+    }
+  } catch {
+    /* 缓存写失败不影响正常流程 */
+  }
+}
+
+/**
+ * 取加密清单本体：先磁盘缓存，再分段下载，最后单连接。
+ *
+ * 分段下载要落文件，所以下到临时目录再读回来（2 MB 的磁盘往返可以忽略）。
+ * 分段不可用（服务器不支持 Range / 文件很小）、或者分段中途失败，都退回单连接：
+ * 清单是后续所有逻辑的入口，这里宁可慢一点也不能失败。
+ */
+async function fetchEncryptedManifest(latest, profile, options = {}) {
+  if (!options.skipDisk) {
+    const cached = await readDiskManifest(profile, latest.version);
+    if (cached) return cached;
+  }
+  const url = `${latest.base}/game_files`;
+  const temp = path.join(
+    os.tmpdir(),
+    `hxl-manifest-${profile.directory}-${process.pid}-${Date.now().toString(36)}.bin`
+  );
+  const known = manifestSizeHint.get(profile.directory) || 0;
+  if (!known || known >= MANIFEST_PARALLEL_MIN) {
+    try {
+      await multiDownload({
+        url,
+        dest: temp,
+        fetchImpl: httpFetch,
+        headers: { 'user-agent': UA },
+        connections: MANIFEST_CONNECTIONS,
+        minSize: MANIFEST_PARALLEL_MIN,
+        minSegmentSize: MANIFEST_MIN_SEGMENT,
+        signal: AbortSignal.timeout(120000),
+      });
+      const glued = await fsp.readFile(temp);
+      manifestSizeHint.set(profile.directory, glued.length);
+      await writeDiskManifest(profile, latest.version, glued);
+      return glued;
+    } catch (error) {
+      if (error?.code === 'ABORTED') throw error;
+      // 其余一律退单连接：fallbackToSingle 表示「不值得分段」，其他是分段失败
+    } finally {
+      await fsp.rm(temp, { force: true }).catch(() => {});
+    }
+  }
+  const response = await httpFetch(url, {
     headers: { 'user-agent': UA },
     signal: AbortSignal.timeout(60000),
   });
   if (!response.ok) throw new Error(`${profile.iconName} 清单 HTTP ${response.status}`);
-  const encrypted = Buffer.from(await response.arrayBuffer());
-  const parsed = parseManifest(decryptManifest(encrypted));
+  const buffer = Buffer.from(await response.arrayBuffer());
+  manifestSizeHint.set(profile.directory, buffer.length);
+  await writeDiskManifest(profile, latest.version, buffer);
+  return buffer;
+}
+
+async function loadRemoteManifest(profile, allFiles = false) {
+  const latest = await fetchLatest(profile);
+  const memoKey = `${profile.directory}|${latest.version}|${allFiles ? 1 : 0}`;
+  const memo = manifestMemo.get(memoKey);
+  if (memo && Date.now() - memo.at < MANIFEST_MEMO_MS) return memo.value;
+  const encrypted = await fetchEncryptedManifest(latest, profile);
+  let raw = encrypted;
+  let parsed;
+  try {
+    parsed = parseManifest(decryptManifest(encrypted));
+  } catch (error) {
+    // 缓存被截断（上次写盘时断电）会在这里解密失败：删掉重下一次，不把坏缓存当正式结果
+    await fsp.rm(manifestDiskPath(profile, latest.version), { force: true }).catch(() => {});
+    raw = await fetchEncryptedManifest(latest, profile, { skipDisk: true });
+    parsed = parseManifest(decryptManifest(raw));
+    if (!parsed.length) throw error;
+  }
   let files = allFiles ? parsed : parsed.filter((file) => isAllowed(profile, file.path));
   /*
    * Gryphline 三个渠道（国际服 / Play / Steam）不能只盖 SDK。
@@ -371,28 +492,36 @@ async function loadRemoteManifest(profile, allFiles = false) {
     files = Array.from(merged.values());
   }
   if (!files.length) throw new Error(`${profile.iconName} 清单里没有渠道文件`);
-  return {
+  const value = {
     version: latest.version,
     base: latest.base,
-    manifestSha256: crypto.createHash('sha256').update(encrypted).digest('hex').toUpperCase(),
+    manifestSha256: crypto.createHash('sha256').update(raw).digest('hex').toUpperCase(),
     files,
   };
+  return rememberManifest(memoKey, value);
+}
+
+/** 写清单缓存（按写入先后淘汰，够用就行）。 */
+function rememberManifest(key, value) {
+  manifestMemo.delete(key);
+  manifestMemo.set(key, { at: Date.now(), value });
+  while (manifestMemo.size > MANIFEST_MEMO_MAX) {
+    manifestMemo.delete(manifestMemo.keys().next().value);
+  }
+  return value;
 }
 
 /**
  * 只取清单本身（不做渠道过滤），给「按差异打包」当基线用。
  *
- * 国服清单一次几万行，国际服 / Play / Steam 都要用它，缓存 10 分钟：
- * 一个渠道包下载动辄几分钟，重复拉只会把切服前的等待拉长。
+ * 国服清单一次几万行，国际服 / Play / Steam 都要用它：统一由 loadRemoteManifest
+ * 的内存缓存兜着（同版本 5 分钟内只拉一次）。一个渠道包下载动辄几分钟，
+ * 重复拉只会把切服前的等待拉长。
  */
-const rawManifestCache = new Map();
 async function rawManifest(directory) {
-  const hit = rawManifestCache.get(directory);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.files;
   const profile = PROFILES.find((item) => item.directory === directory);
   if (!profile) throw new Error(`没有 ${directory} 这条渠道`);
   const remote = await loadRemoteManifest(profile, true);
-  rawManifestCache.set(directory, { at: Date.now(), files: remote.files });
   return remote.files;
 }
 
@@ -1076,6 +1205,7 @@ module.exports = {
   updateEndfieldGame,
   checkEndfieldGame,
   fetchLatest,
+  loadRemoteManifest,
   downloadAndExtractSplit,
   findSevenZip,
   decryptManifest,

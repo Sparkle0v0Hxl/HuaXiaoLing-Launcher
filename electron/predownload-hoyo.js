@@ -34,7 +34,16 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 
-const { CHANNELS, decodeManifest, normalizeAudioLanguages, AUDIO_LANGUAGES } = require('./sophon');
+const {
+  CHANNELS,
+  decodeManifest,
+  normalizeAudioLanguages,
+  AUDIO_LANGUAGES,
+  // 清单读取复用安装链路那一套：多份并发 + 大清单分段 + 解码缓存 + 单飞。
+  // 预下载原来自己写了一份串行循环，绝区零带分类剧情 113 份就是 113 次往返。
+  ensureManifests,
+} = require('./sophon');
+const { httpFetch } = require('./http-fetch');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -95,8 +104,17 @@ function throwIfCancelled(signal) {
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
 }
 
+/*
+ * 接口结果 60 秒内复用：预下载一次操作里，check / start / apply 会各问一遍
+ * getGameBranches 和 getBuild，同一份数据来回问三次纯属白等往返。
+ */
+const jsonMemo = new Map();
+
 async function fetchJson(url, init) {
-  const response = await fetch(url, {
+  const key = `${url}|${init?.method || 'GET'}`;
+  const hit = jsonMemo.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.data;
+  const response = await httpFetch(url, {
     headers: { 'user-agent': UA, accept: 'application/json' },
     signal: AbortSignal.timeout(30000),
     ...init,
@@ -104,6 +122,8 @@ async function fetchJson(url, init) {
   if (!response.ok) throw new Error(`HTTP ${response.status}：${url}`);
   const json = await response.json();
   if (json.retcode !== 0) throw new Error(json.message || `接口返回 ${json.retcode}`);
+  jsonMemo.set(key, { at: Date.now(), data: json.data });
+  while (jsonMemo.size > 24) jsonMemo.delete(jsonMemo.keys().next().value);
   return json.data;
 }
 
@@ -125,34 +145,6 @@ async function fetchBuild(info, branchPackage, tag = '') {
   )}&password=${encodeURIComponent(branchPackage.password)}`;
   if (tag) query += `&tag=${encodeURIComponent(tag)}`;
   return fetchJson(`${base}?${query}`);
-}
-
-/** 清单（protobuf）下载 → zstd 解压 → 解压后 MD5 校验 → 解析。带本地缓存。 */
-async function loadManifest(manifest, cacheDir, onProgress) {
-  await fsp.mkdir(cacheDir, { recursive: true });
-  const cacheFile = path.join(cacheDir, manifest.manifest.id);
-  let compressed = null;
-  try {
-    compressed = await fsp.readFile(cacheFile);
-  } catch {
-    compressed = null;
-  }
-  if (!compressed) {
-    onProgress?.({ phase: 'manifest', current: manifest.manifest.id });
-    const url = `${manifest.manifest_download.url_prefix.replace(/\/$/, '')}/${manifest.manifest.id}`;
-    const response = await fetch(url, {
-      headers: { 'user-agent': UA, accept: '*/*' },
-      signal: AbortSignal.timeout(120000),
-    });
-    if (!response.ok) throw new Error(`下载清单失败：HTTP ${response.status}`);
-    compressed = Buffer.from(await response.arrayBuffer());
-    await fsp.writeFile(cacheFile, compressed);
-  }
-  const raw = zlib.zstdDecompressSync(compressed);
-  if (manifest.manifest.checksum && md5(raw) !== manifest.manifest.checksum.toLowerCase()) {
-    throw new Error('清单校验失败，缓存可能损坏');
-  }
-  return decodeManifest(raw);
 }
 
 /*
@@ -518,8 +510,8 @@ async function verifyChunks(base, count) {
     const manifests = pickManifests(build, base.audioLanguages, {
       includeCategory: base.includeCategory,
     });
-    for (const manifest of manifests) {
-      const files = await loadManifest(manifest, base.cacheDir);
+    const lists = await ensureManifests(manifests, base.cacheDir, null, { label: '校验用清单' });
+    for (const files of lists) {
       for (const file of files) {
         for (const chunk of file.chunks || []) {
           if (chunk.id && !wanted.has(chunk.id)) {
@@ -635,10 +627,13 @@ async function downloadChunkFile(url, target, expectedSize, expectedMd5, signal,
 /** 从一份 build 里收集所有要去重的 chunk（按 id 去重，保持压缩态信息）。 */
 async function collectChunks(build, cacheDir, audioLanguages, onProgress, signal, options = {}) {
   const chunks = new Map();
-  for (const manifest of pickManifests(build, audioLanguages, options)) {
-    throwIfCancelled(signal);
-    const files = await loadManifest(manifest, cacheDir, onProgress);
-    const prefix = String(manifest.chunk_download?.url_prefix || '').replace(/\/$/, '');
+  const manifests = pickManifests(build, audioLanguages, options);
+  // 并发读：绝区零带分类剧情是 113 份清单，串行等于 113 次往返
+  const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单', signal });
+  throwIfCancelled(signal);
+  for (let index = 0; index < manifests.length; index += 1) {
+    const files = lists[index];
+    const prefix = String(manifests[index].chunk_download?.url_prefix || '').replace(/\/$/, '');
     if (!prefix) continue;
     for (const file of files) {
       if (!file.file) continue;
@@ -923,12 +918,14 @@ async function applyHoyoPredownload({
   onProgress?.({ phase: 'version', current: `目标版本 ${base.latestVersion}` });
   const build = await fetchBuild(base.info, base.branch.main, '');
   const files = new Map();
-  for (const manifest of pickManifests(build, audioLanguages, {
+  const manifests = pickManifests(build, audioLanguages, {
     includeCategory: base.includeCategory,
-  })) {
-    throwIfCancelled(signal);
-    const list = await loadManifest(manifest, cacheDir, onProgress);
-    const prefix = String(manifest.chunk_download?.url_prefix || '').replace(/\/$/, '');
+  });
+  const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单', signal });
+  throwIfCancelled(signal);
+  for (let index = 0; index < manifests.length; index += 1) {
+    const list = lists[index];
+    const prefix = String(manifests[index].chunk_download?.url_prefix || '').replace(/\/$/, '');
     for (const item of list) {
       if (!item.file || files.has(item.file)) continue;
       files.set(item.file, { ...item, chunkPrefix: prefix });
