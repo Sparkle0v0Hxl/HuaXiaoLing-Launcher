@@ -1936,6 +1936,19 @@ async function handleAction(action, id, element, event = null) {
         confirmText: '开始更新',
       });
       if (!ok) break;
+      /*
+       * 确认框是用 openModal 顶掉「发现新版本」那个弹窗的，确认之后 modalRoot 会被清空。
+       * 结果就是：整个下载（完整包 188 MB）期间界面上既没有进度条也没有别的反馈，
+       * 只有一个开场 toast，用户看到的就是「点了没反应、也不知道在下什么」。
+       * 所以这里把更新弹窗重新立起来，进度区立刻可见，后面的 onUpdateProgress 才有地方落。
+       */
+      openUpdateModal({ ...info, percent: 0 });
+      setUpdateProgress(0, '正在准备下载…');
+      const busyBtn = document.querySelector('.update-modal [data-action="apply-update"]');
+      if (busyBtn) {
+        busyBtn.disabled = true;
+        busyBtn.textContent = '正在下载…';
+      }
       try {
         toast('开始下载更新包…', 'info');
         const result = await api.applyUpdate();

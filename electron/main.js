@@ -380,6 +380,21 @@ if (!gotLock) {
   app.quit();
 }
 
+/*
+ * 清掉上次更新留下的旧主程序映像（花筱灵启动器.exe.updating）。
+ *
+ * 覆盖脚本自己就跑在这个 exe 上，Windows 不让写运行中的映像（EBUSY），只能先把自己改名让位、
+ * 再把新 exe 写到原位置——改名出来的那份在本次更新进程退出前删不掉。
+ * 不清理的话用户目录里会一直多一份 250 MB 的旧 exe，而且每更新一次多一份。
+ * 现在跑的是新 exe，旧的没被任何进程占用，直接删得掉；删不掉（杀软还在扫）就留到下次。
+ */
+try {
+  const parkedExe = `${process.execPath}.updating`;
+  if (fs.existsSync(parkedExe)) fs.rmSync(parkedExe, { force: true });
+} catch {
+  /* 删不掉不影响启动 */
+}
+
 const isDev = !app.isPackaged;
 const ROOT = path.join(__dirname, '..');
 

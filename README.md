@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.8.1-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.8.2-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,7 +19,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.8.1**
+**当前版本：v2.8.2**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -205,7 +205,20 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.8.1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.8.2 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.8.2</b></summary>
+
+
+- 修掉「更新装不上」：覆盖脚本 `apply.js` 是用 `花筱灵启动器.exe` 以 Node 模式跑起来的，它判断「旧进程退干净没有」时按进程名列进程，永远能列到自己；又因为自己就运行在这个 exe 上，`isFileLocked` 永远返回「被占用」。两条凑一起 → 空等 60 秒 → 写一条「启动器还在运行，没能退出」→ 把启动器重新拉起来。**所有 2.8.0 → 2.8.1 都卡在这一步**。现在按 PID 只等真正的主进程，其余同名子进程不管，实测 3 秒内开始备份。
+- 主程序 exe 现在也能换掉了：运行中的映像不能写（实测 EBUSY），以前覆盖清单里这一项永远被跳过。Windows 允许给运行中的映像改名，所以改成「先把自己改名成 `.updating` 让位 → 再写新 exe」，写入失败会把旧的挪回来；`.updating` 由下次启动自动清理。
+- 下载期间终于有进度条：点「立即更新」后弹出的确认框会用 `openModal` 顶掉「发现新版本」弹窗，进度条元素跟着消失，188 MB 下载全程界面空白。现在确认后重新立起更新弹窗，进度、速度立刻显示，按钮变成「正在下载…」。
+- 增量打不上会静默退回完整包：本地文件被改过（换过封面、解包过 `app.asar`）就跟标准基线对不上，这时会改下 188 MB 全量——这是有意的，宁可多下也不装出打不开的客户端。
+- 升级提醒同前：自动更新只覆盖程序文件，`data` 目录不动；启动器未签名，第一次运行前建议加杀软白名单。
+
+
+</details>
 
 <details>
 <summary><b>v2.8.1</b></summary>
