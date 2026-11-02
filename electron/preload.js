@@ -90,6 +90,10 @@ contextBridge.exposeInMainWorld('launcher', {
   // 自定义背景图
   importBackground: (path) => ipcRenderer.invoke('background:import', path),
 
+  // 官方背景（跟随鹰角版本简报自动换）
+  syncOfficialBackground: () => ipcRenderer.invoke('background:sync-official'),
+  officialBackgroundState: () => ipcRenderer.invoke('background:official-state'),
+
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),

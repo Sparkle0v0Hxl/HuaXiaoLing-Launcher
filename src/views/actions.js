@@ -2427,6 +2427,50 @@ async function handleAction(action, id, element, event = null) {
       await api.updateSettings({ customBackground: '' });
       toast('已恢复纯色背景', 'success');
       break;
+    case 'sync-official-bg': {
+      const button = document.querySelector('#sync-official-bg');
+      if (button) {
+        button.disabled = true;
+        button.textContent = '同步中…';
+      }
+      try {
+        const result = await api.syncOfficialBackground();
+        if (result && result.busy) {
+          toast('官方背景正在同步中，稍等一下', 'info');
+        } else if (result && result.ok) {
+          toast(
+            result.added > 0
+              ? `同步完成：新增 ${result.added} 张官方背景`
+              : '官方背景已是最新（这一期没有新增）',
+            'success'
+          );
+        } else {
+          toast(`官方背景同步失败：${(result && result.error) || '未知错误'}`, 'error');
+        }
+      } catch (error) {
+        toast(humanError(error), 'error');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = '同步官方背景';
+        }
+      }
+      // 无论成败都重拉一次列表：主进程启动时的静默同步可能已经落了图
+      officialBgs = null;
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'pick-official-bg': {
+      const relative = element.dataset.relative;
+      if (!relative) break;
+      try {
+        await api.updateSettings({ customBackground: relative });
+        toast('已设为背景', 'success');
+      } catch (error) {
+        toast(humanError(error), 'error');
+      }
+      break;
+    }
     case 'set-ui-scale': {
       const scale = normalizeUiScale(element.dataset.value);
       if (scale === currentUiScale()) break;

@@ -325,6 +325,55 @@ function gachaBackupFormPatch() {
 }
 
 /* ------------------------------------------------------------------ */
+/* 官方背景：跟随鹰角版本简报自动换的背景网格                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 和文件统计同一个套路：主进程拿列表（读目录 + manifest）不算重，但同步按钮
+ * 要走网络，所以网格先渲染空态，列表回来再补画；同步走按钮自己的异步流程。
+ */
+let officialBgs = null;
+let officialBgLoading = false;
+let officialBgError = '';
+
+function ensureOfficialBackgrounds() {
+  if (officialBgs || officialBgLoading) return;
+  if (!api.officialBackgroundState || typeof api.officialBackgroundState !== 'function') {
+    officialBgError = '当前版本不支持官方背景';
+    return;
+  }
+  officialBgLoading = true;
+  const run = async () => {
+    try {
+      const state = await api.officialBackgroundState();
+      officialBgs = state.backgrounds || [];
+    } catch (error) {
+      officialBgError = (error && error.message) || String(error);
+    } finally {
+      officialBgLoading = false;
+      render({ preserveScroll: true });
+    }
+  };
+  setTimeout(run, 0);
+}
+
+function officialBgGridHtml() {
+  ensureOfficialBackgrounds();
+  if (officialBgLoading) return '<div class="official-bg-grid"><div class="official-bg-hint">读取中…</div></div>';
+  if (officialBgError) return `<div class="official-bg-grid"><div class="official-bg-hint">${esc(officialBgError)}</div></div>`;
+  if (!officialBgs || !officialBgs.length) {
+    return '<div class="official-bg-grid"><div class="official-bg-hint">还没有同步到官方背景，点上面的「同步官方背景」试试。</div></div>';
+  }
+  const active = typeof state.settings.customBackground === 'string' ? state.settings.customBackground : '';
+  return `<div class="official-bg-grid">${officialBgs
+    .map(
+      (bg) => `
+      <button class="official-bg-thumb${active === bg.relative ? ' is-active' : ''}" data-action="pick-official-bg" data-relative="${esc(bg.relative)}" title="设为背景" style="background-image:url('${esc(toFileUrl(bg.relative) || '')}')"></button>`
+    )
+    .join('')}</div>`;
+}
+
+/* ------------------------------------------------------------------ */
 /* 文件管理：分类占用与清理                                              */
 /* ------------------------------------------------------------------ */
 
@@ -545,6 +594,13 @@ function settingsView() {
               ${settings.customBackground ? `<button class="btn btn-quiet" data-action="reset-background">移除</button>` : ''}
             </div>
           </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>官方背景（终末地）</strong><span>跟随鹰角官方启动器的版本简报换背景：启动器后台静默同步，官方换一期，这里就多一期。图片始终从官方 CDN 获取。</span></div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="sync-official-bg" id="sync-official-bg">${icon('refresh')}同步官方背景</button>
+            </div>
+          </div>
+          ${officialBgGridHtml()}
           <div class="setting-row-pair">
             <div class="setting-row">
               <div class="setting-copy"><strong>背景不透明度</strong><span>调低后背景变淡，能看见更多窗口材质。</span></div>

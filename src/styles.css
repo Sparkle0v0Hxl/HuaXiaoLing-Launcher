@@ -18830,6 +18830,41 @@ body.has-backdrop .gfx-card {
   cursor: not-allowed;
 }
 
+/* 官方背景网格：跟随鹰角版本简报同步来的背景缩略图 */
+.official-bg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+.official-bg-thumb {
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background-position: center;
+  background-size: cover;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.official-bg-thumb:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent, #4c8dff);
+}
+
+.official-bg-thumb.is-active {
+  border-color: var(--accent, #4c8dff);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8dff) 35%, transparent);
+}
+
+.official-bg-hint {
+  grid-column: 1 / -1;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* ── 材质面板的排布修正 ────────────────────────────────────────────
  * .settings-grid 是两列，每列约 480px。材质面板一行里塞不下
  * 「一段说明 + 5 个按钮 + 滑块」，会让 .setting-copy 被压成单字竖排。

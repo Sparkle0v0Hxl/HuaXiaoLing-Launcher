@@ -37,6 +37,7 @@ const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
 const nteTool = require('./nte-tool');
 const updater = require('./updater');
+const hgBackgrounds = require('./hg-backgrounds');
 const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
 const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
@@ -7591,8 +7592,11 @@ function installIpc() {
         if (!raw) {
           settings.customBackground = '';
         } else {
+          // ef- 前缀是官方背景同步下来的（backgrounds/official/），custom- 是本地导入的
           const base = path.basename(raw);
-          if (/^custom-[0-9a-f-]{36}\.(png|jpe?g|webp|gif)$/i.test(base)) {
+          if (
+            /^(ef-[a-z]+[a-f0-9]{6}\.(png|jpe?g|webp)|custom-[0-9a-f-]{36}\.(png|jpe?g|webp|gif))$/i.test(base)
+          ) {
             settings.customBackground = `backgrounds/${base}`;
           }
         }
@@ -12799,6 +12803,41 @@ function musicLoginWindow(target) {
     return `avatars/${fileName}`;
   });
 
+  /*
+   * 官方背景：跟随鹰角「版本简报」页面自动换。
+   * sync 是手动按钮 / 启动时共用的入口；official-list 给切换器出缩略图。
+   * officialStat 给文件管理页算占用。同步失败完全静默——这功能锦上添花，不能烦人。
+   */
+  let officialSyncState = { busy: false, lastError: '', lastResult: null };
+  ipcMain.handle('background:sync-official', async () => {
+    if (officialSyncState.busy) return { busy: true };
+    officialSyncState.busy = true;
+    officialSyncState.lastError = '';
+    try {
+      const result = await hgBackgrounds.syncOfficialBackgrounds(app.getPath('userData'));
+      officialSyncState.lastResult = result;
+      return { ok: true, ...result };
+    } catch (error) {
+      officialSyncState.lastError = (error && error.message) || String(error);
+      console.warn('官方背景同步失败：', officialSyncState.lastError);
+      return { ok: false, error: officialSyncState.lastError };
+    } finally {
+      officialSyncState.busy = false;
+    }
+  });
+  ipcMain.handle('background:official-state', async () => {
+    const backgrounds = await hgBackgrounds.listOfficialBackgrounds(app.getPath('userData'));
+    return {
+      backgrounds,
+      busy: officialSyncState.busy,
+      lastError: officialSyncState.lastError,
+      lastResult: officialSyncState.lastResult,
+    };
+  });
+  ipcMain.handle('background:official-stat', async () =>
+    hgBackgrounds.officialBackgroundsStat(app.getPath('userData'))
+  );
+
   ipcMain.handle('background:import', async (_event, sourcePath) => {
     if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error('图片不存在');
     const stat = fs.statSync(sourcePath);
@@ -14886,6 +14925,19 @@ app.whenReady().then(async () => {
   // 歌单缓存单独一个文件：它是可丢的派生数据，不该和 launcher-data.json 共命运
   await playlistCache().load();
   await ensureSeedData(store, app.getPath('userData'));
+  /*
+   * 官方背景启动静默同步：官方鹰角启动器每次发版本简报都会换一批主视觉背景，
+   * 这里延迟一分钟拉一次（失败完全静默），用户打开设置页就能看到最新一期。
+   * 手动入口在设置 → 窗口材质与背景 → 官方背景。
+   */
+  setTimeout(() => {
+    hgBackgrounds
+      .syncOfficialBackgrounds(app.getPath('userData'))
+      .then((result) => {
+        if (result.added > 0) console.log(`[官方背景] 新增 ${result.added} 张（共 ${result.total}）`);
+      })
+      .catch((error) => console.warn('[官方背景] 同步失败：', (error && error.message) || error));
+  }, 20 * 1000).unref?.();
   const previousUiRevision = store.data.settings?.uiRevision;
   store.data.settings = { ...defaultSettings(), ...(store.data.settings || {}) };
   // 代理要在任何联网动作之前生效（更新检查、封面、公告都在后面）
