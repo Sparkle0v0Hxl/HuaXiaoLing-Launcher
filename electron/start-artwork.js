@@ -19,10 +19,40 @@
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+const { httpFetch, nodeRequest } = require('./http-fetch');
+
 const HOYO_BASIC_BASE = 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api';
 const HOYO_OS_BASE = 'https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api';
 const CN_LAUNCHER = 'jGHBHlcOq1';
 const OS_LAUNCHER = 'VYTpXlbWo8';
+
+/**
+ * 取一次 JSON，双栈兜底。
+ *
+ * 这里原来是直接 fetch（Electron 主进程里等于 Chromium 的 net.fetch）。开了
+ * Steam++ 之类的本地中间人代理时，这条链路对 hyp-api 会一直挂到 20 秒超时，
+ * 于是崩坏3 的官方 webm 永远取不到，启动页背景按钮跟着消失（2026-11-02）。
+ * Node 的 https 栈不读系统代理，反而经常能直连；两条栈各自有盲区，互为兜底。
+ */
+async function fetchJson(url, timeoutMs = 9000) {
+  const headers = { 'user-agent': BROWSER_UA, accept: 'application/json' };
+  try {
+    const response = await nodeRequest(url, {
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.ok) return await response.json();
+  } catch {
+    /* 换 Chromium 栈 */
+  }
+  const response = await httpFetch(url, {
+    headers,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
 
 /** 游戏 key -> 官方 category。 */
 const CATEGORY_BY_GAME = {
@@ -37,16 +67,6 @@ const CATEGORY_BY_GAME = {
   bh3: ['bh3_cn', 'bh3_global'],
 };
 
-async function getJson(url) {
-  const response = await fetch(url, {
-    headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
-    signal: AbortSignal.timeout(20000),
-    redirect: 'follow',
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
 /**
  * 取某款游戏官方的背景素材。
  * 返回 { videos: [{id,url,time}], images: [{id,url,time}] }，按时间倒序。
@@ -60,7 +80,7 @@ async function officialBackgrounds(gameKey) {
     [HOYO_OS_BASE, OS_LAUNCHER],
   ]) {
     try {
-      const json = await getJson(`${base}/getAllGameBasicInfo?launcher_id=${launcher}&language=zh-cn`);
+      const json = await fetchJson(`${base}/getAllGameBasicInfo?launcher_id=${launcher}&language=zh-cn`);
       const list = json.data?.game_info_list || [];
       for (const category of categories) {
         const game = list.find((item) => item.game?.biz === category);
@@ -82,8 +102,9 @@ async function officialBackgrounds(gameKey) {
           return { videos, images };
         }
       }
-    } catch {
-      /* 换下一个渠道 */
+    } catch (error) {
+      // 静默失败会让「没有动态背景」变成无解问题，留一行日志方便排查
+      console.warn(`[启动页素材] ${gameKey} 读取失败（${base}）：`, error.message);
     }
   }
   return { videos: [], images: [] };

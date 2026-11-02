@@ -40,6 +40,11 @@ const nteTool = require('./nte-tool');
 const updater = require('./updater');
 const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
+// 启动页官方动态背景（星铁 / 绝区零 / 崩坏3 的官方 webm 都从这个接口按游戏取）。
+// 之前这里漏了引用，调用处抛 ReferenceError 又被空 catch 吞掉，表现就是
+// 「这些游戏一直没有动态背景，背景按钮也跟着消失」。
+const { officialBackgrounds } = require('./start-artwork');
+const { httpFetch, nodeRequest } = require('./http-fetch');
 const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
 const { resolveLiveRoom } = require('./live-rooms');
 const { startDanmaku, pollDanmaku, stopDanmaku } = require('./live-danmaku');
@@ -1958,15 +1963,29 @@ async function cacheStartVideo(source, relativePath, local = false) {
   if (local) {
     await fsp.copyFile(source, temporary);
   } else {
-    const response = await fetch(source, {
-      headers: {
-        'user-agent': BROWSER_UA,
-        accept: 'video/mp4,video/webm,video/*;q=0.9,*/*;q=0.5',
-        referer: 'https://endfield.hypergryph.com/',
-      },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(90000),
-    });
+    const videoHeaders = {
+      'user-agent': BROWSER_UA,
+      accept: 'video/mp4,video/webm,video/*;q=0.9,*/*;q=0.5',
+      referer: 'https://endfield.hypergryph.com/',
+    };
+    /*
+     * 动图都是一二十兆的大文件，先走 Node 的 https 栈（独立连接、不受 Chromium
+     * 对同 host 的 6 socket 限制）。Chromium 栈在开了 Steam++ 这类中间人代理时
+     * 偶尔会卡到超时，所以失败后仍用它兜底。
+     */
+    let response;
+    try {
+      response = await nodeRequest(source, {
+        headers: videoHeaders,
+        signal: AbortSignal.timeout(90000),
+      });
+    } catch {
+      response = await httpFetch(source, {
+        headers: videoHeaders,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(90000),
+      });
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const declared = Number(response.headers.get('content-length') || 0);
     if (declared > 80 * 1024 * 1024) throw new Error('动图文件过大');
@@ -2249,14 +2268,22 @@ function existingStartVideo(key) {
   }
   return '';
 }
-function ensureAnimatedStartBackgrounds() {
-  if (startArtworkJob) return startArtworkJob;
+function ensureAnimatedStartBackgrounds(options = {}) {
+  // only：只处理某款内置游戏。手动「重新获取动态背景」时用，别顺带把
+  // 星铁 / 绝区零那几十兆 webm 全部重下一遍。
+  const only = String(options.only || '');
+  if (startArtworkJob) {
+    if (!only) return startArtworkJob;
+    // 有任务在跑就等它结束再按 only 重跑一次，避免手动刷新被旧任务吞掉
+    return startArtworkJob.then(() => ensureAnimatedStartBackgrounds(options));
+  }
   startArtworkJob = (async () => {
     if (!store) return;
     let changed = false;
     let officialMiss = false;
     for (const game of store.data.games) {
       if (!game.builtinKey) continue;
+      if (only && game.builtinKey !== only) continue;
       if (game.startCover && !/-(?:clean2|clean3)\./.test(game.startCover)) game.startCover = '';
       // 2.4.0 合并：customCover 判定换成 isCustomCover —— 明日方舟 / 崩坏3 的
       // 钉住封面（PINNED_BUILTIN_COVERS）不算「用户自定义」，启动页背景照常跟官方走。
@@ -2353,7 +2380,7 @@ function ensureAnimatedStartBackgrounds() {
     /* 2.4.x 增量：官方背景偶尔一次拉不到（接口抖动/网络慢）就永远是静态图，
        之后 60 秒补一次预取，最多补 3 次。已落盘的游戏 existingStartVideo
        直接命中跳过，重跑代价只是每游戏一次 getAllGameBasicInfo。 */
-    if (officialMiss && bh3OfficialRetry < 3) {
+    if (!only && officialMiss && bh3OfficialRetry < 3) {
       bh3OfficialRetry += 1;
       setTimeout(() => {
         startArtworkJob = null;
@@ -13123,6 +13150,22 @@ function musicLoginWindow(target) {
       selfHeal: await read('self-heal.log'),
       error: await read('update-error.json'),
     };
+  });
+
+  ipcMain.handle('start:refresh-art', async (_event, gameId) => {
+    const game = store?.data?.games?.find((item) => item.id === gameId);
+    if (!game) return { ok: false, reason: '没有找到这个游戏' };
+    if (!game.builtinKey) return { ok: false, reason: '这个游戏不是内置游戏，没有官方动态背景' };
+    // 手动触发时把自动重试计数清零，否则接口抖动留下的 3 次上限会一直卡着
+    bh3OfficialRetry = 0;
+    try {
+      await ensureAnimatedStartBackgrounds({ only: game.builtinKey });
+    } catch (error) {
+      return { ok: false, reason: error.message || '获取失败' };
+    }
+    const video = String(game.backgroundVideo || '');
+    if (video) return { ok: true, video };
+    return { ok: false, reason: `${game.name} 的官方接口这次没有返回动态背景` };
   });
 
   ipcMain.handle('start:export-video', async (_event, gameId) => {

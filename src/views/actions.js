@@ -835,6 +835,41 @@ async function handleAction(action, id, element, event = null) {
       element?.setAttribute('aria-expanded', open ? 'true' : 'false');
       break;
     }
+    case 'refresh-start-art': {
+      /*
+       * 手动重抓启动页动态背景。自动预取只在启动后跑（失败最多补三次），
+       * 网络恢复后用户没办法自己触发；清过背景缓存的人也会看到「只有静态图」。
+       * 这里按当前游戏单独抓一次，成功后主进程会 pushState 重绘。
+       */
+      const game =
+        state.games.find((item) => item.id === state.startGameId) ||
+        state.games.find((item) => item.installed) ||
+        state.games[0];
+      if (!game) break;
+      if (!api.refreshStartArt) {
+        toast('当前版本不支持重新获取动态背景', 'info');
+        break;
+      }
+      const label = element.querySelector('span');
+      const originalLabel = label ? label.textContent : '';
+      if (label) label.textContent = '获取中…';
+      element.disabled = true;
+      try {
+        const result = await api.refreshStartArt(game.id);
+        if (result && result.video) {
+          toast('动态背景已就绪，正在切换', 'success');
+        } else {
+          toast(result && result.reason ? result.reason : '没取到官方动态背景，稍后再试', 'info');
+        }
+      } catch (error) {
+        toast(humanError(error), 'error');
+      } finally {
+        if (label) label.textContent = originalLabel || '重新获取动态背景';
+        element.disabled = false;
+        state.bgPanelOpen = true;
+      }
+      break;
+    }
     case 'start-server-menu': {
       /*
        * 面板开合只切 DOM 类名，不再整页重绘：

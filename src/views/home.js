@@ -283,12 +283,16 @@ function startView() {
             <small>HANABI STAGE</small>
           </div>
         </div>
-        ${
-          bgCands.length > 1 || hasVideo
-            ? `${(() => {
-                const pinnedNow = pinnedBgMap()[selected.id] === bgPick;
-                const bgIndex = Math.max(0, bgCands.indexOf(bgPick));
-                return `<div class="start-video-tools${state.bgPanelOpen ? ' is-open' : ''}">
+        ${(() => {
+          /*
+           * 这个入口以前只在「有多个背景候选」或「有视频」时才渲染，于是官方
+           * 素材拉取失败、或用户清过背景缓存之后，按钮会整个消失——看起来像
+           * 功能被砍了（2026-11-02 崩坏3 就出现过一次）。入口本身不该依赖素材
+           * 状态：没有视频时它至少还要能说明情况、并给一个重新获取的入口。
+           */
+          const pinnedNow = pinnedBgMap()[selected.id] === bgPick;
+          const bgIndex = Math.max(0, bgCands.indexOf(bgPick));
+          return `<div class="start-video-tools${state.bgPanelOpen ? ' is-open' : ''}">
           <button class="start-video-toggle start-bg-trigger${pinnedNow ? ' is-pinned' : ''}" data-action="toggle-bg-panel" title="${pinnedNow ? '背景已固定 · 点开调整' : '背景设置'}" aria-label="背景设置" aria-expanded="${state.bgPanelOpen ? 'true' : 'false'}">${pinnedNow ? icon('pin-fill') : icon('image')}</button>
           <div class="start-bg-panel" id="start-bg-panel" ${state.bgPanelOpen ? '' : 'hidden'}>
             ${
@@ -299,7 +303,8 @@ function startView() {
               <button class="start-bg-step" data-action="bg-cycle" data-dir="1" title="下一个背景" aria-label="下一个背景">${icon('chevron-right')}</button>
             </div>
             <button class="start-bg-action${pinnedNow ? ' is-pinned' : ''}" data-action="bg-pin">${pinnedNow ? icon('pin-fill') : icon('pin')}<span>${pinnedNow ? '已固定，点击取消' : '固定这个背景'}</span></button>`
-                : ''
+                : `<p class="start-bg-hint">当前只有静态主视觉，官方还没给到这款游戏的动态背景素材。网络恢复后可以点下面重新获取。</p>
+            <button class="start-bg-action" data-action="refresh-start-art" title="重新从官方接口获取动态背景">${icon('refresh')}<span>重新获取动态背景</span></button>`
             }
             ${
               bgSoftwareHint
@@ -312,14 +317,13 @@ function startView() {
               <svg class="icon" aria-hidden="true"><use id="start-video-use" href="#i-pause"></use></svg>
               <span>暂停 / 播放动态背景</span>
             </button>
-            <button class="start-bg-action" data-action="export-start-video" title="把这个动态背景另存为视频文件">${icon('download')}<span>保存为视频</span></button>`
+            <button class="start-bg-action" data-action="export-start-video" title="把这个动态背景另存为视频文件">${icon('download')}<span>保存为视频</span></button>
+            <button class="start-bg-action" data-action="refresh-start-art" title="重新从官方接口获取这款游戏的动态背景">${icon('refresh')}<span>重新获取动态背景</span></button>`
                 : ''
             }
           </div>
         </div>`;
-              })()}`
-            : ''
-        }
+        })()}
         <div class="start-window-controls">
           <button class="chrome-btn" data-action="window-minimize" title="最小化" aria-label="最小化">${icon('minus')}</button>
           <button class="chrome-btn" data-action="window-maximize" title="最大化 / 还原" aria-label="最大化">${icon('maximize')}</button>

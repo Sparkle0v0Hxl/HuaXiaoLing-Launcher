@@ -313,6 +313,7 @@ contextBridge.exposeInMainWorld('launcher', {
   createDesktopShortcut: () => ipcRenderer.invoke('app:create-desktop-shortcut'),
   setUiScale: (value) => ipcRenderer.invoke('app:ui-scale', value),
   exportStartVideo: (gameId) => ipcRenderer.invoke('start:export-video', gameId),
+  refreshStartArt: (gameId) => ipcRenderer.invoke('start:refresh-art', gameId),
   relaunchAdmin: (input) => ipcRenderer.invoke('app:relaunch-admin', input),
   quit: () => ipcRenderer.invoke('app:quit'),
 
