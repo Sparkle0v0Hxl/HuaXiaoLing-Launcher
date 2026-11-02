@@ -18727,6 +18727,7 @@ body.sidebar-collapsed .nav-item-parent .nav-caret {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  overflow: hidden;
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -18739,6 +18740,76 @@ body.sidebar-collapsed .nav-item-parent .nav-caret {
      filter 千万不能加过渡：拖模糊度滑杆时每一帧都会被缓动吞掉，
      手感就是「拖了没反应、松手后才慢慢变过去」。 */
   transition: opacity 0.18s ease;
+  --bg-px: 0px;
+  --bg-py: 0px;
+}
+
+/*
+ * 背景动画拆两层的原因见 chrome.js 顶部注释：
+ *   .backdrop-plate  → 淡入淡出 + 鼠标视差（translate）
+ *   .backdrop-media  → 缓慢运镜（scale + 位移长循环）
+ * 两个 transform 分属不同元素，才不会互相覆盖。
+ */
+#app-backdrop .backdrop-plate {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translate3d(var(--bg-px), var(--bg-py), 0);
+  transition: opacity 0.85s ease, transform 1.1s cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform, opacity;
+}
+
+#app-backdrop .backdrop-plate.is-active {
+  opacity: 1;
+}
+
+#app-backdrop .backdrop-media {
+  position: absolute;
+  /* 运镜要往外推，留够边，不然缩放时四角会露底 */
+  inset: -7%;
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  transform-origin: center;
+  will-change: transform;
+}
+
+#app-backdrop .backdrop-media:is(video) {
+  width: 114%;
+  height: 114%;
+  object-fit: cover;
+  border: 0;
+}
+
+/* 只让最上面那层动：旧层正在淡出时还在动会显得画面在抖 */
+#app-backdrop.is-live .backdrop-plate.is-active .backdrop-media {
+  animation: backdrop-drift 78s ease-in-out infinite alternate;
+}
+
+@keyframes backdrop-drift {
+  0% {
+    transform: scale(1.06) translate3d(-1.1%, -0.7%, 0);
+  }
+  35% {
+    transform: scale(1.1) translate3d(0.9%, 0.5%, 0);
+  }
+  70% {
+    transform: scale(1.13) translate3d(-0.5%, 1%, 0);
+  }
+  100% {
+    transform: scale(1.07) translate3d(1.2%, -0.9%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #app-backdrop .backdrop-plate,
+  #app-backdrop .backdrop-plate.is-active .backdrop-media {
+    animation: none;
+    transition: opacity 0.2s ease;
+  }
+  #app-backdrop .backdrop-plate {
+    transform: none;
+  }
 }
 
 #app-backdrop[hidden] {
@@ -34504,4 +34575,38 @@ body.is-idle .modal-backdrop {
   color: var(--text);
   border-color: var(--accent-line);
   background: var(--accent-soft);
+}
+
+/* -------- 更新弹窗不再被长清单拉长：标题与底栏常驻，正文内部滚动 --------
+ * 「发现新版本」和「升级后公告」两个弹窗都用 .update-modal。
+ * 以前整窗一起滚（.modal 是 overflow:auto），更新内容一多，
+ * 顶部的版本标题和底部的「立即更新 / 知道了」就被推出屏幕，得下滑老远才看得见。
+ * 现在改成竖向 flex：头、底栏、顶部大图都不缩，只有中间 .modal-body 自己滚，
+ * 内容短的时候高度照旧贴内容，不会多出空白。 */
+.modal.update-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 52px);
+  overflow: hidden;
+}
+.update-modal > .modal-head,
+.update-modal > .news-figure.update-hero {
+  flex: 0 0 auto;
+}
+.update-modal > .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.update-modal > .modal-foot {
+  flex: 0 0 auto;
+}
+
+/* 动态页头条右侧：有版本美图就铺图，没有就退回原来的几何花 */
+.news-feature-art img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 30%;
 }

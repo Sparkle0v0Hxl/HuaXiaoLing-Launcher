@@ -9,7 +9,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { hardlinkTree } = require('./runtime');
-const { httpFetch } = require('./http-fetch');
+const { httpFetch, segmentFetch } = require('./http-fetch');
 const { multiDownload } = require('./multi-download');
 
 const API = {
@@ -429,7 +429,8 @@ async function downloadManifestBytes(url, cacheFile, { forceSingle = false, conn
       await multiDownload({
         url,
         dest: part,
-        fetchImpl: httpFetch,
+        // 分段必须用独立 socket：Chromium 栈对同 host 只开 6 条，分段等于白做
+        fetchImpl: segmentFetch,
         headers: { 'user-agent': UA, accept: '*/*' },
         connections,
         minSize: 400 * 1024,

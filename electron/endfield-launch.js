@@ -20,10 +20,22 @@ const { spawn } = require('node:child_process');
  * 与 pid 文件。提权版（-Elevate）用 runas 自提升，替代 PowerShell 的
  * Start-Process -Verb RunAs，连 UAC 窗口都自己弹。
  *
- * 路径：打包时在 package.json 里配了 asarUnpack，所以 __dirname 下的 VelaEndfield.exe
- * 会是解包后的真实文件；开发环境直接是 electron/VelaEndfield.exe。两种情形都可直接用。
+ * 路径（重点，之前就是这里写错导致打包后 spawn ENOENT）：
+ *   开发态  —— __dirname 就是 electron/，VelaEndfield.exe 是真实文件，直接用。
+ *   打包态  —— __dirname 形如 …/resources/app.asar/electron（asar 虚拟路径），
+ *             操作系统 CreateProcess 根本找不到；asarUnpack 实际把 exe 抽到了
+ *             …/resources/app.asar.unpacked/electron/VelaEndfield.exe（这才是真身）。
+ *             所以打包态要把 app.asar 换成 app.asar.unpacked 再拼，不能用 __dirname 的虚拟路径。
+ *   不能用 fs.existsSync 判断两种态——Electron 给 fs 打了补丁，asar 虚拟路径会被误判「存在」。
  */
 function velaExe() {
+  const sep = path.sep;
+  const asarIdx = __dirname.indexOf('.asar' + sep);
+  if (asarIdx !== -1) {
+    const unpackedDir =
+      __dirname.slice(0, asarIdx) + '.asar.unpacked' + __dirname.slice(asarIdx + '.asar'.length);
+    return path.join(unpackedDir, 'VelaEndfield.exe');
+  }
   return path.join(__dirname, 'VelaEndfield.exe');
 }
 

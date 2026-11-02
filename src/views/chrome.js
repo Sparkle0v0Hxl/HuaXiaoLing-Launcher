@@ -45,6 +45,159 @@ const MATERIAL_LABEL = {
  * 「界面上根本没有这个按钮，但数据里是它」这种对不上的状态。 */
 const MATERIAL_OPTIONS = ['none', 'acrylic', 'mica', 'micaTabbed', 'auto'];
 
+/*
+ * 背景层的「动」是怎么来的：
+ *   · 每一张背景包成 .backdrop-plate > .backdrop-media 两层。
+ *     外层只负责淡入淡出和鼠标视差（translate），内层负责缓慢运镜
+ *     （scale + 位移的 78 秒长循环）。分两层是因为两者都要用 transform，
+ *     挤在一个元素上会互相覆盖。
+ *   · 换背景不直接替换，而是新建一层淡入、旧层淡出后再摘掉，
+ *     所以点官方背景缩略图时看到的是溶解，不是硬闪。
+ *   · 视频（mp4/webm）走 <video> 循环播放，视差和淡入逻辑完全一致。
+ *   · 「背景动态效果」关掉或系统开了减少动态时，只保留静态层。
+ */
+const backdropState = { url: '', kind: '', source: '', parallaxBound: false };
+
+/* 官方背景轮播：只在「当前背景是同步下来的官方主视觉」时启动。
+ * 每 26 秒换一张，走的是和点缩略图同一条淡入路径，所以换图是溶解不是硬切。
+ * 只改画面、不改设置 —— 用户设置里存的仍是他自己选的那张，重启后不会
+ * 莫名其妙变成别的图。 */
+const backdropRotate = { timer: 0, list: [], loading: false, source: '' };
+
+function backdropMotionAllowed() {
+  const settings = state.settings || {};
+  if (settings.backgroundMotion === false) return false;
+  // 系统级「减少动态效果」优先于应用设置：无障碍选项不该被开关绕过去
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+  return true;
+}
+
+function bindBackdropParallax() {
+  if (backdropState.parallaxBound) return;
+  backdropState.parallaxBound = true;
+  let frame = 0;
+  window.addEventListener(
+    'pointermove',
+    (event) => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const layer = document.getElementById('app-backdrop');
+        if (!layer || layer.hidden) return;
+        const halfW = window.innerWidth / 2 || 1;
+        const halfH = window.innerHeight / 2 || 1;
+        const dx = Math.max(-1, Math.min(1, (event.clientX - halfW) / halfW));
+        const dy = Math.max(-1, Math.min(1, (event.clientY - halfH) / halfH));
+        // 反向位移一点点就够了，幅度大了会晕
+        layer.style.setProperty('--bg-px', `${(-dx * 16).toFixed(1)}px`);
+        layer.style.setProperty('--bg-py', `${(-dy * 12).toFixed(1)}px`);
+      });
+    },
+    { passive: true }
+  );
+}
+
+/** 把一张背景（图或视频）挂成新的一层，淡入后摘掉旧层。 */
+function mountBackdropVisual(layer, url, kind) {
+  const plate = document.createElement('div');
+  plate.className = 'backdrop-plate';
+  const media = document.createElement(kind === 'video' ? 'video' : 'div');
+  media.className = 'backdrop-media';
+  if (kind === 'video') {
+    media.src = url;
+    media.autoplay = true;
+    media.muted = true;
+    media.loop = true;
+    media.playsInline = true;
+    // Qt/Chromium 两个内核下 muted 必须落成属性，光设 JS 属性自动播放会被拦
+    media.setAttribute('muted', '');
+    media.setAttribute('playsinline', '');
+  } else {
+    media.style.backgroundImage = `url("${url.replace(/"/g, '\\"')}")`;
+  }
+  plate.appendChild(media);
+
+  const old = Array.from(layer.querySelectorAll('.backdrop-plate'));
+  layer.appendChild(plate);
+
+  let activated = false;
+  const activate = () => {
+    if (activated) return;
+    activated = true;
+    plate.classList.add('is-active');
+    old.forEach((node) => node.classList.remove('is-active'));
+    // 等淡出跑完再删，否则旧层会瞬间消失，露出底色
+    setTimeout(() => old.forEach((node) => node.remove()), 1000);
+  };
+
+  if (kind === 'video') {
+    media.addEventListener('loadeddata', activate, { once: true });
+    // 视频迟迟不解码（编码不支持/文件坏了）也要让这一层露出来
+    setTimeout(activate, 1600);
+    const played = media.play();
+    if (played && typeof played.catch === 'function') played.catch(() => {});
+  } else {
+    const probe = new Image();
+    probe.onload = activate;
+    probe.onerror = activate;
+    probe.src = url;
+    // 命中内存缓存时 onload 可能不触发，兜底一次
+    setTimeout(activate, 600);
+  }
+}
+
+/** 官方背景列表（渲染层缓存一份，够轮播用）。 */
+async function loadOfficialBackdropList() {
+  if (backdropRotate.list.length) return backdropRotate.list;
+  if (backdropRotate.loading) return [];
+  if (!api || typeof api.officialBackgroundState !== 'function') return [];
+  backdropRotate.loading = true;
+  try {
+    const snapshot = await api.officialBackgroundState();
+    backdropRotate.list = (snapshot && snapshot.backgrounds) || [];
+  } catch {
+    backdropRotate.list = [];
+  } finally {
+    backdropRotate.loading = false;
+  }
+  return backdropRotate.list;
+}
+
+function stopBackdropRotation() {
+  if (backdropRotate.timer) {
+    clearInterval(backdropRotate.timer);
+    backdropRotate.timer = 0;
+  }
+}
+
+function startBackdropRotation(source) {
+  stopBackdropRotation();
+  backdropRotate.source = source;
+  let step = 0;
+  backdropRotate.timer = setInterval(async () => {
+    // 窗口在后台时换图没意义，切回来还会看到「跳了一张」
+    if (document.hidden) return;
+    const list = await loadOfficialBackdropList();
+    if (list.length < 2) return;
+    step += 1;
+    const current = list.findIndex((item) => item.relative === backdropRotate.source);
+    const next = list[((current < 0 ? 0 : current) + step) % list.length];
+    const layer = document.getElementById('app-backdrop');
+    const url = toFileUrl(next.relative);
+    if (!layer || !url) return;
+    mountBackdropVisual(layer, url, 'image');
+    layer.classList.toggle('is-live', backdropMotionAllowed());
+  }, 26000);
+}
+
+/** 轮播只对官方主视觉生效：用户自己导入的图不该被换走。 */
+function backdropRotationWanted(image) {
+  if (!image) return false;
+  if (!/^backgrounds\/ef-/i.test(String(image))) return false;
+  if ((state.settings || {}).backgroundRotate === false) return false;
+  return backdropMotionAllowed();
+}
+
 function applyBackdrop(settings) {
   const root = document.documentElement;
   const material = settings.material || 'none';
@@ -65,16 +218,38 @@ function applyBackdrop(settings) {
     layer.id = 'app-backdrop';
     document.body.insertBefore(layer, document.body.firstChild);
   }
-  if (image) {
-    const url = toFileUrl(image);
-    layer.style.backgroundImage = url ? `url("${url.replace(/"/g, '\\"')}")` : '';
-    if (!url) layer.hidden = true;
-    else layer.hidden = false;
-    layer.classList.toggle('is-authoritative', material === 'none');
-  } else {
-    layer.style.backgroundImage = '';
+
+  const url = image ? toFileUrl(image) : '';
+  const kind = /\.(mp4|webm)(\?|#|$)/i.test(String(image)) ? 'video' : 'image';
+
+  if (!url) {
+    if (backdropState.url) {
+      layer.querySelectorAll('.backdrop-plate').forEach((node) => node.remove());
+      backdropState.url = '';
+      backdropState.kind = '';
+    }
+    backdropState.source = '';
+    stopBackdropRotation();
     layer.hidden = true;
+  } else {
+    layer.hidden = false;
+    layer.classList.toggle('is-authoritative', material === 'none');
+    if (image !== backdropState.source) {
+      backdropState.source = image;
+      backdropState.url = url;
+      backdropState.kind = kind;
+      mountBackdropVisual(layer, url, kind);
+      bindBackdropParallax();
+      // 换背景时重新排队，否则新图会沿上一张的计时继续跑
+      if (backdropRotationWanted(image)) startBackdropRotation(image);
+      else stopBackdropRotation();
+    } else if (backdropRotationWanted(image)) {
+      if (!backdropRotate.timer) startBackdropRotation(image);
+    } else if (backdropRotate.timer) {
+      stopBackdropRotation();
+    }
   }
+  layer.classList.toggle('is-live', Boolean(url) && backdropMotionAllowed());
   document.body.classList.toggle('has-material', material !== 'none');
   document.body.classList.toggle('has-backdrop', Boolean(image));
 }

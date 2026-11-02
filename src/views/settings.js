@@ -617,6 +617,14 @@ function settingsView() {
               </div>
             </div>
           </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>背景动态效果</strong><span>缓慢运镜 + 鼠标轻微视差，背景不再是一张死图。系统开了「减少动态效果」时会自动关掉。</span></div>
+            <div class="setting-control">${switchMarkup('backgroundMotion', settings.backgroundMotion !== false)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>官方背景轮播</strong><span>只在用官方主视觉时生效：每 26 秒交叉淡入换下一张，素材来自你已经同步的官方背景。</span></div>
+            <div class="setting-control">${switchMarkup('backgroundRotate', settings.backgroundRotate !== false)}</div>
+          </div>
           <p class="material-note">${icon('alert', 'xs')}「透明效果」在 设置 → 个性化 → 颜色；关掉后所有材质失效。</p>
         </section>
 
@@ -1003,6 +1011,7 @@ function settingsView() {
               <div class="about-name">花筱灵启动器</div>
               <div class="about-version">VERSION ${esc(state.app.version || '1.0.0')} · ELECTRON ${esc(state.app.electron || '')}</div>
               <div class="about-note">
+                更新包支持增量：只下和你本地版本差异的那一小块，差分包打不上会自动改回完整包；下载时显示百分比、已下字节和实时速度，下完自动关闭、覆盖、重新启动，弹窗点「稍后再说」会记 24 小时，不再反复提醒。
                 内置原神、崩坏：星穹铁道、绝区零、崩坏3、明日方舟、异环、明日方舟：终末地的启动入口，也支持添加任意本地游戏；装在哪、切哪个服、缺不缺资源，启动器都会自己认，游戏有官方更新时「开始游戏」会直接变成「更新游戏」，点了就下、下完自动就位。
                 切服不用重下：多渠道游戏（官服 / B服 / 国际服）共用一份客户端，运行时按渠道自动组装，更新一次全服通用；组装在旁边的独立目录里做，你装好的官方客户端一个字节都不动。
                 终末地 / 明日方舟的渠道包不随安装包装：第一次切到某个服时会写清要下多少（官服 9 MB、B服 194 MB、国际服 / Play 约 940 MB），点了才下，带百分比与速度、可取消续传，下过一次就一直在。

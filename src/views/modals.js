@@ -1128,7 +1128,18 @@ function openGameDownloadModal(gameId) {
       if (event.jobId !== jobId) return;
       const total = Number(event.total) || 0;
       const processed = Number(event.processed) || 0;
-      const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+      /*
+       * 优先用主进程给的字节进度。
+       * 渠道包（pack）阶段也带 processed/total，但那是「文件个数」，文件大小差
+       * 一百倍，按个数算出来的百分比会长时间停在原地；主进程已经按字节算好了
+       * percent，直接用，只有老事件没带这个字段时才退回按个数算。
+       */
+      const explicitPercent = Number(event.percent);
+      const percent = Number.isFinite(explicitPercent)
+        ? Math.max(0, Math.min(100, explicitPercent))
+        : total
+          ? Math.min(100, (processed / total) * 100)
+          : 0;
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
@@ -1306,9 +1317,26 @@ function sophonProgressStats(event, compact = false) {
     }`;
   }
   if (event.phase === 'done') return '';
-  return `硬链接 ${event.linked || 0} · 下载 ${event.downloaded || 0} · ${formatSize(
-    event.bytesDone
-  )} / ${formatSize(event.totalBytes)}`;
+  /*
+   * 渠道包（pack）不是硬链接，套统一模板就成了「硬链接 0 · 下载 0 · 0 KB / 0 KB」，
+   * 明明在下东西却处处是 0。这一步单独给一句：下了几个文件、走到多少字节。
+   */
+  if (event.phase === 'pack') {
+    const files = Number(event.downloaded) || 0;
+    const done = formatSize(event.bytesDone);
+    const total = Number(event.totalBytes) ? formatSize(event.totalBytes) : '';
+    return `已下载 ${files} 个文件 · ${done}${total ? ` / ${total}` : ''}`;
+  }
+  /*
+   * 硬链接 / 覆盖这两步只报「几个文件」，没有字节数。
+   * 以前统一模板会补一句「0 KB / 0 KB」，明明在跑却像卡死；
+   * 没有字节数据就干脆不显示这一段。
+   */
+  const parts = [`硬链接 ${event.linked || 0}`, `下载 ${event.downloaded || 0}`];
+  if (Number(event.totalBytes) || Number(event.bytesDone)) {
+    parts.push(`${formatSize(event.bytesDone)} / ${formatSize(event.totalBytes)}`);
+  }
+  return parts.join(' · ');
 }
 
 /*
@@ -1995,7 +2023,18 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       if (event.jobId !== jobId) return;
       const total = Number(event.total) || 0;
       const processed = Number(event.processed) || 0;
-      const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+      /*
+       * 优先用主进程给的字节进度。
+       * 渠道包（pack）阶段也带 processed/total，但那是「文件个数」，文件大小差
+       * 一百倍，按个数算出来的百分比会长时间停在原地；主进程已经按字节算好了
+       * percent，直接用，只有老事件没带这个字段时才退回按个数算。
+       */
+      const explicitPercent = Number(event.percent);
+      const percent = Number.isFinite(explicitPercent)
+        ? Math.max(0, Math.min(100, explicitPercent))
+        : total
+          ? Math.min(100, (processed / total) * 100)
+          : 0;
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',

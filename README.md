@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.7.1-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.7.3-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -16,7 +16,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.7.1**
+**当前版本：v2.7.3**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -129,7 +129,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.7.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.7.3-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -232,7 +232,25 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.7.1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.7.3 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.7.3</b></summary>
+
+
+- 更新包下载真的改成多连接了：以前 16 段都走 Chromium 网络栈，同域名最多 6 条 socket、还支持 HTTP/2 合并，多线程等于白加；现在每段一条独立 TCP，同一份 179 MB 的包从 0.67 MB/s 提到 6~20 MB/s。Node 直连不通时自动退回 Chromium 栈并熔断 5 分钟。
+- 更新进度不再卡 0%：原先进度靠 setInterval 上报，下载一开就把事件循环占满，定时器跑不起来——179 MB 实际 1 秒下完，界面 30 秒停在 0%。现在改在写盘路径上按 120 ms 节流，0% 时也会显示「正在连接下载服务器…」，之后带实时速度（如 12.3 MB/s）。
+- 修掉「下完不重启、旧文件没换」的一个根因：两次重试共用一个临时文件名，上一次失败的清理会删掉正在写的那份（统计报 ENOENT），于是退回单连接从 0 重下、最后 sha256 对不上。现在每次尝试用独立文件名，并清理一天前残留。
+- 「正在连接下载服务器」不再停十几秒：更新清单四个源并发读（单源 6 秒超时、拿到一份后再等 1.8 秒），实测 2 秒出清单，不再等 raw.githubusercontent 的 15 秒超时。
+- 渠道差异包改两层并发：文件之间 8 路，1 MB 以上的单文件再按体量开 3~16 段；并给 http 请求加了连接复用（小文件以前每个请求都新建 TCP+TLS，时间全耗在握手上）。实测 EndfieldBase.dll 36.6 MB 从 53.4 秒降到 12.3 秒，14 个小文件从 2.58 秒降到 0.92 秒。
+- 渠道包下载进度不再是「硬链接 0 · 下载 0 · 0 KB / 0 KB」：主进程转发时把字节字段过滤掉了、调下载时又漏传进度回调。现在显示「已下载 71 个文件 · 89 MB / 936 MB」，进度条按字节走。
+- 官方背景自动跟随：同步鹰角版本简报的主视觉（当前 31 张），设置 → 窗口材质与背景里直接选，不依赖本机是否装了官方启动器。
+- 动态背景：官方主视觉支持缓慢运镜、鼠标视差、每 26 秒轮播、换图交叉淡入，也支持 mp4 / webm 视频背景；遵循系统「减少动态效果」，最小化自动暂停。
+- 修好启动页动图：清理旧格式残留时会把正在写的 .part 一起删掉，导致明日方舟 / 异环动图每次 rename 失败，还会连带删掉已有 mp4。现在不再误删。
+- 升级提醒同前：自动更新只覆盖程序文件，data 目录（登录态、抽卡记录、歌单、设置）不动；启动器未签名，第一次运行前建议加杀软白名单。
+
+
+</details>
 
 <details>
 <summary><b>v2.7.1</b></summary>

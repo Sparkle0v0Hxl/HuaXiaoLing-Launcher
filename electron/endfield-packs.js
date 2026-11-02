@@ -6,8 +6,8 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const { multiDownload, MIN_PARALLEL_SIZE, DEFAULT_CONNECTIONS } = require('./multi-download');
-const { httpFetch } = require('./http-fetch');
+const { multiDownload, MIN_PARALLEL_SIZE } = require('./multi-download');
+const { httpFetch, segmentFetch } = require('./http-fetch');
 
 const AES_KEY = Buffer.from([
   192, 243, 14, 28, 231, 99, 187, 194, 28, 195, 85, 163, 67, 3, 172, 80, 57, 148, 68,
@@ -421,7 +421,7 @@ async function fetchEncryptedManifest(latest, profile, options = {}) {
       await multiDownload({
         url,
         dest: temp,
-        fetchImpl: httpFetch,
+        fetchImpl: segmentFetch,
         headers: { 'user-agent': UA },
         connections: MANIFEST_CONNECTIONS,
         minSize: MANIFEST_PARALLEL_MIN,
@@ -577,7 +577,12 @@ async function downloadToFile(url, destination, options = {}) {
   const headers = { 'user-agent': UA };
   if (start > 0) headers.range = `bytes=${start}-`;
 
-  const response = await fetch(url, {
+  /*
+   * 走 segmentFetch 而不是裸 fetch：小文件现在会 6 个一起下，而 Chromium 对
+   * 同一个 host 只有 6 条 socket，全挤在里面等于没有余量；node 侧每条都是
+   * 独立连接，6 个并发就是实打实的 6 条。
+   */
+  const response = await segmentFetch(url, {
     headers,
     // 取消信号优先；单次尝试超时 10 分钟，卡顿检测会在更早（60s）就接管
     signal: options.signal || AbortSignal.timeout(10 * 60 * 1000),
@@ -641,11 +646,30 @@ function bytesPerSecond(bytes, startedAt) {
   return Math.round(bytes / seconds);
 }
 
-/** 渠道包的连接数。和更新包保持一致，对端按连接限速时才能吃满带宽。 */
-const PACK_CONNECTIONS = DEFAULT_CONNECTIONS;
+/**
+ * 按体量给每个文件配一份分段计划：越大的文件开越多段，1 MB 以上才分段。
+ *
+ * 渠道包的 CDN（beyond.hg-cdn.com / gryphline 节点）是按「连接」限速的，
+ * 跨海节点单连接常年只有 1~2 MB/s。差异包里绝大多数是几百 KB 的小文件，
+ * 只开一个连接就意味着每个文件都要先等一次握手 + 302 才见到第一个字节，
+ * 这段等待里带宽完全是空转的——串行下一堆小文件，总速度掉到几百 KB/s
+ * 就是这么来的。所以这里不再沿用「小于 8 MB 就单连接」的旧判断，
+ * 改成按大小分档多开几段；只有小到 256 KB 以下的才不值得（多一次往返
+ * 反而更慢），仍旧走单连接。
+ */
+function packSegmentPlan(size) {
+  const MB = 1024 * 1024;
+  if (size >= 16 * MB) return { connections: 16, minSegmentSize: 1 * MB };
+  if (size >= MIN_PARALLEL_SIZE) return { connections: 10, minSegmentSize: 1 * MB };
+  if (size >= 2 * MB) return { connections: 6, minSegmentSize: 512 * 1024 };
+  return { connections: 3, minSegmentSize: 384 * 1024 };
+}
+
+/** 小于这个大小就不分段：实测 1 MB 以下多开 2~4 段常常反而更慢（多一次探测往返）。 */
+const PACK_MIN_SEGMENT_SIZE = 1 * 1024 * 1024;
 
 /**
- * 下载一个渠道包文件：够大就走多连接分段，其余照旧单连接。
+ * 下载一个渠道包文件：一律先试多连接分段，分段不可用才退单连接。
  *
  * 差异包体量不小（国际服整包 940 MB，里面 Endfield.exe / GameAssembly.dll 都是
  * 几十上百 MB 的单文件），而鹰角的 CDN 按连接限速——单连接跑这些大文件只有
@@ -658,13 +682,14 @@ const PACK_CONNECTIONS = DEFAULT_CONNECTIONS;
  * 洞当成已下好的数据（大小够了，内容却是垃圾，最后卡在 md5 校验上）。
  *
  * @param {object} [options]
- * @param {number} [options.size] 清单里的文件大小，用于判断值不值得分段
+ * @param {number} [options.size] 清单里的文件大小，用于决定开几段
  * @param {AbortSignal} [options.signal]
  * @param {(bytes:number)=>void} [options.onChunk]
  */
 async function downloadPackFile(url, destination, options = {}) {
   const { size = 0, signal, onChunk } = options;
-  if (size >= MIN_PARALLEL_SIZE) {
+  if (size >= PACK_MIN_SEGMENT_SIZE) {
+    const plan = packSegmentPlan(size);
     let sent = 0;
     try {
       await multiDownload({
@@ -672,7 +697,10 @@ async function downloadPackFile(url, destination, options = {}) {
         dest: destination,
         expectedSize: size,
         headers: { 'user-agent': UA },
-        connections: PACK_CONNECTIONS,
+        connections: plan.connections,
+        minSegmentSize: plan.minSegmentSize,
+        // 小文件也要能进来：默认门槛是 8 MB，不显式放低会被直接打回单连接
+        minSize: PACK_MIN_SEGMENT_SIZE,
         signal,
         report: (percent, received) => {
           if (typeof onChunk !== 'function') return;
@@ -757,7 +785,7 @@ async function downloadAndExtractSplit({ profile, root, stagingRoot, onProgress 
       reused = false;
     }
     if (reused) continue;
-    // 大卷走 16 连接分段，小卷仍是单连接（分段对小文件没意义，反而多几次探测）
+    // 分卷动辄几百 MB，按体量走 12~16 段；小分卷也会自动开 4~8 段
     let doneInPack = 0;
     await downloadPackFile(pack.url, target, {
       size: pack.size,
@@ -1040,7 +1068,36 @@ async function updateProfile(profile, root, onProgress, options = {}) {
   let downloadedBytes = 0;
   const startedAt = Date.now();
   const signal = options.signal;
+
+  /*
+   * 速度用最近 3 秒的滑动窗口，而不是「总字节 / 总耗时」。
+   * 后者把 md5 校验、文件切换、重试等待全算进分母，界面上就会一直显示
+   * 一个远低于实际带宽的数字——看起来像「下载速度不对」。
+   */
+  const speedSamples = [];
+  const sampleSpeed = () => {
+    const now = Date.now();
+    speedSamples.push({ t: now, bytes: downloadedBytes });
+    while (speedSamples.length > 2 && now - speedSamples[0].t > 3000) speedSamples.shift();
+    const first = speedSamples[0];
+    const dt = (now - first.t) / 1000;
+    if (dt <= 0.2) return 0;
+    return Math.max(0, (downloadedBytes - first.bytes) / dt);
+  };
+
   const report = (index, current) => {
+    /*
+     * 进度要三样东西，界面那套模板（「硬链接 X · 下载 Y · A / B」+ 阶段条）
+     * 分别读 percent / bytesDone / totalBytes，少给一个就会显示成 0：
+     *   · percent 按字节算；清单里若有大小为 0 的项，退回按文件个数算
+     *   · bytesDone 是已处理的字节（老字段名叫 bytes，两个都给，老调用方不受影响）
+     */
+    const percent =
+      totalBytes > 0
+        ? Math.min(100, (processedBytes / totalBytes) * 100)
+        : remote.files.length
+          ? Math.min(100, (index / remote.files.length) * 100)
+          : 0;
     onProgress?.({
       profile: profile.iconName,
       directory: profile.directory,
@@ -1049,15 +1106,34 @@ async function updateProfile(profile, root, onProgress, options = {}) {
       processed: index,
       total: remote.files.length,
       bytes: processedBytes,
+      bytesDone: processedBytes,
+      // 界面那条「硬链接 X · 下载 Y」里的 Y：已经下完并通过 md5 的文件数
+      downloaded,
       totalBytes,
       downloadedBytes,
-      speed: bytesPerSecond(downloadedBytes, startedAt),
+      percent,
+      speed: sampleSpeed() || bytesPerSecond(downloadedBytes, startedAt),
     });
   };
-  for (let index = 0; index < remote.files.length; index += 1) {
+  // 先把总量推上去：不然界面要等第一个文件下完才从「0 KB / 0 KB」变成真实体积
+  report(0, '');
+  /*
+   * 文件级并发：差异包里绝大多数是十几 KB ~ 几百 KB 的小文件，逐个串行下载时
+   * 每个文件都要先握手、302 跳转、读响应头，这段时间带宽完全空转，小文件一多
+   * 总速度就掉到几百 KB/s。
+   *
+   * 1 MB 以上的文件自己还会开 3~16 段（见 packSegmentPlan），连接预算按
+   * 「8 个文件 × 最多 6 段 = 48 条」算；http-fetch 的 keep-alive agent 上限
+   * 是 64，留足了余量。小文件本身不分段，靠这 8 路并发 + 连接复用提速。大文件（Endfield.exe / GameAssembly.dll 这类几十上百
+   * MB 的）反过来要串行：它内部已经开了 12~16 段，再叠文件级并发只会互相抢
+   * 带宽，反而更慢。
+   */
+  const SMALL_FILE_PARALLEL = 8;
+  const BIG_FILE_THRESHOLD = MIN_PARALLEL_SIZE;
+  let finished = 0;
+
+  const processFile = async (file) => {
     if (signal?.aborted) throw abortedError();
-    const file = remote.files[index];
-    report(index, file.path);
     const temporary = path.join(staging, file.path);
 
     /*
@@ -1086,17 +1162,17 @@ async function updateProfile(profile, root, onProgress, options = {}) {
       for (let attempt = 1; attempt <= 5; attempt += 1) {
         try {
           /*
-           * 大文件（Endfield.exe / GameAssembly.dll 这类几十上百 MB 的）走
-           * 16 连接分段，小文件仍是单连接：CDN 按连接限速，分段是唯一能让
-           * 「硬链接生成一份」等 940 MB 差异包时快起来的办法。分段不可用时
-           * downloadPackFile 内部就退回单连接了，这里不用再判断。
+           * 1 MB 以上的文件都先走多连接分段（3~16 段，按体量分档）。
+           * CDN 按连接限速，分段是唯一能让「硬链接生成一份」等 940 MB 差异包
+           * 时快起来的办法。分段不可用（不支持 Range / 探测失败）时
+           * downloadPackFile 内部会退回单连接，这里不用再判断。
            */
           await downloadPackFile(`${remote.base}/${file.urlPath}`, temporary, {
             size: file.size || 0,
             signal,
             onChunk: (chunkBytes) => {
               downloadedBytes += chunkBytes;
-              report(index, file.path);
+              report(finished, file.path);
             },
           });
           lastError = null;
@@ -1117,9 +1193,30 @@ async function updateProfile(profile, root, onProgress, options = {}) {
         throw new Error(`${file.path} MD5 校验失败`);
       }
     }
+    finished += 1;
     processedBytes += file.size || 0;
     if (processedBytes > totalBytes) processedBytes = totalBytes;
-    report(index + 1, file.path);
+    report(finished, file.path);
+  };
+
+  const smallFiles = remote.files.filter((file) => (file.size || 0) < BIG_FILE_THRESHOLD);
+  const bigFiles = remote.files.filter((file) => (file.size || 0) >= BIG_FILE_THRESHOLD);
+
+  let cursor = 0;
+  const smallWorker = async () => {
+    while (cursor < smallFiles.length) {
+      if (signal?.aborted) throw abortedError();
+      const file = smallFiles[cursor];
+      cursor += 1;
+      await processFile(file);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SMALL_FILE_PARALLEL, smallFiles.length) }, () => smallWorker())
+  );
+  for (const file of bigFiles) {
+    if (signal?.aborted) throw abortedError();
+    await processFile(file);
   }
 
   await fsp.rm(target, { recursive: true, force: true });

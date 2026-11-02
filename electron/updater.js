@@ -36,7 +36,9 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const execFileAsync = promisify(execFile);
 const { multiDownload } = require('./multi-download');
 
 /*
@@ -44,10 +46,20 @@ const { multiDownload } = require('./multi-download');
  * 证书走系统库、代理走系统设置，Steam++ 之类的加速器才生效；非 Electron 环境
  * （自测脚本）自动降级回 Node fetch。
  */
-const { httpFetch } = require('./http-fetch');
+const { httpFetch, nodeRequest, segmentFetch } = require('./http-fetch');
 
 const EXE_NAME = '花筱灵启动器.exe';
 const DEFAULT_TIMEOUT = 15000;
+/**
+ * 读清单的超时要短得多。
+ *
+ * 清单只有几百字节，读不下来一定是这条源不通（raw.githubusercontent.com 在国内
+ * 直接黑洞），没必要陪它耗 15 秒。以前是「一个源一个源挨着读」，第一条源死了就
+ * 卡满超时，用户在「正在连接下载服务器…」上干等十几秒。
+ */
+const MANIFEST_TIMEOUT = 6000;
+/** 已经拿到一份可用清单后，最多再等别的源这么久（等更高版本的那份）。 */
+const MANIFEST_GRACE = 1800;
 /** 下载断线时最多重试几次（不含第一次）。 */
 const DOWNLOAD_RETRIES = 2;
 
@@ -179,6 +191,30 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
 }
 
 /**
+ * 把清单里的 deltas 数组解析成统一的 {from,to,url,sha256,size}，url 按清单位置补全。
+ * deltas 是可选的：老清单没有这个字段时返回空数组，行为与过去完全一致。
+ */
+function parseDeltas(data, base) {
+  const list = Array.isArray(data && data.deltas) ? data.deltas : [];
+  const out = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const from = String(item.from || '').trim().replace(/^v/i, '');
+    const to = String(item.to || '').trim().replace(/^v/i, '');
+    const url = resolveAgainst(base, item.url);
+    if (!from || !to || !url) continue;
+    out.push({
+      from,
+      to,
+      url,
+      sha256: String(item.sha256 || '').trim().toLowerCase(),
+      size: Number(item.size) || 0,
+    });
+  }
+  return out;
+}
+
+/**
  * 读取并校验 manifest。
  *
  * 随包分发的那份 latest.json 只写「真正的清单在哪」（manifest 指针），
@@ -187,10 +223,10 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
  *
  * @returns {Promise<{version:string,notes:string,url:string,sha256:string,size:number,mandatory:boolean,source:string,title:string,date:string}>}
  */
-async function readManifest(location) {
+async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
   const raw = String(location || '').trim();
   if (!raw) throw new Error('还没有设置更新源');
-  const text = await fetchText(raw);
+  const text = await fetchText(raw, timeout);
   let data;
   try {
     data = JSON.parse(text);
@@ -202,7 +238,7 @@ async function readManifest(location) {
   // 指针式清单：自己没有下载地址，就去它指的地方拿真正的那份
   const pointer = String(data.manifest || data.redirect || '').trim();
   if (pointer && !data.url) {
-    const real = await readManifest(resolveAgainst(raw, pointer));
+    const real = await readManifest(resolveAgainst(raw, pointer), timeout);
     return { ...real, source: raw };
   }
 
@@ -217,6 +253,7 @@ async function readManifest(location) {
     sha256: String(data.sha256 || '').trim().toLowerCase(),
     size: Number(data.size) || 0,
     mandatory: Boolean(data.mandatory),
+    deltas: parseDeltas(data, raw),
     source: raw,
   };
 }
@@ -233,18 +270,55 @@ async function readManifest(location) {
  */
 async function resolveManifest(candidates) {
   const list = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean);
+  if (!list.length) return { ok: false, error: '读不到更新源' };
+  /*
+   * 并发读，不是挨着读。
+   *
+   * 候选里既有本机文件、又有国内 CDN、还有国内根本不通的 raw.githubusercontent.com。
+   * 串行的时候，排在前面的一条死了就白白占满一个超时；用户看到的就是「正在连接下载
+   * 服务器…」停十几秒才动。现在同时发出去，整体耗时等于最快那条。
+   */
   let best = null;
   let lastError = null;
+  let remaining = list.length;
+  let settle = () => {};
+  let graceTimer = null;
+  const finished = new Promise((resolve) => {
+    settle = resolve;
+  });
+
   for (const candidate of list) {
-    try {
-      const manifest = await readManifest(candidate);
-      if (!best || compareVersions(manifest.version, best.manifest.version) > 0) {
-        best = { manifest, source: candidate };
-      }
-    } catch (error) {
-      lastError = error;
-    }
+    readManifest(candidate)
+      .then(
+        (manifest) => {
+          if (!best || compareVersions(manifest.version, best.manifest.version) > 0) {
+            best = { manifest, source: manifest.source };
+          }
+          /*
+           * 已经有可用结果了，就别让剩下那条死链再把用户拖满一个超时。
+           * 留一点宽限，是为了让「本地那份旧清单先到、线上新清单后到」这种情况下
+           * 还能取到版本更高的那份。
+           */
+          if (!graceTimer) {
+            graceTimer = setTimeout(() => {
+              if (best) settle();
+            }, MANIFEST_GRACE);
+          }
+        },
+        (error) => {
+          lastError = error;
+        }
+      )
+      .finally(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          if (graceTimer) clearTimeout(graceTimer);
+          settle();
+        }
+      });
   }
+
+  await finished;
   if (best) return { ok: true, manifest: best.manifest, source: best.source };
   return {
     ok: false,
@@ -302,6 +376,14 @@ async function checkForUpdate({ location, currentVersion }) {
     sha256: manifest.sha256,
     size: manifest.size,
     mandatory: manifest.mandatory,
+    deltas: manifest.deltas || [],
+    // 匹配「当前版本 -> 目标版本」的增量；界面上据此提示「本次走增量」
+    delta:
+      (manifest.deltas || []).find(
+        (d) =>
+          d.from === String(current).replace(/^v/i, '') &&
+          d.to === String(manifest.version).replace(/^v/i, '')
+      ) || null,
     source: resolved.source,
   };
 }
@@ -336,12 +418,34 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
       try {
         const reader = response.body.getReader();
         for (;;) {
-          const { done, value } = await reader.read();
+          /*
+           * 单连接也要有「读不动」的保护。原来只给建连设了 60 秒超时，
+           * 一旦连接建好但对方不再吐数据（国内直连 GitHub 常见），
+           * reader.read() 会永久挂着，进度条就定格不动了。
+           */
+          let idleTimer = null;
+          const stalled = new Promise((_, reject) => {
+            idleTimer = setTimeout(() => reject(new Error('连接长时间没有数据')), 30000);
+          });
+          let chunk;
+          try {
+            chunk = await Promise.race([reader.read(), stalled]);
+          } finally {
+            if (idleTimer) clearTimeout(idleTimer);
+          }
+          const { done, value } = chunk;
           if (done) break;
           await handle.write(value);
           received += value.length;
           report(total ? (received / total) * 100 : 0, received, total);
         }
+      } catch (error) {
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* 已经关闭 */
+        }
+        throw error;
       } finally {
         await handle.close();
       }
@@ -368,20 +472,44 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
  *   抛 slow 错误，让上层重开一遍；退到单连接时不再判定（慢总比没有强）。
  */
 async function downloadOne({ url, dest, expectedSize, report, minSpeed = 0 }) {
-  try {
-    return await multiDownload({
-      url,
-      dest,
-      expectedSize,
-      report,
-      fetchImpl: httpFetch,
-      headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
-      connections: DOWNLOAD_CONNECTIONS,
-      minSpeed,
-    });
-  } catch (error) {
-    // 慢速说明这批连接被限得厉害，往上抛给上层重开；其余情况都退单连接
-    if (error && error.slow) throw error;
+  const headers = { 'user-agent': BROWSER_UA, accept: '*/*' };
+  /*
+   * 分段必须走 node:https —— 每段一条独立 TCP。
+   *
+   * 用 Chromium 的 net.fetch 做分段等于白做：它对同一个 host 最多开 6 条 socket，
+   * 而 GitHub 的下载资源还支持 HTTP/2，16 个 Range 请求会被并进一两条连接里，
+   * 共享同一个拥塞窗口。表现就是「多线程加了，速度一点没变」。NDM 那种能跑满
+   * 带宽的下载器，靠的正是每段各自一条连接、各走各的窗口。
+   *
+   * nodeRequest 连不上时（用户是靠系统代理才出得去网，Node 不读系统代理）
+   * 再退回 Chromium 栈：那时只有 6 条并发，但也比一条强。
+   */
+  const plans = [
+    { name: 'node', impl: segmentFetch },
+    { name: 'chromium', impl: httpFetch },
+  ];
+  let lastError = null;
+  for (const plan of plans) {
+    try {
+      return await multiDownload({
+        url,
+        dest,
+        expectedSize,
+        report,
+        fetchImpl: plan.impl,
+        headers,
+        connections: DOWNLOAD_CONNECTIONS,
+        minSpeed,
+      });
+    } catch (error) {
+      // 慢速判定要交给上层重开，不能在这里吞掉
+      if (error && error.slow) throw error;
+      lastError = error;
+      console.warn(`[update] 分段下载（${plan.name}）不可用：`, error && error.message);
+    }
+  }
+  if (lastError) {
+    console.warn('[update] 退回单连接下载：', lastError.message);
   }
   return await downloadSingle({ url, dest, expectedSize, report });
 }
@@ -392,26 +520,43 @@ async function downloadOne({ url, dest, expectedSize, report, minSpeed = 0 }) {
  * 以前这里是「官方 + 一串加速镜像，谁快用谁」，实际维护下来镜像比直连更不可靠：
  * 免费前缀今天通明天挂，还得先花几秒探测。现在整层删掉——直连 16 连接已经能到
  * 6~10 MB/s，少一层转发也少一个能篡改下载内容的地方（sha256 仍在最后把关）。
+ *
+ * 这里不再做「平均速度低就重开一遍」：那种重来会把已经下好的进度清零，用户看到
+ * 的就是进度条归零、又从 0 慢慢爬。真正该处理的「卡住」交给 multiDownload 的
+ * 停滞看门狗（45 秒没进展就换网络栈/退单连接），有进展就一直往下走。
  */
 async function downloadHttp({ url, dest, expectedSize, report }) {
   const official = String(url || '').trim();
   if (!official) throw new Error('没有可用的下载地址');
-  try {
-    return await downloadOne({ url: official, dest, expectedSize, report, minSpeed: MIN_DOWNLOAD_SPEED });
-  } catch (error) {
-    if (!(error && error.slow)) throw error;
-    // 太慢：重开一遍，但不再限速。国内窄带宽或代理环境里，两小时下完也好过下不下来。
-    report(0, 0, expectedSize || 0);
-    return await downloadOne({ url: official, dest, expectedSize, report, minSpeed: 0 });
-  }
+  return await downloadOne({ url: official, dest, expectedSize, report });
 }
 
 async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
   await fsp.mkdir(path.dirname(dest), { recursive: true });
+  /*
+   * 速度也一起算出来给界面用。以前只给百分比，用户看到的是「0%」和一个不动的条，
+   * 分不清是在慢慢下还是彻底卡住——把 MB/s 摆出来，卡没卡一眼就知道。
+   */
+  let lastAt = 0;
+  let lastReceived = 0;
+  let speed = 0;
   const report = (percent, received, total) => {
     if (typeof onProgress !== 'function') return;
+    const now = Date.now();
+    if (lastAt && now > lastAt && received >= lastReceived) {
+      const instant = ((received - lastReceived) / (now - lastAt)) * 1000;
+      // 指数平滑：单次采样的抖动太大，直接显示会一直跳
+      speed = speed > 0 ? speed * 0.7 + instant * 0.3 : instant;
+    }
+    lastAt = now;
+    lastReceived = received;
     try {
-      onProgress({ percent: Math.max(0, Math.min(100, percent)), received, total });
+      onProgress({
+        percent: Math.max(0, Math.min(100, percent)),
+        received,
+        total,
+        speed: Number.isFinite(speed) ? Math.max(0, speed) : 0,
+      });
     } catch {
       /* 进度回调出错不影响下载 */
     }
@@ -950,6 +1095,196 @@ async function cleanTemp(tempBase) {
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* 增量更新（HDiffPatch 逐文件差分）                                    */
+/* ---------------------------------------------------------------- */
+
+/**
+ * hpatchz.exe 的真实路径。
+ * 打包后它在 resources/app.asar.unpacked/electron/vendor/ 下（asarUnpack 解出来的）；
+ * 开发态在 electron/vendor/。asar 虚拟路径能 existsSync 成 true，但拿去 spawn 会被系统
+ * 当成「文件不存在」，所以优先取 unpacked 的真实路径。
+ */
+function hpatchzPath() {
+  const dir = __dirname || '';
+  const candidates = [];
+  if (dir.includes('app.asar')) {
+    candidates.push(path.join(dir.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'hpatchz.exe'));
+  }
+  candidates.push(path.join(dir, 'vendor', 'hpatchz.exe'));
+  const root = path.dirname(process.execPath);
+  candidates.push(path.join(root, 'resources', 'app.asar.unpacked', 'electron', 'vendor', 'hpatchz.exe'));
+  for (const file of candidates) {
+    if (file && fs.existsSync(file)) return file;
+  }
+  return '';
+}
+
+function normalizeRel(rel) {
+  return String(rel || '').replace(/\\/g, '/').replace(/^\.?\//, '');
+}
+
+/** 从清单里挑一条「当前版本 -> 目标版本」的增量（版本号忽略前缀 v）。 */
+function pickDelta(manifest, fromVersion, toVersion) {
+  const from = String(fromVersion || '').trim().replace(/^v/i, '');
+  const to = String(toVersion || '').trim().replace(/^v/i, '');
+  const list = Array.isArray(manifest && manifest.deltas) ? manifest.deltas : [];
+  return (
+    list.find(
+      (d) =>
+        String(d.from || '').replace(/^v/i, '') === from &&
+        (!to || String(d.to || '').replace(/^v/i, '') === to)
+    ) || null
+  );
+}
+
+/**
+ * 解压增量包 + 逐文件重建出新版本文件，产出一个和 stage() 同构的 staged 对象，
+ * 之后原样交给 apply()（备份 + 覆盖 + 重启那条已验证的链路）。
+ *
+ * 安全约定（任何一条不满足都抛错，让上层退回整包）：
+ *   · 每个补丁先核对本地基文件的 size/sha256 与清单一致——对不上说明用户的版本不是
+ *     做差分时假设的那一版（或文件被改过），硬套只会产出错误内容；
+ *   · 重建结果再核对目标 size/sha256；
+ *   · 路径必须是相对、不含 ..、不落在 data/downloads 等受保护目录。
+ *
+ * @param {object} options
+ * @param {string} [options.deltaPath] 已下载的增量 zip（不给则用 options.extractedRoot 里现成的）
+ * @param {string} [options.extractedRoot] 事先解压好的临时根（测试用）
+ * @param {string} options.tempBase     临时目录根
+ * @param {string} options.version      目标版本（清单声明）
+ * @param {string} [options.currentVersion] 当前版本（校验增量起点）
+ * @param {string} [options.target]     覆盖目标目录（默认 process.execPath 所在目录，测试时可指定）
+ */
+async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', target, extractedRoot }) {
+  const destTarget = target || path.dirname(process.execPath);
+  const want = String(version || '').trim().replace(/^v/i, '');
+  const from = String(currentVersion || '').trim().replace(/^v/i, '');
+
+  await fsp.mkdir(tempBase, { recursive: true });
+  const tempRoot = extractedRoot || (await fsp.mkdtemp(path.join(tempBase, 'vela-delta-')));
+  const bundle = path.join(tempRoot, 'delta');
+  if (!extractedRoot) await extractZip(deltaPath, bundle);
+
+  let delta;
+  try {
+    delta = JSON.parse((await fsp.readFile(path.join(bundle, 'delta.json'), 'utf8')).replace(/^\uFEFF/, ''));
+  } catch {
+    throw new Error('增量包缺少 delta.json 或格式损坏');
+  }
+  if (!delta || Number(delta.format) !== 1) throw new Error('增量包格式版本不认识');
+  if (String(delta.from || '').replace(/^v/i, '') !== from) {
+    throw new Error(`增量包的起点是 v${delta.from}，和当前 v${from} 不符`);
+  }
+  if (want && String(delta.to || '').replace(/^v/i, '') !== want) {
+    throw new Error(`增量包的终点是 v${delta.to}，和清单 v${want} 不符`);
+  }
+
+  const entries = Array.isArray(delta.files) ? delta.files : [];
+  if (!entries.length) throw new Error('增量包里没有要重建的文件');
+
+  const hpatchz = hpatchzPath();
+  if (!hpatchz) throw new Error('找不到 hpatchz.exe，无法应用增量');
+
+  const source = path.join(tempRoot, 'source');
+  await fsp.mkdir(source, { recursive: true });
+  const files = [];
+
+  for (const entry of entries) {
+    const rel = normalizeRel(entry.path);
+    if (!rel || rel.includes('..') || path.isAbsolute(rel)) {
+      throw new Error(`增量包里的路径非法：${entry.path}`);
+    }
+    if (isProtected(rel)) throw new Error(`增量包试图写入受保护目录：${rel}`);
+    const destination = path.join(source, rel);
+    await fsp.mkdir(path.dirname(destination), { recursive: true });
+
+    if (entry.mode === 'full') {
+      const srcFile = path.join(bundle, normalizeRel(entry.src));
+      if (!fs.existsSync(srcFile)) throw new Error(`增量包缺少文件：${entry.src}`);
+      await fsp.copyFile(srcFile, destination);
+    } else if (entry.mode === 'patch') {
+      const baseFile = path.join(destTarget, rel);
+      if (!fs.existsSync(baseFile)) throw new Error(`本地缺少基准文件，无法打补丁：${rel}`);
+      const baseSize = (await fsp.stat(baseFile)).size;
+      if (Number(entry.baseSize) && baseSize !== Number(entry.baseSize)) {
+        throw new Error(`基准文件大小不符：${rel}`);
+      }
+      if (entry.baseSha256) {
+        const actualBase = await sha256File(baseFile);
+        if (actualBase !== String(entry.baseSha256).toLowerCase()) {
+          throw new Error(`基准文件校验不符：${rel}`);
+        }
+      }
+      const patchFile = path.join(bundle, normalizeRel(entry.patch));
+      if (!fs.existsSync(patchFile)) throw new Error(`增量包缺少补丁：${entry.patch}`);
+      const outTmp = `${destination}.rebuilt`;
+      await execFileAsync(hpatchz, [baseFile, patchFile, outTmp], {
+        windowsHide: true,
+        timeout: 5 * 60 * 1000,
+      });
+      try {
+        await fsp.rename(outTmp, destination);
+      } catch {
+        await fsp.rm(destination, { force: true }).catch(() => {});
+        await fsp.rename(outTmp, destination);
+      }
+    } else {
+      throw new Error(`未知的增量模式：${entry.mode}`);
+    }
+
+    const stat = await fsp.stat(destination);
+    if (Number(entry.size) && stat.size !== Number(entry.size)) {
+      throw new Error(`重建文件大小不符：${rel}`);
+    }
+    if (entry.sha256) {
+      const actual = await sha256File(destination);
+      if (actual !== String(entry.sha256).toLowerCase()) throw new Error(`重建文件校验不符：${rel}`);
+    }
+    files.push(rel);
+  }
+
+  const hasAsar = files.includes('resources/app.asar');
+  const hasAppDir = files.includes('resources/app/electron/main.js');
+  if (!hasAsar && !hasAppDir) {
+    throw new Error('增量包里既没有 resources/app.asar 也没有 resources/app/electron/main.js，覆盖后启动器会打不开');
+  }
+
+  const protectedExisting = new Set();
+  try {
+    const existing = await listFiles(destTarget);
+    for (const rel of existing) if (isProtected(rel)) protectedExisting.add(rel);
+  } catch {
+    /* 读不到就只做覆盖 */
+  }
+
+  const applyJsSource = path.join(source, 'resources', 'updater', 'apply.js');
+  const installerSource = path.join(source, 'resources', 'updater', 'HXL-Updater.ps1');
+  const selfHealSource = path.join(source, 'resources', 'updater', 'self-heal.ps1');
+
+  return {
+    action: 'update',
+    tempRoot,
+    source,
+    target: destTarget,
+    version: want || String(delta.to || ''),
+    packageVersion: '',
+    fromVersion: from,
+    hasAsar,
+    hasAppDir,
+    files,
+    removed: Array.isArray(delta.removed) ? delta.removed : [],
+    protectedExisting: [...protectedExisting],
+    locks: files.filter((rel) => !rel.includes('/')),
+    installerSource,
+    selfHealSource,
+    applyJsSource,
+    delta: true,
+    deltaFrom: from,
+    deltaTo: String(delta.to || ''),
+  };
+}
+
 module.exports = {
   EXE_NAME,
   parseVersion,
@@ -965,8 +1300,12 @@ module.exports = {
   listFiles,
   isProtected,
   stage,
+  stageDelta,
   apply,
   buildApplyMeta,
+  pickDelta,
+  hpatchzPath,
+  normalizeRel,
   describeApplyProblem,
   updateStatusDir,
   prepareRollback,

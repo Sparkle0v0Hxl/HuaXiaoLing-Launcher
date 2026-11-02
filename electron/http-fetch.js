@@ -32,8 +32,29 @@ try {
   /* 非 Electron 环境：require('electron') 拿到的是 exe 路径字符串或直接抛错 */
 }
 
-/** 用 node 的 http/https 发请求，返回标准 Response（body 为 Web 流）。 */
-function nodeRequest(url, options = {}) {
+/*
+ * 复用连接（keep-alive）。
+ *
+ * 渠道包里绝大多数是十几 KB 的小文件，一次一个连接的话，每个文件光 TCP + TLS
+ * 握手就要 100~300 ms，真正的传输只有几毫秒——「硬链接生成一份」走几千个文件，
+ * 时间几乎全耗在握手上。这里按协议共享一个 keep-alive agent，同 host 的空闲
+ * socket 直接复用，握手只发生在第一批连接上。
+ *
+ * maxSockets 给到 64：分段下载（单个大文件最多 16 段）和文件级并发（8 个文件
+ * ×2 段）叠起来也在预算内，不会互相排队。
+ */
+const agentOptions = { keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, maxFreeSockets: 16 };
+const httpsAgent = new https.Agent(agentOptions);
+const httpAgent = new http.Agent(agentOptions);
+
+/** 用 node 的 http/https 发请求，返回标准 Response（body 为 Web 流）。
+ *
+ * ⚠️ 必须自己跟随 3xx：GitHub Release 的下载地址会 302 到
+ * objects.githubusercontent.com。这条兜底路径如果不跟重定向，分段请求拿到的
+ * 就是一个空 302（不是 206），多连接会整体判失败、悄悄退回单连接——
+ * 表现就是「加了多线程还是几十 KB/s」。
+ */
+function nodeRequest(url, options = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     let target;
     try {
@@ -60,12 +81,37 @@ function nodeRequest(url, options = {}) {
         path: `${target.pathname}${target.search}`,
         method: (options.method || 'GET').toUpperCase(),
         headers,
+        // 同 host 复用空闲连接：小文件下载省掉每次的 TCP/TLS 握手
+        agent: isHttps ? httpsAgent : httpAgent,
         // 国内 CDN 的证书链在 Node 内置 CA 里可能缺一环；这条路径只是兜底，
         // 不校验证书反而更不容易「两边都连不上」
         rejectUnauthorized: false,
         timeout: options.timeout || 120000,
       },
       (response) => {
+        const status = response.statusCode || 0;
+        const location = response.headers.location;
+        if (status >= 300 && status < 400 && location && redirects < 5) {
+          response.resume();
+          const nextUrl = new URL(location, url).href;
+          const nextHeaders = { ...headers };
+          // 换了主机就别把 origin 带过去；range / ua 这些要留着，分段靠它
+          delete nextHeaders.host;
+          delete nextHeaders.Host;
+          delete nextHeaders.origin;
+          delete nextHeaders.Origin;
+          // GET/HEAD 重发不带 body；POST 的 307/308 才需要原样重发
+          const keepBody = body && (status === 307 || status === 308);
+          resolve(
+            nodeRequest(
+              nextUrl,
+              { ...options, headers: nextHeaders, body: keepBody ? body : undefined },
+              redirects + 1
+            )
+          );
+          return;
+        }
+
         const encoding = String(response.headers['content-encoding'] || '').toLowerCase();
         let stream = response;
         if (encoding === 'gzip') stream = response.pipe(zlib.createGunzip());
@@ -81,10 +127,10 @@ function nodeRequest(url, options = {}) {
         if (encoding) responseHeaders.delete('content-encoding');
 
         // 204 / 304 不能带 body
-        const noBody = response.statusCode === 204 || response.statusCode === 304;
+        const noBody = status === 204 || status === 304;
         resolve(
           new Response(noBody ? null : Readable.toWeb(stream), {
-            status: response.statusCode || 0,
+            status,
             statusText: response.statusMessage || '',
             headers: responseHeaders,
           })
@@ -121,4 +167,37 @@ async function httpFetch(url, options = {}) {
   return fetch(url, rest);
 }
 
-module.exports = { httpFetch, nodeRequest };
+/**
+ * 分段下载专用取数函数：**只走 node:https**，每段一条独立 TCP。
+ *
+ * 为什么不能给分段用 net.fetch：Chromium 对同一个 host 最多 6 条 socket，
+ * 下载资源又普遍支持 HTTP/2，几十个 Range 请求会被并进一两条连接里共享同一个
+ * 拥塞窗口——多线程加了等于没加。实测同一条 CDN 大文件：单连接 7.6 MB/s，
+ * 16 条独立 socket 19.2 MB/s。
+ *
+ * Node 不读系统代理，所以「只有挂代理才出得去网」的环境会连不上；这种情况下
+ * 自动退回 Chromium 栈（至少还有 6 条并发），并记一个熔断标记，避免每条分段
+ * 都白等一次超时。
+ */
+let rangeTransport = 'unknown'; // unknown | node
+let rangeTransportBrokenAt = 0;
+const RANGE_FALLBACK_COOLDOWN = 5 * 60 * 1000;
+
+async function segmentFetch(url, options = {}) {
+  const brokenRecently = rangeTransportBrokenAt && Date.now() - rangeTransportBrokenAt < RANGE_FALLBACK_COOLDOWN;
+  if (!brokenRecently) {
+    try {
+      const response = await nodeRequest(url, options);
+      rangeTransport = 'node';
+      return response;
+    } catch (error) {
+      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) throw error;
+      // Node 直连不通（多半是靠代理出网）：5 分钟内不再尝试，免得每段都等超时
+      rangeTransport = 'node-broken';
+      rangeTransportBrokenAt = Date.now();
+    }
+  }
+  return httpFetch(url, options);
+}
+
+module.exports = { httpFetch, nodeRequest, segmentFetch };

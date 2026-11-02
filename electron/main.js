@@ -29,6 +29,7 @@ const crypto = require('node:crypto');
 
 const { JsonStore } = require('./store');
 const { DownloadManager } = require('./downloads');
+const hgBackgrounds = require('./hg-backgrounds');
 const { ensureSeedData } = require('./seed');
 const { linkTrees, previewTrees } = require('./link');
 const { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree } = require('./runtime');
@@ -37,7 +38,6 @@ const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
 const nteTool = require('./nte-tool');
 const updater = require('./updater');
-const hgBackgrounds = require('./hg-backgrounds');
 const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
 const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
@@ -789,6 +789,10 @@ function defaultSettings() {
     backgroundOpacity: 100,
     // 背景图清晰度 0-100：100 为原图，越低越模糊（用来让内容更易读）
     backgroundBlur: 0,
+    // 背景动态效果：缓慢运镜 + 鼠标视差 + 换图溶解，关掉就是一张静止的图
+    backgroundMotion: true,
+    // 官方背景轮播：每 26 秒换下一张官方主视觉（只对官方同步下来的图生效）
+    backgroundRotate: true,
     sidebarCollapsed: true,
     uiRevision: 2,
     // 界面缩放：100% 为原始大小，范围 80% - 130%
@@ -855,6 +859,9 @@ function defaultSettings() {
     proxyRules: '',
     // 更新公告弹窗已经弹过的版本号；空串表示这次升级还没看，启动时弹一次
     notesSeenVersion: '',
+    // 「发现新版本」点了「稍后再说」的推迟状态：同一版本在 updateSnoozeUntil 之前不再自动弹
+    updateSnoozeVersion: '',
+    updateSnoozeUntil: 0,
     endfieldPackRoot: detectEndfieldPackRoot(),
     // 本机实际已有的渠道包（官服 / B服 / 国际服 / Play / Steam），界面按它显示
     // 「缺哪个会在切过去时自动补下」，避免用户以为渠道包没被识别。
@@ -1998,8 +2005,15 @@ async function cacheStartVideo(source, relativePath, local = false) {
     const keep = path.basename(finalDestination);
     const base = keep.replace(/\.[^./\\]+$/, '');
     const stale = new RegExp(`^${base}\\.(?:mp4|webm)(?:\\.part)?$`, 'i');
+    /*
+     * 这个临时文件是当前正在写的那一份，绝对不能删。
+     * 上面的 stale 正则会匹配到「arknights.mp4.part」，早先没排除它，
+     * 于是流程成了「下完 → 清理旧残留 → 顺手把刚下好的 .part 删了 → rename 报 ENOENT」，
+     * 日志里就是「启动页动图缓存失败」，界面上表现为没有动态背景。
+     */
+    const temporaryName = path.basename(temporary);
     for (const old of await fsp.readdir(dir)) {
-      if (old === keep || !stale.test(old)) continue;
+      if (old === keep || old === temporaryName || !stale.test(old)) continue;
       await fsp.rm(path.join(dir, old), { force: true }).catch(() => {});
     }
   } catch {
@@ -3244,9 +3258,25 @@ async function ensureEndfieldPackFor(channel, onProgress, options = {}) {
     throw new Error(`本机还没有${label}渠道包（切到${label}时会自动补下，也可以在设置 → 终末地渠道包里点一次下载）`);
   }
   if (typeof onProgress === 'function') {
-    onProgress({ phase: 'pack', processed: 0, total: 0, current: `正在下载${label}渠道包…` });
+    onProgress({
+      phase: 'pack',
+      processed: 0,
+      total: 0,
+      bytesDone: 0,
+      totalBytes: 0,
+      percent: 0,
+      current: `正在下载${label}渠道包…`,
+    });
   }
-  await updateEndfieldProfile(profile, root);
+  /*
+   * 必须把 onProgress 接下去。
+   * 以前这里只发了一条「正在下载…」的开场事件就去 await 了，下载途中一个进度
+   * 都收不到：界面停在「下载 0 · 0 KB / 0 KB」，用户只能看见网速在动、进度条不动。
+   */
+  await updateEndfieldProfile(profile, root, (progress) => {
+    if (typeof onProgress !== 'function') return;
+    onProgress({ ...progress, phase: 'pack', current: `正在下载${label}渠道包…` });
+  });
   await rememberEndfieldPackRoot(root);
   return { packDir, downloaded: true };
 }
@@ -3283,10 +3313,10 @@ async function ensureArknightsPack(profile, readyFiles, label, onProgress) {
   if (!(await verifyArknightsSource(profile))) return '';
   const relay = (progress) => {
     if (typeof onProgress !== 'function') return;
+    // 同上：字节字段要一起带出去，否则界面只能显示 0 KB / 0 KB
     onProgress({
+      ...progress,
       phase: 'pack',
-      processed: progress.processed || 0,
-      total: progress.total || 0,
       current: `正在下载${label}渠道文件：${progress.current || ''}`,
     });
   };
@@ -5091,6 +5121,9 @@ function resolveUpdateSource() {
   return updateSourceList();
 }
 
+// 本会话内已经自动弹过「发现新版本」的版本号：同一个版本后台复查（每 6 小时）不再重复弹
+let autoNotifiedUpdateVersion = '';
+
 async function performUpdateCheck(options = {}) {
   const locations = resolveUpdateSource();
   if (!locations.length) {
@@ -5114,7 +5147,18 @@ async function performUpdateCheck(options = {}) {
   updateStatus.backup = updateBackupInfo();
   if (options.push !== false) pushState(true);
   if (result.hasUpdate) {
-    send('update:available', updateStatus);
+    const latest = String(result.latest || '').replace(/^v/i, '');
+    // 用户点过「稍后再说」：同一个版本在推迟窗口内不再自动弹
+    const snoozeVersion = String(store?.data?.settings?.updateSnoozeVersion || '').replace(/^v/i, '');
+    const snoozeUntil = Number(store?.data?.settings?.updateSnoozeUntil) || 0;
+    const snoozed = snoozeVersion === latest && Date.now() < snoozeUntil;
+    // 同一版本本会话只自动弹一次，挡住每 6 小时的后台复查
+    const alreadyAutoNotified = autoNotifiedUpdateVersion === latest;
+    // 手动检查（options.manual）不受推迟 / 只弹一次的约束
+    if (options.manual || (!snoozed && !alreadyAutoNotified)) {
+      autoNotifiedUpdateVersion = latest;
+      send('update:available', updateStatus);
+    }
   }
   return updateStatus;
 }
@@ -5223,6 +5267,80 @@ async function applyStaged(staged) {
   return { ok: true, restarting: true, version: staged.version };
 }
 
+/**
+ * 下载并重建增量包，产出 staged（之后交给 applyStaged 走同一套备份+覆盖+重启）。
+ * 任何异常都往外抛，由 startUpdate 捕获后退回整包——增量只是「更快」，绝不能成为
+ * 「更新不了」的新原因。
+ */
+async function downloadAndStageDelta({ delta, manifest, tempBase }) {
+  const dir = path.join(tempBase, 'download');
+  await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+  // 独立文件名：两次尝试同时进行时不会互相踩掉对方的文件
+  const deltaPath = path.join(
+    dir,
+    `delta-${APP_VERSION}-to-${manifest.version}-${Date.now().toString(36)}.zip`
+  );
+  send('update:progress', { percent: 0, phase: 'delta', label: '正在下载增量更新…' });
+  let percent = -1;
+  let lastPushAt = 0;
+  try {
+    await updater.downloadToFile({
+      url: delta.url,
+      dest: deltaPath,
+      expectedSize: delta.size,
+      onProgress: (progress) => {
+        const next = Math.round(progress.percent);
+        const now = Date.now();
+        // 百分比变了就推；没变但过了 800ms 也推，慢速时界面才不是死的
+        if (next === percent && now - lastPushAt < 800 && next !== 100) return;
+        percent = next;
+        lastPushAt = now;
+        updateStatus = { ...updateStatus, percent: next, delta: true, speed: progress.speed || 0 };
+        const speedText = progress.speed
+          ? ` · ${(progress.speed / 1048576).toFixed(1)} MB/s`
+          : '';
+        send('update:progress', {
+          percent: next,
+          phase: 'delta',
+          received: progress.received,
+          total: progress.total,
+          speed: progress.speed || 0,
+          label: `增量更新 ${next}%${speedText}`,
+        });
+      },
+    });
+    const actual = await updater.sha256File(deltaPath);
+    if (actual !== delta.sha256) throw new Error('增量包校验没通过（sha256 对不上）');
+    send('update:progress', { percent: 100, phase: 'delta-apply', label: '正在按增量重建文件…' });
+    return await updater.stageDelta({
+      deltaPath,
+      tempBase,
+      version: manifest.version,
+      currentVersion: APP_VERSION,
+    });
+  } catch (error) {
+    await fsp.rm(deltaPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * 清掉下载目录里超过一天的旧包。
+ *
+ * 每次尝试都用独立文件名（避免两次尝试互相删掉对方正在写的文件），
+ * 不清理的话失败几次就会在 data\tmp\download 里攒下几百 MB。
+ */
+async function sweepOldDownloads(dir) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const entries = await fsp.readdir(dir).catch(() => []);
+  for (const name of entries) {
+    if (!/^(HuaXiaoLing-|delta-)/.test(name)) continue;
+    const full = path.join(dir, name);
+    const stat = await fsp.stat(full).catch(() => null);
+    if (stat && stat.mtimeMs < cutoff) await fsp.rm(full, { force: true }).catch(() => {});
+  }
+}
+
 async function startUpdate(options = {}) {
   if (updateStatus.downloading) throw new Error('已经在下载更新了');
   // 上一次已经下载解压好、只是被占用程序挡住了：直接用那份，别再下一次几百 MB
@@ -5242,6 +5360,7 @@ async function startUpdate(options = {}) {
   pushState(true);
   try {
     // 挨个候选找一份读得通的清单：用户填的 → 目录里那份 → 官方源
+    send('update:progress', { percent: 0, phase: 'manifest', label: '正在读取更新清单…' });
     const resolved = await updater.resolveManifest(locations);
     if (!resolved.ok) throw new Error(resolved.error || '读不到更新清单');
     const manifest = resolved.manifest;
@@ -5256,9 +5375,35 @@ async function startUpdate(options = {}) {
 
     const tempBase = updateTempBase();
     await fsp.mkdir(tempBase, { recursive: true }).catch(() => {});
-    // 包名带上版本号，换版本时不会认错上一个版本的残留文件
-    const zipPath = path.join(tempBase, 'download', `HuaXiaoLing-${manifest.version}-Portable.zip`);
+
+    // 增量更新优先：清单里有「当前版本 -> 目标版本」的差分包时，只下变化的部分。
+    // 任何一步不对都静默退回整包，绝不让「更快」变成「更新不了」。
+    const deltaInfo = updater.pickDelta(manifest, APP_VERSION, manifest.version);
+    if (deltaInfo && deltaInfo.url && deltaInfo.sha256) {
+      try {
+        const staged = await downloadAndStageDelta({ delta: deltaInfo, manifest, tempBase });
+        return await applyStaged(staged);
+      } catch (error) {
+        const msg = error && error.message ? error.message : String(error);
+        updateStatus = { ...updateStatus, delta: false };
+        send('toast', { message: `增量更新没成功（${msg}），改用完整包`, type: 'info' });
+        // 增量包自己在失败时已经删掉了，这里只顺手扫一遍过期残留
+        await sweepOldDownloads(path.join(tempBase, 'download')).catch(() => {});
+      }
+    }
+
+    // 包名带上版本号，换版本时不会认错上一个版本的残留文件；
+    // 再加一个会话内唯一后缀，避免两次尝试同时写同一个文件（上一次失败的清理会把它删掉，
+    // 正在写的那次就会拿到「文件不存在」，随后又从 0 重下）。
+    const attemptTag = `${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+    const zipPath = path.join(
+      tempBase,
+      'download',
+      `HuaXiaoLing-${manifest.version}-Portable-${attemptTag}.zip`
+    );
+    await sweepOldDownloads(path.dirname(zipPath)).catch(() => {});
     let percent = 0;
+    let lastPushAt = 0;
     try {
       await updater.downloadToFile({
         url: manifest.url,
@@ -5266,15 +5411,27 @@ async function startUpdate(options = {}) {
         expectedSize: manifest.size,
         onProgress: (progress) => {
           const next = Math.round(progress.percent);
-          // 每 1% 推一次就够了，避免 IPC 刷屏把渲染层卡住
-          if (next === percent && next !== 100) return;
+          const now = Date.now();
+          /*
+           * 百分比变化就推；百分比没变但已经过去 800ms 也推一次——
+           * 慢速线路上 1% 可能要走十几秒，不推的话界面上既没有新进度也没有速度，
+           * 看着就像卡死在 0%。
+           */
+          if (next === percent && now - lastPushAt < 800 && next !== 100) return;
           percent = next;
-          updateStatus = { ...updateStatus, percent: next };
-          send('update:progress', { percent: next, received: progress.received, total: progress.total });
+          lastPushAt = now;
+          updateStatus = { ...updateStatus, percent: next, speed: progress.speed || 0 };
+          send('update:progress', {
+            percent: next,
+            received: progress.received,
+            total: progress.total,
+            speed: progress.speed || 0,
+          });
           if (progress.total && options.onTotal) options.onTotal(progress.total);
         },
       });
     } catch (error) {
+      await fsp.rm(zipPath, { force: true }).catch(() => {});
       // 退回直连再试一次：局域网共享和本地文件走不到这里，HTTP 才需要
       if (options.retried || (error.retryable === false)) throw error;
       send('toast', { message: '直连下载失败，正在重试…', type: 'info' });
@@ -6363,62 +6520,72 @@ function isElevated() {
  *     所以捕获失败后用 --no-elevate 参数把非管理员实例拉回来，
  *     避免「取消一次授权 → 启动器没了 → 再打开又弹授权」的死循环。
  */
-function spawnElevatedSelf(delayMs = 2500) {
+function spawnElevatedSelf() {
   /*
-   * 不只是「睡一会儿」：直接用 Wait-Process 等当前进程真的退出。
-   * 固定 sleep 在慢机器上不够（Electron 退进程可能要好几秒），
-   * 新实例抢不到单实例锁就又变成「点了没反应」。
+   * 优先用项目自带的 elevate.exe（resources/elevate.exe，Johannes Passing 的 Elevate）弹 UAC
+   * 并以管理员拉起自身。关键：通过 argv 传路径（不是 PowerShell -Command 字符串），
+   * 彻底规避「中文路径（H:\花筱灵启动器\）在 PowerShell -Command 里编码乱码 →
+   * Start-Process 找不到 exe → 新实例起不来 → 旧实例已退 → 启动器消失」这个本机实锤的坑。
+   * elevate.exe 不存在才退回 PowerShell RunAs（仅兜底，带中文路径风险）。
    */
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    `Start-Sleep -Milliseconds ${delayMs}`,
-    `try { Wait-Process -Id ${process.pid} -Timeout 30 -ErrorAction Stop } catch { }`,
-    '$elevated = $null',
-    'try {',
-    `  $elevated = Start-Process -FilePath ${psQuote(process.execPath)} -Verb RunAs -WorkingDirectory ${psQuote(path.dirname(process.execPath))} -PassThru`,
-    '  Start-Sleep -Seconds 6',
-    '  if ($elevated.HasExited) { throw "elevated instance exited immediately" }',
-    '} catch {',
-    '  Start-Sleep -Milliseconds 400',
-    `  Start-Process -FilePath ${psQuote(process.execPath)} -ArgumentList '--no-elevate'`,
-    '}',
-  ].join("\n");
-  const child = spawn(powershellExe(), ['-NoProfile', '-Command', script], {
+  const elevateExe = path.join(process.resourcesPath, 'elevate.exe');
+  const selfExe = process.execPath;
+  if (fs.existsSync(elevateExe)) {
+    writeLaunchLog(`alwaysAdmin: 用 elevate.exe 提权（${elevateExe}）`);
+    return spawn(elevateExe, [selfExe], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  }
+  writeLaunchLog('alwaysAdmin: elevate.exe 缺失，退回 PowerShell RunAs');
+  const script = `Start-Process -FilePath ${psQuote(selfExe)} -Verb RunAs -ArgumentList '--no-elevate' -Wait`;
+  return spawn(powershellExe(), ['-NoProfile', '-Command', script], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
-  return child;
 }
 
-function relaunchElevated() {
+async function relaunchElevated() {
   if (!app.isPackaged) return false;
+  const elevateExe = path.join(process.resourcesPath, 'elevate.exe');
+  const selfExe = process.execPath;
+  const useElevate = fs.existsSync(elevateExe);
+  writeLaunchLog(`alwaysAdmin: 调度提权重启（elevate=${useElevate}，旧实例pid=${process.pid}）`);
   try {
-    writeLaunchLog('alwaysAdmin: 当前非管理员，调度提权重启（UAC 拒绝或新实例未存活会自动回退普通权限）');
-    const child = spawnElevatedSelf(1500);
+    const child = spawnElevatedSelf();
     /*
-     * 关键：只有确认提权脚本进程真的起来了，才退出当前实例。
-     * 之前是先 app.quit() 再祈祷——spawn 一失败（powershell 被拦、PATH 异常），
-     * 脚本没跑、老实例已退，用户看到的就是「双击没反应」且 crash.log 无记录。
-     * 现在 spawn 失败就吞掉事件继续以普通权限跑；脚本起来了它自己会兜底
-     * （UAC 拒绝 / 提权实例 6 秒内退出 → 自动拉起 --no-elevate 实例）。
+     * 消失保险：提权进程退出且非成功码（UAC 拒绝 / elevate 失败）→ 立刻兜底起一个
+     * --no-elevate 普通实例。这样无论本机 UAC 什么状态，启动器都不会「点了就没了」。
      */
-    let spawnSettled = false;
-    child.on('error', () => {
-      spawnSettled = true;
-      writeLaunchLog('alwaysAdmin: 提权脚本进程启动失败，继续以普通权限运行');
+    child.on('close', (code) => {
+      if (code !== 0) {
+        writeLaunchLog(`alwaysAdmin: 提权未成功（code=${code}），兜底以普通权限重新打开`);
+        try {
+          const fb = spawn(selfExe, ['--no-elevate'], { detached: true, stdio: 'ignore', windowsHide: true });
+          fb.unref();
+        } catch (e) {
+          writeLaunchLog(`alwaysAdmin: 兜底普通实例启动失败: ${e.message}`);
+        }
+      }
     });
-    child.on('spawn', () => {
-      spawnSettled = true;
-      child.unref();
-      setTimeout(() => {
-        quitting = true;
-        app.quit();
-      }, 400);
+    const settled = await new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+      child.on('error', () => {
+        writeLaunchLog('alwaysAdmin: 提权进程启动失败（命令未执行），继续普通权限');
+        finish(false);
+      });
+      child.on('spawn', () => { child.unref(); finish(true); });
+      setTimeout(() => finish(false), 6000);
     });
-    setTimeout(() => {
-      if (!spawnSettled) writeLaunchLog('alwaysAdmin: 提权脚本 5 秒未启动，继续以普通权限运行');
-    }, 5000);
+    if (!settled) {
+      writeLaunchLog('alwaysAdmin: 提权进程未能启动，继续以普通权限运行');
+      return false;
+    }
+    // 提权进程已拉起 → 旧实例退出，让新实例（管理员或兜底普通）抢锁接管
+    setTimeout(() => { quitting = true; app.quit(); }, 800);
     return true;
   } catch (error) {
     writeLaunchLog(`alwaysAdmin: 提权重启调度失败，继续以普通权限运行: ${error.message}`);
@@ -6439,9 +6606,16 @@ async function resumePendingLaunch() {
   if (!gameId) return;
   store.data.settings.pendingLaunchGameId = '';
   await store.saveNow().catch(() => {});
-  if (!currentElevation()) return; // 这次没提权成功：等用户再点一次，走普通 UAC 路线
-  if (!(store.data.games || []).some((item) => item.id === gameId)) return;
-  send('game:autolaunch', { gameId });
+  /*
+   * 不再静默丢弃：提权失败 / UAC 点否 / 游戏列表比定时器晚加载，
+   * 之前都会让「重启后自动续开游戏」悄悄失效。现在照发；列表未就绪时 1500ms 补发一次。
+   */
+  const fire = () => send('game:autolaunch', { gameId });
+  if ((store.data.games || []).some((item) => item.id === gameId)) {
+    fire();
+  } else {
+    setTimeout(fire, 1500);
+  }
 }
 
 function startWithShellExecute(target, args, cwd) {
@@ -7439,7 +7613,7 @@ function installIpc() {
     return { ok: true, restarting: true, version: staged.version };
   });
 
-  ipcMain.handle('update:check', async () => performUpdateCheck({ push: true }));
+  ipcMain.handle('update:check', async () => performUpdateCheck({ push: true, manual: true }));
 
   ipcMain.handle('update:apply', async () => startUpdate());
 
@@ -7520,6 +7694,9 @@ function installIpc() {
       'autoCheckUpdate',
       'proxyRules',
       'notesSeenVersion',
+      // 「稍后再说」的推迟状态：不在白名单里的话，界面写下去会被快照回推抹掉，等于没记
+      'updateSnoozeVersion',
+      'updateSnoozeUntil',
       'endfieldPackRoot',
       'starwardDbPath',
       'runtimeRoot',
@@ -7529,6 +7706,8 @@ function installIpc() {
       'customBackground',
       'backgroundOpacity',
       'backgroundBlur',
+      'backgroundMotion',
+      'backgroundRotate',
       // 点歌台音源：内置音源的开关 + 用户自己导入的第三方音源
       'musicSources',
       'musicCustomSources',
@@ -7592,8 +7771,8 @@ function installIpc() {
         if (!raw) {
           settings.customBackground = '';
         } else {
-          // ef- 前缀是官方背景同步下来的（backgrounds/official/），custom- 是本地导入的
           const base = path.basename(raw);
+          // ef- 前缀是官方背景同步下来的（backgrounds/official/），custom- 是本地导入的
           if (
             /^(ef-[a-z]+[a-f0-9]{6}\.(png|jpe?g|webp)|custom-[0-9a-f-]{36}\.(png|jpe?g|webp|gif))$/i.test(base)
           ) {
@@ -7606,6 +7785,10 @@ function installIpc() {
       } else if (key === 'backgroundBlur') {
         const value = Number(patch.backgroundBlur);
         if (Number.isFinite(value)) settings.backgroundBlur = Math.max(0, Math.min(60, Math.round(value)));
+      } else if (key === 'backgroundMotion') {
+        settings.backgroundMotion = patch.backgroundMotion !== false;
+      } else if (key === 'backgroundRotate') {
+        settings.backgroundRotate = patch.backgroundRotate !== false;
       } else if (key === 'musicSources') {
         // 内置音源开关：只认已知的五个键，值只认布尔
         const incoming = patch.musicSources;
@@ -7644,6 +7827,10 @@ function installIpc() {
         // 更新公告弹窗「看过了」的版本号：存到 settings 里，跟着 launcher-data.json 走，
         // 所以升级覆盖 resources/app 之后这个标记不会丢，同一个版本只弹一次。
         settings.notesSeenVersion = String(patch.notesSeenVersion || '').trim().replace(/^v/i, '').slice(0, 32);
+      } else if (key === 'updateSnoozeVersion') {
+        settings.updateSnoozeVersion = String(patch.updateSnoozeVersion || '').trim().replace(/^v/i, '').slice(0, 32);
+      } else if (key === 'updateSnoozeUntil') {
+        settings.updateSnoozeUntil = Number(patch.updateSnoozeUntil) || 0;
       } else if (key === 'downloadDir') {
         const dir = String(patch.downloadDir || '').trim();
         if (dir) {
@@ -11174,13 +11361,17 @@ function musicLoginWindow(target) {
     sophonJobs.set(jobId, signal);
     beginBackgroundTask();
     try {
+      /*
+       * 整条 progress 透传。
+       * 以前这里是白名单（只挑 processed/total/current），把字节进度
+       * bytesDone / totalBytes / percent 全丢在门外——渠道包下得再快，
+       * 界面也只能显示「下载 0 · 0 KB / 0 KB」，因为事件里根本没这些数。
+       */
       const emit = (progress) =>
         send('sophon:progress', {
+          ...progress,
           jobId,
           phase: progress.phase === 'pack' ? 'pack' : progress.phase || 'link',
-          processed: progress.processed || 0,
-          total: progress.total || 0,
-          current: progress.current || '',
         });
       emit({ phase: 'start', current: '正在准备运行时…' });
       const result = await ensureEndfieldChannelRuntime(game, server, {
@@ -12805,8 +12996,7 @@ function musicLoginWindow(target) {
 
   /*
    * 官方背景：跟随鹰角「版本简报」页面自动换。
-   * sync 是手动按钮 / 启动时共用的入口；official-list 给切换器出缩略图。
-   * officialStat 给文件管理页算占用。同步失败完全静默——这功能锦上添花，不能烦人。
+   * sync 是手动按钮 / 启动时共用的入口；official-state 给切换器出缩略图。
    */
   let officialSyncState = { busy: false, lastError: '', lastResult: null };
   ipcMain.handle('background:sync-official', async () => {
@@ -13016,7 +13206,7 @@ function musicLoginWindow(target) {
      * 老实例已经退了，用户看到的就是「点了重启，启动器消失，权限还是普通」，
      * 也就是「管理员权限功能根本无效」。
      */
-    if (relaunchElevated()) return { ok: true };
+    if (await relaunchElevated()) return { ok: true };
     return {
       ok: false,
       error: '无法调度提权重启（PowerShell 可能被安全软件拦截）。请右键启动器选「以管理员身份运行」',
@@ -14926,9 +15116,8 @@ app.whenReady().then(async () => {
   await playlistCache().load();
   await ensureSeedData(store, app.getPath('userData'));
   /*
-   * 官方背景启动静默同步：官方鹰角启动器每次发版本简报都会换一批主视觉背景，
-   * 这里延迟一分钟拉一次（失败完全静默），用户打开设置页就能看到最新一期。
-   * 手动入口在设置 → 窗口材质与背景 → 官方背景。
+   * 官方背景启动静默同步：官方每次发版本简报都会换一批主视觉背景，
+   * 这里延迟 20 秒拉一次（失败完全静默），用户打开设置页就能看到最新一期。
    */
   setTimeout(() => {
     hgBackgrounds
@@ -15027,7 +15216,7 @@ app.whenReady().then(async () => {
     process.env.HX_CAPTURE !== '1' &&
     process.env.HX_SMOKE !== '1'
   ) {
-    if (relaunchElevated()) return;
+    if (await relaunchElevated()) return;
   }
   applyNativeTheme(store.data.settings.theme);
   applyUiScale(store.data.settings.uiScale);
