@@ -1,7 +1,7 @@
 ﻿const T=process.env.GH_TOKEN, R="Sparkle0v0Hxl/HuaXiaoLing-Launcher";
 (async()=>{
   const body={
-    description:"花筱灵启动器 · 原神 / 崩坏：星穹铁道 / 绝区零 / 异环 / 明日方舟：终末地 多服务器启动器｜硬链接切换、官方更新、抽卡记录、弹幕点歌、完全便携",
+    description:"花筱灵启动器 · 原神 / 崩坏：星穹铁道 / 绝区零 / 异环 / 明日方舟：终末地 多服务器启动器｜硬链接切换、官方更新、抽卡记录、弹幕点歌、完全便携｜未签名，首次运行请先把安装目录加进杀毒软件白名单",
     homepage:"https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest",
     topics:["electron","windows","launcher","genshin-impact","honkai-star-rail","zenless-zone-zero","honkai-impact-3rd","arknights-endfield","neverness-to-everness","portable","hardlink"]
   };

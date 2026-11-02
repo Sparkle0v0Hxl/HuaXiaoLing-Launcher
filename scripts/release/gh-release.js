@@ -78,6 +78,9 @@ async function api(method, url, body, raw) {
         `- 安装版：\`HuaXiaoLing-${VER}-Setup.exe\`（向导安装，推荐）`,
         `- 便携版：\`HuaXiaoLing-${VER}-Portable.zip\`（解压即用，数据在 \`data\\\` 里，覆盖升级不会丢）`,
         `- 更新清单：\`latest.json\``,
+        ...(Array.isArray(m.deltas) && m.deltas.length
+          ? [`- 增量包：${m.deltas.map((d) => `\`delta-${d.from}-to-${d.to}.zip\`（${(d.size / 1048576).toFixed(2)} MB）`).join('、')}——启动器自动用，不用手动下`]
+          : []),
         '',
         `SHA-256（便携包）：\`${m.sha256 || ''}\``,
         '',
@@ -98,11 +101,26 @@ async function api(method, url, body, raw) {
   const existing = new Map(((rel.json.assets) || []).map(a => [a.name, a.id]));
 
   // 2. 上传资产（先删同名旧资产）
-  for (const [file, name, type] of [
+  // 增量包必须跟同一批上传：latest.json 的 deltas[].url 指向的就是 release 资产，
+  // 漏传只会 404，客户端回退整包——不报错但增量白做，所以这里自动跟着清单扫一遍。
+  const assets = [
     [setup, `HuaXiaoLing-${VER}-Setup.exe`, 'application/octet-stream'],
     [zip, `HuaXiaoLing-${VER}-Portable.zip`, 'application/zip'],
-    [MANIFEST, 'latest.json', 'application/json'],
-  ]) {
+  ];
+  for (const d of (Array.isArray(m.deltas) ? m.deltas : [])) {
+    const f = path.join(BUILD, `delta-${d.from}-to-${d.to}.zip`);
+    if (!fs.existsSync(f)) {
+      console.error(`清单声明了增量包 ${d.from}→${d.to}，但找不到 ${f}`);
+      process.exit(1);
+    }
+    assets.push([f, path.basename(f), 'application/zip']);
+  }
+  if (assets.length > 2) console.log('增量包:', assets.slice(2).map((a) => a[1]).join(', '));
+  // 清单放最后：清单里的 deltas[].url 指向上面这些资产，先传包再传清单，
+  // 就不会出现「清单已生效、增量包还没传完」的 404 窗口。
+  assets.push([MANIFEST, 'latest.json', 'application/json']);
+
+  for (const [file, name, type] of assets) {
     if (existing.has(name)) {
       const d = await api('DELETE', `/repos/${REPO}/releases/assets/${existing.get(name)}`);
       console.log('删除旧资产', name, d.status);

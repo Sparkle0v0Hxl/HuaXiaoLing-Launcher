@@ -49,6 +49,14 @@ function buildGiteeManifest(manifest) {
   const out = { ...manifest };
   const url = String(out.url || '');
   if (url && !url.startsWith(mirror)) out.url = mirror + url;
+  // 增量包的 url 也换成镜像：2.4.5+ 客户端会读这份 Gitee 清单，
+  // 不换的话它从国内直连 GitHub 拉补丁多半下不动，只能回退整包，增量等于白做。
+  if (Array.isArray(out.deltas)) {
+    out.deltas = out.deltas.map((d) => {
+      const u = String((d && d.url) || '');
+      return u && !u.startsWith(mirror) ? { ...d, url: mirror + u } : d;
+    });
+  }
   return out;
 }
 
