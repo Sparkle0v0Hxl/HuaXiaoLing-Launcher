@@ -721,8 +721,27 @@ async function handleAction(action, id, element, event = null) {
         break;
       }
       const result = await api.games.launch(id);
-      if (!result.ok) toast(result.error, 'error');
-      else playUiSound('launch');
+      if (result.ok) {
+        playUiSound('launch');
+      } else if (result.elevationRequired) {
+        /*
+         * 终末地的 740 是官方客户端硬限制（非提权创建进程直接 failed to create
+         * game process 740），绕不过去。能省掉的只有「每次都问」：让启动器自己以
+         * 管理员运行，提权一次、整场免问。只问一次，选哪边都记住（elevationAsked）。
+         */
+        const useAdmin = await confirmDialog({
+          title: '以后开游戏不再每次问权限',
+          message: `${result.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
+          confirmText: '以管理员重启',
+        });
+        await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
+        if (useAdmin) {
+          const relaunched = await api.relaunchAdmin({ launchGameId: id });
+          if (!relaunched.ok) toast(relaunched.error, 'error');
+        }
+      } else {
+        toast(result.error, 'error');
+      }
       break;
     }
     case 'start-server':
@@ -1571,7 +1590,16 @@ async function handleAction(action, id, element, event = null) {
         playUiSound('launch');
         if (!target.demo) toast(`正在启动 ${target.name}`, 'info');
       } else if (started.elevationRequired) {
-        toast('需要管理员权限，请到游戏卡片上用启动按钮', 'error');
+        const useAdmin = await confirmDialog({
+          title: '以后开游戏不再每次问权限',
+          message: `${started.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
+          confirmText: '以管理员重启',
+        });
+        await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
+        if (useAdmin) {
+          const relaunched = await api.relaunchAdmin({ launchGameId: target.id });
+          if (!relaunched.ok) toast(relaunched.error, 'error');
+        }
       } else {
         toast(started.error, 'error');
       }

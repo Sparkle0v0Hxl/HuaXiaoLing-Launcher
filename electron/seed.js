@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const { app } = require('electron');
 
@@ -624,6 +625,45 @@ function pruneStaleCovers(coversDir, games) {
   }
 }
 
+/* 随包内置封面的「换图」机制。
+   老逻辑是「本地缺文件才拷」，于是我们换了内置图之后，老用户本地那份永远不更新：
+   2.7.2 换原神启动页背景时就是这么踩坑的——包里明明是新图，用户那边还是老图。
+   现在按内容指纹判断这份文件归谁：
+     · 是我们发的（指纹 = 上次播种记下的，或 = 历史上发过的某版）→ 直接覆盖成新图；
+     · 指纹不认识 → 大概率是用户自己换过（比如拿豆包重绘），一律不动。
+   指纹记在 covers/.seed-covers.json，不进 launcher-data（那玩意儿会被设置快照回推）。 */
+const SEED_MANIFEST = '.seed-covers.json';
+
+// 历史上随包内置过的封面指纹（sha1）。只用来认出「这是我们自己发的文件」，
+// 认不出来的一律当用户自定义，绝不覆盖。
+const LEGACY_SEEDED_SHA1 = {
+  'official-genshin-clean3.png': [
+    '1fcf205ea186a6d0c77c5f1b3d86f5b8425c059a', // 2.4.x ~ 2.6.x 内置版
+    'ca68b8d54d64318e49349730b85a78721190188f', // 2.7.1 内置版
+  ],
+};
+
+function sha1OfBuffer(buffer) {
+  return crypto.createHash('sha1').update(buffer).digest('hex');
+}
+
+function readSeedManifest(coversDir) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(coversDir, SEED_MANIFEST), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSeedManifest(coversDir, manifest) {
+  try {
+    fs.writeFileSync(path.join(coversDir, SEED_MANIFEST), JSON.stringify(manifest, null, 2), 'utf8');
+  } catch (error) {
+    console.warn('[封面seed] 指纹清单写入失败：', error.message);
+  }
+}
+
 async function ensureSeedData(store, userData) {
   const coversDir = path.join(userData, 'covers');
   await fsp.mkdir(coversDir, { recursive: true });
@@ -653,25 +693,72 @@ async function ensureSeedData(store, userData) {
           }
         }
       }
+      const manifest = readSeedManifest(coversDir);
+      let manifestDirty = false;
       for (const fileName of wanted) {
         const src = path.join(bundleCovers, fileName);
         const dst = path.join(coversDir, fileName);
         if (!fs.existsSync(src)) continue; // 只 seed 真随包内置的
-        let need = false;
+        let srcBuf;
+        try {
+          srcBuf = fs.readFileSync(src);
+        } catch {
+          continue;
+        }
+        const srcHash = sha1OfBuffer(srcBuf);
+        let dstSize = -1;
         try {
           const st = fs.statSync(dst);
-          if (!st.isFile() || st.size < 4096) need = true;
+          if (st.isFile()) dstSize = st.size;
         } catch {
-          need = true;
+          /* 不存在 */
         }
-        if (!need) continue;
+        if (dstSize < 4096) {
+          // 首次播种（或文件被删/损坏）：直接落图
+          try {
+            fs.writeFileSync(dst, srcBuf);
+            manifest[fileName] = srcHash;
+            manifestDirty = true;
+            console.log('[封面seed] 已从内置资源补齐：', fileName);
+          } catch (err) {
+            console.warn('[封面seed] 拷贝失败：', fileName, err.message);
+          }
+          continue;
+        }
+        if (dstSize === srcBuf.length) {
+          // 大小一致基本就是同一份，省掉一次哈希（稳态下这里零开销）
+          if (manifest[fileName] !== srcHash) {
+            manifest[fileName] = srcHash;
+            manifestDirty = true;
+          }
+          continue;
+        }
+        // 大小不同：判断本地这份是不是我们自己发的
+        let dstHash = '';
         try {
-          fs.writeFileSync(dst, fs.readFileSync(src));
-          console.log('[封面seed] 已从内置资源补齐：', fileName);
+          dstHash = sha1OfBuffer(fs.readFileSync(dst));
         } catch (err) {
-          console.warn('[封面seed] 拷贝失败：', fileName, err.message);
+          console.warn('[封面seed] 读取失败：', fileName, err.message);
+          continue;
+        }
+        if (dstHash === srcHash) continue; // 内容一样，只是长度记错了，不动
+        const logged = manifest[fileName];
+        const legacy = LEGACY_SEEDED_SHA1[fileName] || [];
+        const ours = (logged && dstHash === logged) || legacy.includes(dstHash);
+        if (!ours) {
+          console.log('[封面seed] 内置封面被用户替换过，保留原样：', fileName);
+          continue;
+        }
+        try {
+          fs.writeFileSync(dst, srcBuf);
+          manifest[fileName] = srcHash;
+          manifestDirty = true;
+          console.log('[封面seed] 内置封面已更新到新版本：', fileName);
+        } catch (err) {
+          console.warn('[封面seed] 更新失败：', fileName, err.message);
         }
       }
+      if (manifestDirty) writeSeedManifest(coversDir, manifest);
     }
   } catch (err) {
     console.warn('[封面seed] 跳过：', err.message);

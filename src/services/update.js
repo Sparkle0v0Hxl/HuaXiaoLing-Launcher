@@ -200,9 +200,43 @@ async function loadPostArt(force = false) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 「稍后再说」的推迟状态                                              */
+/* ------------------------------------------------------------------ */
+
+let updateDismissedVersion = '';
+
+/** 这一版是否已被用户推迟（本会话内直接压制；持久化设置里还记着 24 小时窗口）。 */
+function isUpdateSnoozed(info) {
+  const latest = String((info && info.latest) || '').replace(/^v/i, '').trim();
+  if (!latest) return false;
+  if (updateDismissedVersion === latest) return true;
+  const settings = state.settings || {};
+  const snoozedVersion = String(settings.updateSnoozeVersion || '').replace(/^v/i, '').trim();
+  const until = Number(settings.updateSnoozeUntil) || 0;
+  return snoozedVersion === latest && Date.now() < until;
+}
+
+/** 记下「这版先不更新」：会话内立刻压住（挡掉 6 小时后台复查），并持久化 24 小时。 */
+function snoozeUpdate(version) {
+  const latest = String(version || '').replace(/^v/i, '').trim();
+  if (!latest) return;
+  updateDismissedVersion = latest;
+  const until = Date.now() + 24 * 60 * 60 * 1000;
+  if (typeof applySettingLocally === 'function') {
+    applySettingLocally({ updateSnoozeVersion: latest, updateSnoozeUntil: until }).catch(() => {});
+  }
+}
+
 function openUpdateModal(info) {
   const data = info || state.update || {};
   const size = formatUpdateSize(data.size);
+  // 清单里有「当前版本 -> 目标版本」的增量时，主进程会带上 data.delta；这里据此提示体积
+  const delta = data.delta && data.delta.size ? data.delta : null;
+  const deltaSize = delta ? formatUpdateSize(delta.size) : '';
+  const sizeLine = deltaSize
+    ? `当前 v${esc(state.app.version || '')} · 增量更新 ${esc(deltaSize)}${size ? `（完整包 ${esc(size)}）` : ''}`
+    : `当前 v${esc(state.app.version || '')}${size ? ` · 更新包 ${esc(size)}` : ''}`;
   const entry = versionHero(data.latest);
   openModal(`
     <div class="modal-backdrop" data-backdrop>
@@ -211,12 +245,13 @@ function openUpdateModal(info) {
         <div class="modal-head">
           <div>
             <h2>发现新版本 v${esc(data.latest || '')}</h2>
-            <p>当前 v${esc(state.app.version || '')}${size ? ` · 更新包 ${esc(size)}` : ''}</p>
+            <p>${sizeLine}</p>
           </div>
           <button class="modal-close" data-close title="关闭">${icon('x')}</button>
         </div>
         <div class="modal-body">
           ${data.notes ? `<div class="update-notes"><strong>这一版改了什么</strong>${notesMarkup(data.notes)}</div>` : '<p class="desc">没有附带更新说明。</p>'}
+          ${delta ? `<p class="desc">本次走增量更新：只下载与 v${esc(delta.from || '')} 的差异部分，安装时自动把本地文件补齐到 v${esc(data.latest || '')}，比完整包省流量；万一差异包用不了会自动改用完整包。</p>` : ''}
           <div class="update-progress" id="update-modal-progress" hidden><div class="update-progress-bar"><span style="width:0%"></span></div><small>准备下载…</small></div>
           <p class="desc" style="margin-top:14px">更新会关闭启动器、覆盖程序文件然后自动重新打开。游戏、账号、抽卡记录、歌单和设置都在数据目录里，不会被覆盖。</p>
           <p class="desc">不想走弹窗更新的话，也可以去 GitHub 自己下新版 ZIP，覆盖程序文件同样不会动数据。</p>
@@ -228,7 +263,13 @@ function openUpdateModal(info) {
           <button class="btn btn-primary" data-action="apply-update">${icon('download')}立即更新</button>
         </div>
       </div>
-    </div>`);
+    </div>`,
+    {
+      // 用户关掉「发现新版本」弹窗（✕ / 稍后再说）＝这版先跳过：记下版本 + 推迟 24 小时，
+      // 免得启动时和每 6 小时的后台检查反复把它弹出来。
+      onClose: () => snoozeUpdate(data.latest),
+    }
+  );
   setUpdateProgress(data.percent || 0);
 }
 

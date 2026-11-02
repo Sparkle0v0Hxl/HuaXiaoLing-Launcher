@@ -36,7 +36,9 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+const execFileAsync = promisify(execFile);
 const { multiDownload } = require('./multi-download');
 
 /*
@@ -179,6 +181,30 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
 }
 
 /**
+ * 把清单里的 deltas 数组解析成统一的 {from,to,url,sha256,size}，url 按清单位置补全。
+ * deltas 是可选的：老清单没有这个字段时返回空数组，行为与过去完全一致。
+ */
+function parseDeltas(data, base) {
+  const list = Array.isArray(data && data.deltas) ? data.deltas : [];
+  const out = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const from = String(item.from || '').trim().replace(/^v/i, '');
+    const to = String(item.to || '').trim().replace(/^v/i, '');
+    const url = resolveAgainst(base, item.url);
+    if (!from || !to || !url) continue;
+    out.push({
+      from,
+      to,
+      url,
+      sha256: String(item.sha256 || '').trim().toLowerCase(),
+      size: Number(item.size) || 0,
+    });
+  }
+  return out;
+}
+
+/**
  * 读取并校验 manifest。
  *
  * 随包分发的那份 latest.json 只写「真正的清单在哪」（manifest 指针），
@@ -217,6 +243,7 @@ async function readManifest(location) {
     sha256: String(data.sha256 || '').trim().toLowerCase(),
     size: Number(data.size) || 0,
     mandatory: Boolean(data.mandatory),
+    deltas: parseDeltas(data, raw),
     source: raw,
   };
 }
@@ -302,6 +329,14 @@ async function checkForUpdate({ location, currentVersion }) {
     sha256: manifest.sha256,
     size: manifest.size,
     mandatory: manifest.mandatory,
+    deltas: manifest.deltas || [],
+    // 匹配「当前版本 -> 目标版本」的增量；界面上据此提示「本次走增量」
+    delta:
+      (manifest.deltas || []).find(
+        (d) =>
+          d.from === String(current).replace(/^v/i, '') &&
+          d.to === String(manifest.version).replace(/^v/i, '')
+      ) || null,
     source: resolved.source,
   };
 }
@@ -950,6 +985,196 @@ async function cleanTemp(tempBase) {
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* 增量更新（HDiffPatch 逐文件差分）                                    */
+/* ---------------------------------------------------------------- */
+
+/**
+ * hpatchz.exe 的真实路径。
+ * 打包后它在 resources/app.asar.unpacked/electron/vendor/ 下（asarUnpack 解出来的）；
+ * 开发态在 electron/vendor/。asar 虚拟路径能 existsSync 成 true，但拿去 spawn 会被系统
+ * 当成「文件不存在」，所以优先取 unpacked 的真实路径。
+ */
+function hpatchzPath() {
+  const dir = __dirname || '';
+  const candidates = [];
+  if (dir.includes('app.asar')) {
+    candidates.push(path.join(dir.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'hpatchz.exe'));
+  }
+  candidates.push(path.join(dir, 'vendor', 'hpatchz.exe'));
+  const root = path.dirname(process.execPath);
+  candidates.push(path.join(root, 'resources', 'app.asar.unpacked', 'electron', 'vendor', 'hpatchz.exe'));
+  for (const file of candidates) {
+    if (file && fs.existsSync(file)) return file;
+  }
+  return '';
+}
+
+function normalizeRel(rel) {
+  return String(rel || '').replace(/\\/g, '/').replace(/^\.?\//, '');
+}
+
+/** 从清单里挑一条「当前版本 -> 目标版本」的增量（版本号忽略前缀 v）。 */
+function pickDelta(manifest, fromVersion, toVersion) {
+  const from = String(fromVersion || '').trim().replace(/^v/i, '');
+  const to = String(toVersion || '').trim().replace(/^v/i, '');
+  const list = Array.isArray(manifest && manifest.deltas) ? manifest.deltas : [];
+  return (
+    list.find(
+      (d) =>
+        String(d.from || '').replace(/^v/i, '') === from &&
+        (!to || String(d.to || '').replace(/^v/i, '') === to)
+    ) || null
+  );
+}
+
+/**
+ * 解压增量包 + 逐文件重建出新版本文件，产出一个和 stage() 同构的 staged 对象，
+ * 之后原样交给 apply()（备份 + 覆盖 + 重启那条已验证的链路）。
+ *
+ * 安全约定（任何一条不满足都抛错，让上层退回整包）：
+ *   · 每个补丁先核对本地基文件的 size/sha256 与清单一致——对不上说明用户的版本不是
+ *     做差分时假设的那一版（或文件被改过），硬套只会产出错误内容；
+ *   · 重建结果再核对目标 size/sha256；
+ *   · 路径必须是相对、不含 ..、不落在 data/downloads 等受保护目录。
+ *
+ * @param {object} options
+ * @param {string} [options.deltaPath] 已下载的增量 zip（不给则用 options.extractedRoot 里现成的）
+ * @param {string} [options.extractedRoot] 事先解压好的临时根（测试用）
+ * @param {string} options.tempBase     临时目录根
+ * @param {string} options.version      目标版本（清单声明）
+ * @param {string} [options.currentVersion] 当前版本（校验增量起点）
+ * @param {string} [options.target]     覆盖目标目录（默认 process.execPath 所在目录，测试时可指定）
+ */
+async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', target, extractedRoot }) {
+  const destTarget = target || path.dirname(process.execPath);
+  const want = String(version || '').trim().replace(/^v/i, '');
+  const from = String(currentVersion || '').trim().replace(/^v/i, '');
+
+  await fsp.mkdir(tempBase, { recursive: true });
+  const tempRoot = extractedRoot || (await fsp.mkdtemp(path.join(tempBase, 'vela-delta-')));
+  const bundle = path.join(tempRoot, 'delta');
+  if (!extractedRoot) await extractZip(deltaPath, bundle);
+
+  let delta;
+  try {
+    delta = JSON.parse((await fsp.readFile(path.join(bundle, 'delta.json'), 'utf8')).replace(/^\uFEFF/, ''));
+  } catch {
+    throw new Error('增量包缺少 delta.json 或格式损坏');
+  }
+  if (!delta || Number(delta.format) !== 1) throw new Error('增量包格式版本不认识');
+  if (String(delta.from || '').replace(/^v/i, '') !== from) {
+    throw new Error(`增量包的起点是 v${delta.from}，和当前 v${from} 不符`);
+  }
+  if (want && String(delta.to || '').replace(/^v/i, '') !== want) {
+    throw new Error(`增量包的终点是 v${delta.to}，和清单 v${want} 不符`);
+  }
+
+  const entries = Array.isArray(delta.files) ? delta.files : [];
+  if (!entries.length) throw new Error('增量包里没有要重建的文件');
+
+  const hpatchz = hpatchzPath();
+  if (!hpatchz) throw new Error('找不到 hpatchz.exe，无法应用增量');
+
+  const source = path.join(tempRoot, 'source');
+  await fsp.mkdir(source, { recursive: true });
+  const files = [];
+
+  for (const entry of entries) {
+    const rel = normalizeRel(entry.path);
+    if (!rel || rel.includes('..') || path.isAbsolute(rel)) {
+      throw new Error(`增量包里的路径非法：${entry.path}`);
+    }
+    if (isProtected(rel)) throw new Error(`增量包试图写入受保护目录：${rel}`);
+    const destination = path.join(source, rel);
+    await fsp.mkdir(path.dirname(destination), { recursive: true });
+
+    if (entry.mode === 'full') {
+      const srcFile = path.join(bundle, normalizeRel(entry.src));
+      if (!fs.existsSync(srcFile)) throw new Error(`增量包缺少文件：${entry.src}`);
+      await fsp.copyFile(srcFile, destination);
+    } else if (entry.mode === 'patch') {
+      const baseFile = path.join(destTarget, rel);
+      if (!fs.existsSync(baseFile)) throw new Error(`本地缺少基准文件，无法打补丁：${rel}`);
+      const baseSize = (await fsp.stat(baseFile)).size;
+      if (Number(entry.baseSize) && baseSize !== Number(entry.baseSize)) {
+        throw new Error(`基准文件大小不符：${rel}`);
+      }
+      if (entry.baseSha256) {
+        const actualBase = await sha256File(baseFile);
+        if (actualBase !== String(entry.baseSha256).toLowerCase()) {
+          throw new Error(`基准文件校验不符：${rel}`);
+        }
+      }
+      const patchFile = path.join(bundle, normalizeRel(entry.patch));
+      if (!fs.existsSync(patchFile)) throw new Error(`增量包缺少补丁：${entry.patch}`);
+      const outTmp = `${destination}.rebuilt`;
+      await execFileAsync(hpatchz, [baseFile, patchFile, outTmp], {
+        windowsHide: true,
+        timeout: 5 * 60 * 1000,
+      });
+      try {
+        await fsp.rename(outTmp, destination);
+      } catch {
+        await fsp.rm(destination, { force: true }).catch(() => {});
+        await fsp.rename(outTmp, destination);
+      }
+    } else {
+      throw new Error(`未知的增量模式：${entry.mode}`);
+    }
+
+    const stat = await fsp.stat(destination);
+    if (Number(entry.size) && stat.size !== Number(entry.size)) {
+      throw new Error(`重建文件大小不符：${rel}`);
+    }
+    if (entry.sha256) {
+      const actual = await sha256File(destination);
+      if (actual !== String(entry.sha256).toLowerCase()) throw new Error(`重建文件校验不符：${rel}`);
+    }
+    files.push(rel);
+  }
+
+  const hasAsar = files.includes('resources/app.asar');
+  const hasAppDir = files.includes('resources/app/electron/main.js');
+  if (!hasAsar && !hasAppDir) {
+    throw new Error('增量包里既没有 resources/app.asar 也没有 resources/app/electron/main.js，覆盖后启动器会打不开');
+  }
+
+  const protectedExisting = new Set();
+  try {
+    const existing = await listFiles(destTarget);
+    for (const rel of existing) if (isProtected(rel)) protectedExisting.add(rel);
+  } catch {
+    /* 读不到就只做覆盖 */
+  }
+
+  const applyJsSource = path.join(source, 'resources', 'updater', 'apply.js');
+  const installerSource = path.join(source, 'resources', 'updater', 'HXL-Updater.ps1');
+  const selfHealSource = path.join(source, 'resources', 'updater', 'self-heal.ps1');
+
+  return {
+    action: 'update',
+    tempRoot,
+    source,
+    target: destTarget,
+    version: want || String(delta.to || ''),
+    packageVersion: '',
+    fromVersion: from,
+    hasAsar,
+    hasAppDir,
+    files,
+    removed: Array.isArray(delta.removed) ? delta.removed : [],
+    protectedExisting: [...protectedExisting],
+    locks: files.filter((rel) => !rel.includes('/')),
+    installerSource,
+    selfHealSource,
+    applyJsSource,
+    delta: true,
+    deltaFrom: from,
+    deltaTo: String(delta.to || ''),
+  };
+}
+
 module.exports = {
   EXE_NAME,
   parseVersion,
@@ -965,8 +1190,12 @@ module.exports = {
   listFiles,
   isProtected,
   stage,
+  stageDelta,
   apply,
   buildApplyMeta,
+  pickDelta,
+  hpatchzPath,
+  normalizeRel,
   describeApplyProblem,
   updateStatusDir,
   prepareRollback,

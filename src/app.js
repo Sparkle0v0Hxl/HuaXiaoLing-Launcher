@@ -1162,6 +1162,10 @@ async function boot() {
     api.onUpdateAvailable((info) => {
       if (!info || !info.hasUpdate) return;
       if (state.update && state.update.downloading) return;
+      // 用户点过「稍后再说」：同一版本在推迟窗口内不再自动弹（手动检查更新仍会弹）
+      if (typeof isUpdateSnoozed === 'function' && isUpdateSnoozed(info)) return;
+      // 已经有一个更新弹窗开着，别重复打开
+      if (document.querySelector('.update-modal')) return;
       openUpdateModal(info);
     });
     /*
