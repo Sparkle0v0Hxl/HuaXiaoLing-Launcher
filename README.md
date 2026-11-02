@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.8.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.8.1-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,14 +19,12 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.8.0**
+**当前版本：v2.8.1**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
 > 启动器未签名，且会调用 PowerShell 解压更新包、随包带 `VelaEndfield.exe` / `hpatchz.exe` 两个小工具，这些是杀软的高危特征组合，**会被误报成病毒或直接隔离**。被隔离后典型症状是「更新失败」「终末地点开始游戏没反应」「找不到 VelaEndfield.exe」。
 > 加白名单步骤与核对方法见 [Windows 安全提示](#windows-安全提示)。
-
-**当前版本：v2.7.2**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -133,7 +131,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.8.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.8.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -207,7 +205,21 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.8.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.8.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.8.1</b></summary>
+
+
+- 修掉「更新包下完了却不重启」的真正根因：覆盖脚本是被主程序用 `ELECTRON_RUN_AS_NODE=1` 拉起的，它覆盖完再拉起新启动器时没清这个变量，新进程就继承它以 Node 模式跑——没有窗口。所以现象一直是「下载 100%、窗口关掉、什么都没有」，其实新版本已经装好。现在拉起前清掉 Electron 运行态变量，覆盖完正常回到新版本窗口。
+- 增量更新真正接通：客户端一直有增量能力，但 2.8.0 的清单里 `deltas` 是空的（打包时没对着上一版基线产出差分包），所有人只能下 188 MB 全量。现在打包会对着 `prev` 里的每个旧版本生成差分包并写进清单，2.8.0 → 2.8.1 只下差异部分；打不上自动退回完整包。
+- 解压更新包换成 .NET 的 `System.IO.Compression.ZipFile` 优先、`Expand-Archive` 兜底：大包在部分机器上会抽到一半就退出还返回成功，导致「找不到启动器主程序」的报错和真正原因对不上。失败时还会把解压清单写进 `stage-debug.json`。
+- 预下载「应用」加了守卫：官方新版本还没上线时点应用，以前会按旧版本重建一遍再把 `chunk/` 缓存删掉——游戏没变新、几十 G 预下载白下，重查还会退回「可以预下载」。现在这个状态按钮直接变灰、文案写「新版本上线后应用」，后端同一道守卫兜底。
+- 预下载弹窗能最小化了：开始下载后右上角出现「−」，收进左下角任务面板继续下；下载中直接关窗也是收进任务坞，不会取消。
+- 升级提醒同前：自动更新只覆盖程序文件，`data` 目录不动；启动器未签名，第一次运行前建议加杀软白名单。
+
+
+</details>
 
 <details>
 <summary><b>v2.8.0</b></summary>

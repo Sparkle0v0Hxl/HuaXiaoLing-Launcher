@@ -1031,6 +1031,7 @@ function predownloadDetail(info, busy) {
   if (state === 'done') {
     if (info.storedFiles) bits.push(`已存 ${info.storedFiles} 个分块 · ${fmtBytes(info.storedBytes)}`);
     if (info.categoryCount) bits.push(`含 ${info.categoryCount} 份剧情分类包`);
+    bits.push('已备好，等官方新版本正式发布后再点应用才会装进游戏；期间正常进游戏不受影响');
   }
   /*
    * 「下了一半」要能自己说出来。以前这里只有一句「可以预下载」，用户停掉之后
@@ -1129,7 +1130,10 @@ function openPredownloadModal(gameId, serverId) {
             <h2>预下载</h2>
             <p>${esc(game.name)} · ${esc(server.name)} · 新版本上线前先把内容拉到本地，上线后再应用</p>
           </div>
-          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          <div class="modal-head-actions">
+            <button class="modal-close" id="pd-minimize" style="display:none" title="最小化到任务面板">−</button>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
         </div>
         <div class="modal-body">
           <div class="pd-status" id="pd-status">${predownloadStatusMarkup(server)}</div>
@@ -1165,18 +1169,23 @@ function openPredownloadModal(gameId, serverId) {
       </div>
     </div>`;
 
-  openModal(html, {
-    onClose: () => {
-      // 关窗即视为停止：先记下，免得后端抛回「已取消」时又弹一条错误提示
-      if (running) {
-        cancelled = true;
-        api.predownload.cancel(jobId).catch(() => {});
-      }
-      if (unsubscribe) unsubscribe();
-      pdModalRepaint = null;
-      pdModalStoryRepaint = null;
-    },
-  });
+  function onClose() {
+    // 被最小化守卫拦下来的关窗：只是收进任务坞，不算关闭，也不取消
+    if (guardFired) {
+      guardFired = false;
+      return;
+    }
+    // 跑着的时候关窗 = 取消下载（点最小化按钮才是收进任务坞）
+    if (running) {
+      cancelled = true;
+      api.predownload.cancel(jobId).catch(() => {});
+    }
+    if (unsubscribe) unsubscribe();
+    pdModalRepaint = null;
+    pdModalStoryRepaint = null;
+  }
+
+  openModal(html, { onClose });
 
   const phase = document.querySelector('#pd-phase');
   const count = document.querySelector('#pd-count');
@@ -1194,6 +1203,79 @@ function openPredownloadModal(gameId, serverId) {
   let cancelled = false;
   let paused = false;
   let unsubscribe = null;
+  let stashed = false; // 收进过任务坞没有
+  let guardFired = false; // 关窗被守卫拦成最小化没有
+
+  const minimizeBtn = document.querySelector('#pd-minimize');
+
+  // 任务坞里那条：预下载也塞进 sophonJobs，和下载 / 更新共用左下角任务面板。
+  const job = {
+    id: jobId,
+    gameId,
+    serverId,
+    gameName: game.name,
+    serverName: server.name,
+    mode: 'predownload',
+    status: 'starting',
+    percent: 0,
+    phase: '准备中…',
+    stats: '',
+  };
+
+  /** 从任务坞里撤掉这一条（完成 / 失败 / 取消都走它）。 */
+  const endJob = () => {
+    if (activeSophonJob === job) activeSophonJob = null;
+    sophonUi = null;
+    taskModalGuard = null;
+    sophonJobs = sophonJobs.filter((item) => item.id !== jobId);
+    document.body.classList.remove('sophon-minimized');
+    renderTaskDock();
+  };
+
+  /*
+   * 最小化到任务面板：整块界面从 #modal-root 拔下来存着（进度条 / 监听都还在），
+   * 坞里挂一条能看进度、能停的任务。预下载本身在主进程跑，不受影响。
+   */
+  const minimized = () => {
+    if (!running) return;
+    const node = document.querySelector('.modal-backdrop');
+    if (!node) return;
+    stashed = true;
+    hiddenTaskModalClose = onClose;
+    stashTaskModal(node);
+    document.body.classList.add('sophon-minimized');
+    job.status = 'running';
+    activeSophonJob = job;
+    if (!sophonJobs.some((item) => item.id === jobId)) sophonJobs.push(job);
+    renderTaskDock();
+    sophonUi = {
+      restore: () => {
+        if (restoreTaskModal()) stashed = false;
+      },
+      cancel: () => {
+        cancelled = true;
+        api.predownload.cancel(jobId).catch(() => {});
+        running = false;
+        stashed = false;
+        dropStashedTaskModal();
+        hiddenTaskModalClose = null;
+        endJob();
+        dom.modalRoot.innerHTML = '';
+        document.body.classList.remove('modal-open');
+        toast('已停止预下载', 'info');
+      },
+    };
+  };
+
+  if (minimizeBtn) minimizeBtn.addEventListener('click', minimized);
+
+  /* 下载中被关窗（✕ / Esc / 点遮罩）不是取消：先收进任务坞接着下。 */
+  taskModalGuard = () => {
+    if (!running) return false;
+    guardFired = true;
+    minimized();
+    return true;
+  };
 
   const currentServer = () => {
     const live = state.games.find((item) => item.id === gameId);
@@ -1216,7 +1298,21 @@ function openPredownloadModal(gameId, serverId) {
         pdState === 'available' && info && info.partial && stored ? '继续预下载' : '开始预下载'
       }`;
     }
-    if (apply) apply.style.display = pdState === 'done' || pdState === 'update' ? '' : 'none';
+    if (apply) {
+      apply.style.display = pdState === 'done' || pdState === 'update' ? '' : 'none';
+      // done：官方新版本还没上线，应用只会清掉缓存、游戏也变不了新，禁用并说明
+      if (pdState === 'done') {
+        apply.disabled = true;
+        apply.title = '新版本还没正式发布，暂时不能应用；上线后这里会变成可点的「应用更新」';
+        apply.innerHTML = `${icon('download')}新版本上线后应用`;
+        // 顺手把「清除」按钮的措辞也点明：现在清掉才会白下
+        if (clearBtn && stored) clearBtn.title = '删掉已经下好的预下载内容（游戏文件不受影响）；没上线前清了就得重下';
+      } else if (pdState === 'update') {
+        apply.disabled = false;
+        apply.title = '用已下好的预下载内容把新版本装上，命中缓存的部分不耗流量';
+        apply.innerHTML = `${icon('download')}应用更新`;
+      }
+    }
     // 有东西占着盘就给「清除」，体积跟着走；下完 / 下一半 / 官方撤了都算
     if (clearBtn) {
       clearBtn.style.display = stored ? '' : 'none';
@@ -1278,12 +1374,14 @@ function openPredownloadModal(gameId, serverId) {
     pause.style.display = 'none';
     pause.textContent = '暂停';
     paused = false;
+    if (minimizeBtn) minimizeBtn.style.display = 'none';
   };
 
   const run = async (kind) => {
     cancelled = false;
     running = true;
     progress.style.display = 'block';
+    if (minimizeBtn) minimizeBtn.style.display = '';
     errorBox.textContent = '';
     start.disabled = true;
     apply.disabled = true;

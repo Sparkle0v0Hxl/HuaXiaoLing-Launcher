@@ -911,8 +911,21 @@ async function applyHoyoPredownload({
   }
   const dir = chunkDirOf(installRoot);
   const hasCache = fs.existsSync(dir);
-  if (!hasCache && compareVersion(base.latestVersion, base.localVersion) <= 0) {
-    throw new Error('没有找到预下载内容，而且官方也没发布新版本');
+  /*
+   * 必须等官方新版本正式上线（main 分支版本比本地新）才能应用。
+   * 预下载只是把新版本的 chunk 提前缓存到 chunk/，游戏本体此时还是旧版本；
+   * 提前点「应用」只会按旧版本把缓存重建一遍、再把 chunk/ 清掉，既不会让游戏
+   * 变成新版本，又把刚下好的预下载内容报废，等于白下。所以这里拦下来保住缓存，
+   * 等官方上线（check 状态变成 update）再点应用。
+   */
+  if (compareVersion(base.latestVersion, base.localVersion) <= 0) {
+    if (hasCache) {
+      throw new Error(
+        '新版本还没正式发布，现在「应用」只会清掉已下好的预下载内容、游戏也不会变新。' +
+          '请等官方上线后（启动器提示「应用官方更新」，或预下载状态变成「正式版已上线」）再来点应用。'
+      );
+    }
+    throw new Error('没有找到预下载内容，而且官方也还没发布新版本');
   }
 
   onProgress?.({ phase: 'version', current: `目标版本 ${base.latestVersion}` });

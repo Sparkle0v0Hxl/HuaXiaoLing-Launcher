@@ -620,9 +620,23 @@ function runPowerShell(script, timeoutMs = 10 * 60 * 1000) {
 
 async function extractZip(zipPath, extractRoot) {
   await fsp.mkdir(extractRoot, { recursive: true });
-  await runPowerShell(
-    `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
-  );
+  // 优先用 .NET 的 ZipFile 解压：实测部分机器 / 旧版 PowerShell 的 Expand-Archive
+  // 在解压大体积 ZIP（>100MB）时会中途静默退出（exit 0 但只抽出半截），导致覆盖后
+  // 启动器缺文件打不开。.NET 的 ZipFile 更稳，Expand-Archive 作为兜底。
+  const dotNet = `[System.IO.Compression.ZipFile]::ExtractToDirectory(${JSON.stringify(zipPath)}, ${JSON.stringify(extractRoot)})`;
+  try {
+    await runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; ${dotNet}`);
+    return;
+  } catch (err) {
+    try {
+      await runPowerShell(
+        `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
+      );
+      return;
+    } catch (err2) {
+      throw new Error(`解压更新包失败：${err2 && err2.message ? err2.message : err2}`);
+    }
+  }
 }
 
 function findPackageRoot(extractRoot) {
@@ -691,7 +705,20 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
   const extractRoot = path.join(tempRoot, 'extract');
   await extractZip(zipPath, extractRoot);
   const source = findPackageRoot(extractRoot);
-  if (!source) throw new Error('这个 ZIP 不是有效的花筱灵便携版更新包');
+  if (!source) {
+    // 解压成功却找不到启动器主程序，多半是 ZIP 结构不对 / 抽出半截。把解压清单留下来方便排障。
+    try {
+      const dumped = (await listFiles(extractRoot)).slice(0, 300);
+      await fsp.writeFile(
+        path.join(tempRoot, 'stage-debug.json'),
+        JSON.stringify({ extractRoot, tempRoot, fileCount: dumped.length, files: dumped }, null, 2),
+        'utf8'
+      );
+    } catch {
+      /* 诊断写入失败不影响主流程报错 */
+    }
+    throw new Error('这个 ZIP 不是有效的花筱灵便携版更新包（解压后找不到启动器主程序；解压清单已记入 stage-debug.json）');
+  }
 
   let packageVersion = '';
   try {
