@@ -1402,12 +1402,21 @@ async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', t
       if (!fs.existsSync(baseFile)) throw new Error(`本地缺少基准文件，无法打补丁：${rel}`);
       const baseSize = (await fsp.stat(baseFile)).size;
       if (Number(entry.baseSize) && baseSize !== Number(entry.baseSize)) {
-        throw new Error(`基准文件大小不符：${rel}`);
+        throw new Error(
+          `基准文件大小不符：${rel}（本地 ${baseSize} 字节，期望 ${entry.baseSize} 字节）`
+        );
       }
       if (entry.baseSha256) {
         const actualBase = await sha256File(baseFile);
         if (actualBase !== String(entry.baseSha256).toLowerCase()) {
-          throw new Error(`基准文件校验不符：${rel}`);
+          /*
+           * 两边都留一段前缀：用户把这个日志发回来，一眼就能看出是「本地被改过」
+           * 还是「增量包基准写错了」。差一个字节就得退回整包，这是设计如此，
+           * 但要让人知道是哪一步拦下的。
+           */
+          throw new Error(
+            `基准文件校验不符：${rel}（本地 ${actualBase.slice(0, 12)}…，期望 ${String(entry.baseSha256).slice(0, 12)}…）`
+          );
         }
       }
       const patchFile = path.join(bundle, normalizeRel(entry.patch));

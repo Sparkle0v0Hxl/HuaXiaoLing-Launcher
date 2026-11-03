@@ -915,7 +915,16 @@ function predownloadChannelOk(game, server) {
 
 function predownloadInfo(server) {
   const info = server && server.predownload;
-  return info && typeof info === 'object' ? info : null;
+  if (!info || typeof info !== 'object') return null;
+  if (String(info.scope || '') === 'launcher') return info;
+  /*
+   * 异环这套清单只覆盖 NTELauncher 侧资源，游戏本体不在里面——这是产品事实，
+   * 不是运行时状态。scope 字段是 2.8.3 才落的盘，之前存的那些状态里没有，
+   * 直接读就会退回「更新游戏」的说法。这里按 kind 补回来，用户升到新版
+   * 不用等下一次后台检测就能看到正确文案。
+   */
+  if (String(info.kind || '') === 'nte') return { ...info, scope: 'launcher' };
+  return info;
 }
 
 function predownloadMeta(info) {

@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.8.3-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.8.4-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,7 +19,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.8.3**
+**当前版本：v2.8.4**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -205,7 +205,17 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.8.3 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.8.4 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.8.4</b></summary>
+
+- 修掉「增量包老是打不上」：覆盖脚本自己就是用主程序跑的，运行时会把 `icudtl.dat`、`v8_context_snapshot.bin` 占住，写不进去就被跳过，本地从此与标准包对不上，下一版增量基准校验必然失败、退回整包。现在改成先挪开再写。
+- 增量退回整包时，提示里带上具体原因和校验值前缀，同时写进启动日志。
+- 异环不再显示「更新游戏」：旧落盘数据没有标记字段，现在按游戏类型补认，升级后立刻生效，并自动重查一次。
+- 清理更新挪到旁路的临时文件，不再每更新一次就多留一份旧映像。
+
+</details>
 
 <details>
 <summary><b>v2.8.3</b></summary>

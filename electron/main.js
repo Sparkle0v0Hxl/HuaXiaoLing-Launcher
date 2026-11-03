@@ -395,6 +395,34 @@ try {
   /* 删不掉不影响启动 */
 }
 
+/*
+ * 清掉上次更新挪到旁路上的其它文件（icudtl.dat、v8_context_snapshot.bin 这类
+ * 被运行时占着、只能先改名让位的）。覆盖脚本把挪过的每一个都记进了
+ * last-update.json 的 parkedFiles，照单删就行——不去扫目录猜，扫目录有把
+ * 用户自己的文件当成残留误删的风险。还删不掉的留在单子里，下次启动再试。
+ */
+try {
+  const marker = path.join(app.getPath('userData'), 'tmp', 'last-update.json');
+  if (fs.existsSync(marker)) {
+    const record = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    const list = Array.isArray(record.parkedFiles) ? record.parkedFiles : [];
+    const left = list.filter((file) => {
+      try {
+        if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (left.length !== list.length) {
+      record.parkedFiles = left;
+      fs.writeFileSync(marker, JSON.stringify(record, null, 2), 'utf8');
+    }
+  }
+} catch {
+  /* 删不掉不影响启动 */
+}
+
 const isDev = !app.isPackaged;
 const ROOT = path.join(__dirname, '..');
 
@@ -5438,6 +5466,12 @@ async function startUpdate(options = {}) {
       } catch (error) {
         const msg = error && error.message ? error.message : String(error);
         updateStatus = { ...updateStatus, delta: false };
+        /*
+         * 必须留档：增量为什么退回整包，界面上一句 toast 看完就没了。
+         * 「本地和基准对不上」往往不是这次才发生的——多半是更早某次更新有文件
+         * 被占着没覆盖成功，从那以后每一版都只能下整包。
+         */
+        writeLaunchLog(`delta ${APP_VERSION} -> ${manifest.version} 失败：${msg}`);
         send('toast', { message: `增量更新没成功（${msg}），改用完整包`, type: 'info' });
         // 增量包自己在失败时已经删掉了，这里只顺手扫一遍过期残留
         await sweepOldDownloads(path.join(tempBase, 'download')).catch(() => {});
@@ -12187,7 +12221,16 @@ function musicLoginWindow(target) {
       if (!server) continue;
       // 演练模式下每次启动都重查，否则 2 小时 TTL 会让人以为开关没生效
       const fresh = predownloadSim.enabled() ? 0 : Date.parse(server.predownload?.updatedAt || '') || 0;
-      if (server.predownload && now - fresh < PREDOWNLOAD_AUTO_TTL) continue;
+      /*
+       * 异环在 2.8.3 之前落盘的状态不可信，两处都对不上现在的事实：
+       *   1. 没有 scope 字段 —— 界面会把它说成「更新游戏」，可它只覆盖启动器资源；
+       *   2. state 是按「版本号字面不等」算的 —— 官方改个命名就天天报「有更新」，
+       *      而游戏本体一个字节都没动。
+       * 所以别等两小时 TTL，当作过期直接重查。
+       */
+      const staleNte =
+        String(server.predownload?.kind || '') === 'nte' && !server.predownload?.scope;
+      if (server.predownload && !staleNte && now - fresh < PREDOWNLOAD_AUTO_TTL) continue;
       // 正在预下载 / 正在更新时别插队，免得两边抢同一份清单
       if (predownloadJobs.size) return;
       try {
