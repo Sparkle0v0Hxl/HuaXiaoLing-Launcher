@@ -151,20 +151,73 @@ function nodeRequest(url, options = {}, redirects = 0) {
   });
 }
 
+/*
+ * 请求留痕。
+ *
+ * 默认什么都不挂：自测脚本直接 require 这个文件时不需要诊断模块。主进程启动
+ * 时调用 setRequestLogger() 注入，之后每条请求都记一条元数据（地址、状态码、
+ * 耗时、走的哪条栈、错误信息），不记 body、不记 header。
+ *
+ * 记日志本身绝不能影响请求，所以整段都包在 try 里。
+ */
+let requestLogger = null;
+
+function setRequestLogger(fn) {
+  requestLogger = typeof fn === 'function' ? fn : null;
+}
+
+function reportRequest(url, method, startedAt, transport, status, error) {
+  if (!requestLogger) return;
+  try {
+    requestLogger({
+      url: String(url),
+      method,
+      status,
+      ms: Date.now() - startedAt,
+      transport,
+      error: error ? error.message || String(error) : '',
+    });
+  } catch {
+    /* 诊断日志写失败不能反过来把请求搞挂 */
+  }
+}
+
 async function httpFetch(url, options = {}) {
   const { dispatcher, ...rest } = options; // dispatcher 是 undici 专属参数，Chromium 栈不认
+  const startedAt = Date.now();
+  const method = String(rest.method || 'GET').toUpperCase();
   if (electronNetFetch) {
     try {
-      return await electronNetFetch(url, rest);
+      const response = await electronNetFetch(url, rest);
+      reportRequest(url, method, startedAt, 'chromium', response.status, null);
+      return response;
     } catch (error) {
       // Chromium 栈连不上时退回 Node 的 https 栈再试一把：两边各自的可达性盲区
       // （系统代理配置异常、证书库被改、个别 CDN 的 TLS 实现差异）不同，互为兜底。
-      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) throw error;
-      return nodeRequest(url, rest);
+      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) {
+        reportRequest(url, method, startedAt, 'chromium', 0, error);
+        throw error;
+      }
+      try {
+        const response = await nodeRequest(url, rest);
+        reportRequest(url, method, startedAt, 'node', response.status, null);
+        return response;
+      } catch (fallbackError) {
+        // 两条路都断了：记成一条，比记两条「Chromium 失败 + Node 失败」更好读
+        reportRequest(url, method, startedAt, 'node', 0, fallbackError);
+        throw fallbackError;
+      }
     }
   }
   // 纯 Node 环境（自测脚本）：用原生 fetch，行为最完整
-  return fetch(url, rest);
+  try {
+    const response = await fetch(url, rest);
+    reportRequest(url, method, startedAt, 'fetch', response.status, null);
+    return response;
+  } catch (error) {
+    reportRequest(url, method, startedAt, 'fetch', 0, error);
+    throw error;
+  }
 }
 
 /**
@@ -200,4 +253,4 @@ async function segmentFetch(url, options = {}) {
   return httpFetch(url, options);
 }
 
-module.exports = { httpFetch, nodeRequest, segmentFetch };
+module.exports = { httpFetch, nodeRequest, segmentFetch, setRequestLogger };

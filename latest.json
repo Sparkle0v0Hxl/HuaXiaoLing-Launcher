@@ -1,53 +1,23 @@
 {
-  "version": "2.8.4",
-  "title": "花筱灵启动器 2.8.4",
+  "version": "2.9.0",
+  "title": "花筱灵启动器 2.9.0",
   "date": "2026-11-03",
-  "notes": "未签名程序，第一次运行前请把安装目录（含 resources 子目录）加进杀毒软件白名单，否则更新与「开始游戏」可能被拦。\n增量包老是打不上的根因找到了：覆盖脚本是拿花筱灵启动器.exe 当 Node 跑起来的，而这个运行时启动时会把同目录的 icudtl.dat、v8_context_snapshot.bin 一起读进来占着。实测这两个文件写不进去（copyfile UNKNOWN），于是每次更新都被跳过——本地文件和标准包对不上，下一版增量的基准校验必然失败，只能退回 188 MB 整包。跳一次，以后每一版都只能下整包。现在改成写不进去就先把旧的挪开再写新的（实测改名可行），不再留残件，增量也就一直打得上了。\n增量为什么退回整包，现在会写进日志，界面上的提示也带上了具体原因和文件校验值的前几位，不用再靠猜。\n异环不再显示「更新游戏」：上一版虽然改了说法，但很多人的状态是更早落盘的旧数据，里面没有标记字段，要等两小时才自动刷新。现在读的时候按游戏类型补认，升级后立刻就是「更新启动器」；旧数据同时被判定为不可信，启动十几秒后自动重查一次。\n顺带把更新挪到旁路的临时文件也清干净：以前只清主程序那一份，现在按上次更新的记录逐项清理，不再每更新一次就在目录里多留一份 250 MB 的旧映像。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/HuaXiaoLing-2.8.4-Portable.zip",
+  "notes": "未签名程序，第一次运行前请把安装目录（含 resources 子目录）加进杀毒软件白名单，否则更新与「开始游戏」可能被拦。\n更新清单开始带数字签名：以前 sha256 和清单走同一条通道，能改清单的人顺手就能把哈希一起改掉，哈希只能防传输损坏、防不了源被换。现在清单由发包机上的私钥签名，客户端内置公钥验签——版本号、包大小、整包哈希、任何一条增量的哈希被改动，都会当场判为无效并拒绝更新。第一次验签成功之后就锁死：之后谁把签名字段整个删掉，也骗不过去。\n设置里「网络代理」多了两个按钮：「用系统代理」直接读 Clash、v2rayN 已经配好的地址填进输入框，不用自己去翻端口；「测试连接」拿真实的 GitHub 和 Gitee 地址各试一次，当场告诉你这条代理到底通不通、延迟多少。测的是输入框里当下的值，改完不用先保存就能验。\n新增「导出诊断信息」：把版本、系统、代理与更新源设置、最近 240 条网络请求（只记地址、状态码、耗时和走的哪条网络栈，不记请求内容、不记账号密码），连同覆盖安装日志、自愈日志、崩溃日志，合成一个 txt 放到桌面。以后遇到「更新失败」「封面不显示」，把这个文件发回来就能定位，不用再来回问。\n抽卡记录多了三张图：星级分布的环形图、每次出金花了多少抽的折线（带平均虚线）、累计出金的阶梯图。数据本来就在记录里，以前只显示成数字和列表，看不出「最近是不是越来越非」。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.0/HuaXiaoLing-2.9.0-Portable.zip",
   "deltas": [
     {
-      "from": "2.7.1",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.7.1-to-2.8.4.zip",
-      "sha256": "f79d7ddb5bc551d85572c74dc7a1b115a601e63567af299e0ced2fca5796b8f4",
-      "size": 3804628
-    },
-    {
-      "from": "2.7.2",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.7.2-to-2.8.4.zip",
-      "sha256": "1d522311a01eac3d8d0b7676fdba215ec6e46b5394d6f590677b9b90153c6e56",
-      "size": 138997
-    },
-    {
-      "from": "2.8.0",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.8.0-to-2.8.4.zip",
-      "sha256": "3f389f3202108c3f2b717d16a81f613d7bfc2077f1fde93148248f9ff3e27613",
-      "size": 97586
-    },
-    {
-      "from": "2.8.1",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.8.1-to-2.8.4.zip",
-      "sha256": "659be26d87283c8357062e82719063769b880e55a30a5f5f0ff83d581947a431",
-      "size": 26466
-    },
-    {
-      "from": "2.8.2",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.8.2-to-2.8.4.zip",
-      "sha256": "91dfe27dabf3448e61cec28444dc29d5c99a1b51002590063cf3ff5955f19de5",
-      "size": 23038
-    },
-    {
-      "from": "2.8.3",
-      "to": "2.8.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.4/delta-2.8.3-to-2.8.4.zip",
-      "sha256": "e2b83d07aefecfce221c68767418abcb8801ddf8e9a2d6c9639223606eb040c6",
-      "size": 11427
+      "from": "2.8.4",
+      "to": "2.9.0",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.0/delta-2.8.4-to-2.9.0.zip",
+      "sha256": "1f47ad790de28c036f3fc2ccb1c97f3ec52c0b30d2516e11358eee01d5113533",
+      "size": 19475763
     }
   ],
-  "sha256": "ea7c883f2a5aef54213366497f90b222751e707fdb6e957a5f02ac33c2269492",
-  "size": 187959167
+  "sha256": "4935cc55abca7194e23b28e1fb8be6fa6e9dd897e208216dcac9b388fab3027f",
+  "size": 200807404,
+  "sig": {
+    "alg": "ed25519",
+    "keyId": "dff6dc4c71f12733",
+    "value": "jcEK+bYMu9NKEUbnpvZ4gkz97umT5XEBVddef/qi4DM6WBpuASbid7fkETccBEek3RsDEMFh5cE1Hbhntg0XAg=="
+  }
 }

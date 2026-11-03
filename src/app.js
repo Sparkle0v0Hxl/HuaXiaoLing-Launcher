@@ -88,6 +88,11 @@ const state = {
   hoyolab: null,
   // 鹰角 / 完美世界 / 库街区等通行证的登录态，key 是 provider id
   passport: null,
+  /*
+   * 森空岛登录态（终末地）。
+   * 结构：{ loading, loggedIn, accounts, roles }，由 tools.js 的 refreshSklandStatus 填。
+   */
+  skland: null,
   // 截图管理：按游戏分组，组内按时间倒序
   shots: null,
   shotsLoading: false,
@@ -292,6 +297,12 @@ const state = {
     // 每个游戏选中的角色 { genshin: { uid, region, nickname, level } }
     role: {},
     cache: {},
+    /*
+     * 战绩请求的闸门，按游戏记：{ [game]: { lastAt, blockedUntil } }。
+     * 米哈游对便笺/战绩接口按分钟限流，连点刷新是 retcode 1034 最常见的成因；
+     * 被拦一次之后 5 分钟内再查只会继续被拒，所以本地自己先拦住。
+     */
+    gate: {},
   },
   /*
    * 插件页。

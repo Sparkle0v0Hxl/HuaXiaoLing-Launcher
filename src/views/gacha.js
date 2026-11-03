@@ -262,6 +262,169 @@ function gachaPoolCard(pool, label, poolData, game, standardNames) {
     </section>`;
 }
 
+/* ------------------------------------------------------------------ */
+/* 数据看板：三张静态图                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 抽卡数据的三张图：出率结构、每金抽数、累计出金。
+ *
+ * 为什么手写 SVG 而不引图表库：启动器是零运行时依赖的，为三张不会交互的静态图
+ * 引一个几百 KB 的库不划算。数据在渲染时算一次就固定了，SVG 比 canvas 省事，
+ * 还能直接吃到主题的 CSS 变量（深浅色、强调色跟着走）。
+ */
+
+/** 当前 scope 对应的数据：单池看 breakdown 里的那份，全部看整体 */
+function gachaChartDataSource(user, scope) {
+  if (scope && scope !== 'all') {
+    const hit = user.breakdown && user.breakdown[scope];
+    if (hit && hit.total) return hit;
+  }
+  return user;
+}
+
+/** 环形：五星 / 四星 / 其余 的占比 */
+function gachaDonutSvg({ five, four, low }) {
+  const total = five + four + low;
+  if (!total) return '';
+  const R = 52;
+  const C = 2 * Math.PI * R;
+  const segs = [
+    { value: five, cls: 'is-five' },
+    { value: four, cls: 'is-four' },
+    { value: low, cls: 'is-low' },
+  ];
+  let passed = 0;
+  const rings = segs
+    .filter((seg) => seg.value > 0)
+    .map((seg) => {
+      const len = (seg.value / total) * C;
+      const circle = `<circle class="gacha-donut-seg ${seg.cls}" cx="70" cy="70" r="${R}" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-passed).toFixed(2)}" />`;
+      passed += len;
+      return circle;
+    })
+    .join('');
+  return `
+    <svg class="gacha-donut" viewBox="0 0 140 140" role="img" aria-label="出率结构">
+      <g transform="rotate(-90 70 70)">${rings}</g>
+      <text class="gacha-donut-total" x="70" y="68">${total}</text>
+      <text class="gacha-donut-unit" x="70" y="84">抽</text>
+    </svg>`;
+}
+
+/** 折线：每次出金花了多少抽（时间正序），虚线是平均值 */
+function gachaPitySvg(items, cap) {
+  const values = items.map((item) => Number(item.pity) || 0);
+  if (!values.length) return '';
+  const W = 480;
+  const H = 152;
+  const L = 30;
+  const R = 10;
+  const T = 14;
+  const B = 20;
+  const maxV = Math.max(...values, cap || 0, 10);
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const n = values.length;
+  const x = (i) => L + (n === 1 ? (W - L - R) / 2 : (i / (n - 1)) * (W - L - R));
+  const y = (value) => H - B - (value / maxV) * (H - T - B);
+  const line = values.map((value, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(value).toFixed(1)}`).join(' ');
+  const dots = values
+    .map((value, i) => `<circle class="gacha-line-dot" cx="${x(i).toFixed(1)}" cy="${y(value).toFixed(1)}" r="2.3" />`)
+    .join('');
+  const avgY = y(avg).toFixed(1);
+  return `
+    <svg class="gacha-line" viewBox="0 0 ${W} ${H}" role="img" aria-label="每次出金抽数">
+      <line class="gacha-axis" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" />
+      <text class="gacha-axis-text" x="${L - 6}" y="${H - B + 4}" text-anchor="end">0</text>
+      <text class="gacha-axis-text" x="${L - 6}" y="${T + 4}" text-anchor="end">${maxV}</text>
+      <line class="gacha-avg" x1="${L}" y1="${avgY}" x2="${W - R}" y2="${avgY}" />
+      <text class="gacha-avg-text" x="${W - R}" y="${Number(avgY) - 4}" text-anchor="end">平均 ${avg.toFixed(1)}</text>
+      <path class="gacha-line-path" d="${line}" />
+      ${dots}
+    </svg>`;
+}
+
+/** 阶梯：横轴累计抽数，纵轴第几个五星 */
+function gachaCumulativeSvg(items) {
+  const values = items.map((item) => Number(item.pity) || 0);
+  if (!values.length) return '';
+  const W = 480;
+  const H = 152;
+  const L = 26;
+  const R = 12;
+  const T = 14;
+  const B = 20;
+  let cum = 0;
+  const points = [[0, 0]];
+  values.forEach((value, index) => {
+    cum += value;
+    // 先竖着上升一格，再水平走到下一次出金的位置
+    points.push([cum, index]);
+    points.push([cum, index + 1]);
+  });
+  const maxCum = Math.max(cum, 1);
+  const maxN = values.length;
+  const x = (value) => L + (value / maxCum) * (W - L - R);
+  const y = (value) => H - B - (value / maxN) * (H - T - B);
+  const path = points
+    .map(([cx, cy], i) => `${i ? 'L' : 'M'}${x(cx).toFixed(1)} ${y(cy).toFixed(1)}`)
+    .join(' ');
+  return `
+    <svg class="gacha-step" viewBox="0 0 ${W} ${H}" role="img" aria-label="累计出金">
+      <line class="gacha-axis" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" />
+      <line class="gacha-axis" x1="${L}" y1="${T}" x2="${L}" y2="${H - B}" />
+      <text class="gacha-axis-text" x="${W - R}" y="${H - B + 15}" text-anchor="end">${maxCum} 抽</text>
+      <text class="gacha-axis-text" x="${L - 4}" y="${T + 4}" text-anchor="end">${maxN}</text>
+      <path class="gacha-step-path" d="${path}" />
+    </svg>`;
+}
+
+/**
+ * 三张图拼成一块。没有五星记录时只留环形——另外两张图没有意义，
+ * 硬画出来是两条空白轴，反而像坏了。
+ */
+function gachaCharts(user, game, scope) {
+  const src = gachaChartDataSource(user, scope);
+  const total = Number(src.total) || 0;
+  if (!total) return '';
+  const five = Number(src.five) || 0;
+  const four = Number(src.four) || 0;
+  const low = src.low !== undefined ? Number(src.low) || 0 : Math.max(0, total - five - four);
+  // fiveHistory 是「新的在前」，画图要从左到右按时间走
+  const history = (src.fiveHistory || []).slice().reverse();
+  const recent = history.slice(-60);
+  const cap = gachaPityCap(game);
+  const high = gachaHighLabel(game);
+  const mid = gachaMidLabel(game);
+
+  const cards = [
+    `<section class="gacha-chart-card">
+      <header><strong>出率结构</strong><small>${total} 抽里各占多少</small></header>
+      <div class="gacha-chart-flex">
+        ${gachaDonutSvg({ five, four, low })}
+        <ul class="gacha-legend">
+          <li><i class="is-five"></i>${esc(high)}<b>${five}</b><em>${total ? ((five / total) * 100).toFixed(2) : '0.00'}%</em></li>
+          <li><i class="is-four"></i>${esc(mid)}<b>${four}</b><em>${total ? ((four / total) * 100).toFixed(2) : '0.00'}%</em></li>
+          <li><i class="is-low"></i>其余<b>${low}</b><em>${total ? ((low / total) * 100).toFixed(2) : '0.00'}%</em></li>
+        </ul>
+      </div>
+    </section>`,
+  ];
+
+  if (five > 0) {
+    cards.push(`<section class="gacha-chart-card">
+      <header><strong>每金抽数</strong><small>最近 ${recent.length} 次${esc(high)}${recent.length < history.length ? `（共 ${history.length} 次）` : ''}</small></header>
+      ${gachaPitySvg(recent, cap)}
+    </section>`);
+    cards.push(`<section class="gacha-chart-card">
+      <header><strong>累计出金</strong><small>横轴累计抽数，纵轴${esc(high)}个数</small></header>
+      ${gachaCumulativeSvg(recent)}
+    </section>`);
+  }
+
+  return `<div class="gacha-charts">${cards.join('')}</div>`;
+}
+
 function gachaOverview(user, game, scope = 'all') {
   const high = gachaHighLabel(game);
   const mid = gachaMidLabel(game);
@@ -335,6 +498,7 @@ function gachaOverview(user, game, scope = 'all') {
         }
       </div>
     </div>
+    ${gachaCharts(user, game, scope)}
     ${
       user.pityExact === false
         ? '<p class="gacha-pity-note">这份记录里没有三星抽卡，抽数会把四星也算进去，只能当参考。</p>'

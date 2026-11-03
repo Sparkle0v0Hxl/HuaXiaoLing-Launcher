@@ -1986,6 +1986,75 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
 
+    case 'import-system-proxy': {
+      try {
+        const info = await api.proxy.system();
+        if (!info || !info.ok) {
+          toast((info && info.detail) || '读不到系统代理', 'error');
+          break;
+        }
+        if (!info.rules) {
+          toast('系统当前是直连，没有可以导入的代理', 'info');
+          break;
+        }
+        const input = document.querySelector('#proxy-rules');
+        if (input) input.value = info.rules;
+        // 只填不保存：万一读出来的是别的软件的代理，用户还得有机会改
+        toast(`${info.detail}，已填进输入框，点「保存」生效`, 'success');
+      } catch (error) {
+        toast(`读取系统代理失败：${humanError(error)}`, 'error');
+      }
+      break;
+    }
+
+    case 'test-proxy': {
+      const input = document.querySelector('#proxy-rules');
+      const raw = (input ? input.value : '').trim();
+      if (raw && !/^(https?|socks5h?):\/\/[^\s/]+/i.test(raw)) {
+        toast('地址要以 http:// 、https:// 或 socks5:// 开头', 'error');
+        break;
+      }
+      // 测的是输入框里当下的值，不是已保存的值——改完不用先保存就能验
+      setProxyProbe({ state: 'running', ok: false, text: '' });
+      try {
+        const result = await api.proxy.test(raw);
+        const detail = (result.results || [])
+          .map((item) => {
+            if (item.ok) return `${item.name} 通（${(item.ms / 1000).toFixed(1)} 秒）`;
+            const why = item.error || (item.status ? `HTTP ${item.status}` : '无响应');
+            return `${item.name} 不通（${why}）`;
+          })
+          .join(' · ');
+        const text = detail || result.error || '没有拿到测试结果';
+        setProxyProbe({
+          state: 'done',
+          ok: Boolean(result.ok),
+          text: `${result.ok ? '可以连通' : '连不上'}：${text}`,
+        });
+        if (!result.ok) toast('这条路走不通，换个地址或直接留空直连', 'error');
+      } catch (error) {
+        setProxyProbe({ state: 'done', ok: false, text: `测试失败：${humanError(error)}` });
+        toast(`测试失败：${humanError(error)}`, 'error');
+      }
+      break;
+    }
+
+    case 'export-diagnostics': {
+      toast('正在收集诊断信息…', 'info');
+      try {
+        const result = await api.exportDiagnostics();
+        if (!result || !result.ok) {
+          toast(`导出失败：${(result && result.error) || '未知原因'}`, 'error');
+          break;
+        }
+        const name = String(result.path || '').split(/[\\/]/).pop();
+        toast(`已导出到桌面：${name}（含 ${result.requests || 0} 条网络记录）`, 'success');
+      } catch (error) {
+        toast(`导出失败：${humanError(error)}`, 'error');
+      }
+      break;
+    }
+
     case 'save-update-source': {
       const input = document.querySelector('#update-manifest');
       const value = (input ? input.value : '').trim();
@@ -2866,6 +2935,35 @@ async function handleAction(action, id, element, event = null) {
     case 'passport-logout':
       await doPassportLogout(element.dataset.value || '');
       break;
+    /* 森空岛：终末地的便笺与战绩都走这里，和米游社那套完全独立 */
+    case 'skland-login':
+      await doSklandLogin(element.dataset.value || '');
+      break;
+    case 'skland-logout':
+      await doSklandLogout();
+      break;
+    case 'skland-use':
+      await doSklandUseAccount(element.dataset.value || '');
+      break;
+    case 'skland-sign':
+      await doSklandSign();
+      break;
+    /*
+     * 复制一段文本。目前只有关于页的 Q 群号在用，
+     * 但做成通用动作而不是写死一个按钮，以后别处要复制就不用再加一遍。
+     */
+    case 'copy-text': {
+      const text = String(element.dataset.value || '').trim();
+      if (!text) break;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast(`已复制：${text}`, 'success');
+      } catch {
+        /* 剪贴板被拒（非安全上下文 / 用户拒绝）时至少把号码显示出来，别静默 */
+        toast(`复制失败，请手动记下：${text}`, 'error');
+      }
+      break;
+    }
     case 'shots-game':
       state.shotsGame = element.dataset.value || '';
       render({ preserveScroll: true });

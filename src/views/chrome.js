@@ -1077,6 +1077,22 @@ function render(options = {}) {
   const videoMemo = memoStartVideo();
   const prevArt = dom.view.querySelector(`.start-screen ${START_ART_LIVE}`);
   dom.view.innerHTML = view ? view() : homeView();
+  /*
+   * 设置页：说明默认只显示一行短句，全文挂到 title 上（悬停可见）；
+   * 点标题可原地展开全文。这样一屏能扫完所有设置项，又不用把
+   * 那些「例外情况 / 原理」写丢。每次重绘重新绑定，旧节点随 innerHTML 一起丢弃。
+   */
+  if (state.route === 'settings') {
+    dom.view.querySelectorAll('.setting-copy > span').forEach((span) => {
+      const full = span.textContent.trim();
+      if (!full) return;
+      span.title = full;
+      const strong = span.parentElement && span.parentElement.querySelector('strong');
+      if (!strong) return;
+      strong.classList.add('setting-hint-toggle');
+      strong.addEventListener('click', () => span.classList.toggle('is-expanded'));
+    });
+  }
   handoffStartArt(prevArt);
   // 点歌台外层滚动位置还原：任何一次重绘都保住用户当前看到的位置
   if (state.route === 'song') {

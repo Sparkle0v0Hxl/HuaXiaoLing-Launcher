@@ -47,6 +47,12 @@ const { multiDownload } = require('./multi-download');
  * （自测脚本）自动降级回 Node fetch。
  */
 const { httpFetch, nodeRequest, segmentFetch } = require('./http-fetch');
+/*
+ * 清单签名校验。sha256 只能证明「文件没传坏」，证明不了「清单没被换」——
+ * 两者走同一条通道，能改清单的人顺手就能把 sha256 一起改掉。签名用的是只有
+ * 发包机才有的私钥，改任何受保护字段都会在这里被挡下。
+ */
+const minisign = require('./minisign');
 
 const EXE_NAME = '花筱灵启动器.exe';
 const DEFAULT_TIMEOUT = 15000;
@@ -244,6 +250,13 @@ async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
 
   const version = String(data.version || '').trim().replace(/^v/i, '');
   if (!version) throw new Error('更新源里没有版本号');
+  // 有签名就必须验过；没签名（过渡期的老清单）交给上层按「已验签过的版本」决定放不放行
+  const sigCheck = minisign.verifyManifest(data);
+  if (sigCheck.state === 'invalid') {
+    const error = new Error(`更新清单签名校验失败：${sigCheck.reason}`);
+    error.code = 'SIGNATURE_INVALID';
+    throw error;
+  }
   return {
     version,
     title: String(data.title || '').trim(),
@@ -254,6 +267,8 @@ async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
     size: Number(data.size) || 0,
     mandatory: Boolean(data.mandatory),
     deltas: parseDeltas(data, raw),
+    sigState: sigCheck.state,
+    sigReason: sigCheck.reason,
     source: raw,
   };
 }
@@ -280,6 +295,7 @@ async function resolveManifest(candidates) {
    */
   let best = null;
   let lastError = null;
+  let sigError = null;
   let remaining = list.length;
   let settle = () => {};
   let graceTimer = null;
@@ -324,6 +340,8 @@ async function resolveManifest(candidates) {
         },
         (error) => {
           lastError = error;
+          // 签名不对比「连不上」严重得多：混在普通网络错误里会被用户当成网络问题忽略掉
+          if (error && error.code === 'SIGNATURE_INVALID') sigError = error;
         }
       )
       .finally(() => {
@@ -337,6 +355,7 @@ async function resolveManifest(candidates) {
 
   await finished;
   if (best) return { ok: true, manifest: best.manifest, source: best.source };
+  if (sigError) return { ok: false, code: 'SIGNATURE_INVALID', error: sigError.message };
   return {
     ok: false,
     error: lastError && lastError.message ? lastError.message : String(lastError || '读不到更新源'),
@@ -377,6 +396,7 @@ async function checkForUpdate({ location, currentVersion }) {
       sha256: '',
       size: 0,
       mandatory: false,
+      code: resolved.code || '',
       error: resolved.error || '读不到更新源',
     };
   }
@@ -394,6 +414,8 @@ async function checkForUpdate({ location, currentVersion }) {
     size: manifest.size,
     mandatory: manifest.mandatory,
     deltas: manifest.deltas || [],
+    sigState: manifest.sigState || 'none',
+    sigReason: manifest.sigReason || '',
     // 匹配「当前版本 -> 目标版本」的增量；界面上据此提示「本次走增量」
     delta:
       (manifest.deltas || []).find(

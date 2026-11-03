@@ -44,7 +44,11 @@ const { ensureErasedBackground } = require('./background-clean');
 // 之前这里漏了引用，调用处抛 ReferenceError 又被空 catch 吞掉，表现就是
 // 「这些游戏一直没有动态背景，背景按钮也跟着消失」。
 const { officialBackgrounds } = require('./start-artwork');
-const { httpFetch, nodeRequest } = require('./http-fetch');
+const { httpFetch, nodeRequest, setRequestLogger } = require('./http-fetch');
+// 运行诊断：网络请求留痕 + 一键导出。挂在 http-fetch 上，只记元数据不记内容。
+const diagnostics = require('./diagnostics');
+// 诊断报告里要写「当前内置的签名公钥是谁」，用同一个常量，避免两处各写一份对不上
+const minisign = require('./minisign');
 const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
 const { resolveLiveRoom } = require('./live-rooms');
 const { startDanmaku, pollDanmaku, stopDanmaku } = require('./live-danmaku');
@@ -72,6 +76,7 @@ const miyoushe = require('./miyoushe-login');
 const pluginHost = require('./plugin-host');
 const postArt = require('./post-art');
 const passport = require('./passport-login');
+const skland = require('./skland');
 const screenshotLib = require('./screenshots');
 const graphicsConfig = require('./graphics-config');
 const graphicsSchema = require('./graphics-schema');
@@ -197,6 +202,15 @@ function writeCrashLog(label, error) {
   } catch {
     /* logging must never throw */
   }
+  // 同一件事也进诊断缓冲：导出诊断时不必再去翻 crash.log 找时间点
+  try {
+    const firstLine = String((error && error.stack) || error || '')
+      .split('\n')[0]
+      .slice(0, 300);
+    diagnostics.recordEvent('error', label, firstLine);
+  } catch {
+    /* 诊断模块自己出错也不能影响崩溃日志 */
+  }
 }
 
 /*
@@ -208,6 +222,12 @@ process.on('uncaughtException', (error) => {
   writeCrashLog('uncaughtException', error);
   console.error('Uncaught exception:', error);
 });
+
+/*
+ * 网络请求留痕。注入点放在模块级而不是 ready 之后：启动早期的清单检查、
+ * 封面 seed 也要能记上——「启动就失败」恰恰是最需要日志的那一类问题。
+ */
+setRequestLogger((entry) => diagnostics.recordRequest(entry));
 
 process.on('unhandledRejection', (error) => {
   writeCrashLog('unhandledRejection', error);
@@ -910,6 +930,21 @@ function defaultSettings() {
     // 「发现新版本」点了「稍后再说」的推迟状态：同一版本在 updateSnoozeUntil 之前不再自动弹
     updateSnoozeVersion: '',
     updateSnoozeUntil: 0,
+    /*
+     * 最近一次「清单签名验过」的版本号。只在主进程里读写，界面不展示也不改。
+     * 作用：一旦验签成功过，之后没签名的清单就不许再用（防止有人把 sig 删掉绕过）。
+     */
+    updateSignedVersion: '',
+    /*
+     * 自动检查更新失败时的「已经提示过」记录。
+     *
+     * 自动那次检查以前是彻底静默的：清单读不到、源被墙、清单没签名被拦，界面上
+     * 一律只是「已是最新」，用户反馈过来只剩「自动更新没用」一句话，连卡在哪
+     * 一步都不知道。现在第一次失败会明说一次，但同一条错误 24 小时内不再重复，
+     * 免得拔网线开机每次弹红字。
+     */
+    updateFailNoticeText: '',
+    updateFailNoticeAt: 0,
     endfieldPackRoot: detectEndfieldPackRoot(),
     // 本机实际已有的渠道包（官服 / B服 / 国际服 / Play / Steam），界面按它显示
     // 「缺哪个会在切过去时自动补下」，避免用户以为渠道包没被识别。
@@ -5223,6 +5258,60 @@ async function performUpdateCheck(options = {}) {
     location: locations,
     currentVersion: APP_VERSION,
   });
+  /*
+   * 签名策略（TOFU：第一次验签成功之后就锁死）。
+   *
+   * 清单格式是公开的，攻击者想绕过验签最简单的办法不是伪造签名，而是把 sig
+   * 字段整个删掉、让我们退回「只校验 sha256」。所以第一次验签成功之后记住那个
+   * 版本，从此凡是没签名的清单一律拒绝——不能只拒「版本号更低」的，否则删掉
+   * 签名再把 version 写高一点就绕过去了。
+   *
+   * 代价是「以后每一版都必须签名」。pack.js 已经自动签了，换机器发版记得把
+   * H:\HXL-pack\keys\update-signing.pem 一起带走。
+   *
+   * 用户自己填了更新源（内网共享、自建静态站点）时不强求签名：那份清单本来就
+   * 由他自己管，不该让自建源因为没签名而更不了。
+   */
+  const customSource = String(store?.data?.settings?.updateManifest || '').trim();
+  const signedVersion = String(store?.data?.settings?.updateSignedVersion || '').replace(/^v/i, '');
+  /*
+   * 只在「确实要更新」时才要求签名。
+   *
+   * 远端版本不高于本机时，这份清单根本不会被拿去下载，拦它没有任何安全收益，
+   * 只会让状态行常年挂一条红字——本机版本比线上高是很常见的状态（本地构建、
+   * 测试包、镜像还没同步到新版），不能因此一直报「清单没签名」。
+   */
+  if (result.ok && result.hasUpdate && !customSource && result.sigState === 'none' && signedVersion) {
+    /*
+     * 拦下归拦下，话要说人话。
+     *
+     * 以前这里只写「更新清单没有签名（本机已验证过 vX）」，用户看不懂，也拿不到
+     * 任何可反馈的信息。现在把「远端其实是多少版」一并写进去——真的遇到发布漏签，
+     * 用户截图发过来就能立刻判断是哪一环断的。
+     */
+    const remoteVersion = String(result.latest || '').replace(/^v/i, '');
+    const remoteNewer = remoteVersion && remoteVersion !== String(APP_VERSION || '').replace(/^v/i, '');
+    result.ok = false;
+    result.hasUpdate = false;
+    result.code = 'SIGNATURE_MISSING';
+    result.error = `这次更新的清单没带安全签名，已自动拦下（本机上次验签的是 v${signedVersion}${
+      remoteNewer ? `，这次清单写的是 v${remoteVersion}` : ''
+    }）。通常是发布时漏签了，请稍后再试或联系作者重新发布带签名的清单。`;
+  }
+  if (result.ok && result.sigState === 'ok') {
+    const latest = String(result.latest || '').replace(/^v/i, '');
+    /*
+     * 只往前记，不往回调。
+     *
+     * 镜像同步慢、启动器目录里留着上一版的正式清单，这两种情况都会读到版本更低
+     * 但带签名的清单；直接覆盖会把「已经验签过的最高版本」降下去，之后的拦截
+     * 判断就跟着漂。这里只接受更高的版本。
+     */
+    if (latest && (!signedVersion || updater.compareVersions(latest, signedVersion) > 0)) {
+      store.data.settings.updateSignedVersion = latest;
+      store.saveNow().catch(() => {});
+    }
+  }
   updateStatus = { ...updateStatus, ...result, checkedAt: Date.now(), percent: 0, downloading: false };
   updateStatus.backup = updateBackupInfo();
   if (options.push !== false) pushState(true);
@@ -5819,6 +5908,105 @@ async function applyProxySettings() {
   } catch {
     /* 代理填错不该让启动器起不来 */
   }
+}
+
+/**
+ * 读系统代理，转成设置页那个输入框认得的格式。
+ *
+ * 用户装了 Clash / v2rayN 之后，最常卡住的一步是「知道自己在用代理，但不知道
+ * 端口号」。resolveProxy 是 Chromium 自己解析出来的结果（系统代理、PAC 脚本
+ * 都算），直接问它比读注册表可靠——PAC 和 Windows 的 ProxyServer 字段格式
+ * 差得远，自己解析迟早出错。
+ */
+async function readSystemProxy() {
+  const target = session.defaultSession;
+  if (!target) return { ok: false, rules: '', detail: '当前没有可用的网络会话' };
+  let raw = '';
+  try {
+    raw = await target.resolveProxy('https://raw.githubusercontent.com/');
+  } catch (error) {
+    return { ok: false, rules: '', detail: `读不到系统代理：${error.message}` };
+  }
+  // 形如 "PROXY 127.0.0.1:7890;DIRECT"、"SOCKS5 127.0.0.1:1080"、"DIRECT"
+  const text = String(raw || '');
+  const match = text.match(/(PROXY|HTTPS|SOCKS5|SOCKS)\s+([^\s;]+)/i);
+  if (!match) {
+    return { ok: true, rules: '', direct: true, detail: '系统没有配置代理（当前是直连）' };
+  }
+  const scheme = match[1].toUpperCase();
+  const host = match[2];
+  const rules = scheme === 'SOCKS5' || scheme === 'SOCKS' ? `socks5://${host}` : `http://${host}`;
+  return { ok: true, rules, direct: false, detail: `系统代理：${scheme} ${host}` };
+}
+
+/**
+ * 实测一条代理规则通不通。
+ *
+ * 用独立的临时 session 发请求，绝不碰默认会话——用户点「测试」的时候，后台
+ * 可能正在下载更新包，临时切代理会让那条下载直接断掉。
+ *
+ * 同时测 GitHub 和 Gitee：只测 GitHub 的话，「代理生效但 GitHub 本来就慢」
+ * 和「代理根本没生效」看起来一模一样；两条结果放在一起才能判断问题在哪。
+ */
+const PROXY_PROBES = [
+  {
+    name: 'GitHub',
+    url: 'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
+  },
+  { name: 'Gitee', url: 'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json' },
+];
+
+async function probeProxy(value) {
+  const rules = normalizeProxyRules(value);
+  const probeSession = session.fromPartition(`hxl-proxy-probe-${Date.now()}`, { cache: false });
+  const results = [];
+  try {
+    if (rules) await probeSession.setProxy({ proxyRules: rules, proxyBypassRules: '<local>' });
+    else await probeSession.setProxy({ mode: 'direct' });
+  } catch (error) {
+    return { ok: false, rules, error: `代理规则无效：${error.message}`, results: [] };
+  }
+  try {
+    for (const probe of PROXY_PROBES) {
+      const started = Date.now();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await probeSession.fetch(probe.url, {
+          signal: controller.signal,
+          headers: { 'cache-control': 'no-cache', accept: 'application/json,text/plain,*/*' },
+        });
+        results.push({
+          name: probe.name,
+          ok: response.ok,
+          status: response.status,
+          ms: Date.now() - started,
+        });
+        // 主动丢掉 body：探测只关心能不能连上，别把清单内容留在内存里
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* 已经读完或没有 body */
+        }
+      } catch (error) {
+        results.push({
+          name: probe.name,
+          ok: false,
+          ms: Date.now() - started,
+          error: error && error.name === 'AbortError' ? '超时（10 秒）' : String(error && error.message).slice(0, 120),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  } finally {
+    try {
+      probeSession.closeAllConnections();
+    } catch {
+      /* 关不掉也不影响主会话 */
+    }
+  }
+  return { ok: results.some((item) => item.ok), rules, results };
 }
 
 function snapshot() {
@@ -7669,6 +7857,694 @@ function installIpc() {
     return { ok: true };
   });
 
+  /* ------------------------------------------------------------------ */
+  /* 森空岛（鹰角社区）—— 终末地 / 明日方舟的官方数据源                    */
+  /* ------------------------------------------------------------------ */
+
+  /*
+   * 凭据分三层，缺一层就换不出数据：
+   *   accountToken —— 账号级 token（网页登录后 cookie 里的那个），长期有效，用来重换 cred
+   *   cred         —— 每次请求都带在头上的身份串，会过期
+   *   credToken    —— 参与签名计算的密钥，和 cred 一起换
+   * 这三样都是账号凭据，只走 safeStorage，不写进任何明文配置。
+   */
+  const SKLAND_STORE_KEY = 'skland-store';
+  /**
+   * 存储版本 2 的来由：v1 时期 `roles` 里存的是 bindingList 的 uid（森空岛的绑定编号），
+   * 而终末地的接口要的是 `roles[].roleId`，两者差一个数量级之外还完全不同。
+   * 旧数据留着只会让便笺/战争回响/签到一直 403·10001，所以升版本时把缓存角色清空一次，
+   * 下次刷新自动按新解析方式重读。accountToken 不动，用户不需要重新登录。
+   */
+  const SKLAND_STORE_VERSION = 2;
+
+  async function readSklandStore() {
+    const empty = { version: SKLAND_STORE_VERSION, accounts: [], activeId: '' };
+    const raw = await loadSecret(SKLAND_STORE_KEY);
+    if (!raw) return empty;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return empty;
+    }
+    if (!parsed || typeof parsed !== 'object') return empty;
+    const stale = Number(parsed.version) !== SKLAND_STORE_VERSION;
+    const accounts = (Array.isArray(parsed.accounts) ? parsed.accounts : [])
+      .filter((item) => item && item.accountToken)
+      .map((item) => ({
+        id: String(item.id || `sk${Math.random().toString(36).slice(2, 8)}`),
+        accountToken: String(item.accountToken),
+        cred: String(item.cred || ''),
+        credToken: String(item.credToken || ''),
+        userId: String(item.userId || ''),
+        roles: !stale && Array.isArray(item.roles) ? item.roles : [],
+        savedAt: Number(item.savedAt) || 0,
+      }));
+    const activeId = accounts.some((item) => item.id === parsed.activeId)
+      ? parsed.activeId
+      : accounts[0]?.id || '';
+    return { version: SKLAND_STORE_VERSION, accounts, activeId };
+  }
+
+  async function writeSklandStore(store) {
+    await saveSecret(SKLAND_STORE_KEY, JSON.stringify(store));
+  }
+
+  function publicSklandAccount(account) {
+    /*
+     * 账号得有个能认人的名字。
+     * 森空岛只给 userId（一串数字），列表里全是数字谁也分不清哪个是哪个，
+     * 所以优先用这个账号下终末地角色的昵称，没有角色才退回 userId 尾号。
+     */
+    const roles = skland.endfieldRolesOf(account.roles || []);
+    const nickname = String(roles[0]?.nickname || '');
+    return {
+      id: account.id,
+      userId: account.userId,
+      label: nickname || (account.userId ? `鹰角 ${String(account.userId).slice(-6)}` : '森空岛账号'),
+      nickname,
+      savedAt: account.savedAt || 0,
+      roles: account.roles || [],
+    };
+  }
+
+  function pickSklandAccount(store, accountId) {
+    const wanted = String(accountId || '');
+    if (wanted) {
+      const found = store.accounts.find((item) => item.id === wanted);
+      if (found) return found;
+    }
+    return store.accounts.find((item) => item.id === store.activeId) || store.accounts[0] || null;
+  }
+
+  /**
+   * 候选 token 的判定：形状像不像一段令牌。
+   *
+   * 换 cred 的接口本身就是校验器，所以这里只管「值看起来像不像」，
+   * 不追求认得出是哪个字段。太短的（语言、主题、AB 分组）直接排掉，
+   * 免得拿一堆垃圾值去撞接口。
+   */
+  function looksLikeToken(value) {
+    const text = String(value || '').trim();
+    if (text.length < 16 || text.length > 4096) return false;
+    if (!/^[A-Za-z0-9+/=_.\-:]+$/.test(text)) return false;
+    // 纯数字、纯日期这类不算令牌
+    if (/^\d+$/.test(text)) return false;
+    return true;
+  }
+
+  /**
+   * 从 cookie 里抠出所有「可能是账号 token」的值。
+   *
+   * 森空岛网页把登录态种在 ACCOUNT 上，鹰角通行证自己用 HG_TOKEN，
+   * 老版本 SDK 还丢过一个 u8_token；三者历史上有过混用。
+   * 更要紧的是：**站点改过 cookie 名**，只认这三个名字的话，
+   * 用户明明登录成功了也会一直「识别不到账号」。
+   * 所以分两轮：名字像 token 的排前面，其余 cookie 兜底排后面。
+   */
+  function sklandTokenCandidates(items) {
+    const list = [];
+    const push = (raw) => {
+      const value = String(raw || '').trim();
+      if (!value) return;
+      /*
+       * 先解码再判断。
+       * 森空岛把 ACCOUNT 的值做过 URL 编码，原文带 % 号，而 looksLikeToken 的字符集
+       * 白名单里没有 % —— 先前是先校验原文、不过就 return，等于把所有 URL 编码过的
+       * token 直接扔了。用户明明登着，这边永远「识别不到账号」，就是这一步卡掉的。
+       */
+      let decoded = '';
+      try {
+        decoded = decodeURIComponent(value);
+      } catch {
+        decoded = '';
+      }
+      for (const candidate of [value, decoded]) {
+        if (!candidate || !looksLikeToken(candidate) || list.includes(candidate)) continue;
+        list.push(candidate);
+      }
+    };
+    const rows = Array.isArray(items) ? items : [];
+    const tokenish = /token|account|hg_|u8_|cred|passport|skland/i;
+    for (const item of rows) if (tokenish.test(String(item?.name || ''))) push(item?.value);
+    for (const item of rows) push(item?.value);
+    /* 上限 12 个：每轮轮询都要逐个试，太多会把这个账号试进风控 */
+    return list.slice(0, 12);
+  }
+
+  /**
+   * 森空岛网页版也可能把 token 放 localStorage（不走 cookie）。
+   * 拿不到 cookie 时补这一手，顺带把 JSON 里像 token 的字段挖出来。
+   */
+  async function sklandStorageCandidates(webContents) {
+    try {
+      const pairs = await webContents.executeJavaScript(
+        `(() => {
+          const out = [];
+          try {
+            for (let i = 0; i < localStorage.length; i += 1) {
+              const key = localStorage.key(i);
+              out.push([key, String(localStorage.getItem(key) || '').slice(0, 4096)]);
+            }
+          } catch (error) {
+            /* 跨域或页面未就绪，忽略 */
+          }
+          return out;
+        })()`,
+        true
+      );
+      if (!Array.isArray(pairs)) return [];
+      const list = [];
+      for (const [key, value] of pairs) {
+        if (looksLikeToken(value)) list.push(value);
+        /* 值是 JSON 时把里面的 token 字段也挖出来 */
+        if (value && value.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(value);
+            for (const field of ['token', 'access_token', 'accountToken', 'account_token', 'hgToken']) {
+              const found = parsed?.[field];
+              if (looksLikeToken(found)) list.push(String(found));
+            }
+          } catch {
+            /* 不是合法 JSON */
+          }
+        }
+        void key;
+      }
+      return list.slice(0, 6);
+    } catch {
+      return [];
+    }
+  }
+
+  /** 用候选 token 逐个换 cred，第一个成功的就留下。 */
+  async function sklandCredFromCandidates(candidates) {
+    let lastError = null;
+    for (const candidate of candidates) {
+      try {
+        const cred = await skland.loginByToken(candidate);
+        return { cred, accountToken: candidate };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('这个账号的登录凭据用不了，请重新登录森空岛');
+  }
+
+  /**
+   * 把换到的 cred 落成账号记录。
+   * 轮询、粘贴令牌、接管通行证分区三条路都走这里，免得三份实现慢慢跑偏。
+   */
+  async function sklandSaveAccount({ cred, accountToken }) {
+    const account = {
+      id: `sk-${cred.userId || accountToken.slice(-8)}`,
+      accountToken,
+      cred: cred.cred,
+      credToken: cred.token,
+      userId: cred.userId,
+      roles: [],
+      savedAt: Date.now(),
+    };
+    const store = await readSklandStore();
+    store.accounts = store.accounts.filter((item) => item.id !== account.id);
+    store.accounts.unshift(account);
+    store.activeId = account.id;
+    await writeSklandStore(store);
+    try {
+      await refreshSklandRoles(account);
+    } catch {
+      /* 角色拉不到不影响登录本身 */
+    }
+    await writeSklandStore(store);
+    return account;
+  }
+
+  /**
+   * 顺手接管「鹰角通行证」那张卡已经登录的状态。
+   *
+   * 工具页上的「鹰角通行证」登录窗口跑在 persist:passport-hypergryph 分区里，
+   * 森空岛这边跑在 persist:skland，两者 cookie 不共享。但登录成功后种下的是
+   * 同一枚账号 token —— 用户先在通行证那边登过、再来点森空岛，不该再让他登一遍。
+   */
+  async function sklandAdoptPassportSession() {
+    try {
+      const ses = session.fromPartition('persist:passport-hypergryph');
+      const candidates = sklandTokenCandidates(await ses.cookies.get({}));
+      if (!candidates.length) return null;
+      return await sklandCredFromCandidates(candidates);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 换一份能用的 cred：有就直接用，没有或被告知失效就重新换。
+   * `force` 用于接口返回「凭据失效」之后的第二次尝试。
+   */
+  async function ensureSklandCred(account, force = false) {
+    if (!force && account.cred && account.credToken) {
+      return { cred: account.cred, token: account.credToken };
+    }
+    const fresh = await skland.loginByToken(account.accountToken);
+    account.cred = fresh.cred;
+    account.credToken = fresh.token;
+    account.userId = fresh.userId || account.userId;
+    return { cred: account.cred, token: account.credToken };
+  }
+
+  /**
+   * 终末地的 card/detail 与 war-echoes 都必须带 `userId`（森空岛账号 ID）。
+   *
+   * 以前直接读 account.userId。这个值只在「拉绑定角色」那一步顺手取，
+   * 取失败会被静默吞掉（注释写着"缺了也能用"，但终末地这两个接口缺了不行）——
+   * 于是 URL 里变成 `userId=`，服务端不解释，直接回 HTTP 401，
+   * 用户看到的只有一句「接口 HTTP 401」，怎么点重试都一样。
+   *
+   * 这里改成缺了就现取，取不到如实报错，不再让它退化成 401。
+   */
+  async function ensureSklandUserId(account, cred, token) {
+    if (account?.userId) return String(account.userId);
+    const userId = await skland.fetchUserId(cred, token);
+    if (account) account.userId = userId;
+    return userId;
+  }
+
+  /** 拉一次绑定角色，只留终末地那些，顺手写回 store。 */
+  async function refreshSklandRoles(account) {
+    const { cred, token } = await ensureSklandCred(account);
+    const all = await skland.fetchBindings(cred, token);
+    account.roles = all;
+    if (!account.userId) {
+      try {
+        account.userId = await skland.fetchUserId(cred, token);
+      } catch {
+        /* 少数接口不要 userId，缺了也能用 */
+      }
+    }
+    return account.roles;
+  }
+
+  /**
+   * 角色列表为空时补拉一次（每分钟最多一次）。
+   *
+   * 场景：存储升到 v2 后旧的角色缓存被清掉、或者刚登录还没同步过。
+   * 界面上每次重绘都会问状态，所以这里卡一个时间窗，避免打开工具页就
+   * 连打十几个 binding 请求。
+   */
+  const sklandRolesRefreshAt = new Map();
+  async function ensureSklandRoles(account, { force = false } = {}) {
+    if (!account) return [];
+    if (!force && skland.endfieldRolesOf(account.roles || []).length) return account.roles;
+    const last = sklandRolesRefreshAt.get(account.id) || 0;
+    if (!force && Date.now() - last < 60_000) return account.roles || [];
+    sklandRolesRefreshAt.set(account.id, Date.now());
+    try {
+      return await refreshSklandRoles(account);
+    } catch {
+      return account.roles || [];
+    }
+  }
+
+  /** 先查缓存，查不到再补拉一次绑定 —— 老数据迁移后用户不用手动点「同步角色」。 */
+  async function resolveEndfieldRole(account, roleId) {
+    const cached = endfieldRoleOf(account, roleId);
+    if (cached) return cached;
+    /*
+     * 这里是用户主动点了刷新/切游戏，别再受 status 那个 60 秒窗口限制：
+     * 窗口内不重试的话，网络刚好抖一下就会误报「这个账号下没有终末地角色」。
+     */
+    await ensureSklandRoles(account, { force: true });
+    return endfieldRoleOf(account, roleId);
+  }
+
+  /**
+   * 统一入口：挑账号 → 拿 cred → 执行 → 凭据失效时自动重换一次。
+   *
+   * 森空岛的过期信号是 10000（未登录）/ 10002（登录过期）。
+   * 只重试一次：如果是账号本身出问题，反复重换只会把风控惹毛。
+   */
+  async function withSkland(input, runner) {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input?.accountId);
+    if (!account) {
+      return { ok: false, error: '还没有登录森空岛，请先在工具页点「登录森空岛」', needLogin: true };
+    }
+    const run = async () => {
+      const { cred, token } = await ensureSklandCred(account);
+      return runner({ account, cred, token });
+    };
+    try {
+      const result = await run();
+      await writeSklandStore(store);
+      return { ok: true, data: result };
+    } catch (error) {
+      const code = error?.code;
+      const biz = Number(error?.bizCode);
+      /*
+       * 401 / 403 / 10000 / 10002 都按「凭据可能不同步」处理。
+       * 服务端对「cred 还有效、但签名用的 token 已经不是这一份」这种情况，
+       * 返回的是 HTTP 403 / 401 而不是 10002 这类业务码；用账号 token 重换一次
+       * cred 往往就通了，所以和 10002 走同一条重试路径。
+       *
+       * 401 是 2026-11-03 补的：终末地 card/detail 实际会返 401（响应体仍是
+       * {"code":10000}），以前只认 403，于是这种「重登一下就好」的情况被直接
+       * 当成最终错误甩给用户，点了重试还是同一条。
+       *
+       * 但 403 里有一种不该重试：响应体带 `code:10001` 的「操作失败，请稍后重试」。
+       * 那不是登录问题，而是请求里的角色/区服对不上（实测把 bindingList 的 uid
+       * 当 roleId 就会必现）。重换凭据一百次也是同一句，只会让用户以为号坏了。
+       * 这种直接如实说明并指向「同步角色」。
+       */
+      const paramRejected = code === 403 && biz === 10001;
+      const retryable =
+        !paramRejected && (code === 10000 || code === 10002 || code === 401 || code === 403);
+      if (!retryable) {
+        await writeSklandStore(store).catch(() => {});
+        if (paramRejected) {
+          const hint = error?.bizMessage ? `（10001 ${error.bizMessage}）` : '（10001）';
+          return {
+            ok: false,
+            error:
+              `森空岛不接受这次查询${hint}：请求里的角色或区服和这个账号对不上，` +
+              '不是登录过期。点战绩页的「同步角色」重新读一次绑定，再点刷新就好。',
+            code,
+          };
+        }
+        return { ok: false, error: String(error?.message || error), code: code ?? null };
+      }
+      try {
+        await ensureSklandCred(account, true);
+        const result = await run();
+        await writeSklandStore(store);
+        return { ok: true, data: result };
+      } catch (retryError) {
+        await writeSklandStore(store).catch(() => {});
+        const retryBiz = Number(retryError?.bizCode);
+        if (retryBiz === 10001) {
+          const hint = retryError?.bizMessage ? `（10001 ${retryError.bizMessage}）` : '（10001）';
+          return {
+            ok: false,
+            error:
+              `森空岛不接受这次查询${hint}：角色或区服和这个账号对不上。` +
+              '点「同步角色」重新读取绑定后再刷新。',
+            code: retryError?.code ?? 403,
+          };
+        }
+        const prefix = code === 401 || code === 403
+          ? `森空岛拒绝了这次请求（${code}），已经自动重新换过凭据仍然被拒`
+          : '森空岛登录态已失效';
+        return {
+          ok: false,
+          error: `${prefix}：${String(retryError?.message || retryError)}`,
+          needLogin: true,
+        };
+      }
+    }
+  }
+
+  /** 终末地角色（可能一个账号下挂多个服）。 */
+  function endfieldRoleOf(account, roleId) {
+    const roles = skland.endfieldRolesOf(account.roles || []);
+    if (!roles.length) return null;
+    const wanted = String(roleId || '');
+    if (wanted) {
+      const found = roles.find((role) => String(role.uid) === wanted || String(role.roleId) === wanted);
+      if (found) return found;
+    }
+    return roles.find((role) => role.isDefault) || roles[0];
+  }
+
+  /*
+   * 登录森空岛。
+   *
+   * 打开的是森空岛网页版而不是鹰角通行证首页 —— 后者登完只种 hypergryph 域的 cookie，
+   * 拿不到森空岛自己的 ACCOUNT；在森空岛页面里点登录，走的虽然是同一套通行证 SSO，
+   * 但登录态会同时落到 skland.com 下，正好是我们要的那一份。
+   */
+  ipcMain.handle('skland:login', async (_event, input = {}) => {
+    const ses = session.fromPartition('persist:skland');
+    if (input.relogin) {
+      try {
+        await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage'] });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    /*
+     * 最常见的一种「明明登录了却识别不到」：
+     * 用户先在工具页的「鹰角通行证」卡里登过，再来点森空岛 —— 两边是不同的
+     * 会话分区，cookie 不互通，于是又弹一个空白的登录窗。
+     * 这里先拿通行证分区的凭据换一次 cred，成功了连窗口都不开。
+     *
+     * add=true（添加另一个账号）时必须跳过这一步：通行证分区里只有第一次那个号，
+     * 接管过来等于把用户已经有的账号又存一遍，新账号根本进不来。
+     */
+    if (!input.relogin && !input.add) {
+      const adopted = await sklandAdoptPassportSession();
+      if (adopted) {
+        const account = await sklandSaveAccount(adopted);
+        return { ok: true, account: publicSklandAccount(account), adopted: true };
+      }
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let poll = null;
+      let timeout = null;
+
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        if (poll) clearInterval(poll);
+        if (timeout) clearTimeout(timeout);
+        try {
+          if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
+        } catch {
+          /* ignore */
+        }
+        resolve(payload);
+      };
+
+      const loginWindow = new BrowserWindow({
+        width: 560,
+        height: 760,
+        parent: win && !win.isDestroyed() ? win : undefined,
+        modal: false,
+        show: true,
+        title: '登录森空岛',
+        autoHideMenuBar: true,
+        webPreferences: {
+          session: ses,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      loginWindow.setMenuBarVisibility(false);
+      loginWindow.webContents.setUserAgent(passport.UA);
+
+      loginWindow.on('closed', () => {
+        finish({ ok: false, cancelled: true, reason: '已取消登录' });
+      });
+
+      loginWindow.loadURL('https://www.skland.com/').catch(() => {});
+
+      /*
+       * 轮询：每 1.5 秒探一次登录态。
+       *
+       * 两个讲究：
+       * ① 一进窗口先跑一次 —— 用户之前登录过、cookie 还留在 persist:skland 分区里时
+       *    能立刻接管，不用他自己发现「明明登着却还说我没登」。
+       * ② cookie 没变化就不重复换 cred。候选最多十二个，每轮全试一遍等于每 1.5 秒
+       *    打十几次接口，容易把这个账号试进风控；失败一次后补一轮 localStorage
+       *    （森空岛网页版也可能把 token 存那儿），补完仍失败就等 cookie 变化。
+       */
+      let lastProbeKey = '';
+      let needStorageFallback = false;
+      const probe = async () => {
+        if (settled || !loginWindow || loginWindow.isDestroyed()) return;
+        try {
+          const all = await ses.cookies.get({});
+          const fromCookie = sklandTokenCandidates(all);
+          const key = fromCookie.join('|');
+          if (key && key === lastProbeKey && !needStorageFallback) return;
+          lastProbeKey = key;
+          const candidates = fromCookie.slice();
+          if (needStorageFallback) {
+            needStorageFallback = false;
+            candidates.push(...(await sklandStorageCandidates(loginWindow.webContents)));
+          }
+          if (!candidates.length) return;
+          const account = await sklandSaveAccount(await sklandCredFromCandidates(candidates));
+          finish({ ok: true, account: publicSklandAccount(account) });
+        } catch {
+          /* 还没登好 / 网络抖动：允许补一次 localStorage，再失败就等 cookie 变化 */
+          needStorageFallback = true;
+        }
+      };
+      poll = setInterval(probe, 1500);
+      probe();
+
+      timeout = setTimeout(() => {
+        finish({ ok: false, cancelled: true, reason: '登录超时（5 分钟）' });
+      }, 5 * 60 * 1000);
+    });
+  });
+
+  /** 兜底：用户从 web-api.skland.com/account/info/hg 抄来的 token 直接粘进来。 */
+  ipcMain.handle('skland:login-token', async (_event, input = {}) => {
+    const token = String(input.token || '').trim();
+    if (!token) return { ok: false, error: '请先粘贴 token' };
+    try {
+      const cred = await skland.loginByToken(token);
+      const account = await sklandSaveAccount({ cred, accountToken: token });
+      return { ok: true, account: publicSklandAccount(account) };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
+  });
+
+  ipcMain.handle('skland:status', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const active = pickSklandAccount(store, input.accountId);
+    /*
+     * 这里不主动联网：状态查询在页面每次重绘时都会调，
+     * 真去换 cred 会让打开工具页要多等两秒。失效会在读数据时被发现。
+     *
+     * 但要顺带看一眼分区里有没有残留的 cookie —— 有的话说明「用户在这个窗口里
+     * 登录过、只是账号还没被接管」，界面就能提示「点一次登录即可」，而不是干巴巴
+     * 写着「未登录」。读 cookie 是内存操作，不发网络请求。
+     */
+    let hasCookies = false;
+    if (!active) {
+      for (const partition of ['persist:skland', 'persist:passport-hypergryph']) {
+        if (hasCookies) break;
+        try {
+          const pieces = await session.fromPartition(partition).cookies.get({});
+          hasCookies = sklandTokenCandidates(pieces).length > 0;
+        } catch {
+          /* 分区还没建，视作没有 */
+        }
+      }
+    }
+    /*
+     * 例外：存储升级后角色缓存是空的（v1 存的是绑定编号，已经不再兼容）。
+     * 这时候补拉一次绑定，否则界面会误报「这个账号下没有终末地角色」。
+     * ensureSklandRoles 内部有 60 秒时间窗，成功一次就写回 store，不会反复请求。
+     */
+    if (active && !skland.endfieldRolesOf(active.roles || []).length) {
+      const before = (active.roles || []).length;
+      await ensureSklandRoles(active);
+      if ((active.roles || []).length !== before) await writeSklandStore(store).catch(() => {});
+    }
+    return {
+      ok: true,
+      loggedIn: Boolean(active),
+      hasCookies,
+      activeId: active?.id || '',
+      accounts: store.accounts.map(publicSklandAccount),
+      roles: active ? skland.endfieldRolesOf(active.roles || []) : [],
+    };
+  });
+
+  ipcMain.handle('skland:roles', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input.accountId);
+    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true, roles: [] };
+    try {
+      const roles = await refreshSklandRoles(account);
+      await writeSklandStore(store);
+      return { ok: true, roles: skland.endfieldRolesOf(roles) };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error), roles: skland.endfieldRolesOf(account.roles || []) };
+    }
+  });
+
+  /** 切换当前使用的森空岛账号。多个号各自有自己的 cred 与角色，互不影响。 */
+  ipcMain.handle('skland:use-account', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const wanted = String(input.accountId || '');
+    const account = store.accounts.find((item) => item.id === wanted);
+    if (!account) return { ok: false, error: '没有这个森空岛账号，可能已经被移除了' };
+    store.activeId = account.id;
+    await writeSklandStore(store);
+    return { ok: true, accountId: account.id, account: publicSklandAccount(account) };
+  });
+
+  ipcMain.handle('skland:logout', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input.accountId);
+    if (account) {
+      store.accounts = store.accounts.filter((item) => item.id !== account.id);
+      if (store.activeId === account.id) store.activeId = store.accounts[0]?.id || '';
+      await writeSklandStore(store);
+    }
+    /*
+     * 只有「一个号都不剩」时才清分区。
+     * 多账号时删掉其中一个就把整个 persist:skland 清空，会把另一个号留在分区里的
+     * cookie 一起扔了 —— 虽然它还能靠 accountToken 重新换 cred，但下次启动就得
+     * 多走一次授权，没必要。
+     */
+    if (!store.accounts.length) {
+      try {
+        const ses = session.fromPartition('persist:skland');
+        await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'cachestorage'] });
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true, accounts: store.accounts.map(publicSklandAccount), activeId: store.activeId };
+  });
+
+  ipcMain.handle('skland:note', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input.accountId);
+    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
+    const role = await resolveEndfieldRole(account, input.roleId);
+    await writeSklandStore(store).catch(() => {});
+    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色，请先在游戏里创建角色' };
+    const result = await withSkland(input, async ({ cred, token, account: current }) =>
+      skland.endfieldCard(cred, token, {
+        userId: await ensureSklandUserId(current, cred, token),
+        roleId: role.roleId,
+        serverId: role.serverId,
+      })
+    );
+    return { ...result, role };
+  });
+
+  ipcMain.handle('skland:record', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input.accountId);
+    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
+    const role = await resolveEndfieldRole(account, input.roleId);
+    await writeSklandStore(store).catch(() => {});
+    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色，请先在游戏里创建角色' };
+    const result = await withSkland(input, async ({ cred, token, account: current }) =>
+      skland.endfieldWarEchoes(cred, token, {
+        userId: await ensureSklandUserId(current, cred, token),
+        roleId: role.roleId,
+        serverId: role.serverId,
+        seasonId: input.seasonId,
+      })
+    );
+    return { ...result, role };
+  });
+
+  ipcMain.handle('skland:sign', async (_event, input = {}) => {
+    const store = await readSklandStore();
+    const account = pickSklandAccount(store, input.accountId);
+    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
+    const role = await resolveEndfieldRole(account, input.roleId);
+    await writeSklandStore(store).catch(() => {});
+    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色' };
+    const result = await withSkland(input, ({ cred, token }) =>
+      skland.endfieldAttendance(cred, token, { roleId: role.roleId, serverId: role.serverId })
+    );
+    return { ...result, role };
+  });
+
   ipcMain.handle('app:install-update', async () => {
     const result = await dialog.showOpenDialog(win, {
       title: '选择花筱灵启动器更新包',
@@ -7700,6 +8576,10 @@ function installIpc() {
   });
 
   ipcMain.handle('update:check', async () => performUpdateCheck({ push: true, manual: true }));
+  // 代理：从系统里读一条现成的规则，省得用户自己去翻 Clash 的端口
+  ipcMain.handle('proxy:system', async () => readSystemProxy());
+  // 代理：拿真实地址试一下通不通，比「保存了但不知道有没有用」强
+  ipcMain.handle('proxy:test', async (_event, rules) => probeProxy(typeof rules === 'string' ? rules : ''));
 
   ipcMain.handle('update:apply', async () => startUpdate());
 
@@ -13220,6 +14100,81 @@ function musicLoginWindow(target) {
     };
   });
 
+  /*
+   * 一键导出诊断信息到桌面。
+   *
+   * 不打包成 zip：导出的是一个纯文本文件，用户直接拖进聊天窗口就能发，不用先找
+   * 压缩软件。内容只含版本、系统、设置摘要、网络请求元数据和已有日志；设置是
+   * 按白名单逐项挑的，不是把 settings 整个 dump 出去——那里有账号和密钥。
+   */
+  ipcMain.handle('diag:export', async () => {
+    try {
+      const dirs = updateLogDirs();
+      const readLog = async (name, limit = 12000) => {
+        for (const dir of dirs) {
+          try {
+            const text = await fsp.readFile(path.join(dir, name), 'utf8');
+            const clean = text.replace(/^\uFEFF/, '').trim();
+            return clean.length > limit ? clean.slice(-limit) : clean;
+          } catch {
+            /* 换下一个目录 */
+          }
+        }
+        return '';
+      };
+      let crashLog = '';
+      try {
+        const raw = await fsp.readFile(path.join(app.getPath('userData'), 'crash.log'), 'utf8');
+        crashLog = raw.length > 20000 ? raw.slice(-20000) : raw;
+      } catch {
+        /* 没崩溃过就没有这个文件 */
+      }
+
+      const cfg = store?.data?.settings || {};
+      const settingsSummary = {
+        主题: `${cfg.theme || '跟随系统'} / 强调色 ${cfg.accent || '默认'}`,
+        代理: cfg.proxyRules ? String(cfg.proxyRules) : '未设置（直连）',
+        更新源: cfg.updateManifest ? String(cfg.updateManifest) : '内置官方源',
+        自动检查更新: cfg.autoCheckUpdate === false ? '关闭' : '开启',
+        清单签名: `已启用，公钥 ${minisign.KEY_ID}，最近验签版本 ${cfg.updateSignedVersion || '（还没验过）'}`,
+        最近一次检查: updateStatus
+          ? `${updateStatus.ok ? '成功' : '失败'}  当前 ${updateStatus.current || APP_VERSION} / 最新 ${updateStatus.latest || '?'}${updateStatus.error ? `  错误：${updateStatus.error}` : ''}`
+          : '（还没检查过）',
+        游戏数量: String((store?.data?.games || []).length),
+      };
+      const env = {
+        版本: APP_VERSION,
+        Electron: process.versions.electron || '',
+        Chrome: process.versions.chrome || '',
+        Node: process.versions.node || '',
+        系统: `${os.type()} ${os.release()} ${process.arch}`,
+        安装目录: path.dirname(process.execPath),
+        数据目录: app.getPath('userData'),
+      };
+
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stampName = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const target = path.join(app.getPath('desktop'), `花筱灵诊断-${stampName}.txt`);
+      const text = diagnostics.buildReport({
+        generatedAt: now.toLocaleString('zh-CN'),
+        env,
+        settings: settingsSummary,
+        logs: [
+          { title: '覆盖安装日志 update-log.txt', text: await readLog('update-log.txt') },
+          { title: '自愈日志 self-heal.log', text: await readLog('self-heal.log', 6000) },
+          { title: '崩溃日志 crash.log（尾部）', text: crashLog },
+        ],
+      });
+      await fsp.mkdir(path.dirname(target), { recursive: true }).catch(() => {});
+      await fsp.writeFile(target, text, 'utf8');
+      diagnostics.recordEvent('info', 'diag', `诊断已导出：${path.basename(target)}`);
+      return { ok: true, path: target, requests: diagnostics.requestCount() };
+    } catch (error) {
+      return { ok: false, error: (error && error.message) || String(error) };
+    }
+  });
+
   ipcMain.handle('start:refresh-art', async (_event, gameId) => {
     const game = store?.data?.games?.find((item) => item.id === gameId);
     if (!game) return { ok: false, reason: '没有找到这个游戏' };
@@ -15152,11 +16107,41 @@ async function autoUpdateEndfieldPacks() {
   await autoUpdateChannelPacksFor('arknights');
 }
 
+/**
+ * 自动检查失败时说一次，别一声不响。
+ *
+ * 以前只有用户主动点「检查更新」才看得到失败原因，开机那次自动检查是彻底静默的：
+ * 网络被墙、清单读不到、清单没签名被拦，界面上一律只是「已是最新」。用户反馈过来
+ * 就只剩「自动更新没用」一句话，连卡在哪一步都问不出来。
+ *
+ * 但每次开机都弹红字太吵（拔网线开机最明显），所以同一条错误 24 小时内只报一次，
+ * 换了一条新错误立刻报。记录写进 settings，重启也认。
+ */
+const UPDATE_FAIL_NOTICE_WINDOW = 24 * 60 * 60 * 1000;
+function reportAutoCheckFailure(status) {
+  if (!status || status.ok) return;
+  const reason = String(status.error || '').trim();
+  if (!reason) return;
+  const settings = store?.data?.settings;
+  if (!settings) return;
+  const lastAt = Number(settings.updateFailNoticeAt) || 0;
+  const lastText = String(settings.updateFailNoticeText || '');
+  if (lastText === reason && Date.now() - lastAt < UPDATE_FAIL_NOTICE_WINDOW) return;
+  settings.updateFailNoticeText = reason;
+  settings.updateFailNoticeAt = Date.now();
+  store.saveNow().catch(() => {});
+  send('toast', {
+    type: 'error',
+    message: `自动检查更新失败：${reason}（可在 设置 → 软件更新 里手动重试）`,
+  });
+}
+
 async function autoCheckLauncherUpdate() {
   if (!store?.data?.settings?.autoCheckUpdate) return;
   if (process.env.HX_CAPTURE === '1' || process.env.HX_SMOKE === '1') return;
   try {
-    await performUpdateCheck({ push: true });
+    const status = await performUpdateCheck({ push: true });
+    reportAutoCheckFailure(status);
   } catch {
     /* 更新源不可达时静默 */
   }

@@ -383,7 +383,18 @@ function cookieValue(cookieStr, name) {
  *   返回 {code, msg, device_fp}
  * 拿到的 device_fp 直接塞进 x-rpc-device_fp，bbs_device_id 用同一个 device_id。
  */
-let cachedDeviceFp = '';
+/*
+ * device_fp 必须「一个 device_id 一个」。
+ *
+ * 这里踩过一次坑：以前全进程只缓存一个 fp，而请求头里的 x-rpc-device_id
+ * 取的是各自 cookie 的 _MHYUUID。于是第一个账号申领的指纹被贴到所有账号头上，
+ * 指纹与设备 ID 对不上 —— 米哈游风控看到的就是「同一台设备 ID 天天变」，
+ * 这正是 retcode 1034 / 5003 的典型特征。多账号同时登录时尤其明显，
+ * 表现出来就是「换个号就查不了」。
+ *
+ * 现在按 device_id 分开存，老文件里的单个 fp 只认领给第一个用它的 device_id。
+ */
+const cachedDeviceFps = new Map();
 
 /**
  * 指纹文件放在 userData 下：申领到的 device_fp 要长期复用。
@@ -399,22 +410,36 @@ function deviceFpFile() {
   }
 }
 
-function readSavedDeviceFp() {
+/** 读成 { [deviceId]: fp }；兼容 2.9.0 之前的单 fp 格式。 */
+function readDeviceFpStore() {
   const file = deviceFpFile();
-  if (!file) return '';
+  if (!file) return { fps: {} };
   try {
     const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return typeof json.fp === 'string' ? json.fp : '';
+    if (json && json.fps && typeof json.fps === 'object') return { fps: json.fps };
+    if (json && typeof json.fp === 'string' && json.fp) return { fps: { _legacy: json.fp } };
+    return { fps: {} };
   } catch {
-    return '';
+    return { fps: {} };
   }
 }
 
-function saveDeviceFp(fp) {
+function readSavedDeviceFp(deviceIdKey) {
+  const store = readDeviceFpStore();
+  const own = store.fps[deviceIdKey];
+  if (typeof own === 'string' && own) return own;
+  const legacy = store.fps._legacy;
+  return typeof legacy === 'string' ? legacy : '';
+}
+
+function saveDeviceFp(fp, deviceIdKey) {
   const file = deviceFpFile();
   if (!file || !fp) return;
   try {
-    fs.writeFileSync(file, JSON.stringify({ fp, savedAt: Date.now() }), 'utf8');
+    const store = readDeviceFpStore();
+    delete store.fps._legacy; // 老格式升级成按设备存，不再共享
+    store.fps[deviceIdKey] = fp;
+    fs.writeFileSync(file, JSON.stringify({ fps: store.fps, savedAt: Date.now() }), 'utf8');
   } catch {
     /* 写不进去就只留在内存里，下次启动重新申领 */
   }
@@ -430,13 +455,19 @@ function randomProductName() {
 }
 
 async function ensureDeviceFp(cookieStr) {
-  if (cachedDeviceFp) return cachedDeviceFp;
-  const saved = readSavedDeviceFp();
+  /*
+   * 缓存键就是请求头里真正会发出去的那个 device_id：
+   * 优先用 cookie 里米游社网页自己的 _MHYUUID，没有才用本机派生的 GUID。
+   * 和 fetchRecord 里 `x-rpc-device_id` 的取值顺序必须完全一致，
+   * 否则又会出现「指纹与设备 ID 不是一对」的老问题。
+   */
+  const key = cookieValue(cookieStr, '_MHYUUID') || deviceId();
+  if (cachedDeviceFps.has(key)) return cachedDeviceFps.get(key);
+  const saved = readSavedDeviceFp(key);
   if (saved) {
-    cachedDeviceFp = saved;
-    return cachedDeviceFp;
+    cachedDeviceFps.set(key, saved);
+    return saved;
   }
-  const uuid = cookieValue(cookieStr, '_MHYUUID') || deviceId();
   const productName = randomProductName();
   const extFields = JSON.stringify({
     proxyStatus: 0,
@@ -501,7 +532,7 @@ async function ensureDeviceFp(cookieStr) {
     device_fp: '0000000000000',
     app_name: 'bbs_cn',
     ext_fields: extFields,
-    bbs_device_id: uuid,
+    bbs_device_id: key,
   };
   try {
     const response = await fetch('https://public-data-api.mihoyo.com/device-fp/api/getFp', {
@@ -518,13 +549,13 @@ async function ensureDeviceFp(cookieStr) {
     // 实际返回：{retcode:0, message:'OK', data:{device_fp, code:200, msg:'ok'}}
     const fp = json && json.data && typeof json.data.device_fp === 'string' ? json.data.device_fp : '';
     if (json && json.retcode === 0 && fp) {
-      cachedDeviceFp = fp;
-      saveDeviceFp(fp);
+      cachedDeviceFps.set(key, fp);
+      saveDeviceFp(fp, key);
     }
   } catch {
     /* 申领失败就退回 cookie 里网页自己的指纹，不影响主流程 */
   }
-  return cachedDeviceFp;
+  return cachedDeviceFps.get(key) || '';
 }
 
 async function fetchRecord(path, cookieStr, providerId = 'miyoushe', options = {}) {
