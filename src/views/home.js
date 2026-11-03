@@ -490,9 +490,21 @@ function startDockDownloadActions(game) {
     const info = predownloadInfo(server);
     if (info && info.state === 'update') {
       const target = String(info.latestVersion || info.targetVersion || '');
-      return `<button class="start-dock-play is-update" data-action="start-update-game" data-id="${esc(game.id)}" title="${target ? `下载并更新到 ${esc(target)}` : '下载并应用官方更新'}">
+      /*
+       * 异环只覆盖 NTELauncher 那部分资源，游戏本体不在这套清单里（本体走官方
+       * 启动器的 Patcher）。写成「更新游戏」会让人以为点了就能把游戏升上去，
+       * 结果版本没变，还以为是更新失败。
+       */
+      const launcherOnly = String(info.scope || '') === 'launcher';
+      const label = launcherOnly ? '更新启动器' : '更新游戏';
+      const hint = launcherOnly
+        ? '只更新异环的启动器资源，游戏本体请打开官方启动器更新'
+        : target
+          ? `下载并更新到 ${esc(target)}`
+          : '下载并应用官方更新';
+      return `<button class="start-dock-play is-update" data-action="start-update-game" data-id="${esc(game.id)}" title="${hint}">
           ${icon('download')}
-          <span class="start-dock-update-label">更新游戏</span>
+          <span class="start-dock-update-label">${label}</span>
         </button>`;
     }
     return `<button class="start-dock-play" data-action="start-selected" data-id="${esc(game.id)}">

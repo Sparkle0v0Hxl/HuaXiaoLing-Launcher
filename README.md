@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.8.2-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.8.3-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,7 +19,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.8.2**
+**当前版本：v2.8.3**
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -205,7 +205,22 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.8.2 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.8.3 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.8.3</b></summary>
+
+
+- 修掉「多连接被悄悄降级成单连接」：更新包本来是 16 段并发下载，但自更新会先试 Node 网络栈，而 Node **不读系统代理**，靠代理/加速器出网的机器必然探测失败。旧代码把这次失败记成「GitHub 不支持分段」写进缓存，换到能走代理的 Chromium 栈时直接命中缓存、连探测都不做就退回单连接，16 条变 1 条，速度掉几十倍。现在线路问题不再写进缓存，两条栈各记各的。
+- 开下载前先挑线路：直连与几个加速镜像各取一小段（一两秒），谁快用谁；直连够快就走直连，直连慢才落镜像，镜像挂了在探测阶段就被淘汰。
+- 清单选取不再看运气：GitHub / jsDelivr 上那份写的下载地址是直连，Gitee 那份带加速前缀，以前版本相同时「谁先返回用谁」。现在版本持平时按优先级选，带加速的优先。
+- 关键文件装不上不再假装成功：`resources/app.asar` 等被占用时只等 3 秒就跳过，随后照常写「已更新」，用户看到新版号却跑着旧程序。现在主程序与 `app.asar` 装不上就整体失败、还原已改的文件，并说明被什么占着。
+- 等待主进程退出加了第二条判据：不再只认父进程，同时看程序资源是否已释放，避免父进程不是主窗口进程时空等 60 秒。
+- 新增磁盘空间预检：一次更新要近 600 MB（250 MB 主程序 + 备份），不够时提前说明，此时一个文件都还没动。
+- 异环不再把「启动器资源更新」说成「更新游戏」：那套清单只覆盖 NTELauncher，游戏本体不在范围内；且只有远程版本真的比本地新才算有更新。
+
+
+</details>
 
 <details>
 <summary><b>v2.8.2</b></summary>

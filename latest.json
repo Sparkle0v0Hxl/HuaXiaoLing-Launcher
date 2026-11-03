@@ -1,39 +1,46 @@
 {
-  "version": "2.8.2",
-  "title": "花筱灵启动器 2.8.2",
+  "version": "2.8.3",
+  "title": "花筱灵启动器 2.8.3",
   "date": "2026-11-03",
-  "notes": "未签名程序，第一次运行前请把安装目录（含 resources 子目录）加进杀毒软件白名单，否则更新与「开始游戏」可能被拦。\n修掉「更新装不上」：覆盖脚本自己就是用花筱灵启动器.exe 起来的，它等「同名进程退出」时把自己也算进去了，又因为自己占着这个 exe 判定「一直被锁」——等满 60 秒就放弃。所有人 2.8.0 → 2.8.1 都卡在这一步，日志里那句「启动器还在运行，没能退出」就是它。现在按 PID 只等真正的主进程，其余同名子进程一律不管。\n主程序这次也能换掉了：运行中的 exe 写不进去（实测 EBUSY），以前这一项永远被跳过；现在先把自己改名让位、再把新 exe 写到原位置，旧的留到下次启动自动清理。\n下载没进度条：点「立即更新」后弹出的确认框会用 openModal 把「发现新版本」那个弹窗顶掉，进度条元素跟着一起没了，整个 188 MB 下载期间界面上什么都没有。现在确认后重新立起更新弹窗、立即显示进度区和速度。\n增量打不上会自动退回完整包：本地文件被改过（比如自己换过封面、解包过 asar）就对不上基线，这时会安静的改下完整包——行为不变，只是要知道为什么这次是 188 MB。\n之前在 2.8.0 / 2.8.1 点过更新、最后只弹一句「启动器还在运行」的：不用手动重装，现在再点一次更新就行——覆盖脚本是从更新包里取的那份，这一版包里已经是修好的。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.2/HuaXiaoLing-2.8.2-Portable.zip",
+  "notes": "未签名程序，第一次运行前请把安装目录（含 resources 子目录）加进杀毒软件白名单，否则更新与「开始游戏」可能被拦。\n下载慢的真正原因找到了：更新包本来是 16 条连接一起下的，但自更新会先试 Node 网络栈，而它读不到系统代理——靠代理/加速器出网的机器必然探测失败。旧代码把这次失败记成「GitHub 不支持分段」，换到能走代理的那条栈时直接命中缓存，连探测都不做就退回单连接，16 条变 1 条，速度掉几十倍。现在失败不再记进缓存，两条栈各记各的。\n开下载前先花一两秒给每条线路各要一小段，谁快用谁：直连快就走直连，直连慢才落到加速镜像，镜像挂了也不影响。\n同样都是 2.8.2，有人下得快有人下得慢，还有一层原因：几份更新清单里写的下载地址不一样，GitHub 和 jsDelivr 上那份是直连，Gitee 那份带加速前缀。以前版本相同时「谁先返回用谁」，挑中哪份全看运气。现在版本持平时按优先级选，带加速的那份优先。\n装了却没变：覆盖时 app.asar 被占用只等 3 秒就跳过，然后照常写「已更新到 2.8.2」——用户看到新版号，跑的还是旧程序，再点又是同样的失败。现在主程序、app.asar 这类关键文件装不上就整体失败，把已改的还原回去，并明说是被什么占着。\n新增磁盘空间预检：主程序 250 MB 加一份备份要近 600 MB，空间不够会提前说清楚，而不是装到一半崩掉。\n异环不再把「启动器资源更新」说成「更新游戏」：这套清单只覆盖 NTELauncher，游戏本体不在里面，以前按钮写「更新游戏」会让人以为点了就能升本体。现在写「更新启动器」，并且只有远程版本真的比本地新才提示。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/HuaXiaoLing-2.8.3-Portable.zip",
   "deltas": [
     {
       "from": "2.7.1",
-      "to": "2.8.2",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.2/delta-2.7.1-to-2.8.2.zip",
-      "sha256": "d92e48cd3e0b20b53134fa2fb495fd0cba49bb897ce0553d2de07d00c0ba7c49",
-      "size": 3788576
+      "to": "2.8.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/delta-2.7.1-to-2.8.3.zip",
+      "sha256": "5ec3bf67bac049219fe45257d8ad7ef0555758dfffeaf151fc048e27d9f688f3",
+      "size": 3801323
     },
     {
       "from": "2.7.2",
-      "to": "2.8.2",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.2/delta-2.7.2-to-2.8.2.zip",
-      "sha256": "48bfcc2e64dd7f3e21279f85c0b087c5a59f6b125cfcd75d8a7117370a3fa138",
-      "size": 125328
+      "to": "2.8.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/delta-2.7.2-to-2.8.3.zip",
+      "sha256": "6f18fdd94caa9406eecff52379a5b4795f8f40c63f3133690e9ac86703fac0e7",
+      "size": 135823
     },
     {
       "from": "2.8.0",
-      "to": "2.8.2",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.2/delta-2.8.0-to-2.8.2.zip",
-      "sha256": "95151615fc0e5c9faeb3c8918d2eac9ca1991a7d09877e12af56354cc2010ff2",
-      "size": 82710
+      "to": "2.8.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/delta-2.8.0-to-2.8.3.zip",
+      "sha256": "9a217461248e5dc979f5c981946c45b104faa67d68b9b11d2045f6827763ed1c",
+      "size": 94234
     },
     {
       "from": "2.8.1",
-      "to": "2.8.2",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.2/delta-2.8.1-to-2.8.2.zip",
-      "sha256": "9d0c9ec83d3eeeb30085a76740f7987b9dc3d890137e81632d28dd19d4d9de61",
-      "size": 11057
+      "to": "2.8.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/delta-2.8.1-to-2.8.3.zip",
+      "sha256": "9b850bbb9fa66b34d8045658b0a5c2f6a026ab595aa7956d273a07e2714df82e",
+      "size": 23023
+    },
+    {
+      "from": "2.8.2",
+      "to": "2.8.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.8.3/delta-2.8.2-to-2.8.3.zip",
+      "sha256": "0e9141f9a14a8c0677b3b38365110fedef9b573bee1cff7f840a023e35bf7b01",
+      "size": 19223
     }
   ],
-  "sha256": "a6499aae6a809d276a336cf3322b6a4821aa23ec9de490559f8210af702bee1a",
-  "size": 187946717
+  "sha256": "3066ed92ad80fcee11408fc26698cd4aa84ae432380a04e303111dc04625409d",
+  "size": 187956216
 }

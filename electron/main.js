@@ -5088,14 +5088,24 @@ function localUpdateManifest() {
  *
  * 顺序：用户填的更新源 → 启动器目录里那份 → 官方清单（源站 → 镜像）。
  */
+/*
+ * 顺序不只是「谁先试」，版本持平时它就是优先级。
+ *
+ * 各源清单里的下载地址不一样：GitHub 源站和 jsDelivr 上那份写的是 github.com
+ * 直连，Gitee 镜像那份写的是带加速前缀的地址。同一时间它们都返回同一个版本号，
+ * 所以挑中哪份，就决定了用户从哪条线路下那 188 MB。国内机器上挑到直连就是
+ * 几十 KB/s，因此这里把带加速的排在前面；版本真有高低时仍以版本高的为准，
+ * 镜像同步落后也不会让用户拿到旧版。
+ */
 const OFFICIAL_UPDATE_MANIFESTS = [
-  'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
-  'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
-  // fastly 节点：国内裸连比 cdn.jsdelivr.net 稳得多，实测三个源里最靠得住的一条。
-  // 放在 jsdelivr 之后，前面的通了就用前面的，不额外增加延迟。
-  'https://fastly.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
-  // Gitee 镜像仓库（裸连可达，国内兜底）。每次发版后把正式清单同步过去一份。
+  // Gitee 镜像仓库：裸连可达，且清单里的下载地址带加速前缀，国内最快的一条。
+  // 每次发版后把正式清单同步过去一份。
   'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json',
+  // fastly 节点：国内裸连比 cdn.jsdelivr.net 稳得多。
+  'https://fastly.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
+  'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
+  // 源站放最后：国内直连 raw 经常被卡，只作兜底。
+  'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
 ];
 
 /** 更新源候选：一次给全，挨个试，第一个读得通的算数。 */

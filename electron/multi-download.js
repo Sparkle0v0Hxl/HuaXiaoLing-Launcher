@@ -102,19 +102,29 @@ function totalFromContentRange(value) {
  * 差异包动辄几十上百个文件，每个文件探测一次就是几十次多余往返，
  * 小文件本身才几百 KB，探测开销比下载还大。
  */
-const rangeSupportCache = new Map(); // host -> { ok: boolean, at: number }
+const rangeSupportCache = new Map(); // "host|stack" -> { ok: boolean, at: number }
 const RANGE_CACHE_TTL = 10 * 60 * 1000;
 
-function rememberRangeSupport(host, ok) {
-  if (!host) return;
-  rangeSupportCache.set(host, { ok, at: Date.now() });
+/**
+ * 缓存要带网络栈这一维。
+ *
+ * node:https 不读系统代理，Chromium 栈读。同一台 CDN 在两条栈上的结论可以完全
+ * 相反（靠代理/加速器出网的机器尤其明显），按 host 单独记就会互相污染。
+ */
+function cacheKey(host, stack) {
+  return `${host}|${stack || ''}`;
 }
 
-function knownRangeSupport(host) {
-  const hit = host ? rangeSupportCache.get(host) : null;
+function rememberRangeSupport(host, ok, stack = '') {
+  if (!host) return;
+  rangeSupportCache.set(cacheKey(host, stack), { ok, at: Date.now() });
+}
+
+function knownRangeSupport(host, stack = '') {
+  const hit = host ? rangeSupportCache.get(cacheKey(host, stack)) : null;
   if (!hit) return null;
   if (Date.now() - hit.at > RANGE_CACHE_TTL) {
-    rangeSupportCache.delete(host);
+    rangeSupportCache.delete(cacheKey(host, stack));
     return null;
   }
   return hit.ok;
@@ -136,8 +146,16 @@ async function probe({ url, fetchImpl, headers, signal }) {
     });
   } catch (error) {
     if (signal?.aborted) throw abortError();
-    // 探测卡住/超时都不要硬撑：直接告诉上层「分段不可用」，让它走单连接
-    throw fallbackError(`分段探测失败：${error.message}`);
+    /*
+     * 探测卡住/超时都不要硬撑：直接告诉上层「分段不可用」，让它走单连接。
+     *
+     * 但这里记的必须是「这条线路连不上」，不是「这台 CDN 不支持分段」——
+     * 连不上可能只是 node:https 读不到系统代理，换 Chromium 栈就通了。
+     * 打上 networkProblem 标记，上层据此决定要不要写进 CDN 能力缓存。
+     */
+    const failure = fallbackError(`分段探测失败：${error.message}`);
+    failure.networkProblem = true;
+    throw failure;
   }
   try {
     if (response.status === 206) {
@@ -283,15 +301,21 @@ async function multiDownload(options) {
    * 清单里已经给了文件大小 + 这个 host 之前确认过支持 Range，
    * 就直接跳过探测：差异包里每个小文件都少一次往返。
    */
+  /*
+   * 网络栈标识，用来给「这台 CDN 认不认 Range」的缓存分桶。
+   * 调用方可以显式给 stackName；没给就按注入的 fetch 函数名区分。
+   */
+  const stack = String(options.stackName || (typeof fetchImpl === 'function' && fetchImpl.name) || '');
+
   let size = 0;
-  const cachedSupport = knownRangeSupport(host);
+  const cachedSupport = knownRangeSupport(host, stack);
   dbg('开始', url.slice(0, 80), '缓存支持=', cachedSupport, 'expectedSize=', expectedSize);
   /*
    * 这个 host 刚确认过不认 Range：别每个文件都再探一次。
    * 差异包里小文件动辄几千个，每探一次都是白白多一次往返 + 一次超时等待，
    * 直接抛 fallback 让上层退回单连接（单连接照样能下，只是不分段）。
    */
-  if (cachedSupport === false) throw fallbackError('这台 CDN 不支持分段');
+  if (cachedSupport === false) throw fallbackError(`这台 CDN 不支持分段（栈：${stack || 'default'}）`);
   if (cachedSupport === true && expectedSize > 0) {
     size = expectedSize;
   } else {
@@ -302,10 +326,19 @@ async function multiDownload(options) {
       dbg('探测完成', probed.total);
     } catch (error) {
       dbg('探测失败', error.message);
-      if (cachedSupport === null) rememberRangeSupport(host, false);
+      /*
+       * 只有「服务器确实不认 Range」才值得记下来。
+       *
+       * 连不上、超时、TLS 失败这类都是这条线路自己的问题：记成 CDN 不支持，
+       * 换栈重来时缓存会直接命中 false、连探测都不做就退回单连接——自更新
+       * 正是这么从 16 连接退化成 1 连接的，速度掉到几十 KB/s。
+       */
+      if (cachedSupport === null && !(error && error.networkProblem)) {
+        rememberRangeSupport(host, false, stack);
+      }
       throw error;
     }
-    rememberRangeSupport(host, true);
+    rememberRangeSupport(host, true, stack);
     size = probed.total || expectedSize;
   }
   if (!size) throw fallbackError('拿不到文件大小');
@@ -431,4 +464,6 @@ module.exports = {
   multiDownload,
   DEFAULT_CONNECTIONS,
   MIN_PARALLEL_SIZE,
+  knownRangeSupport,
+  rememberRangeSupport,
 };

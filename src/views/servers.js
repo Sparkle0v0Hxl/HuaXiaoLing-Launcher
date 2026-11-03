@@ -932,10 +932,12 @@ function cardPredownloadEntry(game) {
   if (!predownloadChannelOk(game, server)) return '';
   const info = predownloadInfo(server);
   const pdState = String((info && info.state) || '');
+  // 异环只有启动器侧资源能更新，别把它说成「预下载新版本」
+  const launcherOnly = String((info && info.scope) || '') === 'launcher';
   const known = {
-    available: { cls: 'is-ready', title: '预下载新版本' },
-    done: { cls: 'is-done', title: '应用预下载更新' },
-    update: { cls: 'is-update', title: '应用官方更新' },
+    available: { cls: 'is-ready', title: launcherOnly ? '启动器资源有新版本' : '预下载新版本' },
+    done: { cls: 'is-done', title: launcherOnly ? '应用启动器资源更新' : '应用预下载更新' },
+    update: { cls: 'is-update', title: launcherOnly ? '更新异环启动器资源（不含游戏本体）' : '应用官方更新' },
     unsupported: { cls: 'is-block', title: '这个服务器不支持预下载，点开看原因' },
     none: { cls: 'is-idle', title: '查看预下载状态' },
   };
@@ -1396,7 +1398,22 @@ function openPredownloadModal(gameId, serverId) {
       if (cancelled || (result && result.cancelled)) {
         toast('已停止，下次可以从头再来或继续', 'info');
       } else if (kind === 'apply') {
-        toast(`更新已应用到 ${result.tag || '新版本'}`, 'success');
+        /*
+         * 异环那套实现把失败收进 result.failed 而不是抛异常，result.ok 会
+         * 是 false。以前不看这个字段，明明一个文件都没装上却弹「更新已应用」，
+         * 用户下次进来还是同样的状态，永远不知道其实没成功。
+         */
+        if (result && result.ok === false) {
+          const failed = Array.isArray(result.failed) ? result.failed : [];
+          const first = failed.length ? String(failed[0] || '') : '';
+          const text = failed.length
+            ? `更新没有全部完成，${failed.length} 个文件没通过校验${first ? `（例如 ${first}）` : ''}，可以重试`
+            : '更新没有完成，可以重试';
+          errorBox.textContent = text;
+          toast(text, 'error');
+        } else {
+          toast(`更新已应用到 ${result.tag || '新版本'}`, 'success');
+        }
       } else {
         toast(`预下载完成，目标版本 ${result.targetVersion || ''}`, 'success');
       }
