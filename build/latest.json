@@ -1,7 +1,16 @@
 {
-  "version": "2.9.2-alpha1",
-  "title": "花筱灵启动器 2.9.2-alpha1",
+  "version": "2.9.3-alpha1",
+  "title": "花筱灵启动器 2.9.3-alpha1",
   "date": "2026-11-04",
-  "notes": "预发布版本（semver 的 -alpha1 后缀），优先级低于正式版 2.9.2，建议先试、不要当成日常版本。\n硬链接生成不再「假死」：生成 B服 / 国际服运行时如果卡在「第 1/5 步 · 读取官方清单」不动，那其实不是卡住——清空旧运行时目录时撞上 Windows 的 EPERM（这次是 YuanShen_Data\\webCaches\\2.36.0.0\\Service Worker 被残留句柄咬住），任务当场就失败了，而界面还挂着「正在读取官方清单…」的滚动动画。\n清理旧目录改成三档容错：整树删除带 10 次重试 → 逐项删除只看真正删不掉的 → 还有残留就把整个旧目录改名让路，新目录照常建。只有改名也失败才报错。\n失败不再假装在跑：出错时进度区立刻收口成「已中止 · 原因见下方」，滚动动画停掉；EPERM / EBUSY 会翻成中文并带出具体路径，ENOSPC / EACCES 也各有一句能照做的提示。\n清理与扫描都有文案：清理时显示「清理上次残留的运行时目录…」，扫描基础客户端时按 400 ms 节流上报，能看到已经数到第几个文件。\n覆盖范围：原神 B服、终末地、明日方舟三条硬链接路径统一走同一套容错实现；明日方舟的渠道文件覆盖改成删不动就跳过这一件。异环没有硬链接流程，不涉及。\n版本号从这一版开始按 semver 走：修 bug 升 patch、加功能升 minor、破坏性改动升 major，预发布加 -alpha1 / -beta1 / -rc1，转正式时去掉后缀。",
-  "manifest": "https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json"
+  "notes": "预发布版本（semver 的 -alpha1 后缀），优先级低于正式版 2.9.3，建议先试、不要当成日常版本。\n硬链接生成不再「假死」：生成 B服 / 国际服运行时如果卡在「第 1/5 步 · 读取官方清单」不动，那其实不是卡住——清空旧运行时目录时撞上 Windows 的 EPERM（这次是 YuanShen_Data\\webCaches\\2.36.0.0\\Service Worker 被残留句柄咬住），任务当场就失败了，而界面还挂着「正在读取官方清单…」的滚动动画。\n清理旧目录改成三档容错：整树删除带 10 次重试 → 逐项删除只看真正删不掉的 → 还有残留就把整个旧目录改名让路，新目录照常建。只有改名也失败才报错。\n失败不再假装在跑：出错时进度区立刻收口成「已中止 · 原因见下方」，滚动动画停掉；EPERM / EBUSY 会翻成中文并带出具体路径，ENOSPC / EACCES 也各有一句能照做的提示。\n清理与扫描都有文案：清理时显示「清理上次残留的运行时目录…」，扫描基础客户端时按 400 ms 节流上报，能看到已经数到第几个文件。\n覆盖范围：原神 B服、终末地、明日方舟三条硬链接路径统一走同一套容错实现；明日方舟的渠道文件覆盖改成删不动就跳过这一件。异环没有硬链接流程，不涉及。\n版本号从这一版开始按 semver 走：修 bug 升 patch、加功能升 minor、破坏性改动升 major，预发布加 -alpha1 / -beta1 / -rc1，转正式时去掉后缀。\n增量更新：2.9.2 → 2.9.3-alpha1 提供二进制差分包（95 KB，只含 7 个变化文件），在 2.9.2 上点更新会优先用它；基准校验不符时自动回退完整包。",
+  "manifest": "https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json",
+  "deltas": [
+    {
+      "from": "2.9.2",
+      "to": "2.9.3-alpha1",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.3-alpha1/delta-2.9.2-to-2.9.3-alpha1.zip",
+      "sha256": "98e7eceb42662d0768d15f1286c5f4e4ea0dece63683cbaac37651cc70029a27",
+      "size": 97266
+    }
+  ]
 }
