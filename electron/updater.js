@@ -70,6 +70,17 @@ const MANIFEST_GRACE = 1800;
 const DOWNLOAD_RETRIES = 2;
 
 /**
+ * 单连接下载时「建连 + 拿到第一个字节」的上限。
+ *
+ * 这段计时只覆盖到响应头，一拿到响应就 clearTimeout，不影响后面读 body。
+ * 原来是 60 秒：正常线路首包都在 1~3 秒内，60 秒拿到不首字节基本等于这条线不通了，
+ * 用户在「正在下载」上白等一分钟才看到报错（而且报的是 ABORTED）。
+ * 收到 20 秒，并且超时后立刻换线路，不在这条死路上原地重试。
+ * 自测和排障可以设 HXL_UPDATE_CONNECT_TIMEOUT（毫秒，最低 1000）。
+ */
+const CONNECT_TIMEOUT = Math.max(1000, Number(process.env.HXL_UPDATE_CONNECT_TIMEOUT) || 20000);
+
+/**
  * 分段下载的连接数。
  *
  * 直连 GitHub Release 时单条连接常被限到几十 KB/s（实测 53 KB/s），
@@ -438,7 +449,7 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
   let lastError = null;
   for (let attempt = 0; attempt <= DOWNLOAD_RETRIES; attempt += 1) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT);
     try {
       const response = await httpFetch(url, {
         signal: controller.signal,
@@ -492,8 +503,21 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
       return dest;
     } catch (error) {
       clearTimeout(timer);
-      lastError = error;
-      if (error.retryable === false || attempt >= DOWNLOAD_RETRIES) break;
+      /*
+       * 超时是这条链路上最常见的失败，但它原来以 AbortError / message='ABORTED'
+       * 的形式直接冒到界面上，用户只看到「更新失败：ABORTED」，无从下手。
+       * 这里翻译成人话，并打上 timeout 标记：同一地址不再原地重试（三次 20 秒
+       * 白等一分钟），而是立刻交给上层换线路——镜像、直连、Chromium 栈各算一条。
+       */
+      let failure = error;
+      if (controller.signal.aborted) {
+        failure = new Error(`连接更新源超时（${CONNECT_TIMEOUT / 1000} 秒没有响应）`);
+        failure.code = 'ABORTED';
+        failure.timeout = true;
+        failure.cause = error;
+      }
+      lastError = failure;
+      if (failure.timeout || failure.retryable === false || attempt >= DOWNLOAD_RETRIES) break;
     }
   }
   throw lastError || new Error('下载失败');
@@ -716,6 +740,23 @@ async function downloadHttp({ url, dest, expectedSize, report }) {
       lastError = error;
       console.warn(`[update] 这条线路下载失败，换下一条：${source} — ${error && error.message}`);
     }
+  }
+  /*
+   * 所有线路（直连 + 各镜像）都没起来时，别把最后一条的内部错误原样丢给用户。
+   * 「连接更新源超时」这类话要说清是「全都连不上」，并且给出下一步动作，
+   * 否则用户只知道自己更新失败，不知道该怎么办。
+   */
+  if (lastError && lastError.timeout) {
+    const mirrors = Math.max(0, sources.length - 1);
+    const error = new Error(
+      mirrors > 0
+        ? `连不上更新源（直连和 ${mirrors} 条镜像线路都没有响应），请检查网络后重试；国内网络直连 GitHub 常常需要开加速器`
+        : '连不上更新源（多次请求都没有响应），请检查网络后重试；国内网络直连 GitHub 常常需要开加速器'
+    );
+    error.retryable = true;
+    error.timeout = true;
+    error.cause = lastError;
+    throw error;
   }
   throw lastError || new Error('下载失败');
 }

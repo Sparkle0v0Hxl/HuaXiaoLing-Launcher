@@ -706,7 +706,16 @@ function humanError(error) {
   if (/\bEACCES\b/.test(text)) {
     return `没有权限写入${at ? `：${at}` : ''}。换一个目录，或用管理员身份运行启动器。`;
   }
-  return text;
+  /*
+   * ABORTED / ERR_ABORTED 不是用户能理解的词——它是「请求被 signal 掐断」的内部
+   * 标记。主进程已经改成本身就抛人话，这里再兜一道：老版本残留、Chromium 自己
+   * 报的 net::ERR_ABORTED 都还会走到这。
+   */
+  const ABORT_HINT = '请求被中断（网络超时或已取消）';
+  return text
+    .replace(/\bnet::ERR_ABORTED\b/gi, ABORT_HINT)
+    .replace(/\bERR_ABORTED\b/gi, ABORT_HINT)
+    .replace(/\bABORTED\b/g, ABORT_HINT);
 }
 
 function activeDownloads() {
@@ -1323,6 +1332,25 @@ async function boot() {
           const label = document.querySelector('.update-progress small');
           if (label) label.textContent = updateProgressText(state.update.percent, progress.label);
         }
+      }
+      /*
+       * 同一条进度也写进左下角任务坞。
+       *
+       * 弹窗只在你点「立即更新」的那一刻存在：切到别的页面、或者手滑关掉弹窗，
+       * 200MB 的下载就完全没有任何可见反馈——用户的原话是「更新没进度条」。
+       * 坞是全局的，不依赖当前页面，所以这里和游戏预下载走同一套显示。
+       */
+      const job = sophonJobs.find((item) => item.mode === 'launcher');
+      if (job) {
+        job.percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
+        job.phase = progress.label || `正在下载 ${job.percent}%`;
+        const parts = [];
+        if (state.update.received && state.update.total) {
+          parts.push(`${formatMB(state.update.received)} / ${formatMB(state.update.total)}`);
+        }
+        if (state.update.speed) parts.push(formatSpeed(state.update.speed));
+        job.stats = parts.join(' · ');
+        if (!patchTaskDockJob(job)) renderTaskDock();
       }
     });
     api.onGachaUpdated(() => {

@@ -371,6 +371,34 @@ async function main() {
   };
   await fsp.writeFile(outZip.replace(/\.zip$/i, '.json'), `${JSON.stringify(sidecar, null, 2)}\n`, 'utf8');
 
+  // 可选：--manifest <latest.json> 时，把这条增量直接写进清单的 deltas 数组，
+  // 省得每次发布都手动补。否则用户永远是「差异下载也没有」——因为只有手写的那一条
+  // （且恰好对得上当前版本）才生效。增量包跟着同一个 release 资产走，所以 url 复用主包
+  // url 的「目录 + 版本标签」，只把文件名换成 delta-<from>-to-<to>.zip。
+  if (args.manifest) {
+    try {
+      const manifestPath = String(args.manifest);
+      if (!fs.existsSync(manifestPath)) die(`--manifest 指定的清单不存在：${manifestPath}`);
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const deltaEntry = { from: fromVersion, to: toVersion, sha256, size };
+      const baseUrl = String(manifest.url || '').trim();
+      const m = baseUrl.match(/^(https?:\/\/.+\/releases\/download\/[^/]+)\/[^\/]+$/i);
+      deltaEntry.url = m
+        ? `${m[1]}/delta-${fromVersion}-to-${toVersion}.zip`
+        : `delta-${fromVersion}-to-${toVersion}.zip`;
+      manifest.deltas = Array.isArray(manifest.deltas) ? manifest.deltas : [];
+      const idx = manifest.deltas.findIndex(
+        (d) => String(d.from) === fromVersion && String(d.to) === toVersion
+      );
+      if (idx >= 0) manifest.deltas[idx] = deltaEntry;
+      else manifest.deltas.push(deltaEntry);
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      console.log(`[build-delta] 已写入清单 deltas（共 ${manifest.deltas.length} 条）：delta-${fromVersion}-to-${toVersion}.zip`);
+    } catch (error) {
+      console.warn(`[build-delta][warn] 写入清单失败，请手动把上面的清单片段加进 deltas：${error.message}`);
+    }
+  }
+
   try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch { /* 清理失败不影响产物 */ }
 
   console.log('\n[build-delta] 完成');

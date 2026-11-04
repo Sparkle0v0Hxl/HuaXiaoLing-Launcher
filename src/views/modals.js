@@ -1495,6 +1495,8 @@ function renderTaskDock() {
   dock.hidden = false;
   // 渠道包下载也进这个坞（mode=pack），标题单独给一种说法
   const jobTitle = (job) => {
+    // 启动器自更新：不挂在哪个游戏上，标题只写「启动器 + 版本号」
+    if (job.mode === 'launcher') return `启动器${job.gameName ? ` ${job.gameName}` : ''}`;
     const modeText =
       job.mode === 'update'
         ? '更新'
@@ -1539,7 +1541,8 @@ function renderTaskDock() {
         }
         // 阶段文案和弹窗里的阶段条同源，缩到任务坞里也不会换一套说法
         const stepText = job.stage === undefined ? '' : `${sophonStageText(job.stage)}`;
-        const phaseText = job.percent >= 100 ? '完成' : stepText || job.phase || '准备中…';
+        // 有阶段文案就用阶段文案：100% 只代表「下完了」，后面还有校验 / 解压 / 覆盖
+        const phaseText = stepText || job.phase || (job.percent >= 100 ? '完成' : '准备中…');
         return `
           <div class="task-dock-item">
             <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="打开任务界面">
@@ -1550,7 +1553,12 @@ function renderTaskDock() {
                 <span class="task-dock-bar"><span style="width:${Math.max(0, Math.min(100, job.percent || 0))}%"></span></span>
               </span>
             </button>
-            <button class="task-dock-stop" data-action="cancel-sophon-dock" data-id="${esc(job.id)}" title="停止">✕</button>
+            ${
+              // 启动器更新没法中途停下（下载完要覆盖程序再重启），给个 ✕ 只会误导
+              job.mode === 'launcher'
+                ? ''
+                : `<button class="task-dock-stop" data-action="cancel-sophon-dock" data-id="${esc(job.id)}" title="停止">✕</button>`
+            }
           </div>`;
       })
       .join('')}`;
@@ -1573,7 +1581,12 @@ function patchTaskDockJob(job) {
   if (!row || !row.querySelector('.task-dock-bar')) return false;
   const small = row.querySelector('.task-dock-copy small');
   if (small) {
-    const text = job.percent >= 100 ? '完成' : job.phase || '准备中…';
+    /*
+     * 阶段文案优先：「100%」不等于「完事」——启动器更新到 100% 之后还要校验、
+     * 解压、覆盖文件，那一段会推「正在校验更新包…」。以前这里一律写「完成」，
+     * 用户会以为已经装好了，然后看着启动器半天没动静。
+     */
+    const text = job.phase || (job.percent >= 100 ? '完成' : '准备中…');
     small.textContent = job.stats ? `${text} · ${job.stats}` : text;
   }
   const fill = row.querySelector('.task-dock-bar > span');

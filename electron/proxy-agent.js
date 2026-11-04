@@ -99,7 +99,10 @@ function parseProxySpec(spec) {
 }
 
 function isAbort(error) {
-  return Boolean(error && (error.name === 'AbortError' || error.message === 'ABORTED'));
+  return Boolean(
+    error &&
+      (error.code === 'ABORTED' || error.name === 'AbortError' || error.message === 'ABORTED')
+  );
 }
 
 /**

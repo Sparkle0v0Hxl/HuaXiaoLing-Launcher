@@ -1391,6 +1391,12 @@ async function handleAction(action, id, element, event = null) {
       const jobId = element.dataset.id;
       const job = sophonJobs.find((item) => item.id === jobId);
       if (!job) break;
+      // 启动器自更新：把「发现新版本」那个弹窗重新立起来，进度条就在里面
+      if (job.mode === 'launcher') {
+        if (state.update) openUpdateModal({ ...state.update, percent: state.update.percent || 0 });
+        else toast('启动器正在后台更新，进度看任务条上这一行', 'info');
+        break;
+      }
       if (job.status === 'queued') {
         toast(`「${job.serverName}」还在排队，前面的任务结束后会自动开始`, 'info');
         break;
@@ -1949,8 +1955,29 @@ async function handleAction(action, id, element, event = null) {
         busyBtn.disabled = true;
         busyBtn.textContent = '正在下载…';
       }
+      /*
+       * 进度同时进左下角任务坞。
+       *
+       * 弹窗只在「点立即更新」那一下存在：切到别的页面、或者手滑关掉弹窗，
+       * 两百多 MB 的下载就一点反馈都没有了（用户原话：「更新没进度条」「总得给个
+       * 看到下载过程的东西吧」）。坞是全局的，和游戏预下载走同一套显示——
+       * 阶段文字、进度条、已下 / 总量、速度都在那一行里。
+       */
+      const updateJob = {
+        id: `launcher-update-${Date.now()}`,
+        mode: 'launcher',
+        serverName: '启动器',
+        gameName: info.latest ? `v${info.latest}` : '',
+        status: 'running',
+        percent: 0,
+        phase: '正在准备下载…',
+        stats: '',
+      };
+      sophonJobs = sophonJobs.filter((item) => item.mode !== 'launcher');
+      sophonJobs.push(updateJob);
+      renderTaskDock();
       try {
-        toast('开始下载更新包…', 'info');
+        toast('开始下载更新包，进度在左下角「进行中的任务」里', 'info');
         const result = await api.applyUpdate();
         if (result && result.ok) {
           closeModal();
@@ -1960,6 +1987,14 @@ async function handleAction(action, id, element, event = null) {
         }
       } catch (error) {
         toast(`更新失败：${humanError(error)}`, 'error');
+      } finally {
+        /*
+         * 成功时启动器马上就重启，这一条其实看不到；失败或用户放弃时必须收走，
+         * 否则坞里会一直挂着一条永远不动的「正在准备下载…」——就是预下载当初
+         * 「下完了坞里还显示还在」那个毛病。
+         */
+        sophonJobs = sophonJobs.filter((item) => item !== updateJob);
+        renderTaskDock();
       }
       break;
     }

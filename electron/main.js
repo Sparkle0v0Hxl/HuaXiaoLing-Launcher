@@ -5757,12 +5757,14 @@ async function startUpdate(options = {}) {
   if (!locations.length) throw new Error('还没有设置更新源');
   updateStatus = { ...updateStatus, downloading: true, percent: 0, error: '' };
   pushState(true);
+  let pendingVersion = '';
   try {
     // 挨个候选找一份读得通的清单：用户填的 → 目录里那份 → 官方源
     send('update:progress', { percent: 0, phase: 'manifest', label: '正在读取更新清单…' });
     const resolved = await updater.resolveManifest(locations);
     if (!resolved.ok) throw new Error(resolved.error || '读不到更新清单');
     const manifest = resolved.manifest;
+    pendingVersion = String(manifest.version || '');
     if (updater.compareVersions(manifest.version, APP_VERSION) <= 0) {
       const info = await performUpdateCheck({ push: false });
       updateStatus = { ...info, downloading: false, percent: 0, error: '' };
@@ -5859,13 +5861,27 @@ async function startUpdate(options = {}) {
     const staged = await updater.stage({ zipPath, tempBase, version: manifest.version });
     return await applyStaged(staged);
   } catch (error) {
+    const message = error?.message ? error.message : String(error);
     updateStatus = {
       ...updateStatus,
       downloading: false,
       percent: 0,
-      error: error?.message ? error.message : String(error),
+      error: message,
     };
     pushState(true);
+    /*
+     * 更新失败必须留档。用户界面上只有一句 toast，看完就没了；「别的用户更新失败：
+     * ABORTED」那次反馈之所以只能靠猜，就是因为这里什么都没记。导出诊断时要能
+     * 查到哪一步失败、什么错误码。
+     */
+    try {
+      writeLaunchLog(
+        `update ${APP_VERSION} -> ${pendingVersion || '?'} 失败：${message}${error && error.code ? `（code=${error.code}）` : ''}`
+      );
+      diagnostics.recordEvent('error', 'update', message, error && error.code ? `code=${error.code}` : '');
+    } catch {
+      /* 记录失败不能盖住真正的错误 */
+    }
     throw error;
   }
 }

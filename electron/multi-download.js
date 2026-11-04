@@ -39,8 +39,11 @@ const MAX_CONNECTIONS = 32;
 const SEGMENT_IDLE_TIMEOUT = 25000;
 /** 单分段「连上但没数据」的等待上限：比 idle 短，卡住的段尽快换掉。 */
 const SEGMENT_CONNECT_TIMEOUT = 15000;
-/** 探测（bytes=0-0）多久没结果就直接放弃分段。不设这个会卡在这一步不动。 */
-const PROBE_TIMEOUT = 10000;
+/**
+ * 探测（bytes=0-0）多久没结果就直接放弃分段。不设这个会卡在这一步不动。
+ * 自测和排障可以设 HXL_PROBE_TIMEOUT（毫秒，最低 300）。
+ */
+const PROBE_TIMEOUT = Math.max(300, Number(process.env.HXL_PROBE_TIMEOUT) || 10000);
 /** 全局停滞判定：这么久总进度一点没涨，就认为剩下的连接都被黑洞了。 */
 const STALL_TIMEOUT = 45000;
 /** 单分段最多重连几次。 */

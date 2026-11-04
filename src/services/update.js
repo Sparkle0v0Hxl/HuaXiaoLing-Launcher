@@ -285,9 +285,18 @@ function openUpdateModal(info) {
       </div>
     </div>`,
     {
-      // 用户关掉「发现新版本」弹窗（✕ / 稍后再说）＝这版先跳过：记下版本 + 推迟 24 小时，
-      // 免得启动时和每 6 小时的后台检查反复把它弹出来。
-      onClose: () => snoozeUpdate(data.latest),
+      /*
+       * 用户关掉「发现新版本」弹窗（✕ / 稍后再说）＝这版先跳过：记下版本 + 推迟
+       * 24 小时，免得启动时和每 6 小时的后台检查反复把它弹出来。
+       *
+       * 但「已经在下载了」不能算跳过：那是用户想看进度又不想被弹窗挡着，关掉之后
+       * 下载还在跑（任务坞里有进度条）。这时候记 24 小时推迟，等于失败一次就要
+       * 等一整天才会被重新提醒。
+       */
+      onClose: () => {
+        if (state.update && state.update.downloading) return;
+        snoozeUpdate(data.latest);
+      },
     }
   );
   setUpdateProgress(data.percent || 0);

@@ -48,6 +48,36 @@ const agentOptions = { keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64, m
 const httpsAgent = new https.Agent(agentOptions);
 const httpAgent = new http.Agent(agentOptions);
 
+/**
+ * 请求被 AbortSignal 掐断时抛的错误。
+ *
+ * 这里原来写的是 `new Error('ABORTED')`，结果这四个字母一路冒到界面上，用户看到
+ * 「更新失败：ABORTED」，完全不知道发生了什么（2026-11-04 用户反馈）。它不是
+ * 错误码，只是我们自己造的中间量：signal 一触发就把在途 socket destroy 掉。
+ * 触发它的原因只有两种——超时，或者被主动取消。
+ *
+ * 标记改用 `code` 而不是 message：文案以后还会改，靠字符串比对判断「是不是
+ * 取消」迟早会被改坏。`retryable` 给 true，超时属于可以换条线路再试的那类。
+ */
+function abortFailure(signal) {
+  const reason = signal && signal.reason;
+  const timedOut = Boolean(reason && reason.name === 'TimeoutError');
+  const error = new Error(
+    timedOut ? '请求超时（服务器长时间没有响应）' : '请求被中断（网络超时或已取消）'
+  );
+  error.code = 'ABORTED';
+  error.retryable = true;
+  return error;
+}
+
+/** 判断一个错误是不是「被 signal 掐断」。兼容旧写法，免得别处漏改一处就失效。 */
+function isAbort(error) {
+  return Boolean(
+    error &&
+      (error.code === 'ABORTED' || error.name === 'AbortError' || error.message === 'ABORTED')
+  );
+}
+
 /** 用 node 的 http/https 发请求，返回标准 Response（body 为 Web 流）。
  *
  * ⚠️ 必须自己跟随 3xx：GitHub Release 的下载地址会 302 到
@@ -145,10 +175,12 @@ function performRequest(url, options = {}, redirects = 0) {
     request.on('error', reject);
     if (options.signal) {
       if (options.signal.aborted) {
-        request.destroy(new Error('ABORTED'));
+        request.destroy(abortFailure(options.signal));
         return;
       }
-      options.signal.addEventListener('abort', () => request.destroy(new Error('ABORTED')), { once: true });
+      options.signal.addEventListener('abort', () => request.destroy(abortFailure(options.signal)), {
+        once: true,
+      });
     }
     if (body) request.write(body);
     request.end();
@@ -232,7 +264,7 @@ async function httpFetch(url, options = {}) {
     } catch (error) {
       // Chromium 栈连不上时退回 Node 的 https 栈再试一把：两边各自的可达性盲区
       // （系统代理配置异常、证书库被改、个别 CDN 的 TLS 实现差异）不同，互为兜底。
-      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) {
+      if (isAbort(error)) {
         reportRequest(url, method, startedAt, 'chromium', 0, error);
         throw error;
       }
@@ -282,7 +314,7 @@ async function segmentFetch(url, options = {}) {
       rangeTransport = 'node';
       return response;
     } catch (error) {
-      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) throw error;
+      if (isAbort(error)) throw error;
       // Node 直连不通（多半是靠代理出网）：5 分钟内不再尝试，免得每段都等超时
       rangeTransport = 'node-broken';
       rangeTransportBrokenAt = Date.now();
