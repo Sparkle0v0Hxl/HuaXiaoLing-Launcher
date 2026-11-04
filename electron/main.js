@@ -4669,6 +4669,35 @@ function ensureServers(game) {
     if (server.path && server.path.includes('.vela-linked-runtime')) {
       server.legacyRuntime = true;
     }
+    /*
+     * 空壳服务器（从没安装过、没有 root 也没有启动程序）不该留着版本号。
+     *
+     * B服 / 国际服 这类内置占位服务器以前会在「生成一份」失败或生成到一半时
+     * 留下 sophonVersion=7.1.0，之后再也没人清；本地明明已经是 7.2，
+     * 界面上却能看到旧版本号，看起来就是「识别错了」。
+     */
+    if (!server.root && !server.path && server.sophonVersion) {
+      server.sophonVersion = '';
+      changed = true;
+    }
+    /*
+     * 已安装的服务器，版本号以磁盘上的 config.ini 为准。
+     * 老数据里 sophonVersion 可能一直是空的（更新路径历史上不写这个字段），
+     * 空的就按实际客户端补一次——否则界面只能显示「版本未知」，
+     * 用户明明已经更到 7.2 也看不出来。
+     */
+    if (server.root && !server.sophonVersion) {
+      try {
+        const text = fs.readFileSync(path.join(server.root, 'config.ini'), 'utf8');
+        const local = (text.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim();
+        if (local) {
+          server.sophonVersion = local;
+          changed = true;
+        }
+      } catch {
+        /* 没有 config.ini（非米哈游游戏 / 还没装完）就保持空 */
+      }
+    }
     if (!server.addedAt) server.addedAt = new Date().toISOString();
   }
 
@@ -8073,6 +8102,8 @@ function installIpc() {
       });
       game.version = result.tag;
       game.versionName = result.tag;
+      // 修复完整资源同样会把文件换成目标版本，服务器版本号要跟着走
+      server.sophonVersion = result.tag;
       game.lastOfficialSync = Date.now();
       await store.saveNow();
       pushState(true);
@@ -11742,6 +11773,13 @@ function musicLoginWindow(target) {
       }
       game.version = result.tag;
       game.versionName = result.tag;
+      /*
+       * 更新成功后同步服务器的实际版本。
+       * 以前只有「硬链接生成一份」那条路写 sophonVersion，更新这条路不写，
+       * 于是本地已经更到 7.2、服务器上还挂着上一次生成时的 7.1.0——界面
+       * 看起来就像「启动器把本地认成了旧版本」。
+       */
+      server.sophonVersion = result.tag;
       game.lastOfficialSync = Date.now();
       await store.saveNow();
       pushState(true);
@@ -12027,6 +12065,8 @@ function musicLoginWindow(target) {
       if (version) {
         game.version = version;
         game.versionName = version;
+        // 全新安装也要记服务器的实际版本，否则这条服务器会一直挂着空值
+        if (engine === 'sophon') server.sophonVersion = version;
       }
       ensureServers(game);
       await store.saveNow();
