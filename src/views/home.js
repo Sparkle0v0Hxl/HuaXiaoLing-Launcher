@@ -538,6 +538,50 @@ function startDockDownloadActions(game) {
     </div>`;
 }
 
+/*
+ * 渲染后端的三段式短标签。
+ * 弹窗里用完整名（「跟随游戏默认」/「DirectX 12」），dock 只有 296～424px 宽，
+ * 三段并排必须压成 2～4 个字，否则换行或截断。
+ */
+const RENDER_API_SHORT = { default: '默认', dx11: 'DX11', dx12: 'DX12' };
+
+/**
+ * 启动页「开始游戏」正下方的渲染后端快捷开关（2026-11-05 用户要求）。
+ *
+ * 原来这个开关只活在「编辑游戏」表单里，要找到它得先点游戏卡片进弹窗 ——
+ * 用户实际根本不会去那儿翻。开关挪到主按钮下面，点一下就切，不必再进表单。
+ *
+ * 以 RENDER_API_SUPPORT 为唯一判据，表里有谁就给谁渲染：
+ *   原神 / 星铁 / 绝区零 / 终末地 / 异环 五个，崩坏3 与明日方舟实测没有 D3D12 后端
+ *   或压根不是 3D 渲染，表里没有就整行不出现，免得切了没反应还以为开关坏了。
+ *
+ * 另外两种情况也不显示：
+ *   · 没装（这时候 dock 上是「下载游戏」那一排，参数改了也没对象可启动）；
+ *   · 正在运行（参数只在启动那一刻生效，运行中摆个开关只会让人以为能热切）。
+ */
+function startDockRenderApi(game) {
+  const key = game && game.builtinKey ? String(game.builtinKey) : '';
+  const entry = RENDER_API_SUPPORT[key];
+  if (!entry || !game.installed || game.running) return '';
+  const modes = entry.modes;
+  // 存档来自老版本或手改过 json 时可能是脏值，一律按「默认」高亮
+  const current = modes.includes(game.renderApi) ? game.renderApi : 'default';
+  const seg = modes
+    .map((mode) => {
+      const on = mode === current;
+      const title =
+        mode === 'default'
+          ? '交给游戏自己挑（通常就是 DX11），不传任何参数'
+          : `强制用 DirectX ${mode === 'dx12' ? 12 : 11} 启动，下次启动生效`;
+      return `<button class="start-dock-gfx-btn${on ? ' is-on' : ''}" data-action="start-render-api" data-id="${esc(game.id)}" data-mode="${esc(mode)}" title="${esc(title)}" aria-pressed="${on ? 'true' : 'false'}">${esc(RENDER_API_SHORT[mode] || mode)}</button>`;
+    })
+    .join('');
+  return `<div class="start-dock-gfx">
+      <span class="start-dock-gfx-label">渲染后端</span>
+      <span class="start-dock-gfx-seg" role="group" aria-label="渲染后端">${seg}</span>
+    </div>`;
+}
+
 function startServerPanel(game) {
   const servers = game.servers || [];
   const active =
@@ -659,7 +703,7 @@ function startServerPanel(game) {
               </span>
               <button class="start-dock-stop" data-action="stop-game" data-id="${esc(game.id)}" title="结束游戏进程" aria-label="结束游戏进程">${icon('stop')}</button>
             </div>`
-          : `${startDockPredownload(game)}${startDockDownloadActions(game)}`
+          : `${startDockPredownload(game)}${startDockDownloadActions(game)}${startDockRenderApi(game)}`
       }
     </div>`;
 }

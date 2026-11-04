@@ -922,13 +922,21 @@ function predownloadInfo(server) {
    * 不是运行时状态。scope 字段是 2.8.3 才落的盘，之前存的那些状态里没有，
    * 直接读就会退回「更新游戏」的说法。这里按 kind 补回来，用户升到新版
    * 不用等下一次后台检测就能看到正确文案。
+   *
+   * 但 2.9.x 起异环多了 scope='official'（本体预下载，只能官方下），
+   * 那种状态必须原样保留 —— 补成 launcher 会把「去官方预下载」说成「更新启动器」。
    */
-  if (String(info.kind || '') === 'nte') return { ...info, scope: 'launcher' };
+  if (String(info.kind || '') === 'nte' && !info.scope) return { ...info, scope: 'launcher' };
   return info;
 }
 
 function predownloadMeta(info) {
-  return PREDOWNLOAD_STATES[String(info && info.state ? info.state : '')] || null;
+  const meta = PREDOWNLOAD_STATES[String(info && info.state ? info.state : '')] || null;
+  // 异环的本体预下载只有官方能下，徽标别写成「可以预下载」（像是我们能下）
+  if (meta && info && info.officialOnly && String(info.state || '') === 'available') {
+    return { ...meta, label: '官方已开放预下载' };
+  }
+  return meta;
 }
 
 /** 游戏卡上那个预下载入口：只在接入了预下载的游戏上出现，点击直达面板。 */
@@ -943,8 +951,16 @@ function cardPredownloadEntry(game) {
   const pdState = String((info && info.state) || '');
   // 异环只有启动器侧资源能更新，别把它说成「预下载新版本」
   const launcherOnly = String((info && info.scope) || '') === 'launcher';
+  const officialOnly = Boolean(info && info.officialOnly);
   const known = {
-    available: { cls: 'is-ready', title: launcherOnly ? '启动器资源有新版本' : '预下载新版本' },
+    available: {
+      cls: 'is-ready',
+      title: officialOnly
+        ? '官方已开放预下载（资源由官方启动器下载）'
+        : launcherOnly
+          ? '启动器资源有新版本'
+          : '预下载新版本',
+    },
     done: { cls: 'is-done', title: launcherOnly ? '应用启动器资源更新' : '应用预下载更新' },
     update: { cls: 'is-update', title: launcherOnly ? '更新异环启动器资源（不含游戏本体）' : '应用官方更新' },
     unsupported: { cls: 'is-block', title: '这个服务器不支持预下载，点开看原因' },
@@ -979,6 +995,23 @@ function startDockPredownload(game) {
   const info = predownloadInfo(server);
   const pdState = String((info && info.state) || '');
   if (pdState !== 'available' && pdState !== 'done') return '';
+
+  /*
+   * 异环本体预下载：官方放出了下一版，但资源只有官方启动器下得动
+   * （登录态换腾讯云 STS + PatcherXML0 私有加密清单 + .sig 验签，匿名直连一律 404）。
+   * 所以这里不能写「预下载新版本」——那会让人以为什么都不做点一下我们就把几十 G 拉下来了。
+   */
+  if (info && info.officialOnly) {
+    const version = String(info.targetVersion || info.preReleaseVersion || '');
+    const title = version
+      ? `异环官方已开放 ${version} 预下载，点开官方启动页去下（资源由官方下载）`
+      : '异环官方已开放预下载，点开官方启动页去下';
+    return `<button class="start-dock-pd" data-action="open-nte-predownload" data-id="${esc(game.id)}" title="${esc(title)}">
+        ${icon('download', 'xs')}
+        <span class="start-dock-pd-label">去官方预下载</span>
+        <span class="start-dock-pd-meta">${esc([version, '官方下载'].filter(Boolean).join(' · '))}</span>
+      </button>`;
+  }
 
   const done = pdState === 'done';
   /*
@@ -1030,6 +1063,18 @@ function predownloadDetail(info, busy) {
     if (String(info.error || '').includes('已取消')) return '上次预下载被你停掉了，已经下好的分块还在，接着下就行';
     return info.error || '读取预下载状态失败';
   }
+  /*
+   * 异环本体预下载：说清楚「官方已开放」和「我们下不了」两件事。
+   * 不提体积是有意的 —— 官方 config 里的 ResSize 是整套资源大小（实测 82 GB），
+   * 不是这次要下的量，写出来会吓人也误导。
+   */
+  if (info.officialOnly) {
+    const bits = [];
+    if (info.localVersion) bits.push(`本地 ${info.localVersion}`);
+    if (info.targetVersion) bits.push(`预下载 ${info.targetVersion}`);
+    bits.push('官方已开放预下载，点「打开官方预下载」去官方启动页下载，下完到时间自动生效');
+    return bits.join(' · ');
+  }
   const bits = [];
   if (info.localVersion) bits.push(`本地 ${info.localVersion}`);
   if (info.targetVersion) bits.push(`预下载目标 ${info.targetVersion}`);
@@ -1039,6 +1084,13 @@ function predownloadDetail(info, busy) {
   }
   const size = predownloadSizeText(info);
   if (size) bits.push(`约 ${size}`);
+  /*
+   * 启动器资源更新和本体预下载是两件事，可能同时存在。
+   * 这时入口被「更新启动器」占着，至少在这里说一句，免得用户以为没预下载可下。
+   */
+  if (info.preReleaseAvailable && !info.officialOnly) {
+    bits.push(`官方另有 ${info.preReleaseVersion} 预下载，去官方启动页下载`);
+  }
   if (state === 'done') {
     if (info.storedFiles) bits.push(`已存 ${info.storedFiles} 个分块 · ${fmtBytes(info.storedBytes)}`);
     if (info.categoryCount) bits.push(`含 ${info.categoryCount} 份剧情分类包`);
@@ -1058,11 +1110,16 @@ function predownloadDetail(info, busy) {
     );
   }
   if (state === 'update') {
-    // 正式版上线后，已经下好的预下载分块照样能用，只是入口换成了「更新游戏」
-    if (Number(info.storedBytes)) {
-      bits.push(`已下的 ${fmtBytes(info.storedBytes)} 分块会直接复用，不用重下`);
+    if (String(info.scope || '') === 'launcher') {
+      // 异环：这条更新只覆盖 NTELauncher 侧资源，别用米哈游那套「应用更新」的说法
+      bits.push('点「更新启动器」只更新启动器那部分资源，游戏本体仍由官方启动器更新');
+    } else {
+      // 正式版上线后，已经下好的预下载分块照样能用，只是入口换成了「更新游戏」
+      if (Number(info.storedBytes)) {
+        bits.push(`已下的 ${fmtBytes(info.storedBytes)} 分块会直接复用，不用重下`);
+      }
+      bits.push('预下载按钮让位，直接用「应用更新」把新版本装上');
     }
-    bits.push('预下载按钮让位，直接用「应用更新」把新版本装上');
   }
   if (state === 'none' && Number(info.storedBytes)) {
     bits.push(`还剩 ${fmtBytes(info.storedBytes)} 预下载内容占着盘，不想要可以清除`);
@@ -1132,6 +1189,8 @@ function openPredownloadModal(gameId, serverId) {
   const openedInfo = predownloadInfo(server);
   const openedStored = Number(openedInfo && openedInfo.storedBytes) || 0;
   const openedPartial = Boolean(openedInfo && openedInfo.partial) && openedStored > 0;
+  // 异环本体预下载：面板只负责说清状态 + 把人送到官方启动页，不接我们自己的下载器
+  const officialOnly = Boolean(openedInfo && openedInfo.officialOnly);
 
   const html = `
     <div class="modal-backdrop" data-backdrop>
@@ -1148,7 +1207,7 @@ function openPredownloadModal(gameId, serverId) {
         </div>
         <div class="modal-body">
           <div class="pd-status" id="pd-status">${predownloadStatusMarkup(server)}</div>
-          <div class="pd-story-host" id="pd-story">${storyResourcesMarkup(game, server)}</div>
+          <div class="pd-story-host" id="pd-story">${officialOnly ? '' : storyResourcesMarkup(game, server)}</div>
           <div class="link-progress" id="pd-progress" style="display:none">
             <div class="link-progress-head">
               <strong id="pd-phase">准备中…</strong>
@@ -1174,7 +1233,7 @@ function openPredownloadModal(gameId, serverId) {
           <button class="btn btn-ghost" id="pd-refresh">${icon('refresh')}重新检查</button>
           <button class="btn btn-primary" id="pd-apply" style="display:none">${icon('download')}应用更新</button>
           <button class="btn btn-primary" id="pd-start">${icon('download')}${
-            openedPartial ? '继续预下载' : '开始预下载'
+            officialOnly ? '打开官方预下载' : openedPartial ? '继续预下载' : '开始预下载'
           }</button>
         </div>
       </div>
@@ -1304,9 +1363,13 @@ function openPredownloadModal(gameId, serverId) {
     const stored = Number(info && info.storedBytes) || 0;
     if (start) {
       start.style.display = pdState === 'available' ? '' : 'none';
-      // 下了一半就别再写「开始预下载」——按钮文字得承认上次的进度
       start.innerHTML = `${icon('download')}${
-        pdState === 'available' && info && info.partial && stored ? '继续预下载' : '开始预下载'
+        info && info.officialOnly
+          ? '打开官方预下载'
+          : // 下了一半就别再写「开始预下载」——按钮文字得承认上次的进度
+            pdState === 'available' && info && info.partial && stored
+            ? '继续预下载'
+            : '开始预下载'
       }`;
     }
     if (apply) {
@@ -1355,6 +1418,7 @@ function openPredownloadModal(gameId, serverId) {
     const parts = [];
     if (totalBytes) parts.push(`${fmtBytes(bytesDone)} / ${fmtBytes(totalBytes)}`);
     else if (total) parts.push(`${processed} / ${total}`);
+    if (Number(event.netBytes) > 0) parts.push(`本次下载 ${fmtBytes(event.netBytes)}`);
     if (Number(event.reusedChunks)) parts.push(`命中缓存 ${event.reusedChunks} 块`);
     if (parts.length) job.stats = parts.join(' · ');
     // 只改文字与进度条，不重建列表：重建会把用户正按着的那一条换成新节点
@@ -1400,6 +1464,7 @@ function openPredownloadModal(gameId, serverId) {
         parts.push(fmtBytes(event.bytesDone));
       }
       if (Number(event.skipped)) parts.push(`复用 ${event.skipped}`);
+      if (Number(event.netBytes) > 0) parts.push(`本次下载 ${fmtBytes(event.netBytes)}`);
       if (Number(event.reusedChunks)) parts.push(`命中缓存 ${event.reusedChunks} 块`);
       // 没算出体积的阶段保留上一次的数字，别把统计行刷成空白
       if (parts.length) stats.textContent = parts.join(' · ');
@@ -1488,7 +1553,36 @@ function openPredownloadModal(gameId, serverId) {
     }
   };
 
-  start.addEventListener('click', () => run('start'));
+  start.addEventListener('click', async () => {
+    if (officialOnly) {
+      /*
+       * 本体预下载只能官方下（登录态换 STS + 私有加密清单 + .sig 验签）。
+       * 这里只负责把官方启动页拉起来，自动点「预下载」是尽力而为，点不到就让用户自己点。
+       */
+      start.disabled = true;
+      try {
+        const result = await api.games.launch(game.id, { purpose: 'predownload' });
+        if (result && result.ok) {
+          toast(
+            result.reused
+              ? '官方启动页已经开着，切过去点「预下载」就行'
+              : '已打开官方启动页，在里面点「预下载」开始下载',
+            'success'
+          );
+          const closeBtn = document.querySelector('.pd-modal [data-close]');
+          if (closeBtn) closeBtn.click();
+        } else {
+          toast((result && result.error) || '打开官方启动页失败', 'error');
+        }
+      } catch (error) {
+        toast(error.message || '打开官方启动页失败', 'error');
+      } finally {
+        start.disabled = false;
+      }
+      return;
+    }
+    run('start');
+  });
   apply.addEventListener('click', () => run('apply'));
   cancel.addEventListener('click', () => {
     cancelled = true;

@@ -109,6 +109,21 @@ function readClientConfig(dir) {
   }
 }
 
+/**
+ * 按编码自适应读一份 ini（不限 config.ini）。
+ *
+ * 给「要按行改写 ini」的场景用：直接用 fs.readFileSync(file, 'utf8') 读国际服那种
+ * UTF-16 的 config.ini，拿到的是满屏乱码，正则匹配不上，改写时会把 cps / game_biz
+ * 这些行整份丢掉——客户端的渠道信息就这么没了。
+ */
+function readIniText(filePath) {
+  try {
+    return decodeIni(fs.readFileSync(filePath));
+  } catch {
+    return '';
+  }
+}
+
 /** 只看 config.ini 的渠道判定：读不出来就返回 ''（调用方不该拿它当官服）。 */
 function configChannelFromPath(exePath) {
   if (!exePath) return '';
@@ -162,6 +177,7 @@ module.exports = {
   parseIni,
   classifyIni,
   readClientConfig,
+  readIniText,
   configChannelFromPath,
   gameVersionFromPath,
   pathChannelHint,

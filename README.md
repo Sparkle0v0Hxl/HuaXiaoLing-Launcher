@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.9.3--alpha1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.9.3-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.9.3-alpha1**（预发布，建议先试不要长期使用）
+**当前版本：v2.9.3**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.9.3-alpha1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.9.3-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,20 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.9.3-alpha1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.9.3 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.9.3</b></summary>
+
+- 启动页「开始游戏」正下方新增渲染后端开关：默认 / DX11 / DX12，点一下就切。只对实测能切的五款出现——原神、星铁、绝区零、终末地传 `-force-d3d11` / `-force-d3d12`，异环传 `-dx11` / `-dx12`；崩坏3 与明日方舟不提供。游戏运行中、未安装、不在支持表时整行不出现。启动 45 秒后回读 `Player.log` 把实际后端写进启动日志。
+- 异环官方开放预下载后，启动页会识别并显示「去官方预下载」：拉起官方启动器（已开着就切前台，不杀掉）并尝试自动点预下载；官方进程运行期间不替换 `NTELauncher` 文件。异环资源清单为私有加密、资源地址需登录态换密钥，因此只做检测与引导，不代下本体。
+- 更新链路按真实清单与真实客户端重跑一遍：国际服先硬链接再打 ldiff 补丁（实测省流 84.7%）、国际服 ldiff 因 `config.ini` UTF-16 被当 UTF-8 读而从未生效的问题修掉、终末地接上跨渠道复用（实测 20/20 零下载，并修正清单字段 `path` 与 `file` 不匹配导致静默全量下载）、异环 size=0 却配 md5 的瑕疵条目不再每次重下、异环写盘改为临时文件 + rename。
+- 更新与预下载开跑前先算磁盘空间，运行中每 1.5 秒复查，不够当场停并说明还差多少；读不到磁盘信息时放行。
+- 「修复游戏」改为整份读盘算 md5（原来只比首尾分块，多分块文件中间损坏会漏检），更新路径仍是快速判定。
+- 硬链接「快速比较」文案改为「仅估算」，且执行阶段强制全量校验，抽样只用于预览。
+- 异环 `Config.ini` 编码自适应（UTF-16 / UTF-8 / BOM），B服不再拿到官服清单。
+
+</details>
 
 <details>
 <summary><b>v2.9.3-alpha1</b></summary>

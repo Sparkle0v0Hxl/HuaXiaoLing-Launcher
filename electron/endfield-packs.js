@@ -8,6 +8,8 @@ const crypto = require('node:crypto');
 
 const { multiDownload, MIN_PARALLEL_SIZE } = require('./multi-download');
 const { httpFetch, segmentFetch } = require('./http-fetch');
+const linkSource = require('./link-source');
+const diskSpace = require('./disk-space');
 
 const AES_KEY = Buffer.from([
   192, 243, 14, 28, 231, 99, 187, 194, 28, 195, 85, 163, 67, 3, 172, 80, 57, 148, 68,
@@ -855,7 +857,7 @@ async function checkEndfieldGame({ root, channel }) {
   };
 }
 
-async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
+async function updateEndfieldGame({ root, channel, onProgress, force, linkSources = [] } = {}) {
   const profile = profileForChannel(channel);
   if (!profile) throw new Error('没有对应的终末地渠道');
   const remote = await loadRemoteManifest(profile, true);
@@ -876,6 +878,28 @@ async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
   }
   let updated = 0;
   let downloadedBytes = 0;
+  let linkedFiles = 0;
+  /*
+   * 总量算一次就够。以前写在循环里的每次进度回调上，1688 个文件就是 1688 次
+   * 全表求和（约 285 万次加法），纯属白烧 CPU —— 进度条卡顿有一部分就是它。
+   */
+  const totalBytes = remote.files.reduce((sum, item) => sum + (item.size || 0), 0);
+  /*
+   * 同机另一份终末地（官服 / B服 / 国际服三份很常见）已经在目标版本时，
+   * 内容相同的文件直接硬链接过来，不必再为同一份字节走一遍网络。
+   * 判定口径与「本地是否已就位」一致：size + 整份 md5。
+   */
+  const usableSources = linkSource.usableSources(linkSources, { targetRoot: root });
+  /*
+   * 空间守卫：每个要下的文件都先写 `.vela-download` 临时文件再 rename，临时文件在时
+   * 新旧两份同时存在，所以要按文件大小预留。空间不够就在这个文件开始前停下，
+   * 而不是写到一半让系统抛 ENOSPC。
+   */
+  const spaceGuard = diskSpace.createSpaceGuard({
+    dirs: [root],
+    label: '游戏所在盘',
+    reserveBytes: 256 * 1024 ** 2,
+  });
   for (let index = 0; index < remote.files.length; index += 1) {
     const file = remote.files[index];
     const target = path.resolve(root, file.path);
@@ -893,11 +917,42 @@ async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
         processed: index + 1,
         total: remote.files.length,
         downloadedBytes,
-        totalBytes: remote.files.reduce((sum, item) => sum + item.size, 0),
+        totalBytes,
       });
       continue;
     }
+    if (usableSources.length) {
+      const reused = await linkSource.reuseFromSources({
+        /*
+         * 注意字段名：终末地清单项是 { path, urlPath, size, md5 }，而复用函数统一读
+         * item.file。直接把 file 传进去会拿不到相对路径 → 永远命中不了（表现为
+         * 「明明有源还是全量下载」）。这里显式把 path 映射成 file。
+         */
+        file: { ...file, file: file.path },
+        target,
+        gameKey: 'endfield',
+        sources: usableSources,
+        match: async (candidate) => {
+          const stat = await fsp.stat(candidate);
+          if (stat.size !== file.size) return false;
+          return (await md5File(candidate)) === file.md5;
+        },
+      });
+      if (reused.ok) {
+        linkedFiles += 1;
+        onProgress?.({
+          current: file.path,
+          processed: index + 1,
+          total: remote.files.length,
+          downloadedBytes,
+          totalBytes,
+        });
+        continue;
+      }
+    }
     const temporary = `${target}.vela-download`;
+    // 真要从网络下来的文件才需要额外空间：临时文件 + 原文件会同时存在
+    await spaceGuard.check(file.size || 0);
     // 大文件同样走多连接；小文件由 downloadPackFile 自己判断走单连接
     await downloadPackFile(`${remote.base}/${file.urlPath}`, temporary, { size: file.size || 0 });
     const actual = await md5File(temporary);
@@ -915,7 +970,7 @@ async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
       processed: index + 1,
       total: remote.files.length,
       downloadedBytes,
-      totalBytes: remote.files.reduce((sum, item) => sum + item.size, 0),
+      totalBytes,
     });
   }
   await fsp.writeFile(
@@ -932,7 +987,7 @@ async function updateEndfieldGame({ root, channel, onProgress, force } = {}) {
     ),
     'utf8'
   );
-  return { ok: true, version: remote.version, updated, skipped: false, root };
+  return { ok: true, version: remote.version, updated, linked: linkedFiles, skipped: false, root };
 }
 
 /**

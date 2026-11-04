@@ -198,7 +198,7 @@ contextBridge.exposeInMainWorld('launcher', {
     deletePacks: (options) => ipcRenderer.invoke('endfield:delete-packs', options),
     updateArknights: () => ipcRenderer.invoke('arknights:update-packs'),
     updateArknightsGame: () => ipcRenderer.invoke('arknights:update-game'),
-    updateGame: () => ipcRenderer.invoke('endfield:update-game'),
+    updateGame: (options) => ipcRenderer.invoke('endfield:update-game', options),
     // 渠道包按需下载（安装包不再内置）：查状态 → 用户确认 → 下载 → 可取消
     packStatus: (input) => ipcRenderer.invoke('endfield:channel-pack-status', input),
     packDownload: (input) => ipcRenderer.invoke('endfield:channel-pack-download', input),
@@ -211,13 +211,15 @@ contextBridge.exposeInMainWorld('launcher', {
     add: (input) => ipcRenderer.invoke('games:add', input),
     update: (id, input) => ipcRenderer.invoke('games:update', id, input),
     setCover: (id, cover) => ipcRenderer.invoke('games:update-cover', id, cover),
+    // 只改渲染后端这一个字段：走 games:update 得把整份表单补齐，容易漏字段覆盖用户数据
+    setRenderApi: (id, mode) => ipcRenderer.invoke('games:render-api', id, mode),
     remove: (id) => ipcRenderer.invoke('games:remove', id),
     clearDemo: () => ipcRenderer.invoke('games:clear-demo'),
     detect: (id) => ipcRenderer.invoke('games:detect', id),
     // 按渠道扫：只认这个服自己的客户端，不会把官服 exe 记到 B服 那一行
     detectServer: (id, serverId) => ipcRenderer.invoke('games:detect-server', id, serverId),
     syncOfficial: () => ipcRenderer.invoke('games:sync-official'),
-    launch: (id) => ipcRenderer.invoke('games:launch', id),
+    launch: (id, options) => ipcRenderer.invoke('games:launch', id, options),
     stop: (id) => ipcRenderer.invoke('games:stop', id),
     reveal: (id) => ipcRenderer.invoke('games:reveal', id),
     repair: (input) => ipcRenderer.invoke('games:repair-game', input),

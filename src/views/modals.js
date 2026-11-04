@@ -222,6 +222,48 @@ function field(label, input, hint = '', required = false) {  return `<div class=
   </div>`;
 }
 
+/*
+ * 渲染后端（DX11 / DX12）支持表。
+ *
+ * 与 electron/render-api.js 的 SUPPORT 一一对应，两边必须同步改：
+ * `.tmp/test-render-api.js` 会把这份表和主进程那份逐项比对，少一款就报错。
+ * 放在前端是为了让弹窗同步渲染，不必为一个下拉框再等一次 IPC。
+ */
+const RENDER_API_SUPPORT = {
+  genshin: { label: '原神', modes: ['default', 'dx11', 'dx12'] },
+  starrail: { label: '崩坏：星穹铁道', modes: ['default', 'dx11', 'dx12'] },
+  zzz: { label: '绝区零', modes: ['default', 'dx11', 'dx12'] },
+  endfield: { label: '终末地', modes: ['default', 'dx11', 'dx12'] },
+  neverness: { label: '异环', modes: ['default', 'dx11', 'dx12'] },
+};
+
+const RENDER_API_LABELS = {
+  default: '跟随游戏默认',
+  dx11: 'DirectX 11',
+  dx12: 'DirectX 12',
+};
+
+/** 只有支持的游戏才渲染这一项；不支持就整行不出现，免得用户以为切了有用。 */
+function renderApiField(game) {
+  const key = game && game.builtinKey ? String(game.builtinKey) : '';
+  const entry = RENDER_API_SUPPORT[key];
+  if (!entry) return '';
+  const current = (game && RENDER_API_LABELS[game.renderApi] && game.renderApi) || 'default';
+  const options = entry.modes
+    .map(
+      (mode) =>
+        `<option value="${esc(mode)}" ${mode === current ? 'selected' : ''}>${esc(
+          RENDER_API_LABELS[mode] || mode
+        )}</option>`
+    )
+    .join('');
+  return field(
+    '渲染后端',
+    `<select class="select" name="renderApi" style="width:100%">${options}</select>`,
+    '通过启动参数切换 DirectX 版本，不影响游戏内的画质设置。切过去没变化就说明这款游戏的客户端不认这个开关，切回「跟随游戏默认」即可。'
+  );
+}
+
 function openGameModal(id = null) {
   editingId = id || null;
   const game = id ? state.games.find((g) => g.id === id) : null;
@@ -278,6 +320,7 @@ function openGameModal(id = null) {
                   '也可以填写 steam:// 这样的协议链接。示例条目暂时留空即可。'
                 )}
                 ${field('启动参数', `<input name="args" maxlength="1000" value="${esc(game ? game.args : '')}" placeholder='例如：--windowed --profile "My Profile"' spellcheck="false" />`, '带空格的参数请用英文引号包起来。')}
+                ${renderApiField(game)}
                 ${field(
                   '工作目录',
                   `<div class="input-group">
@@ -391,6 +434,8 @@ function openGameModal(id = null) {
         .slice(0, 5),
       target: String(data.get('target') || '').trim(),
       args: String(data.get('args') || '').trim(),
+      // 渲染后端：只有支持的游戏才渲染这个下拉，取不到就落回「跟随默认」
+      renderApi: String(data.get('renderApi') || 'default'),
       workDir: String(data.get('workDir') || '').trim(),
       description: String(data.get('description') || '').trim(),
       cover: editingCover || '',
@@ -1401,6 +1446,21 @@ function sophonProgressStats(event, compact = false) {
     return `已下载 ${files} 个文件 · ${done}${total ? ` / ${total}` : ''}`;
   }
   /*
+   * 分块组装阶段单独给一句。
+   *
+   * bytesDone 是「已就位的字节」，含跳过 / 硬链接 / 从旧版本复用，分母是全量体积——
+   * 一次 2 GB 的更新也会显示成「… / 140 GB」，看着像在下整个游戏。netBytes 才是
+   * 这次真正从网络下来的量，两个数并排摆出来，「到底下了多少」一眼能看清。
+   */
+  if (event.phase === 'download') {
+    const parts = [
+      `本次下载 ${formatSize(event.netBytes || 0)}`,
+      `已就位 ${formatSize(event.bytesDone)} / ${formatSize(event.totalBytes)}`,
+    ];
+    if (Number(event.reusedChunks)) parts.push(`复用旧分块 ${event.reusedChunks} 块`);
+    return parts.join(' · ');
+  }
+  /*
    * 硬链接 / 覆盖这两步只报「几个文件」，没有字节数。
    * 以前统一模板会补一句「0 KB / 0 KB」，明明在跑却像卡死；
    * 没有字节数据就干脆不显示这一段。
@@ -1409,6 +1469,7 @@ function sophonProgressStats(event, compact = false) {
   if (Number(event.totalBytes) || Number(event.bytesDone)) {
     parts.push(`${formatSize(event.bytesDone)} / ${formatSize(event.totalBytes)}`);
   }
+  if (Number(event.netBytes) > 0) parts.push(`本次下载 ${formatSize(event.netBytes)}`);
   return parts.join(' · ');
 }
 
@@ -2337,7 +2398,7 @@ function openLinkModal(gameId) {
                 )}<span>开工前关掉游戏和官方启动器。只合并两边<b>大小和内容都相同</b>的文件；内容不同、目标端独有、游戏存档都不会被改动。</span></p>
                 <details class="sw-note-more">
                   <summary>注意</summary>
-                  <p>终末地的 <code>U8Data</code> 与 <code>sdkdata</code> 存的是渠道登录态，会自动跳过——合并了会让一边登录改写另一边的配置。第一次用建议选「完整校验」，确认没问题后再用快速比较。</p>
+                  <p>终末地的 <code>U8Data</code> 与 <code>sdkdata</code> 存的是渠道登录态，会自动跳过——合并了会让一边登录改写另一边的配置。快速比较只影响预检速度，真正合并时一律逐文件完整校验。</p>
                 </details>
                 <section class="sw-link-step" id="link-step-1">
                   <div class="link-pair">
@@ -2392,7 +2453,7 @@ function openLinkModal(gameId) {
                       </label>
                       <label class="mode-card">
                         <input type="radio" name="link-mode" value="fast" />
-                        <span><strong>快速比较</strong><small>大小 + 首尾各 1MB，快很多，适合先试跑。</small></span>
+                        <span><strong>快速比较</strong><small>大小 + 每 4MB 抽 1MB（8MB 以下、256MB 以上直接全量），</small><small>只用于预检估算；真正建立硬链接时仍逐文件完整校验。</small></span>
                       </label>
                     </div>
                   </div>
@@ -2683,7 +2744,7 @@ function openLinkModal(gameId) {
     previewBox.innerHTML = `
       <div class="link-preview-head">
         <strong>预检完成</strong>
-        <span>${mode === 'fast' ? '快速比较' : '完整校验'}</span>
+        <span>${mode === 'fast' ? '快速比较（仅估算）' : '完整校验'}</span>
       </div>
       <p class="sw-preview-line">
         完全相同的文件 <b>${result.matchable || 0}</b> 个可以合并，省下约 <b>${fmtBytes(

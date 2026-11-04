@@ -98,9 +98,16 @@ function usableSources(sources, { targetRoot, excludeRoots = [] } = {}) {
  */
 async function reuseFromSources({ file, target, gameKey, sources, match }) {
   if (!file || !target || !Array.isArray(sources) || !sources.length) return { ok: false };
+  /*
+   * 清单项里的相对路径字段各游戏叫法不同：米哈游叫 file，终末地叫 path。
+   * 这里兜一下，免得调用方少写一层映射就静默失效（表现为「明明有源还是全量下载」，
+   * 而且不报错，极难查）。
+   */
+  const relative = String(file.file || file.path || '');
+  if (!relative) return { ok: false };
   const targetKey = norm(target);
   for (const root of sources) {
-    for (const candidate of candidatesUnder(root, file.file, gameKey)) {
+    for (const candidate of candidatesUnder(root, relative, gameKey)) {
       if (norm(candidate) === targetKey) continue;
       let hit = false;
       try {

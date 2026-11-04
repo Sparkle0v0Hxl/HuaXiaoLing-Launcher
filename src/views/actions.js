@@ -28,6 +28,8 @@ async function toggleFavorite(id) {
     tags: game.tags,
     target: game.target,
     args: game.args,
+    // 局部更新也要带上：不带的话主进程会用默认值兜底（已做兼容，这里再显式一次更稳）
+    renderApi: game.renderApi,
     workDir: game.workDir,
     cover: game.cover,
     accent: game.accent,
@@ -744,10 +746,62 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
+    case 'start-render-api': {
+      /*
+       * 启动页「开始游戏」正下方的渲染后端开关（DX11 / DX12 / 默认）。
+       *
+       * 走专用通道 games:render-api，只改 renderApi 一个键。不用 games:update：
+       * 那个接口要整份表单（缺 name 直接报错，字段补齐又可能把用户改过的名字、
+       * 启动参数覆盖成默认值），为切一个开关冒这个风险不值得。
+       */
+      const game = state.games.find((item) => item.id === id);
+      if (!game) break;
+      const mode = String((element && element.dataset && element.dataset.mode) || 'default');
+      if ((game.renderApi || 'default') === mode) break;
+      try {
+        const updated = await api.games.setRenderApi(id, mode);
+        if (updated && typeof updated === 'object') Object.assign(game, updated);
+        else game.renderApi = mode;
+        render({ preserveScroll: true });
+        toast(
+          mode === 'default'
+            ? '已改回跟随游戏默认，下次启动生效'
+            : `下次启动用 DirectX ${mode === 'dx12' ? 12 : 11}`,
+          'success'
+        );
+      } catch (error) {
+        toast((error && error.message) || '切换渲染后端失败', 'error');
+      }
+      break;
+    }
     case 'start-server':
       // 服务器胶囊：切换 + 直接启动（快速进游戏，和下拉里的「只切换」区分开）
       await switchServerProfile(element.dataset.game, element.dataset.server, { launch: true });
       break;
+    case 'open-nte-predownload': {
+      /*
+       * 异环本体预下载：资源只有官方启动器下得动（登录态换腾讯云 STS + PatcherXML0
+       * 私有加密清单 + .sig 验签），我们只负责把官方启动页拉起来。
+       *
+       * purpose='predownload' 让主进程：不自动点「开始游戏」（那是直接进游戏）、
+       * 不刷新最近游玩、也绝不杀掉已经开着的官方启动器 —— 用户可能正靠它下载。
+       */
+      const game = state.games.find((item) => item.id === id);
+      if (!game) break;
+      const result = await api.games.launch(id, { purpose: 'predownload' });
+      if (result && result.ok) {
+        playUiSound('launch');
+        toast(
+          result.reused
+            ? '官方启动页已经开着，切过去点「预下载」就行'
+            : '已打开官方启动页，在页面里点「预下载」开始下载',
+          'success'
+        );
+      } else {
+        toast((result && result.error) || '打开官方启动页失败', 'error');
+      }
+      break;
+    }
     case 'start-update-game': {
       // dock 主按钮的「更新游戏」：直接应用官方更新，完成/失败后按钮都会变回去。
       // 进度显示靠全局 onPredownloadProgress 订阅直接改按钮文字，不整页重绘。
@@ -763,17 +817,35 @@ async function handleAction(action, id, element, event = null) {
       state.gameUpdate = { gameId: game.id, jobId, label: '正在准备更新…' };
       render({ preserveScroll: true });
       try {
+        /*
+         * 终末地的「更新游戏」必须走后端那条复合入口（有 Diffs 就用预下载包，没有就走
+         * 逐文件校验）。之前统一丢给 predownload.apply，没预下载过的人点下去只会收到
+         * 「预下载内容不完整，请先把预下载跑完」——而预下载包官方这次可能压根没发，
+         * 等于把唯一能更新的路堵死了。方舟同理，走自己的整包清单。
+         */
         const result =
           game.builtinKey === 'arknights'
             ? await api.endfield.updateArknightsGame()
-            : await api.predownload.apply({ gameId: game.id, serverId: server.id, jobId });
+            : game.builtinKey === 'endfield'
+              ? await api.endfield.updateGame({ jobId })
+              : await api.predownload.apply({ gameId: game.id, serverId: server.id, jobId });
         if (result && result.cancelled) toast('更新已取消', 'info');
         else if (result && result.ok === false) toast('更新没有完成，部分文件校验失败', 'error');
         else {
           const version = String(result?.tag || result?.version || '');
-          toast(version ? `已更新到 ${version}，可以开始游戏了` : '更新完成，可以开始游戏了', 'success');
-          if (game.builtinKey === 'neverness' && version) {
-            toast(`启动器资源已更新到 ${version}；游戏本体如有新版本，打开异环启动器时会自动补`, 'info');
+          /*
+           * 异环这条只更 NTELauncher 那层资源，版本号也不是游戏版本。先说「已更新到
+           * 1.0.7.1029，可以开始游戏了」，用户会以为游戏本体升了级，接着发现版本没动。
+           */
+          if (game.builtinKey === 'neverness') {
+            toast(
+              version
+                ? `启动器资源已更新到 ${version}；游戏本体如有新版本，打开异环启动器时会自动补`
+                : '启动器资源已更新；游戏本体如有新版本，打开异环启动器时会自动补',
+              'info'
+            );
+          } else {
+            toast(version ? `已更新到 ${version}，可以开始游戏了` : '更新完成，可以开始游戏了', 'success');
           }
         }
       } catch (error) {

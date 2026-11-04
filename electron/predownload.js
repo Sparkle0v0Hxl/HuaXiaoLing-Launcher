@@ -61,16 +61,19 @@ const SUPPORT = {
     /*
      * 异环（Neverness to Everness，Hotta Studio / 完美世界）—— 2026-10-30 接入。
      *
-     * 能做的：启动器侧资源（NTELauncher 文件夹）的版本检测 + 更新。
+     * 我们自己能做的：启动器侧资源（NTELauncher 文件夹）的版本检测 + 更新。
      *   Config.ini [VERSION] Version vs 远程 Version.ini，不一致即「有更新」；
      *   更新走 AllFiles.xml 清单逐文件下载校验（neverness-predownload.js）。
      *
-     * 做不了的：游戏本体（Client）的差分更新。
-     *   本体走 PatcherSDK 的 .sig 差分机制，远程路径未公开、sig 是二进制私有格式，
-     *   拿不到清单就做不到可校验的下载。本体更新仍由官方启动器在启动时接管
-     *   （异环本来就是拉官方启动器启动，本体有新版本时它会自己补）。
+     * 只能检测、不能自己下的：游戏本体（Client）。
+     *   本体走 PatcherSDK 的 PreRelease 机制。预下载分支配置是公开的
+     *   （{gameResUrl}/{LocalBranch}/Version/Windows/config.xml 里有 PreReleaseBranch /
+     *   PreReleaseVersion / PreReleaseStatus），所以「官方放出了 1.5.0」我们查得到；
+     *   但资源实体要登录态换腾讯云 STS 临时密钥动态签名，匿名直连一律 404，
+     *   清单还是 PatcherXML0 私有加密格式 + .sig 验签 —— 自己下不了。
+     *   所以这条状态带 scope='official'，界面把按钮接到「打开官方预下载」。
      */
-    note: '异环启动器侧资源检测与更新（游戏本体仍由官方启动器接管）',
+    note: '异环启动器侧资源检测与更新；本体预下载只做检测与引导（资源由官方启动器下载）',
   },
 };
 
@@ -106,6 +109,13 @@ function stateFromReport(report) {
   if (report.reason) base.reason = String(report.reason);
   // 异环只覆盖启动器侧资源，带出去让界面别写成「更新游戏」
   if (report.scope) base.scope = String(report.scope);
+  /*
+   * 异环本体预下载（scope = official）：官方放出了下一版，但资源只有官方启动器
+   * 下得动。officialOnly 让界面把按钮接到「打开官方预下载」而不是我们自己的下载器；
+   * 其余 preRelease* 只用于文案，不参与任何下载决策。
+   */
+  if (typeof report.officialOnly === 'boolean') base.officialOnly = report.officialOnly;
+  if (typeof report.preReleaseAvailable === 'boolean') base.preReleaseAvailable = report.preReleaseAvailable;
   for (const key of [
     'packs',
     'matchedPacks',
@@ -120,8 +130,19 @@ function stateFromReport(report) {
     'chunks',
     'storedFiles',
     'storedBytes',
+    'preReleaseBytes',
   ]) {
     if (typeof report[key] === 'number') base[key] = report[key];
+  }
+  for (const key of [
+    'preReleaseBranch',
+    'preReleaseVersion',
+    'preReleaseStatus',
+    'preReleaseReason',
+    'officialResVersion',
+    'localResVersion',
+  ]) {
+    if (typeof report[key] === 'string' && report[key]) base[key] = report[key];
   }
   if (typeof report.includeCategory === 'boolean') base.includeCategory = report.includeCategory;
   return base;

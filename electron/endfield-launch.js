@@ -402,4 +402,6 @@ async function launchEndfieldElevated(gameRoot, gameExe, args = '') {
   });
 }
 
-module.exports = { launchEndfield, launchEndfieldElevated };
+// velaArgs 也导出：它是「启动器 → 签名父进程」这条链的唯一参数接缝，
+// 自测直接断言它拼出来的命令行，比正则猜源码可靠（DX 开关就靠它过桥）。
+module.exports = { launchEndfield, launchEndfieldElevated, velaArgs };

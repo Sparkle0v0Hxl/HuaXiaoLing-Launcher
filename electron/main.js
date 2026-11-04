@@ -181,6 +181,8 @@ async function fetchLatestForChannel(channel) {
   return fetchLatest(profile);
 }
 const { launchEndfield, launchEndfieldElevated } = require('./endfield-launch');
+// 渲染后端（DX11 / DX12）：支持范围与参数口径都集中在 render-api.js，启动时拼在用户参数前面
+const renderApi = require('./render-api');
 const { prepareSophon, prepareBilibiliRuntime, normalizeAudioLanguages, fetchLauncherConfig } = require('./sophon');
 const { applyHdiffPrepass } = require('./hdiff');
 const predownload = require('./predownload');
@@ -4068,7 +4070,7 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
 async function launchWithSignedParent(game, target, cwd, options = {}) {
   const id = game.id;
   const base = path.basename(target);
-  const { requireElevation = true, strict = true } = options;
+  const { requireElevation = true, strict = true, args = game.args } = options;
   const isElevated = currentElevation();
   /*
    * 第一次遇到「必须提权」的游戏：先问一次要不要让启动器自己以管理员运行。
@@ -4102,8 +4104,8 @@ async function launchWithSignedParent(game, target, cwd, options = {}) {
   for (const useUac of plans) {
     launching.set(id, Date.now());
     const result = useUac
-      ? await launchEndfieldElevated(cwd, target, game.args)
-      : await launchEndfield(cwd, target, game.args);
+      ? await launchEndfieldElevated(cwd, target, args)
+      : await launchEndfield(cwd, target, args);
     if (result.ok) {
       await markLaunched(game);
       writeLaunchLog(`launch ${id}: 签名父进程=${result.parent || ''} uac=${useUac ? 1 : 0} exe=${base}`);
@@ -4411,12 +4413,34 @@ function findNteGame(target) {
 }
 
 /**
- * 异环启动后自动帮用户点登录窗上的「开始游戏」按钮。
+ * 异环启动后自动帮用户点官方窗口上的按钮（默认「开始游戏」）。
  * NTEGame.exe /launcher 会弹 Qt 登录窗,按钮还要人手点一下;这里用 UIA 按窗口 PID 找到
- * Name=「开始游戏」的按钮直接 Invoke(备选 SelectionItem)。Qt QML 可能不暴露 UIA 树,
+ * 名字匹配的按钮直接 Invoke(备选 SelectionItem)。Qt QML / CEF 网页可能不暴露 UIA 树,
  * 拿不到就静默放弃,不影响正常启动流程。
  */
 let nteAutoClickRunning = false;
+
+/**
+ * 把官方启动器窗口拉到前台。
+ * 预下载场景下 NTEGame 很可能已经开着（用户在上一次点击里打开的），这时**不能**走
+ * clearNteLingeringLauncher —— 那会把正在下载预下载资源的进程直接杀掉。
+ */
+function activateWindowByImage(image) {
+  const ps = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$p=Get-Process -Name '${image.replace(/\.exe$/i, '')}' -ErrorAction SilentlyContinue | Select-Object -First 1`,
+    'if($p){(New-Object -ComObject WScript.Shell).AppActivate($p.Id)}',
+  ].join('\n');
+  const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+      { windowsHide: true, timeout: 8000 },
+      () => resolve()
+    );
+  });
+}
 
 /**
  * 用 tasklist 查这些镜像名里哪些正在运行。查挂了就当没看见（和 assertLauncherClosed 一致：
@@ -4477,27 +4501,41 @@ async function clearNteLingeringLauncher(gameId) {
   return { ok: true, code: 'cleared' };
 }
 
-function autoClickNteStart(gameId) {
+function autoClickNteButton(gameId, keyword, label, rounds = 60) {
   if (nteAutoClickRunning) return;
   nteAutoClickRunning = true;
+  const kw = String(keyword).replace(/'/g, "''");
   const ps = [
     "$ErrorActionPreference='SilentlyContinue'",
     "Add-Type -AssemblyName UIAutomationClient",
     "Add-Type -AssemblyName UIAutomationTypes",
     "$procs=@(Get-Process -Name 'NTEGame' -ErrorAction SilentlyContinue)",
     "if($procs.Count -eq 0){[Console]::Out.Write('NOPROC');exit}",
+    `$kw='${kw}'`,
     "$root=[System.Windows.Automation.AutomationElement]::RootElement",
     "foreach($p in $procs){",
     "  $cond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty,$p.Id)",
     "  $wins=$root.FindAll([System.Windows.Automation.TreeScope]::Children,$cond)",
     "  foreach($w in $wins){",
-    "    $nameCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'开始游戏')",
-    "    $btn=$w.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$nameCond)",
-    "    if($btn -eq $null){continue}",
-    "    $invoke=$btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)",
-    "    if($invoke -ne $null){$invoke.Invoke();[Console]::Out.Write('CLICKED');exit}",
-    "    $sel=$btn.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)",
-    "    if($sel -ne $null){$sel.Select();[Console]::Out.Write('CLICKED');exit}",
+    // 先按名字精确找（快，Qt QML 常见形态）
+    "    $nameCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,$kw)",
+    "    $hits=@()",
+    "    $exact=$w.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$nameCond)",
+    "    if($exact -ne $null){$hits+=$exact}",
+    // 再全树扫一遍做包含匹配：CEF 网页里的按钮常带前后缀（「立即预下载」）
+    "    if($hits.Count -eq 0){",
+    "      $all=$w.FindAll([System.Windows.Automation.TreeScope]::Descendants,[System.Windows.Automation.Condition]::TrueCondition)",
+    "      foreach($el in $all){",
+    "        $n=$null;try{$n=$el.Current.Name}catch{}",
+    "        if(-not $n){continue}",
+    "        if($n.Contains($kw)){$hits+=$el}",
+    "      }",
+    "    }",
+    "    foreach($btn in $hits){",
+    "      try{$inv=$btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern);if($inv -ne $null){$inv.Invoke();[Console]::Out.Write('CLICKED');exit}}catch{}",
+    "      try{$sel=$btn.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern);if($sel -ne $null){$sel.Select();[Console]::Out.Write('CLICKED');exit}}catch{}",
+    "      try{$la=$btn.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern);if($la -ne $null){$la.DoDefaultAction();[Console]::Out.Write('CLICKED');exit}}catch{}",
+    "    }",
     "  }",
     "}",
     "[Console]::Out.Write('NOBTN')",
@@ -4517,11 +4555,11 @@ function autoClickNteStart(gameId) {
       let noProcStreak = 0;
       // 60 轮 × 3.5s ≈ 3.5 分钟：覆盖「打开就是资源更新，更新完才开始按钮」的慢场景
       // （2026-10-30 B服切服实测：212MB 更新跑了 3 分半，25 轮等不到按钮就放弃了）。
-      for (let round = 0; round < 60; round += 1) {
+      for (let round = 0; round < rounds; round += 1) {
         await new Promise((resolve) => setTimeout(resolve, 3500));
         const out = await attempt();
         if (out === 'CLICKED') {
-          writeLaunchLog(`launch ${gameId}: NTE start button auto-clicked`);
+          writeLaunchLog(`launch ${gameId}: NTE ${label} button auto-clicked`);
           return;
         }
         if (out === 'NOPROC') {
@@ -4532,13 +4570,26 @@ function autoClickNteStart(gameId) {
         }
         noProcStreak = 0;
       }
-      writeLaunchLog(`launch ${gameId}: NTE auto-click gave up (start button not exposed)`);
+      writeLaunchLog(`launch ${gameId}: NTE auto-click gave up (${label} button not exposed)`);
     } catch {
       /* 尽力而为,失败不影响启动 */
     } finally {
       nteAutoClickRunning = false;
     }
   })();
+}
+
+function autoClickNteStart(gameId) {
+  autoClickNteButton(gameId, '开始游戏', 'start');
+}
+
+/**
+ * 预下载场景：官方页面上那颗「预下载」按钮。
+ * CEF 网页不一定向 UIA 暴露内容，点不到就静默收工 —— 窗口已经打开，用户自己点一下即可，
+ * 绝不为了「自动」去连点，免得误触别的按钮。
+ */
+function autoClickNtePredownload(gameId) {
+  autoClickNteButton(gameId, '预下载', 'predownload', 24);
 }
 
 /*
@@ -9180,13 +9231,29 @@ function installIpc() {
     });
   });
 
-  ipcMain.handle('endfield:update-game', async () => {
+  ipcMain.handle('endfield:update-game', async (_event, options = {}) => {
     const game = store.data.games.find((item) => item.builtinKey === 'endfield');
     const server = game?.servers.find((item) => item.id === game.activeServerId);
     if (!game || !server?.root || !targetExists(server.path)) {
       throw new Error('先配置终末地客户端路径');
     }
     if (running.has(game.id)) throw new Error('请先退出终末地再更新');
+    /*
+     * 从启动页那颗「更新游戏」进来时会带 jobId：跟着发一份到 predownload:progress，
+     * 启动页按钮才能显示百分比（它只认这条通道 + 自己的 jobId）。不带 jobId 的老入口
+     * （服务器面板里的按钮）走原来的 endfield:game-progress，行为不变。
+     */
+    const jobId = String(options?.jobId || '');
+    const emit = (progress) => {
+      send('endfield:game-progress', progress);
+      if (!jobId) return;
+      send('predownload:progress', {
+        jobId,
+        ...progress,
+        // 面板读的是 bytesDone，这里把下载字节映射过去，按钮才有百分比
+        bytesDone: Number(progress?.bytesDone ?? progress?.downloadedBytes) || 0,
+      });
+    };
     /*
      * 预下载过的 Diffs/ 里就是这次更新的 zip 分包，先走它：同名同 size 同 md5 直接命中，
      * 不用重新下载。没预下载过时 hasCache 为 false，整段跳过，还是原来的逐文件校验更新。
@@ -9198,7 +9265,7 @@ function installIpc() {
           gameKey: 'endfield',
           channel: server.channel,
           installRoot: predownloadRoot,
-          onProgress: (progress) => send('endfield:game-progress', progress),
+          onProgress: (progress) => emit(progress),
         });
         if (applied?.ok) {
           const version = String(applied.version || '');
@@ -9215,11 +9282,28 @@ function installIpc() {
         writeLaunchLog(`endfield update: predownload apply fallback: ${error.message}`);
       }
     }
-    return updateEndfieldGame({
+    const result = await updateEndfieldGame({
       root: server.root,
       channel: server.channel,
-      onProgress: (progress) => send('endfield:game-progress', progress),
+      // 同机另一份终末地（官服 / B服 / 国际服）已经在目标版本时，相同内容直接硬链接，不再重下
+      linkSources: externalLinkSources(game, server, server.root),
+      onProgress: (progress) => emit(progress),
     });
+    /*
+     * 更新完把版本号落库。以前这里直接 return，卡片版本要等下一次检测才动，
+     * 用户看到「已更新到 1.5.0」的提示、卡片却还挂旧版本，以为没更上。
+     */
+    const version = String(result?.version || '');
+    if (result?.ok && version) {
+      game.version = version;
+      game.versionName = version;
+      game.lastOfficialSync = Date.now();
+      // Diffs 里的预下载包已经用掉了，状态跟着清掉，别再显示「可以应用」
+      server.predownload = null;
+      await store.saveNow();
+      pushState(true);
+    }
+    return result;
   });
 
   ipcMain.handle('arknights:update-game', async () => {
@@ -9238,6 +9322,7 @@ function installIpc() {
     return updateEndfieldGame({
       root: server.root,
       channel: 'arknights',
+      linkSources: externalLinkSources(game, server, server.root),
       onProgress: (progress) => send('arknights:game-progress', progress),
     });
   });
@@ -9265,6 +9350,8 @@ function installIpc() {
         root: server.root,
         channel: server.channel,
         force: true,
+        // 修复时整盘重扫，正是跨渠道复用收益最大的场景：同内容文件直接链，不用重下
+        linkSources: externalLinkSources(game, server, server.root),
         onProgress: (progress) => send('repair:progress', progress),
       });
     }
@@ -9273,6 +9360,7 @@ function installIpc() {
         root: server.root,
         channel: 'arknights',
         force: true,
+        linkSources: externalLinkSources(game, server, server.root),
         onProgress: (progress) => send('repair:progress', progress),
       });
     }
@@ -9286,6 +9374,8 @@ function installIpc() {
         cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
         audioLanguages: store.data?.settings?.audioLanguages,
         includeStoryResources: storyResourcesEnabled(game, server),
+        // 修复要查的是「中间分块坏掉」这类问题，只比首尾两块查不出来，必须整份校验
+        verifyAll: true,
         signal,
         onProgress: (progress) => send('repair:progress', progress),
       });
@@ -11959,6 +12049,14 @@ function musicLoginWindow(target) {
     if (index === -1) throw new Error('没有找到这个游戏');
     const current = store.data.games[index];
     const next = normalizeGame(input);
+    /*
+     * 调用方没提渲染后端就沿用原值。
+     * 收藏、改名这些局部更新都会走这个 IPC，而 normalizeGame 对缺失字段给的是默认值，
+     * 直接合并会把用户设好的 DX12 悄悄改回「跟随默认」——用户只会觉得「设了不生效」。
+     */
+    if (!input || input.renderApi === undefined) {
+      next.renderApi = renderApi.normalizeMode(current.renderApi);
+    }
     const merged = {
       ...current,
       ...next,
@@ -11979,6 +12077,24 @@ function musicLoginWindow(target) {
     await store.saveNow();
     pushState(true);
     return publicGame(merged);
+  });
+
+  /*
+   * 只改渲染后端这一个字段（启动页「开始游戏」下面的三段式开关走这里）。
+   *
+   * 不复用 games:update 是有原因的：那个入口收的是整份编辑表单，只传 renderApi 会被
+   * normalizeGame 当成「没填游戏名称」直接抛错；补齐所有字段又等于把编辑逻辑抄一遍，
+   * 漏一个字段就会把用户的改名/启动参数覆盖回默认值。这里点名改一个键，风险为零。
+   */
+  ipcMain.handle('games:render-api', async (_event, id, mode) => {
+    const game = store.data.games.find((item) => item.id === id);
+    if (!game) throw new Error('没有找到这个游戏');
+    // 参数只在启动那一刻传给客户端，运行中改了也不会生效，直接挡住比让它「看起来成功了」好
+    if (running.has(id)) throw new Error('游戏正在运行，关掉之后再切换渲染后端');
+    game.renderApi = renderApi.normalizeMode(mode);
+    await store.saveNow();
+    pushState(true);
+    return publicGame(game);
   });
 
   ipcMain.handle('games:remove', async (_event, id) => {
@@ -12976,12 +13092,15 @@ function musicLoginWindow(target) {
             cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
             audioLanguages: store.data?.settings?.audioLanguages,
             includeStory: storyResourcesEnabled(game, server),
+            // 别的渠道已经更到目标版本时，这批文件直接硬链接，别去下增量补丁
+            linkSources,
             signal,
             onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
           });
-          if (ldiff?.ok && ldiff.applied > 0) {
+          if (ldiff?.ok && (ldiff.applied > 0 || ldiff.linked > 0)) {
             writeLaunchLog(
-              `update ${game.id}: ldiff 修补 ${ldiff.applied} 个文件，补丁 ${ldiff.patchBytes} 字节，省流 ${ldiff.saveBytes} 字节`
+              `update ${game.id}: ldiff 修补 ${ldiff.applied} 个文件，` +
+                `硬链接复用 ${ldiff.linked || 0} 个，补丁 ${ldiff.patchBytes} 字节，省流 ${ldiff.saveBytes} 字节`
             );
           } else if (ldiff?.reason) {
             writeLaunchLog(`update ${game.id}: ldiff 跳过（${ldiff.reason}）`);
@@ -13042,6 +13161,8 @@ function musicLoginWindow(target) {
           ldiff: {
             applied: ldiff.applied,
             failed: ldiff.failed,
+            // 从别的渠道客户端硬链接过来的文件数：这批既没下补丁、也没走 chunk
+            linked: ldiff.linked || 0,
             patchBytes: ldiff.patchBytes,
             saveBytes: ldiff.saveBytes,
             localVersion: ldiff.localVersion,
@@ -13151,7 +13272,14 @@ function musicLoginWindow(target) {
         includeStoryResources: storyResourcesEnabled(game, server),
         dryRun: true,
       });
-      return { version: preview.tag, totalBytes: preview.totalBytes, storyResources: preview.storyResources || null };
+      return {
+        version: preview.tag,
+        totalBytes: preview.totalBytes,
+        storyResources: preview.storyResources || null,
+        // 没有本地增量基准时提前告诉界面：这次会是整包量级，不是几十 MB 的小更新
+        localBaseMissing: Boolean(preview.localBaseMissing),
+        localBaseReason: preview.localBaseReason || '',
+      };
     }
     const profile = downloadPackProfile(game.builtinKey, server.channel);
     const latest = await fetchLatest(profile);
@@ -13573,18 +13701,34 @@ function musicLoginWindow(target) {
     beginBackgroundTask();
     send('predownload:progress', { jobId, phase: 'start', current: '正在校验并应用预下载内容…' });
     try {
+      /*
+       * 同机另一渠道客户端里已经有同内容的文件时，直接硬链接过来，别再下/解压一遍。
+       * 「更新游戏」那条路一直是这么做的，应用预下载这条以前没接上：assembleFile 里的
+       * 复用逻辑一直在，但没人把源递进来，等于白写。
+       */
+      const linkSources =
+        game.builtinKey === 'endfield' ? [] : externalLinkSources(game, server, base.installRoot);
       const result = await predownloadSim.apply({
         ...base,
+        linkSources,
         signal,
         onProgress: (progress) => send('predownload:progress', { jobId, ...progress }),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
       const tag = String(result?.tag || result?.version || '');
+      /*
+       * 异环这条「更新」动的只是 NTELauncher 那层资源，返回的是启动器资源版本
+       * （实测 1.0.7.1029），跟卡片上的游戏版本（1.4）不是一回事。以前无条件
+       * 覆盖，点完「更新启动器」卡片就变成 v1.0.7.1029，用户以为游戏升到别的版本了。
+       * scope='launcher' 或异环这种「只更启动器」的结果一律不碰游戏版本号。
+       */
+      const launcherOnly =
+        String(result?.scope || '') === 'launcher' || game.builtinKey === 'neverness' || base.gameKey === 'neverness';
       server.predownload = null;
       // 更新落在了真实安装目录，把链接运行时的标记清掉，下次启动自动重建
       invalidateRuntimesAfterUpdate(game);
       // 演练模式不能改写游戏真实版本号，否则卡片会挂一个官方根本没发布过的版本
-      if (tag && !result?.simulated) {
+      if (tag && !result?.simulated && !launcherOnly) {
         game.version = tag;
         game.versionName = tag;
       }
@@ -13961,9 +14105,15 @@ function musicLoginWindow(target) {
 
   ipcMain.handle('games:sync-official', async () => syncAllOfficial());
 
-  ipcMain.handle('games:launch', async (_event, id) => {
+  ipcMain.handle('games:launch', async (_event, id, options) => {
     const game = store.data.games.find((g) => g.id === id);
     if (!game) return { ok: false, error: '没有找到这个游戏' };
+    /*
+     * purpose 目前只有一个值：'predownload'（异环「打开官方预下载」）。
+     * 这条路上的差别是：不刷新最近游玩、不自动点「开始游戏」，也绝不杀掉
+     * 已经在跑的官方启动器（用户可能正靠它下载预下载资源）。
+     */
+    const purpose = options && typeof options === 'object' ? String(options.purpose || '') : '';
     // 先清掉已经不存在的进程，避免「点了没反应、只说游戏在运行」
     if (await pruneStaleRunning()) pushState(true);
     if (running.has(id)) return { ok: false, error: '游戏已经在运行了' };
@@ -14048,6 +14198,18 @@ function musicLoginWindow(target) {
          * 会触发它的单实例「唤醒旧实例→旧实例退出→新实例秒退」，点了等于没点。
          */
         if (/^nte(game|launcher)\.exe$/i.test(path.basename(target))) {
+          if (purpose === 'predownload') {
+            /*
+             * 预下载只借用官方启动页：它已经开着就直接拉到前台，绝不先杀掉。
+             * 官方正在下载预下载资源时把它结束掉，等于把用户几十分钟的进度连进程一起收了。
+             */
+            const alive = await listRunningImages(['NTEGame.exe']);
+            if (alive.length) {
+              await activateWindowByImage('NTEGame.exe');
+              writeLaunchLog(`launch ${id}: NTE official launcher already open, reused for predownload`);
+              return { ok: true, reused: true, officialPage: true };
+            }
+          }
           const nteClear = await clearNteLingeringLauncher(id);
           if (nteClear.code === 'game-running') {
             return { ok: false, error: '异环已经在运行了（HTGame.exe）。先玩着，或退出游戏再启动。' };
@@ -14140,6 +14302,12 @@ function musicLoginWindow(target) {
         cwd = path.dirname(target);
       }
       let args = splitArgs(game.args);
+      /*
+       * 渲染后端（DX11 / DX12）参数拼在最前面：用户自定义参数在后，
+       * 万一两边写了冲突的开关，以用户手填的为准。
+       */
+      const renderArgs = renderApi.argsFor(game.builtinKey, game.renderApi);
+      if (renderArgs.length) args = [...renderArgs, ...args];
       if (
         nteDirectArgs.length &&
         path.basename(target).toLowerCase() === 'ntegame.exe' &&
@@ -14187,6 +14355,8 @@ function musicLoginWindow(target) {
         const signed = await launchWithSignedParent(game, target, cwd, {
           requireElevation: true,
           strict: true,
+          // 渲染后端参数也要一起传：这条链路绕过了下面的 spawn，漏传等于 DX 开关对终末地无效
+          args: args.join(' '),
         });
         if (signed.handled) return signed.result;
       }
@@ -14236,7 +14406,8 @@ function musicLoginWindow(target) {
         }
       }
 
-      await markLaunched(game);
+      // 预下载只是去官方页面下资源，不算「玩过这个游戏」——别去动最近游玩时间
+      if (purpose !== 'predownload') await markLaunched(game);
 
       if (lower.endsWith('.exe') && !running.has(id)) {
         const isNeverness = game.builtinKey === 'neverness';
@@ -14247,9 +14418,34 @@ function musicLoginWindow(target) {
           isNeverness ? null : Date.now(),
           isNeverness ? 150 : 8
         ).catch(() => {});
-        // 异环直达登录窗后，帮忙把「开始游戏」也点了（UIA 找按钮，找不到就静默让人点）
+        /*
+         * 请求了渲染后端就核对一次结果。
+         * 参数传过去不等于生效：客户端可能不认这个开关，也可能显卡不支持而静默回退。
+         * 45 秒足够冷启动写完 Player.log，又不至于拖到用户已经进游戏几分钟。
+         * 详情只进启动日志，不打扰界面 —— 读不到日志路径是常态，不该弹提示。
+         */
+        if (renderArgs.length) {
+          const probe = setTimeout(async () => {
+            try {
+              const requested = renderApi.labelFor(game.builtinKey, game.renderApi);
+              const actual = await renderApi.readActualApi(game.builtinKey);
+              writeLaunchLog(
+                `launch ${id}: 渲染后端 请求=${requested} 实际=${actual || '未从游戏日志确认'}`
+              );
+            } catch {
+              /* 日志读不到就算了，不影响游戏 */
+            }
+          }, 45000);
+          probe.unref?.();
+        }
         if (isNeverness && path.basename(target).toLowerCase() === 'ntegame.exe') {
-          autoClickNteStart(id);
+          if (purpose === 'predownload') {
+            // 只试着点官方页面上的「预下载」，绝不点「开始游戏」——那是直接进游戏
+            autoClickNtePredownload(id);
+          } else {
+            // 异环直达登录窗后，帮忙把「开始游戏」也点了（UIA 找按钮，找不到就静默让人点）
+            autoClickNteStart(id);
+          }
         }
       } else {
         launching.delete(id);
@@ -15596,6 +15792,11 @@ function normalizeGame(input) {
     tags,
     target: String(source.target || '').trim(),
     args: String(source.args || '').trim().slice(0, 1000),
+    /*
+     * 渲染后端：只接受 render-api.js 认可的三个值（default / dx11 / dx12），
+     * 其余一律当「跟随游戏默认」。存档是老版本、或用户手改过 json 都不会炸。
+     */
+    renderApi: renderApi.normalizeMode(source.renderApi),
     workDir: String(source.workDir || '').trim(),
     cover: String(source.cover || '').trim(),
     accent: /^#[0-9a-f]{6}$/i.test(String(source.accent || '')) ? source.accent : '#f08ba6',

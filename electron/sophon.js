@@ -12,6 +12,8 @@ const { hardlinkTree, removeTreeResilient } = require('./runtime');
 const { httpFetch, directFetch, segmentFetch } = require('./http-fetch');
 const { multiDownload } = require('./multi-download');
 const linkSource = require('./link-source');
+const clientChannel = require('./client-channel');
+const diskSpace = require('./disk-space');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -162,6 +164,26 @@ async function quickFileMatches(file, filePath) {
       await handle.close();
     }
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 整份文件校验：size 对上之后把文件从头到尾读一遍算 md5。
+ *
+ * 只在「修复」这条路径上传 true。按分块清单的正常更新用 quickFileMatches 就够——
+ * 那是我们上一轮自己按 chunk 写下去、md5 已经验过的文件；而修复要查的是「本来完好、
+ * 后来被磁盘/杀软/半途关机弄坏了」的文件，那种损坏经常落在中间某个分块上。
+ * 代价是整盘读一遍（原神 130 GB 级别），所以必须由调用方显式开启。
+ */
+async function fullFileMatches(file, filePath) {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (stat.size !== file.size) return false;
+    const expected = String(file.md5 || '').toLowerCase();
+    if (!expected) return true;
+    return (await md5File(filePath)) === expected;
   } catch {
     return false;
   }
@@ -354,14 +376,35 @@ const MANIFEST_CONCURRENCY = 4;
 /**
  * 同一台 CDN 上能同时开多少条连接。
  *
- * Chromium 网络栈对同一个 host 只有 6 条 socket（HTTP/1.1），超出的请求会排队。
- * 所以「分段下载」和「同时拉多份」是在抢同一份额度：
- *   · 清单少（原神 / 星铁 5 份）→ 每份开 6 段，打满 6 条 socket，大清单能快好几倍；
- *   · 清单多（绝区零 113 份）→ 每份还开 6 段的话，678 个分段请求全挤在 6 条 socket
- *     上排队，实测比单连接还慢（37 秒 vs 4 秒）。这时候一份占一条连接、靠并发数量吃带宽。
+ * 分块和清单现在都走 node 直连（不再受浏览器「同 host 6 条 socket」的限制），
+ * 但 CDN 对单 IP 仍有并发上限，所以还是在「一份分多段」和「多份并发」之间分配额度：
+ *   · 清单少（原神 / 星铁 5 份）→ 每份开 6 段，大清单能快好几倍；
+ *   · 清单多（绝区零 113 份）→ 每份还开 6 段的话，678 个分段请求会互相抢带宽，
+ *     实测比单连接还慢（37 秒 vs 4 秒）。这时候一份占一条连接、靠并发数量吃带宽。
  * 按清单份数在这两种模式之间切换（见 manifestConnectionsFor）。
  */
 const MANIFEST_CONNECTION_BUDGET = 6;
+
+/**
+ * 同一个文件里同时在下载的分块数。
+ *
+ * 正式安装 / 更新原来是逐块串行（下完一块写一块再发下一块），速度被单连接往返
+ * 延迟卡死；官方启动器一直是多连接并发拉分块。分块走的是 node 直连，不受
+ * 「同 host 6 条 socket」的限制，所以这里能真的同时开 8 条。
+ *
+ * 上限 16：每个分块解压后常见 1~4 MB，窗口开太大只是白占内存。
+ * 网络较差或想退回逐块串行的，把 HXL_CHUNK_PREFETCH 设成 1。
+ */
+const CHUNK_PREFETCH = Math.max(1, Math.min(16, Number(process.env.HXL_CHUNK_PREFETCH) || 8));
+
+/**
+ * 同时在组装的文件数。
+ *
+ * 小文件是「每文件一次往返」，串行时带宽大量闲置（原神一次更新两千多个小文件）。
+ * 4 路在实测里已能把这部分尾段时间压到原来的四分之一左右；再往上加，
+ * 与分块窗口相乘的总连接数会超过 CDN 的舒适区，反而变慢。
+ */
+const FILE_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.HXL_FILE_CONCURRENCY) || 8));
 
 function manifestConnectionsFor(count) {
   // 清单少（本体 + 几个语音包）：每份都开到 6 段，大清单能吃满带宽 ——
@@ -544,10 +587,17 @@ async function waitIfPaused(signal) {
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
 }
 
+/*
+ * 建「本地旧版本分块索引」：把本地已装版本的清单摊平成 chunk 哈希 → 位置。
+ *
+ * 更新时只有靠这张表才能「没变的 chunk 直接读本地字节」，表建不起来就退化成整文件
+ * 重下 —— 用户看到的就是「一次小更新像在下整个游戏」。所以失败原因必须往上报，
+ * 不能像以前那样静默返回一个空 Map。
+ *
+ * 返回 { index, reason }：reason 为空串表示索引可用。
+ */
 async function loadLocalChunkIndex({
   gameKey,
-  info,
-  branchPackage,
   baseRoot,
   cacheDir,
   onProgress,
@@ -556,23 +606,37 @@ async function loadLocalChunkIndex({
   includeStory = false,
 }) {
   const version = readGameVersion(baseRoot);
-  if (!version) return new Map();
+  if (!version) {
+    return { index: new Map(), reason: '读不到本地版本号（config.ini 里没有 game_version）' };
+  }
+  const localChannel = detectLocalChannel(baseRoot);
+  if (!localChannel) {
+    return { index: new Map(), reason: '认不出本地客户端属于哪个渠道' };
+  }
   let localBuild;
   try {
-    const localChannel = detectLocalChannel(baseRoot);
     const local = await fetchBranch(gameKey, localChannel);
     localBuild = await fetchBuild(local.info, local.branch.main, version);
-  } catch {
-    return new Map();
+  } catch (error) {
+    return {
+      index: new Map(),
+      reason: `查不到本地 ${version} 的官方清单（${error.message}）`,
+    };
   }
   // 本地版本清单必须和目标版本清单用同一个 includeStory 取值，否则两边的文件集合对不上，
   // chunk 级别的去重就会错位（该复用的 chunk 找不到源，白白重下）。
   const manifests = pickManifests(localBuild, audioLanguages, { includeStory });
-  // 本地版本这几份清单和目标版本那几份互不相干，各拉各的、并发跑（原神来一次就 5 份）
-  const lists = await ensureManifests(manifests, cacheDir, onProgress, {
-    label: '读取本地清单',
-    signal,
-  });
+  let lists;
+  try {
+    // 本地版本这几份清单和目标版本那几份互不相干，各拉各的、并发跑（原神来一次就 5 份）
+    lists = await ensureManifests(manifests, cacheDir, onProgress, {
+      label: '读取本地清单',
+      signal,
+    });
+  } catch (error) {
+    // 本地清单读失败不该让整次更新失败：拿不到基准就按完整包下，但要说清为什么
+    return { index: new Map(), reason: `本地 ${version} 的清单读取失败（${error.message}）` };
+  }
   const index = new Map();
   for (const files of lists) {
     for (const file of files) {
@@ -589,20 +653,38 @@ async function loadLocalChunkIndex({
       }
     }
   }
-  return index;
+  if (!index.size) {
+    return { index, reason: `本地 ${version} 的清单里没有可复用的分块` };
+  }
+  return { index, reason: '' };
+}
+
+/*
+ * 同一个本地文件只开一个读句柄。
+ *
+ * 缓存里存的是 Promise：分块预取会把同一个文件的多个分块同时递进来，如果按
+ * 「先查再开」的写法，这几路会同时判定「没有句柄」而各开一个，既泄漏句柄，
+ * 后面的分块也拿不到已打开的那个。
+ */
+function localHandleFor(localPath, handles) {
+  const existing = handles.get(localPath);
+  if (existing) return existing;
+  const task = fsp.open(localPath, 'r').catch((error) => {
+    handles.delete(localPath);
+    throw error;
+  });
+  handles.set(localPath, task);
+  return task;
 }
 
 async function readLocalChunk(baseRoot, entry, chunk, handles) {
   if (!entry || entry.size !== chunk.uncompressedSize) return null;
   const localPath = safeJoin(baseRoot, entry.file);
-  let handle = handles.get(localPath);
-  if (!handle) {
-    try {
-      handle = await fsp.open(localPath, 'r');
-      handles.set(localPath, handle);
-    } catch {
-      return null;
-    }
+  let handle;
+  try {
+    handle = await localHandleFor(localPath, handles);
+  } catch {
+    return null;
   }
   try {
     const buffer = Buffer.alloc(chunk.uncompressedSize);
@@ -802,33 +884,33 @@ function channelConfig(gameKey, channel, tag, sdkVersion = '') {
   return `[General]\nsub_channel=${sub}\nsdk_version=${sdkVersion}\npredownload=\ngame_version=${tag}\ngame_biz=${biz}\ncps=${cps}\nchannel=${out}\n`;
 }
 
+/*
+ * 读本地客户端的 game_version。
+ *
+ * 必须编码自适应：国际服的 config.ini 有 UTF-16 的版本，用 utf8 直读拿到的是乱码，
+ * 版本号匹配不上，就等于「不知道本地装的是哪个版本」—— 更新时建不出本地分块索引，
+ * 没变的分块也得整份重下，表现出来就是「更新像在下整个游戏」。
+ */
 function readGameVersion(root) {
-  try {
-    const text = fs.readFileSync(path.join(root, 'config.ini'), 'utf8');
-    return (text.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim() || '';
-  } catch {
-    return '';
-  }
+  const config = clientChannel.readClientConfig(root);
+  if (!config) return '';
+  return String(config.fields.get('game_version') || '').trim();
 }
 
+/*
+ * 判本地客户端属于哪个渠道，口径交给 client-channel，和界面上的渠道判定同源。
+ *
+ * 以前这里自带一份正则、兜底硬猜 'official'：国际服 ini 读不出来 → 猜成官服 →
+ * 拿官服的分支参数去找国际服的版本 tag → 查不到 → 本地索引为空 → 全量下载。
+ * 现在判不出就返回 ''，调用方保留原渠道，不硬猜。
+ */
 function detectLocalChannel(root) {
-  try {
-    const text = fs.readFileSync(path.join(root, 'config.ini'), 'utf8');
-    const biz = (text.match(/game_biz\s*=\s*([^\r\n]+)/i) || [])[1] || '';
-    const cps = (text.match(/cps\s*=\s*([^\r\n]+)/i) || [])[1] || '';
-    const channelLine = (text.match(/^channel\s*=\s*(\d+)/im) || [])[1] || '';
-    // 国际服优先：biz 带 global 或 cps 是 hoyoverse
-    if (/global/i.test(biz) || /hoyoverse/i.test(cps)) return 'global';
-    // B服：cps=bilibili，或 channel=14（部分旧配置只改了 channel）
-    if (/bilibili/i.test(biz) || /bilibili/i.test(cps) || channelLine === '14') return 'bilibili';
-    if (/_cn/i.test(biz)) return 'official';
-  } catch {
-    /* fall through to path hints */
+  const config = clientChannel.readClientConfig(root);
+  if (config) {
+    const byIni = clientChannel.classifyIni(config.fields);
+    if (byIni) return byIni;
   }
-  const lower = String(root || '').toLowerCase();
-  if (lower.includes('国际服') || lower.includes('global')) return 'global';
-  if (lower.includes('b服') || lower.includes('bilibili')) return 'bilibili';
-  return 'official';
+  return clientChannel.pathChannelHint(String(root || ''));
 }
 
 async function prepareBilibiliRuntime({
@@ -904,6 +986,15 @@ async function prepareSophon({
    * 清单里内容完全相同的文件直接从那边硬链接过来，不再下载。
    */
   linkSources = [],
+  /*
+   * 是否把每个文件整份读一遍算 md5（修复专用）。
+   *
+   * 默认的 quickFileMatches 只比首尾两个分块：原神 2795 个文件里有 1951 个是多分块
+   * 大文件（平均 40 块），中间某块坏了根本看不出来，「修复」会把它当成完好的跳过。
+   * 更新走快速判定没问题（版本号对得上、文件是我们自己刚写进去的），但用户点「修复」
+   * 就是来查这种坏的，所以这条路径要能开全量校验。
+   */
+  verifyAll = false,
 }) {
   if (!CHANNELS[gameKey]?.[channel]) throw new Error('这个服务器没有 Sophon 清单');
   if (!fs.existsSync(baseRoot)) throw new Error('基础客户端目录不存在');
@@ -929,10 +1020,8 @@ async function prepareSophon({
    */
   const localIndexTask = loadLocalChunkIndex({
     gameKey,
-    info: CHANNELS[gameKey]?.[detectLocalChannel(baseRoot)] || info,
     audioLanguages,
     includeStory: includeStoryResources,
-    branchPackage: branch.main,
     baseRoot,
     cacheDir,
     onProgress,
@@ -951,7 +1040,20 @@ async function prepareSophon({
     }
   }
 
-  const localChunks = await localIndexTask;
+  const localIndex = await localIndexTask;
+  const localChunks = localIndex.index;
+  /*
+   * 没有本地基准时明确说出来。
+   * 以前这一步是静默的：索引建不起来照样跑，只是所有改动过的文件都要整份重下，
+   * 用户看到几十 GB 往下走，却没有任何地方解释为什么，只能猜「是不是在下整个游戏」。
+   */
+  if (!localChunks.size) {
+    onProgress?.({
+      phase: 'manifest',
+      current: `没有可复用的本地分块：${localIndex.reason}，本次按完整包下载`,
+      localBaseMissing: true,
+    });
+  }
 
   let normalized = [];
   for (const file of files.values()) {
@@ -972,6 +1074,9 @@ async function prepareSophon({
   let externalLinked = 0;
   let externalBytes = 0;
   let bytesDone = 0;
+  // 真正从网络下来的字节（压缩态）。bytesDone 是「已就位」，含跳过/硬链接/复用，
+  // 两者对照才能看出「这次到底下了多少」，而不是只有一个看起来像全量的分母。
+  let netBytes = 0;
   const localHandles = new Map();
 
   if (dryRun) {
@@ -984,11 +1089,36 @@ async function prepareSophon({
       files: total,
       totalBytes,
       storyResources: storyResourceSummary(build),
+      // 预估阶段就把「有没有本地基准」带出去：没有基准等于要整包下，界面要能提前提示
+      localBaseMissing: !localChunks.size,
+      localBaseReason: localIndex.reason || '',
       targetRoot,
     };
   }
 
   await fsp.mkdir(targetRoot, { recursive: true });
+  /*
+   * 空间粗筛：只有「没有可复用的本地分块」时才敢按清单全量算 —— 那种情况每个字节
+   * 都要从网络下来再写盘，总量是确定的。有本地基准时真实增量要逐个文件比对才知道，
+   * 此时不能按全量拒绝（否则 140GB 的清单会把「其实只需几 GB」的正常更新误拦），
+   * 交给下面的运行中守卫兜底。
+   */
+  await diskSpace.assertRoom({
+    dir: targetRoot,
+    needBytes: localChunks.size ? 0 : totalBytes,
+    label: '游戏所在盘',
+  });
+  /*
+   * 运行中守卫：目标盘和分块缓存盘可能不是同一个卷，两个都盯。
+   * 有本地基准时是就地覆盖，占用不涨，只留安全余量；没有基准时整份文件都是新写，
+   * 必须按文件大小算。检查按时间节流，两万多个文件不会产生两万次 statfs。
+   */
+  const spaceGuard = diskSpace.createSpaceGuard({
+    // 这里不能复用下面的 chunkCacheDir 变量：它声明在更靠后的位置，
+    // 写在这里会撞上暂时性死区（ReferenceError）。口径保持一致即可。
+    dirs: [targetRoot, cacheDir ? path.join(cacheDir, 'chunks') : ''],
+    label: '游戏所在盘',
+  });
   /*
    * 跨客户端复用源：同一台机器上还装着别的渠道的同一款游戏时，
    * 官方同一个构建产物的资源包往往逐字节相同，直接硬链接过来即可，
@@ -1017,6 +1147,8 @@ async function prepareSophon({
   }
   // 持久分块缓存目录：sophon-cache/chunks/<md5>，跨版本 / 跨游戏复用同一分块时不再走网络
   const chunkCacheDir = cacheDir ? path.join(cacheDir, 'chunks') : '';
+  // 需要重新组装（走网络 / 分块复用）的文件，判定阶段收集、组装阶段并发跑
+  const pendingFiles = [];
   for (const file of normalized) {
     if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
     await waitIfPaused(signal);
@@ -1032,7 +1164,7 @@ async function prepareSophon({
 
     let targetValid = false;
     try {
-      targetValid = await quickFileMatches(file, target);
+      targetValid = verifyAll ? await fullFileMatches(file, target) : await quickFileMatches(file, target);
     } catch {
       targetValid = false;
     }
@@ -1161,56 +1293,126 @@ async function prepareSophon({
 
     // 就地更新时 target 可能也是某个分块复用源：先关掉它的读句柄，避免 Windows 共享冲突
     const targetKey = safeJoin(baseRoot, file.file);
-    const openHandle = localHandles.get(targetKey);
-    if (openHandle) {
-      await openHandle.close().catch(() => {});
+    const pendingHandle = localHandles.get(targetKey);
+    if (pendingHandle) {
+      try {
+        await (await pendingHandle).close();
+      } catch {
+        /* 句柄可能已经因为打开失败被清掉 */
+      }
       localHandles.delete(targetKey);
     }
-    // 必须走 openForWrite：这个 target 很可能是上一次生成时从基础客户端硬链接过来的，
-    // 直接 open('w') 会连带改掉基础客户端那份文件（详见 openForWrite 的注释）。
-    const handle = await openForWrite(target);
-    try {
-      await handle.truncate(file.size);
-      for (const chunk of file.chunks) {
-        const localEntry = localChunks.get(chunk.uncompressedMd5);
-        let raw = selfSourced.get(chunk.uncompressedMd5);
-        if (!raw) raw = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
-        if (raw) {
-          reusedChunks += 1;
-        } else {
-          const fetched = await fetchChunk(chunk, file.chunkPrefix, chunkCacheDir, signal);
-          raw = fetched.raw;
-          if (fetched.fromCache) cacheHits += 1;
-        }
-        await handle.write(raw, 0, raw.length, chunk.offset);
-        bytesDone += chunk.uncompressedSize;
-        onProgress?.({
-          phase: 'download',
-          processed,
-          total,
-          linked,
-          downloaded,
-          skipped,
-          reusedChunks,
-          cacheHits,
-          bytesDone,
-          totalBytes,
-          current: file.file,
-        });
-      }
-    } finally {
-      await handle.close();
-    }
-    const actual = await md5File(target);
-    if (actual !== file.md5.toLowerCase()) {
-      throw new Error(`文件校验失败：${file.file}`);
-    }
-    downloaded += 1;
-    onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+    // 前面几步（跳过 / 缓存命中 / 硬链接 / 跨客户端复用）都是本地操作，随判随做；
+    // 真正要从网络组装的收集起来，交给下面的并发池。
+    pendingFiles.push({ file, target, selfSourced });
   }
 
-  for (const handle of localHandles.values()) {
-    await handle.close().catch(() => {});
+  /*
+   * 需要重新组装的文件并发处理。
+   *
+   * 以前是一个文件组装完再下一个：原神一次更新有两千多个小文件，每个都要一次
+   * HTTP 往返，只这一段就能拖出十几分钟，而带宽一直是闲的。官方启动器一直是
+   * 多文件并发拉分块。这里开 FILE_CONCURRENCY 路，每路内部再按剩余额度开窗口
+   * （总连接数维持在 CHUNK_PREFETCH 附近，不会因为并发数相乘把 CDN 打限速）。
+   */
+  const parallel = Math.max(1, Math.min(FILE_CONCURRENCY, pendingFiles.length));
+  const chunkWindow = Math.max(1, Math.round(CHUNK_PREFETCH / parallel));
+  /*
+   * 并发下任何一路出错都要让其余几路收手。
+   * 串行时一个文件失败就整条停了；并发后如果不管，剩下几十个文件还会继续下、
+   * 继续写盘，用户看到的却是「更新失败」，白费流量也可能留下半成品。
+   * 已经在跑的那几路没法中途掐断（文件要按 offset 写完），但后面排队的会立刻退出。
+   */
+  let fatalError = null;
+  await mapLimit(pendingFiles, parallel, async ({ file, target, selfSourced }) => {
+    if (fatalError) return;
+    try {
+      if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
+      await waitIfPaused(signal);
+      /*
+       * 写盘前复查空间：本地有基准时是就地覆盖、占用基本不涨，只靠守卫留的余量兜底；
+       * 没有基准（或索引建不起来退化成全量）时整份文件都要新写，按文件大小预留。
+       * 真的不够就在这里停，而不是等系统抛 ENOSPC 到文件写到一半。
+       */
+      await spaceGuard.check(localChunks.size ? 0 : file.size);
+      // 必须走 openForWrite：这个 target 很可能是上一次生成时从基础客户端硬链接过来的，
+      // 直接 open('w') 会连带改掉基础客户端那份文件（详见 openForWrite 的注释）。
+      const handle = await openForWrite(target);
+      const inFlight = new Map();
+      const takeChunk = (index) => {
+        const chunk = file.chunks[index];
+        if (!inFlight.has(index)) {
+          inFlight.set(
+            index,
+            (async () => {
+              const localEntry = localChunks.get(chunk.uncompressedMd5);
+              const own = selfSourced.get(chunk.uncompressedMd5);
+              if (own) return { raw: own, from: 'local' };
+              const localRaw = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
+              if (localRaw) return { raw: localRaw, from: 'local' };
+              const fetched = await fetchChunk(chunk, file.chunkPrefix, chunkCacheDir, signal);
+              return {
+                raw: fetched.raw,
+                from: fetched.fromCache ? 'cache' : 'net',
+                netSize: chunk.compressedSize || fetched.raw.length,
+              };
+            })()
+          );
+        }
+        return inFlight.get(index);
+      };
+      try {
+        await handle.truncate(file.size);
+        for (let index = 0; index < file.chunks.length; index += 1) {
+          const chunk = file.chunks[index];
+          const windowEnd = Math.min(index + chunkWindow, file.chunks.length);
+          for (let ahead = index; ahead < windowEnd; ahead += 1) takeChunk(ahead);
+          const item = await takeChunk(index);
+          inFlight.delete(index);
+          if (item.from === 'local') reusedChunks += 1;
+          else if (item.from === 'cache') cacheHits += 1;
+          else netBytes += item.netSize;
+          await handle.write(item.raw, 0, item.raw.length, chunk.offset);
+          bytesDone += chunk.uncompressedSize;
+          onProgress?.({
+            phase: 'download',
+            processed,
+            total,
+            linked,
+            downloaded,
+            skipped,
+            reusedChunks,
+            cacheHits,
+            bytesDone,
+            totalBytes,
+            netBytes,
+            current: file.file,
+          });
+        }
+      } finally {
+        // 取消 / 出错时窗口里还有未完成的分块，先挂上 catch 再关文件，
+        // 否则它们的 reject 会变成未处理的 Promise 异常
+        for (const task of inFlight.values()) task.catch(() => {});
+        await handle.close();
+      }
+      const actual = await md5File(target);
+      if (actual !== file.md5.toLowerCase()) {
+        throw new Error(`文件校验失败：${file.file}`);
+      }
+      downloaded += 1;
+      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+    } catch (error) {
+      if (!fatalError) fatalError = error || new Error('组装失败');
+      throw error;
+    }
+  });
+
+  for (const pending of localHandles.values()) {
+    try {
+      await (await pending).close();
+    } catch {
+      /* 打不开或已关闭的句柄，忽略 */
+    }
   }
   let sdkVersion = '';
   if (channel === 'bilibili') {
@@ -1237,6 +1439,11 @@ async function prepareSophon({
     skipped,
     reusedChunks,
     cacheHits,
+    // 本次真正从网络下来的字节（压缩态）。界面用它回答「这次到底下了多少」
+    netBytes,
+    // 没有本地增量基准时，这里带着人话原因（空串表示有基准）
+    localBaseMissing: !localChunks.size,
+    localBaseReason: localIndex.reason || '',
     targetRoot,
     executable: exe || '',
   };
@@ -1261,6 +1468,11 @@ module.exports = {
   fetchBranch,
   fetchBuild,
   quickFileMatches,
+  fullFileMatches,
+  // 仅供 .tmp 自测脚本核对「本地版本 / 渠道判定」是否和界面同源
+  readGameVersion,
+  detectLocalChannel,
+  loadLocalChunkIndex,
   // 仅供 .tmp/test-sophon-write-isolation.js 断言「覆盖写会不会顺着硬链接改掉源文件」
   openForWrite,
 };

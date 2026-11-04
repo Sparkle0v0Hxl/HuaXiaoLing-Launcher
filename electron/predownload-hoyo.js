@@ -45,6 +45,8 @@ const {
 } = require('./sophon');
 const { httpFetch, directFetch } = require('./http-fetch');
 const linkSource = require('./link-source');
+const clientChannel = require('./client-channel');
+const diskSpace = require('./disk-space');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -248,21 +250,21 @@ function summarizeManifests(build, languages, options = {}) {
   };
 }
 
+/*
+ * config.ini 一律走编码自适应读取。
+ *
+ * 国际服客户端的 config.ini 有 UTF-16 的版本，用 utf8 直读是乱码：既读不到
+ * game_version（预下载会误判「本地版本为空」），也让 setConfigIniValue 的正则匹配不上，
+ * 改写时把 cps / game_biz 这些行整份丢掉 —— 客户端的渠道信息就这么没了。
+ */
 function readGameVersion(root) {
-  try {
-    const text = fs.readFileSync(path.join(root, 'config.ini'), 'utf8');
-    return (text.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim() || '';
-  } catch {
-    return '';
-  }
+  const config = clientChannel.readClientConfig(root);
+  if (!config) return '';
+  return String(config.fields.get('game_version') || '').trim();
 }
 
 function readConfigIni(root) {
-  try {
-    return fs.readFileSync(path.join(root, 'config.ini'), 'utf8');
-  } catch {
-    return '';
-  }
+  return clientChannel.readIniText(path.join(root, 'config.ini'));
 }
 
 /**
@@ -271,12 +273,9 @@ function readConfigIni(root) {
  */
 async function setConfigIniValue(root, key, value) {
   const file = path.join(root, 'config.ini');
-  let text = '';
-  try {
-    text = await fsp.readFile(file, 'utf8');
-  } catch {
-    text = '';
-  }
+  // 编码自适应读：UTF-16 的 ini 用 utf8 读会变成乱码，正则匹配不上，
+  // 改写时会把 cps / game_biz / sdk_version 整份丢掉（客户端渠道信息因此消失）
+  let text = clientChannel.readIniText(file);
   const line = `${key}=${value ?? ''}`;
   const pattern = new RegExp(`^${key}\\s*=.*$`, 'im');
   if (pattern.test(text)) {
@@ -1132,6 +1131,17 @@ async function applyHoyoPredownload({
     });
   };
 
+  /*
+   * 空间守卫：装配是「解压缓存 → 写 .pd_tmp → rename」，临时文件还在时新旧两份
+   * 会同时存在，所以每个文件都要额外占一份目标大小的空间。缓存目录和安装目录
+   * 可能不在同一个卷上，两个都盯。空间不够就在这里停，别等 ENOSPC 落到半截文件上。
+   */
+  const spaceGuard = diskSpace.createSpaceGuard({
+    dirs: [installRoot, dir],
+    label: '游戏所在盘',
+    reserveBytes: 256 * 1024 ** 2,
+  });
+
   const applyOne = async (file) => {
     const result = await assembleFile(file, {
       installRoot,
@@ -1153,16 +1163,32 @@ async function applyHoyoPredownload({
     report(file, true);
   };
 
+  /*
+   * 一路失败就让其余几路收手。
+   *
+   * 16 路并发时如果不设闸，界面已经弹「更新失败」，后台剩下的工人还在下分块、还在写盘；
+   * 用户马上点重试，两个工人池就可能同时往同一个 .pd_tmp 里写。已经在跑的那个文件
+   * 没法中途掐断（要按 offset 写完），但排队的必须立刻退出。
+   */
+  let fatalError = null;
   const workerCount = Math.max(1, Math.min(concurrency, normalized.length));
   const workers = [];
   for (let index = 0; index < workerCount; index += 1) {
     workers.push(
       (async () => {
         while (true) {
+          if (fatalError) return;
           const next = cursor;
           cursor += 1;
           if (next >= normalized.length) return;
-          await applyOne(normalized[next]);
+          try {
+            // 装配前复查空间：这个文件要额外占一份，装不下就整条停下并说明差多少
+            await spaceGuard.check(normalized[next].size || 0);
+            await applyOne(normalized[next]);
+          } catch (error) {
+            if (!fatalError) fatalError = error || new Error('应用预下载失败');
+            throw error;
+          }
         }
       })()
     );

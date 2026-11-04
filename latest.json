@@ -1,18 +1,23 @@
 {
-  "version": "2.9.3-alpha1",
-  "title": "花筱灵启动器 2.9.3-alpha1",
-  "date": "2026-11-04",
-  "notes": "预发布版本（semver 的 -alpha1 后缀），优先级低于正式版 2.9.3，建议先试、不要当成日常版本。\n硬链接生成不再「假死」：生成 B服 / 国际服运行时如果卡在「第 1/5 步 · 读取官方清单」不动，那其实不是卡住——清空旧运行时目录时撞上 Windows 的 EPERM（这次是 YuanShen_Data\\webCaches\\2.36.0.0\\Service Worker 被残留句柄咬住），任务当场就失败了，而界面还挂着「正在读取官方清单…」的滚动动画。\n清理旧目录改成三档容错：整树删除带 10 次重试 → 逐项删除只看真正删不掉的 → 还有残留就把整个旧目录改名让路，新目录照常建。只有改名也失败才报错。\n失败不再假装在跑：出错时进度区立刻收口成「已中止 · 原因见下方」，滚动动画停掉；EPERM / EBUSY 会翻成中文并带出具体路径，ENOSPC / EACCES 也各有一句能照做的提示。\n清理与扫描都有文案：清理时显示「清理上次残留的运行时目录…」，扫描基础客户端时按 400 ms 节流上报，能看到已经数到第几个文件。\n覆盖范围：原神 B服、终末地、明日方舟三条硬链接路径统一走同一套容错实现；明日方舟的渠道文件覆盖改成删不动就跳过这一件。异环没有硬链接流程，不涉及。\n版本号从这一版开始按 semver 走：修 bug 升 patch、加功能升 minor、破坏性改动升 major，预发布加 -alpha1 / -beta1 / -rc1，转正式时去掉后缀。\n增量更新：2.9.2 → 2.9.3-alpha1 提供二进制差分包（95 KB，只含 7 个变化文件），在 2.9.2 上点更新会优先用它；基准校验不符时自动回退完整包。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.3-alpha1/HuaXiaoLing-2.9.3-alpha1-Portable.zip",
-  "sha256": "29e446ed978187b705868561a70698fda3c0042c841f070f74303a7ef37293dc",
-  "size": 200835265,
+  "version": "2.9.3",
+  "title": "花筱灵启动器 2.9.3",
+  "date": "2026-11-05",
+  "notes": "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。\n2.9.3 正式版。渲染后端开关搬到启动页「开始游戏」正下方，默认 / DX11 / DX12 点一下就切，只对实测能切的五款出现：原神、星铁、绝区零、终末地传 -force-d3d11 / -force-d3d12，异环传 -dx11 / -dx12；崩坏3 与明日方舟不提供。游戏运行中会拒绝切换，启动 45 秒后回读 Player.log 把实际后端写进启动日志。\n异环官方开放预下载后，启动页会识别并给出「去官方预下载」：拉起官方启动器（已开着就切前台，不杀掉）并尝试自动点预下载，官方进程运行期间不替换 NTELauncher 文件。异环资源清单私有加密、资源地址需登录态换密钥，所以只做检测与引导，不代下本体。\n更新链路按真实清单与真实客户端重跑一遍：国际服先硬链接再打 ldiff 补丁（实测省流 84.7%）；国际服 ldiff 因 config.ini 是 UTF-16 却按 UTF-8 读而从未生效的问题修掉；终末地接上跨渠道复用（实测 20/20 零下载，并修正清单字段 path 与 file 不匹配导致静默全量下载）；异环 size=0 却配了 md5 的瑕疵条目不再每次重下；异环写盘改为临时文件 + rename。\n更新与预下载开跑前先算磁盘空间，运行中每 1.5 秒复查，不够当场停并说明还差多少；读不到磁盘信息时放行。\n「修复游戏」改为整份读盘算 md5（原来只比首尾分块，多分块文件中间损坏会漏检），更新路径仍是快速判定。硬链接「快速比较」文案改为「仅估算」，执行阶段强制全量。\n异环 Config.ini 编码自适应（UTF-16 / UTF-8 / BOM），B服不再拿到官服清单。\n增量更新：2.9.2 → 2.9.3 提供二进制差分包，在 2.9.2 上点更新会优先用它；基准校验不符时自动回退完整包。覆盖安装不会动 data 目录里的游戏列表、设置、歌单与抽卡记录。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.3/HuaXiaoLing-2.9.3-Portable.zip",
   "deltas": [
     {
       "from": "2.9.2",
-      "to": "2.9.3-alpha1",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.3-alpha1/delta-2.9.2-to-2.9.3-alpha1.zip",
-      "sha256": "98e7eceb42662d0768d15f1286c5f4e4ea0dece63683cbaac37651cc70029a27",
-      "size": 97266
+      "to": "2.9.3",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.9.3/delta-2.9.2-to-2.9.3.zip",
+      "sha256": "55d38757fa887b2d23461d086b0fce9af061e66bdb05a63d2c49defe5a326452",
+      "size": 296577
     }
-  ]
+  ],
+  "sha256": "2835cecf91164a1d0398115378474accaf91cf1c7c09d4d059965a696722c61d",
+  "size": 200872892,
+  "sig": {
+    "alg": "ed25519",
+    "keyId": "dff6dc4c71f12733",
+    "value": "W7cmqLt2sG6Iz2XyOwe6bLxVWyc1APSsmgULOuglQx1M7jBAPaeBgmxp5O/1dgYHBtfR86LqgCIFt09HoFQpDA=="
+  }
 }

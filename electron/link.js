@@ -76,39 +76,63 @@ async function collectFiles(root, signal) {
   return files;
 }
 
-function readSlice(handle, position, length) {
-  return new Promise((resolve, reject) => {
-    const buffer = Buffer.alloc(length);
-    handle.read(buffer, 0, length, position, (error, bytesRead) => {
-      if (error) reject(error);
-      else resolve(buffer.subarray(0, bytesRead));
-    });
-  });
+/*
+ * 按偏移读一块。
+ *
+ * 这里必须用 FileHandle 的 Promise 形式：原来写的是 fs.read 那套
+ * `handle.read(buf, 0, len, pos, callback)`，实测在 Electron 的 Node 模式下
+ * 回调根本不触发，Promise 永远悬着 —— 表现是「点开始比较就一直停在 0%」，
+ * 既不报错也不返回。改成 await 拿 { bytesRead } 就没有这个问题。
+ */
+async function readSlice(handle, position, length) {
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await handle.read(buffer, 0, length, position);
+  return buffer.subarray(0, bytesRead);
+}
+
+/*
+ * 快速比较的采样参数。
+ *
+ * 原来固定只比「头 / 中 / 尾」各 1MB：256MB 的文件只覆盖 3MB（1.2%）。这个密度下
+ * 「头尾一样、中间某一段不同」的大文件会被判成相同，硬链接一建就等于用源文件的内容
+ * 顶掉目标文件 —— 那是数据损坏，不是节省空间。
+ *
+ * 现在改成按固定步长均匀取点，覆盖密度从 1.2% 提到 25%（256MB 时约 65 个点）：
+ *   - 8MB 以下直接全量算，采样没有意义；
+ *   - 8MB ~ 256MB 每 4MB 取一个 1MB 的块，另加末尾一个块覆盖不足 4MB 的尾巴；
+ *   - 超过 256MB 仍然全量 —— 这种量级下省下的读盘时间抵不上一次误判的代价。
+ * 快速模式仍然只是「先试跑看看大概能省多少」的选项，默认走完整校验。
+ */
+const SAMPLE_BLOCK = 1024 * 1024;
+const SAMPLE_STEP = 4 * 1024 * 1024;
+const SAMPLE_FULL_BELOW = 8 * 1024 * 1024;
+const SAMPLE_FULL_ABOVE = 256 * 1024 * 1024;
+
+/**
+ * 采样偏移表；返回 null 表示「这个大小不该采样，直接全量算」。
+ * 纯函数，便于单测：偏移必须落在文件内、互不重叠、且首点是 0、末点贴住文件尾。
+ */
+function sampleOffsets(size) {
+  const total = Number(size) || 0;
+  if (total <= SAMPLE_FULL_BELOW || total > SAMPLE_FULL_ABOVE) return null;
+  const offsets = [];
+  for (let pos = 0; pos + SAMPLE_BLOCK <= total; pos += SAMPLE_STEP) offsets.push(pos);
+  const tail = total - SAMPLE_BLOCK;
+  if (tail > 0 && (offsets.length === 0 || offsets[offsets.length - 1] !== tail)) offsets.push(tail);
+  return offsets;
 }
 
 async function sampleDigest(file, size) {
-  if (size <= 2 * 1024 * 1024) return fullDigest(file);
-  /*
-   * 超过这个大小就老实全量算。
-   *
-   * 只比对头尾两个采样点时，两个「头尾一样、中间不同」的大文件会被判成相同，
-   * 硬链接一建就等于用源文件覆盖掉目标文件 —— 那是数据损坏，不是节省空间。
-   * XelLauncher 那边是靠官方清单逐文件比对，我们没清单，宁可慢一点也不能赌。
-   */
-  if (size > 256 * 1024 * 1024) return fullDigest(file);
+  const offsets = sampleOffsets(size);
+  if (!offsets) return fullDigest(file);
   const handle = await fsp.open(file, 'r');
   try {
-    const chunk = 1024 * 1024;
-    const head = await readSlice(handle, 0, chunk);
-    const middle = await readSlice(handle, Math.floor(size / 2), chunk);
-    const tail = await readSlice(handle, Math.max(0, size - chunk), chunk);
-    return crypto
-      .createHash('sha256')
-      .update(String(size))
-      .update(head)
-      .update(middle)
-      .update(tail)
-      .digest('hex');
+    const hash = crypto.createHash('sha256').update(String(size));
+    for (const offset of offsets) {
+      const slice = await readSlice(handle, offset, SAMPLE_BLOCK);
+      hash.update(slice);
+    }
+    return hash.digest('hex');
   } finally {
     await handle.close();
   }
@@ -361,10 +385,16 @@ async function linkTrees({
         emit('compare', target.rel);
         continue;
       }
-      const [left, right] =
-        mode === 'fast'
-          ? await Promise.all([sampleDigest(source.full, source.size), sampleDigest(target.full, target.size)])
-          : await Promise.all([fullDigest(source.full), fullDigest(target.full)]);
+      /*
+       * 执行阶段一律完整校验，不接受抽样。
+       *
+       * 抽样（哪怕把覆盖密度提到 25%）本质上仍是概率判定：两个「采样点相同、
+       * 其余部分不同」的文件被判成一样，紧接着 replaceWithLink 就会把目标文件
+       * 换成源文件的 inode —— 目标文件的内容被直接顶掉，是数据损坏，不是省空间。
+       * 预览阶段只统计、不落地，抽样用来估算没问题；真正动手时多读一遍盘，
+       * 换的是「绝不会链错」，这个代价必须付。
+       */
+      const [left, right] = await Promise.all([fullDigest(source.full), fullDigest(target.full)]);
       if (left !== right) {
         skipped += 1;
         emit('compare', target.rel);
@@ -389,10 +419,25 @@ async function linkTrees({
     linked,
     skipped,
     savedBytes,
+    // 执行阶段固定完整校验，与调用方传进来的 mode 无关（原因见循环内注释）
+    verifiedMode: 'full',
+    // 调用方可能仍传了 fast；这里显式声明已忽略，避免读代码的人以为它生效了
+    requestedMode: String(mode || 'full'),
     errors,
   };
   onProgress({ ...result, phase: 'done', current: '' });
   return result;
 }
 
-module.exports = { linkTrees, previewTrees, collectFiles };
+module.exports = {
+  linkTrees,
+  previewTrees,
+  collectFiles,
+  // 采样策略对外暴露，便于自测直接验「偏移是否覆盖均匀、是否越界」
+  sampleOffsets,
+  sampleDigest,
+  SAMPLE_BLOCK,
+  SAMPLE_STEP,
+  SAMPLE_FULL_BELOW,
+  SAMPLE_FULL_ABOVE,
+};

@@ -9,6 +9,8 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { CHANNELS, pickManifests } = require('./sophon');
+const linkSource = require('./link-source');
+const clientChannel = require('./client-channel');
 
 const API = {
   cn: 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api/getPatchBuild',
@@ -134,7 +136,16 @@ async function md5File(file) {
   });
 }
 
+/*
+ * 读本地客户端版本号。
+ *
+ * 必须编码自适应：国际服的 config.ini 有 UTF-16 写法，用 utf8 直读拿到的是乱码，
+ * 版本号读不出来 → 这一层 ldiff 直接以 no-local-version 退出，等于整条省钱预处理
+ * 在国际服上从来没生效过（用户看到的就是「国际服更新还是老老实实下增量包」）。
+ */
 function readLocalVersion(root) {
+  const config = clientChannel.readClientConfig(root);
+  if (config) return String(config.fields.get('game_version') || '').trim();
   try {
     const content = fs.readFileSync(path.join(root, 'config.ini'), 'utf8');
     return (content.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim() || '';
@@ -242,6 +253,28 @@ async function readSlice(file, offset, length) {
  * 每个文件都是「写临时文件 → md5 校验通过 → rename 覆盖」，
  * 任何一步失败只记 failed 并跳过该文件，不影响其它文件，也不会留下半成品。
  */
+/*
+ * 一个补丁条目能不能从「已经在目标版本的其它渠道客户端」直接硬链接过来。
+ *
+ * 判定口径必须和补丁清单一致：size + 整份 md5。ldiff 的条目本来就只有 md5、没有分块
+ * 信息，凑不出 quickFileMatches 那套首尾分块判定，用整份 md5 反而是最准的。
+ * 单独抽出来是为了能直接对着真实文件跑断言（见 .tmp/test-ldiff-link.js）。
+ */
+async function linkFromReadySources({ item, target, gameKey, readySources }) {
+  if (!readySources || !readySources.length) return { ok: false };
+  return linkSource.reuseFromSources({
+    file: { file: item.file },
+    target,
+    gameKey,
+    sources: readySources,
+    match: async (candidate) => {
+      const stat = await fsp.stat(candidate);
+      if (stat.size !== item.size) return false;
+      return (await md5File(candidate)) === String(item.md5).toLowerCase();
+    },
+  });
+}
+
 async function applyHdiffPrepass({
   gameKey,
   channel,
@@ -251,8 +284,9 @@ async function applyHdiffPrepass({
   includeStory = false,
   onProgress,
   signal,
+  linkSources = [],
 }) {
-  const empty = { ok: false, applied: 0, skipped: 0, failed: 0, patchBytes: 0, saveBytes: 0, candidates: 0, deleteTags: [] };
+  const empty = { ok: false, applied: 0, skipped: 0, failed: 0, linked: 0, patchBytes: 0, saveBytes: 0, candidates: 0, deleteTags: [] };
   const info = CHANNELS[gameKey]?.[channel];
   if (!info) throw new Error('没有对应的补丁渠道');
   const localVersion = readLocalVersion(installRoot);
@@ -305,11 +339,32 @@ async function applyHdiffPrepass({
     item.patches.some((part) => part.tag === localVersion)
   );
   const total = candidates.length;
+  /*
+   * 硬链接预取源：只取「本身已经处在目标版本」的同款客户端。
+   *
+   * 典型场景：官服更完了 7.2，国际服还停在 7.1。官服那份里绝大多数文件与目标清单
+   * 逐字节相同，本来就该直接硬链接过来；但 ldiff 跑在 prepareSophon 之前，它眼里
+   * 只有补丁清单，会把这些文件按「7.1 → 7.2」再下一遍补丁包 —— 旁边摆着一份现成的，
+   * 白花几十上百 GB 流量。这就是用户说的「硬链接的国际服还跑去下增量包」。
+   *
+   * 用版本号先筛一道很重要：源不是目标版本时，逐文件算 md5 基本全是空转（读盘白读）。
+   */
+  const targetTag = String(branchData.main.tag || '');
+  const readySources = targetTag
+    ? linkSources.filter((source) => {
+        try {
+          return readLocalVersion(source) === targetTag;
+        } catch {
+          return false;
+        }
+      })
+    : [];
   const packages = new Map(); // id → 已下载的补丁包，避免同一个包被反复 md5 校验
   const usedPackages = new Set();
   let applied = 0;
   let skipped = 0;
   let failed = 0;
+  let linked = 0;
   let patchBytes = 0;
   let saveBytes = 0;
   let processed = 0;
@@ -339,6 +394,31 @@ async function applyHdiffPrepass({
     if (alreadyNew) {
       skipped += 1;
       continue;
+    }
+
+    /*
+     * 别的渠道客户端已经在目标版本上：这个文件直接硬链接过来，连补丁都不用下。
+     * 命中判定按清单的 size + 整份 md5 —— ldiff 的条目本来就只有 md5、没有分块信息，
+     * 用整份 md5 才是与清单同口径的判定，不会出现「这里说命中、那边又说不对」。
+     */
+    if (readySources.length) {
+      const reused = await linkFromReadySources({ item, target, gameKey, readySources });
+      if (reused.ok) {
+        linked += 1;
+        onProgress?.({
+          phase: 'ldiff',
+          current: item.file,
+          processed,
+          total,
+          applied,
+          failed,
+          skipped,
+          linked,
+          patchBytes,
+          saveBytes,
+        });
+        continue;
+      }
     }
 
     const entry = item.patches.find((part) => part.tag === localVersion);
@@ -442,6 +522,8 @@ async function applyHdiffPrepass({
     applied,
     skipped,
     failed,
+    // 其中有多少是「从已经更到目标版本的其它渠道客户端硬链接过来」的，一个补丁都没下
+    linked,
     removed,
     patchBytes,
     saveBytes,
@@ -449,4 +531,4 @@ async function applyHdiffPrepass({
   };
 }
 
-module.exports = { applyHdiffPrepass, fetchPatchBuild, decodePatchManifest };
+module.exports = { applyHdiffPrepass, fetchPatchBuild, decodePatchManifest, linkFromReadySources, readLocalVersion };
