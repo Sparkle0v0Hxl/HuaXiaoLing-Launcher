@@ -646,39 +646,96 @@ function defaultDownloadDir(game) {
   return `${drive}\\HuaXiaoLingGames\\${game.builtinKey || 'game'}`;
 }
 
+/**
+ * 下载入口开不出「下载弹窗」时，也要开一个小窗把原因写清楚。
+ *
+ * 以前这几种情况只弹一条 toast 就 return：已有任务在跑、这个游戏没有可用渠道。
+ * toast 两秒就没了，用户点完只看到「没反应」，反馈过来就是「下载弹窗打不开」。
+ * 现在一律开窗说明，能顺手做的事（回到进行中的任务 / 打开官网）直接给按钮。
+ */
+function openDownloadNotice({ title, note, bodyHtml = '', actions = [] }) {
+  openModal(`
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>${esc(title)}</h2>
+            <p>${esc(note)}</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        ${bodyHtml ? `<div class="modal-body">${bodyHtml}</div>` : ''}
+        <div class="modal-foot">
+          <button class="btn btn-ghost" data-close>知道了</button>
+          ${actions.join('')}
+        </div>
+      </div>
+    </div>`);
+}
+
 function openGameDownloadModal(gameId) {
   const game = state.games.find((item) => item.id === gameId);
-  if (!game) return;
-
-  // 没接入下载管线的游戏（异环）：如实说明 + 官网入口，不假装能下
-  if (!DOWNLOAD_GAME_ENGINES[game.builtinKey]) {
-    const site = DOWNLOAD_UNSUPPORTED_SITES[game.builtinKey] || '';
-    openModal(`
-      <div class="modal-backdrop" data-backdrop>
-        <div class="modal narrow" role="dialog" aria-modal="true">
-          <div class="modal-head">
-            <div>
-              <h2>暂不支持自动下载</h2>
-              <p>${esc(game.name)} 还没有接入一键下载。</p>
-            </div>
-            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
-          </div>
-          <div class="modal-body">
-            <p class="sw-note">${icon('info', 'xs')}<span>这款游戏暂时不能在启动器里直接下载安装：官方没有开放的版本清单接口。请先前往官网下载安装，装好后再用启动页的「自动检测」或「路径选择」把客户端指进来。</span></p>
-          </div>
-          <div class="modal-foot">
-            <button class="btn btn-ghost" data-close>关闭</button>
-            ${site ? `<button class="btn btn-primary" data-action="open-external" data-url="${esc(site)}">${icon('external')}打开官网</button>` : ''}
-          </div>
-        </div>
-      </div>`);
+  // 点了没反应是最难排查的一种「bug」：宁可开窗说一句，也不要静默 return
+  if (!game) {
+    openDownloadNotice({
+      title: '找不到这个游戏',
+      note: '这条游戏记录已经不在了。',
+      bodyHtml: `<p class="sw-note">${icon('info', 'xs')}<span>可能是刚在游戏库删掉、或者数据还没刷新。回到游戏库看一眼，列表里没有的话用启动页的「自动检测」重新扫一次。</span></p>`,
+    });
     return;
   }
 
-  // 已有硬链接 / 更新 / 下载任务在跑时不再叠加：下载队列和硬链接队列共用一套任务面板，
-  // 这里不排队，避免排到的下载任务被 openSophonModal 顶成硬链接弹窗。
-  if (activeSophonJob || sophonJobs.some((job) => ['starting', 'running', 'queued'].includes(job.status))) {
-    toast('已有下载 / 硬链接任务在进行，请先等它完成再下载新游戏', 'info');
+  /*
+   * 没接入下载管线，分两种，别用同一句话糊过去：
+   *   · builtinKey 认得出（异环）：官方确实没有开放的版本清单接口，给官网入口；
+   *   · builtinKey 是空的：启动器压根没认出这是哪款游戏，用户看到的「暂不支持」
+   *     会被理解成「这游戏你们不做」，实际是他那条游戏记录没关联上。
+   */
+  if (!DOWNLOAD_GAME_ENGINES[game.builtinKey]) {
+    const site = DOWNLOAD_UNSUPPORTED_SITES[game.builtinKey] || '';
+    const known = Boolean(game.builtinKey);
+    openDownloadNotice({
+      title: known ? '暂不支持自动下载' : '没认出这是哪款游戏',
+      note: known ? `${game.name} 还没有接入一键下载。` : `${game.name} 没有关联到已支持的游戏类型。`,
+      bodyHtml: `<p class="sw-note">${icon('info', 'xs')}<span>${
+        known
+          ? '这款游戏暂时不能在启动器里直接下载安装：官方没有开放的版本清单接口。请先前往官网下载安装，装好后再用启动页的「自动检测」或「路径选择」把客户端指进来。'
+          : '启动器没拿到这款游戏的类型，所以不知道该调哪条下载接口。可以在「游戏库」里删掉这一条，再用启动页的「自动检测」重新扫一次；如果已经装好了，直接用「路径选择」把客户端目录指给启动器就行。'
+      }</span></p>`,
+      actions: site
+        ? [
+            `<button class="btn btn-primary" data-action="open-external" data-url="${esc(site)}">${icon('external')}打开官网</button>`,
+          ]
+        : [],
+    });
+    return;
+  }
+
+  /*
+   * 已有硬链接 / 更新 / 下载任务在跑时不再叠加：下载队列和硬链接队列共用一套任务面板，
+   * 这里不排队，避免排到的下载任务被 openSophonModal 顶成硬链接弹窗。
+   *
+   * 但「不叠加」不等于「不给反馈」：以前这里只 toast 一句就 return，用户点完
+   * 什么都没看到，只会以为按钮坏了。现在开窗说清在跑什么，并给一个直接跳回去的按钮。
+   */
+  const busyJobs = sophonJobs.filter((job) => ['starting', 'running', 'queued'].includes(job.status));
+  const busyJob = activeSophonJob || busyJobs[0] || null;
+  if (busyJob) {
+    const summary = busyJobs.length
+      ? busyJobs
+          .map((job) => `${job.gameName || ''}${job.serverName ? ` · ${job.serverName}` : ''}（${job.status === 'queued' ? '排队中' : '进行中'}）`)
+          .join('；')
+      : `${busyJob.gameName || ''}${busyJob.serverName ? ` · ${busyJob.serverName}` : ''}（进行中）`;
+    openDownloadNotice({
+      title: '有一个任务正在进行',
+      note: '同一时间只跑一个下载 / 硬链接任务。',
+      bodyHtml: `<p class="sw-note">${icon('info', 'xs')}<span>正在跑：${esc(summary)}。两个任务同时写同一个游戏目录会互相覆盖，所以这里先不开始新的。等它跑完再点一次「下载游戏」就行；也可以先回到那个任务看进度。</span></p>`,
+      actions: busyJob.id
+        ? [
+            `<button class="btn btn-primary" data-action="focus-sophon" data-id="${esc(busyJob.id)}">${icon('download')}回到这个任务</button>`,
+          ]
+        : [],
+    });
     return;
   }
 
@@ -688,7 +745,18 @@ function openGameDownloadModal(gameId) {
   const allowedChannels = DOWNLOAD_CHANNELS_OK[game.builtinKey];
   const choices = allowedChannels ? allChoices.filter((server) => allowedChannels.includes(server.channel)) : allChoices;
   if (!choices.length) {
-    toast('这个游戏还没有可用的服务器渠道', 'error');
+    // 有服务器记录、但都被渠道白名单滤掉了 → 是「只有没实测过的渠道」；
+    // 一条记录都没有 → 是游戏没被识别全，两种说法差很多。
+    const hasAnyServer = (game.servers || []).length > 0;
+    openDownloadNotice({
+      title: hasAnyServer ? '这个游戏还没有可下载的渠道' : '没有拿到这个游戏的服务器信息',
+      note: hasAnyServer ? `${game.name} 目前只有还没实测过的渠道。` : `${game.name} 的服务器列表是空的。`,
+      bodyHtml: `<p class="sw-note">${icon('info', 'xs')}<span>${
+        hasAnyServer
+          ? '启动器只把实际验证过的渠道放进下载弹窗，避免选了之后才在获取版本时报错。可以先用官方启动器装好，再用「路径选择」把目录指进来；装好之后这里会直接变成「开始游戏」。'
+          : '多半是这条游戏记录不完整（比如手动添加时没选游戏类型）。到「游戏库」删掉它，用启动页的「自动检测」重新扫一次，就能拿到完整渠道。'
+      }</span></p>`,
+    });
     return;
   }
   // 新任务开始：把上一次收在坞里的旧弹窗丢掉，免得点任务条时挂回来的是上一单的界面
@@ -1143,6 +1211,8 @@ function openGameDownloadModal(gameId) {
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
+        clean: '清理上次残留的运行时目录',
+        scan: '扫描基础客户端文件',
         version: `目标版本 ${event.tag || ''}`,
         manifest: '读取清单与分块索引',
         install: '写入文件',
@@ -1281,6 +1351,9 @@ const SOPHON_STAGES = [
 /** 主进程推的 phase → 阶段下标。B服 走的 'link' 也是纯硬链接复用，归到写入阶段。 */
 const SOPHON_PHASE_STAGE = {
   start: 0,
+  // 清理上次残留目录、扫描基础客户端，都属于「读清单」这一步的准备期
+  clean: 0,
+  scan: 0,
   version: 0,
   manifest: 0,
   // 终末地 / 明日方舟生成运行时：先补缺的渠道包，再硬链接、再覆盖差异文件 —— 都算「写入 / 下载」
@@ -2038,6 +2111,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
+        clean: '清理上次残留的运行时目录',
+        scan: '扫描基础客户端文件',
         version: `目标版本 ${event.tag || ''}`,
         manifest: '读取清单与分块索引',
         install: '写入文件',
@@ -2140,6 +2215,17 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       );
     } catch (error) {
       job.status = cancelled ? 'cancelled' : 'error';
+      /*
+       * 失败时把进度区收口成「已中止」。
+       * 以前只往下面塞一行红字，进度条还挂在「第 1/5 步 · 读取官方清单」的滚动动画上，
+       * 用户以为它在读清单，其实任务已经退出了 —— 这个假卡死比错误本身更误导人。
+       */
+      const failWrap = document.querySelector('#sophon-bar-wrap');
+      failWrap?.classList.remove('indeterminate');
+      const failPhase = document.querySelector('#sophon-phase');
+      if (failPhase) failPhase.textContent = cancelled ? '已停止' : '已中止 · 原因见下方';
+      const failCurrent = document.querySelector('#sophon-current');
+      if (failCurrent) failCurrent.textContent = '';
       // 失败 / 停止同样不在坞里留残影：错误就写在这一屏上，坞只放还在跑的任务
       sophonJobs = sophonJobs.filter((item) => item !== job);
       hideDock();

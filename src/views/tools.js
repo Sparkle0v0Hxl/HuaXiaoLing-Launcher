@@ -1688,6 +1688,7 @@ function toolsFeatureName(data, key) {
  */
 const RECORD_FEATURES = [
   'daily-note',
+  'war-echoes',
   'abyss',
   'theater',
   'stygian',
@@ -1704,6 +1705,7 @@ const RECORD_FEATURES = [
 /** 战绩功能各自的图标，工具页「按游戏查看」里跟着功能名一起显示。 */
 const RECORD_ICON = {
   'daily-note': 'clock',
+  'war-echoes': 'shield',
   abyss: 'star',
   theater: 'sparkle',
   stygian: 'shield',
@@ -1964,13 +1966,29 @@ function toolsRailItem(game, supportOf, active) {
   </button>`;
 }
 
+/**
+ * 这款游戏的数据从哪儿来 —— 面板头上标出来，用户才知道要登哪个账号。
+ * 米家四款走米游社，终末地走森空岛，其余只有本机数据（时长、截图、安装）。
+ */
+function toolsDataSourceOf(game) {
+  if (game.key === 'endfield') return { label: '森空岛', tone: 'skland' };
+  if (game.vendor === 'mihoyo') return { label: '米游社', tone: 'miyoushe' };
+  return { label: '本机', tone: 'local' };
+}
+
 /** 右侧能力面板：一次只铺一个游戏，高度自然撑满，不再有卡片高低参差。 */
 function toolsPanel(game, supportOf) {
   const count = supportOf(game.key).filter((item) => item.supported).length;
+  const source = toolsDataSourceOf(game);
   return `<div class="tg-panel-head">
-      <strong>${esc(game.name)}</strong>
-      <small>${esc(game.subtitle || '')}</small>
-      <span class="tg-count">${count} 项能力</span>
+      <div class="tg-panel-title">
+        <strong>${esc(game.name)}</strong>
+        <small>${esc(game.subtitle || '')}</small>
+      </div>
+      <div class="tg-panel-tags">
+        <span class="tg-source is-${esc(source.tone)}">${esc(source.label)}</span>
+        <span class="tg-count">${count} 项能力</span>
+      </div>
     </div>
     <div class="tg-panel-groups">${toolsGameBody(game, supportOf)}</div>`;
 }
@@ -2063,6 +2081,34 @@ function toolsView() {
   const activeGame = games.find((game) => game.key === activeKey) || games[0] || null;
   const rail = games.map((game) => toolsRailItem(game, supportOf, game.key === activeKey)).join('');
 
+  /*
+   * 顶部四个数字：先把「这个启动器能做什么」讲清楚，再让用户挑游戏。
+   * 以前只有一句 7 个游戏 · 13 项能力，扫过去没有分量，也不像一个看板。
+   */
+  const providerCount = Object.keys(data.providers || {}).length;
+  const playedSeconds = (state.games || []).reduce((sum, item) => sum + (Number(item.playSeconds) || 0), 0);
+  const playedText = playedSeconds
+    ? playedSeconds >= 3600
+      ? `${Math.floor(playedSeconds / 3600)} 小时`
+      : `${Math.max(1, Math.round(playedSeconds / 60))} 分钟`
+    : '—';
+  const summary = `<div class="tools-summary">
+    ${[
+      ['游戏', totalGames, '已接入'],
+      ['能力', totalFeatures, '可直达'],
+      ['通行证', providerCount, '发行方'],
+      ['本机游玩', playedText, '累计'],
+    ]
+      .map(
+        ([label, value, note]) => `<div class="tools-stat">
+          <strong>${esc(value)}</strong>
+          <span>${esc(label)}</span>
+          <em>${esc(note)}</em>
+        </div>`
+      )
+      .join('')}
+  </div>`;
+
   return `<div class="page page-tools">
     <div class="page-head">
       <div>
@@ -2077,6 +2123,8 @@ function toolsView() {
       </div>
     </div>
 
+    ${summary}
+
     <div class="tg-shell">
       <aside class="tg-rail" role="tablist" aria-label="按游戏查看能力">${rail}</aside>
       <section class="tg-panel" style="--tg-accent:${esc((activeGame && activeGame.accent) || '#f0c674')}">
@@ -2087,8 +2135,13 @@ function toolsView() {
 }
 
 /* 工具页右上角「账号登录」弹窗：米游社一套号带四款米家游戏，其余发行方各自一卡。 */
-function openToolsAccountsModal() {
+async function openToolsAccountsModal() {
   const games = (state.features && state.features.games) || [];
+  /*
+   * 森空岛的状态是异步来的，弹窗一打开就定格了，之后再重绘主页面也刷不到弹窗里。
+   * 所以先把状态读好再开窗 —— 读的是本地加密存储，不发网络请求，很快。
+   */
+  await refreshSklandStatus();
   openModal(`
     <div class="modal-backdrop" data-backdrop>
       <div class="modal tools-accounts-modal" role="dialog" aria-modal="true" aria-labelledby="tools-accounts-title">
@@ -2150,6 +2203,43 @@ const RECORD_VERIFY_RETCODES = [1034, 5003, 10035, 10041, 10053];
 const RECORD_WEB_URL = 'https://webstatic.mihoyo.com/app/community-game-records/index.html';
 
 /*
+ * 本地闸门的时间参数。
+ *
+ * 为什么要在客户端自己拦：米哈游对便笺/战绩这类接口是按分钟限流的，
+ * 同一个账号连点几次刷新就会被判成异常请求（retcode 1034）。
+ * 一旦被拦，再点只会把风控顶得更死，用户能做的其实只有一个字：等。
+ * 所以界面上直接拦住，并明确告诉他还要等多久 ——
+ * 比让他反复点、反复看同一条报错有用得多。
+ *
+ * 20 秒是「两次查询的最小间隔」，5 分钟是「被 1034 拦下后的冷却」。
+ * 两个数都只影响本机，不发请求就不会加重风控。
+ */
+const RECORD_MIN_INTERVAL_MS = 20 * 1000;
+const RECORD_COOLDOWN_MS = 5 * 60 * 1000;
+
+/** 取（必要时创建）某个游戏的请求闸门。 */
+function recordGateOf(game) {
+  if (!state.record.gate) state.record.gate = {};
+  if (!state.record.gate[game]) state.record.gate[game] = { lastAt: 0, blockedUntil: 0 };
+  return state.record.gate[game];
+}
+
+/** 冷却还剩多少毫秒（0 表示现在可以查）。 */
+function recordCooldownLeft(game) {
+  const gate = state.record.gate?.[game];
+  if (!gate?.blockedUntil) return 0;
+  return Math.max(0, gate.blockedUntil - Date.now());
+}
+
+/** 把毫秒说成人话：4 分 12 秒 / 38 秒。 */
+function recordWaitText(ms) {
+  const total = Math.max(1, Math.ceil(ms / 1000));
+  const minute = Math.floor(total / 60);
+  const second = total % 60;
+  return minute ? `${minute} 分 ${second} 秒` : `${second} 秒`;
+}
+
+/*
  * 缓存键要带账号：多账号下同一个人可能有多个通行证，
  * 不同账号的原神 uid 完全不同，只用「游戏/功能/期数」做键会串号。
  */
@@ -2169,9 +2259,44 @@ function recordUrlPath(url) {
 }
 
 /** 米游社那个账号在指定游戏下的角色；优先用户手动选过的那个。 */
+/**
+ * 战绩数据源：米家四款走米游社，终末地走森空岛。
+ *
+ * 两套账号体系互不相通 —— 米游社登了不代表森空岛登了。
+ * 所以「这个游戏的数据从哪来」必须收成一个判断，
+ * 登录提示、账号条、角色条都按它分叉，别在七八个地方各写一遍。
+ */
+function recordSourceOf(game) {
+  return String(game) === 'endfield' ? 'skland' : 'miyoushe';
+}
+
+/**
+ * 森空岛绑定角色 → 和米家角色同形状。
+ * 页面上的角色胶囊、UID 行都是照米家那套写的，形状对齐就不用分叉。
+ */
+function sklandRolesAsRecord(game) {
+  const roles = state.skland?.roles || [];
+  return roles
+    .map((role) => ({
+      /*
+       * 用 roleId（游戏内角色 ID）当 uid，**不能**用 uid ——
+       * 终末地绑定项里的 uid 是森空岛的绑定编号（如 940752205），
+       * 而 card/detail 要的是 roleId（如 1783605756）。以前这里取 role.uid，
+       * 请求就被服务端判成「操作失败，请稍后重试」（403·10001）。
+       * 顺带这一列也是界面上的 UID 显示，用 roleId 才对得上游戏里看到的数字。
+       */
+      uid: String(role.roleId || role.uid || ''),
+      region: String(role.serverId || '1'),
+      regionName: String(role.serverName || ''),
+      nickname: String(role.nickname || ''),
+      level: role.level ? String(role.level) : '',
+      game,
+    }))
+    .filter((role) => role.uid);
+}
+
 function recordRoleOf(game) {
-  const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
-  const owned = roles.filter((role) => role && role.game === game && role.uid);
+  const owned = recordRolesOf(game);
   const manual = state.record.role?.[game];
   if (manual?.uid) {
     const hit = owned.find((role) => String(role.uid) === String(manual.uid));
@@ -2182,6 +2307,7 @@ function recordRoleOf(game) {
 
 /** 同一个账号在某款游戏下的全部角色（可以是多个 uid，比如三个崩3服务器）。 */
 function recordRolesOf(game) {
+  if (recordSourceOf(game) === 'skland') return sklandRolesAsRecord(game);
   const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
   return roles.filter((role) => role && role.game === game && role.uid);
 }
@@ -2229,42 +2355,74 @@ function recordAccountLineHtml() {
 function recordRoleLineHtml(game, role, cache) {
   if (!role) return '';
   const owned = recordRolesOf(game);
-  const meta = (item) =>
-    `${esc(item.regionName || item.region || '')}${item.level ? ` · Lv.${esc(item.level)}` : ''}`;
-  const url = cache?.url
-    ? `<span class="record-role-url" title="${esc(cache.url)}">${esc(recordUrlPath(cache.url))}</span>`
-    : '';
-
-  if (owned.length > 1) {
-    const chips = owned
-      .map((item) => {
-        const active = String(item.uid) === String(role.uid);
-        /*
-         * 崩3 的昵称往往就是「玩家<uid>」，再补一个 uid 徽标纯属重复，
-         * 这种情况直接用 uid 当名字。
-         */
-        const nickname = String(item.nickname || '');
-        const label = nickname && !nickname.includes(String(item.uid)) ? nickname : `UID ${item.uid}`;
-        return `<button class="record-role-chip${active ? ' is-active' : ''}" data-action="record-role" data-value="${esc(item.uid)}" title="${esc(item.regionName || item.region || '')}">
-          ${esc(label)}
-        </button>`;
-      })
-      .join('');
-    return `<div class="record-role-line">
-      <span class="record-role-caption">${icon('gamepad', 'xs')}角色</span>
-      ${chips}
-      <span class="record-role-meta">${meta(role)}</span>
-      ${url}
-    </div>`;
-  }
-
   const gameMeta = (state.features?.games || []).find((item) => item.key === game) || {};
-  return `<div class="record-role-line">
-    <span class="record-role-name">${esc(role.nickname || '未命名')}</span>
-    <span class="record-role-meta">${esc(gameMeta.name || '')} · UID ${esc(role.uid || '')}${
-      role.regionName ? ` · ${esc(role.regionName)}` : ''
-    }${role.level ? ` · Lv.${esc(role.level)}` : ''}</span>
-    ${url}
+  const nickname = String(role.nickname || '').trim();
+  const uid = String(role.uid || '');
+  /* 头像一个字就够：昵称首字，没有昵称就退回游戏名首字 */
+  const initial = (nickname || gameMeta.name || '?').slice(0, 1).toUpperCase();
+  const sub = [
+    gameMeta.name || '',
+    uid ? `UID ${uid}` : '',
+    role.regionName || role.region || '',
+    role.level ? `Lv.${role.level}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  /*
+   * 这里原来还挂着一行「接口路径」（/game_record/app/gbs/api/index 这类）。
+   * 那是给排查字段用的，对看战绩的人是纯噪音，而且把角色卡撑成一整条长条 —— 去掉。
+   * 真要排查，页面底部的「原始返回」折叠里能拿到完整 URL。
+   */
+
+  /*
+   * 一条账号挂多个角色时才出切换胶囊（崩3 一个账号常有三台服务器）。
+   * 只有一个角色就没有可切换的东西，再摆一排胶囊纯属噪音。
+   */
+  const chips =
+    owned.length > 1
+      ? `<div class="record-role-chips">${owned
+          .map((item) => {
+            const active = String(item.uid) === uid;
+            const name = String(item.nickname || '');
+            /* 崩3 的昵称往往就是「玩家<uid>」，再补 uid 属于重复，直接用 uid 当名字 */
+            const label = name && !name.includes(String(item.uid)) ? name : `UID ${item.uid}`;
+            return `<button class="record-role-chip${active ? ' is-active' : ''}" data-action="record-role" data-value="${esc(
+              item.uid
+            )}" title="${esc(item.regionName || item.region || '')}">${esc(label)}</button>`;
+          })
+          .join('')}</div>`
+      : '';
+
+  return `<div class="record-role-card">
+    <span class="record-role-avatar">${esc(initial)}</span>
+    <div class="record-role-main">
+      <span class="record-role-name">${esc(nickname || `UID ${uid}`)}</span>
+      <span class="record-role-sub">${esc(sub)}</span>
+    </div>
+    ${chips}
+  </div>`;
+}
+
+/**
+ * 战绩页顶部的森空岛账号切换条。
+ * 只有一个号时不出现 —— 唯一的账号没什么可切的，多一行只是噪音。
+ */
+function sklandRecordAccountLineHtml() {
+  const view = state.skland || {};
+  const accounts = Array.isArray(view.accounts) ? view.accounts : [];
+  if (accounts.length < 2) return '';
+  const activeId = String(view.activeId || '');
+  const chips = accounts
+    .map((item) => {
+      const active = String(item.id) === activeId;
+      return `<button class="record-account-chip${active ? ' is-active' : ''}" data-action="skland-use" data-value="${esc(
+        item.id
+      )}">${esc(item.label || '森空岛账号')}</button>`;
+    })
+    .join('');
+  return `<div class="record-account-line">
+    <span class="record-account-caption">${icon('shield', 'xs')}账号</span>
+    ${chips}
   </div>`;
 }
 
@@ -2310,26 +2468,83 @@ async function loadRecord(force = false) {
   const role = recordRoleOf(game);
   if (!role) return { skipped: true };
 
+  /*
+   * 米哈游侧的请求闸门。森空岛不走这里 —— 它没有这种按分钟的风控，
+   * 加节流只会让人以为刷新坏了。
+   */
+  const isHoyo = recordSourceOf(game) !== 'skland';
+  if (isHoyo) {
+    const left = recordCooldownLeft(game);
+    if (left > 0) {
+      /*
+       * 冷却期内一个请求都不发。
+       * 有旧数据就继续显示旧数据（附一行「还要等多久」），没有就开说明卡；
+       * 无论哪种都不再给米哈游送一次「异常请求」，否则只会把冷却拖得更长。
+       */
+      const previous = state.record.cache[key];
+      const entry = previous && previous.view && !previous.loading
+        ? { ...previous, cooldownLeft: left }
+        : {
+            loading: false,
+            error: `米哈游还在冷却，再查只会继续被拒。约 ${recordWaitText(left)} 后再点「刷新」。`,
+            url: '',
+            at: Date.now(),
+            needVerify: true,
+            cooldownLeft: left,
+          };
+      state.record.cache[key] = entry;
+      return entry;
+    }
+    /*
+     * 冷却之外还要防连点：两次查询至少隔 20 秒。
+     * 只拦「手动刷新」，切换游戏/功能不拦 —— 那是在看别的数据，不是重复打同一个接口。
+     */
+    const gate = recordGateOf(game);
+    const since = Date.now() - (gate.lastAt || 0);
+    if (force && gate.lastAt && since < RECORD_MIN_INTERVAL_MS) {
+      const previous = state.record.cache[key];
+      if (previous && !previous.loading) {
+        toast(`刚查过一次，${recordWaitText(RECORD_MIN_INTERVAL_MS - since)}后再试（米哈游按分钟限流，连点会被判异常）`, 'info');
+        return previous;
+      }
+    }
+  }
+
   const entry = { loading: true, error: '', view: null, url: '', at: Date.now() };
   state.record.cache[key] = entry;
   try {
-    if (!window.launcher?.hoyolab?.record) throw new Error('当前版本不支持战绩查询');
-    const result = await window.launcher.hoyolab.record({
-      provider: 'miyoushe',
-      // 指定账号：不然主进程会用「当前激活的那个」，和界面上选的可能不是同一个
-      accountId: state.record.account || undefined,
-      game,
-      feature,
-      uid: role.uid,
-      region: role.region,
-      schedule,
-    });
+    let result;
+    if (recordSourceOf(game) === 'skland') {
+      if (!window.launcher?.skland) throw new Error('当前版本不支持终末地战绩查询');
+      /*
+       * 终末地只有一个数据源：便笺读 card/detail，战绩读 war-echoes。
+       * 两个接口都要 roleId（不是米家那种 uid + region 的组合）——
+       * 这里的 role.uid 已经在 sklandRolesAsRecord 里映射成 roleId 了。
+       */
+      result = await window.launcher.skland[feature === 'war-echoes' ? 'record' : 'note']({
+        roleId: role.uid,
+        accountId: state.record.account || undefined,
+      });
+    } else {
+      if (!window.launcher?.hoyolab?.record) throw new Error('当前版本不支持战绩查询');
+      result = await window.launcher.hoyolab.record({
+        provider: 'miyoushe',
+        // 指定账号：不然主进程会用「当前激活的那个」，和界面上选的可能不是同一个
+        accountId: state.record.account || undefined,
+        game,
+        feature,
+        uid: role.uid,
+        region: role.region,
+        schedule,
+      });
+    }
     /*
      * 主进程现在把接口报错当成返回值（ok:false）带回来，而不是 throw ——
      * Electron 的 IPC 在 throw 时只保留 message，实际请求地址和 retcode 都会丢。
      */
     if (result && result.ok === false) {
       entry.error = result.error || '请求失败';
+      entry.needLogin = Boolean(result.needLogin);
       entry.url = result.url || '';
       entry.retcode = typeof result.retcode === 'number' ? result.retcode : null;
       entry.debug = result.debug || null;
@@ -2344,11 +2559,21 @@ async function loadRecord(force = false) {
        *     有时候能读到别的功能，说明不是登录或风控问题），等也没用。
        */
       if (RECORD_VERIFY_RETCODES.includes(entry.retcode)) {
+        /*
+         * 1034 / 5003 是「查太勤」这一类，被拦下来之后本轮必然还会被拦。
+         * 这里直接把闸门关上 5 分钟，冷却期内刷新不会再发请求 ——
+         * 否则用户会一直点、一直撞，风控只会越拖越久。
+         */
+        if (isHoyo && (entry.retcode === 1034 || entry.retcode === 5003)) {
+          const gate = recordGateOf(game);
+          gate.lastAt = Date.now();
+          gate.blockedUntil = Date.now() + RECORD_COOLDOWN_MS;
+        }
         entry.error =
           entry.retcode === 1034 || entry.retcode === 5003
-            ? `米哈游把这次查询当成了异常请求（retcode ${entry.retcode}）。` +
-              '大多是短时间内查得太频繁，等几分钟点「刷新」就好；' +
-              '如果一直这样，点下面的「打开官方战绩页」在网页里看一次，完成它要求的验证后再回来刷新。'
+            ? `米哈游把这次查询当成了异常请求（retcode ${entry.retcode}）：同一账号短时间内查得太频繁。` +
+              `已自动冷却 ${Math.round(RECORD_COOLDOWN_MS / 60000)} 分钟，这段时间点「刷新」不会再发请求，等冷却结束再查。` +
+              '想马上看，可以点下面的「打开官方战绩页」在网页里读一次，完成它要求的验证后再回来刷新。'
             : `米哈游拒绝了这个角色的这条战绩（retcode ${entry.retcode}）。` +
               '这个错误码不是查询太频繁，而是接口对当前角色没有开放这条数据 —— ' +
               '换个功能或换个游戏看看，也可以点下面的「打开官方战绩页」去网页上确认一下。';
@@ -2360,8 +2585,14 @@ async function loadRecord(force = false) {
     entry.view = window.HXLRecord ? window.HXLRecord.parse(game, feature, result?.data) : null;
     entry.url = result?.url || '';
     entry.at = Date.now();
+    /*
+     * 读到数据就记一次「刚查过」，连点刷新的 20 秒间隔按这个时间算。
+     * 成功的请求也占用频率额度，所以失败分支同样要记（见上面的 catch）。
+     */
+    if (isHoyo) recordGateOf(game).lastAt = Date.now();
   } catch (error) {
     entry.error = humanError(error) || '请求失败';
+    if (isHoyo) recordGateOf(game).lastAt = Date.now();
   } finally {
     entry.loading = false;
   }
@@ -2370,6 +2601,20 @@ async function loadRecord(force = false) {
 
 /** 用户点刷新 / 切游戏 / 切期数时走这里：先把格子标成加载中，再请求、再重绘。 */
 async function reloadRecord() {
+  /*
+   * 冷却期内连「占位成 loading」都不做：
+   * 一旦把缓存盖成 loading，loadRecord 里就取不到上一份数据了，
+   * 页面会从「有一份旧数据」直接变成空白/报错。这里只提示，不动画面。
+   */
+  const game = state.record.game;
+  if (recordSourceOf(game) !== 'skland') {
+    const left = recordCooldownLeft(game);
+    if (left > 0) {
+      toast(`米哈游还在冷却，约 ${recordWaitText(left)}后再试；这段时间再查只会继续被拒`, 'info');
+      if (state.route === 'record') render({ preserveScroll: true });
+      return;
+    }
+  }
   /*
    * 先占位成 loading 再重绘：否则切游戏/切功能时用户盯着旧数据看一两秒，
    * 分不清是「点了没反应」还是「真的在加载」。
@@ -2390,6 +2635,42 @@ function recordStarsHtml(stars, max) {
   return `<span class="record-stars" title="${full}/${total}">${'★'.repeat(full)}<em>${'☆'.repeat(total - full)}</em></span>`;
 }
 
+/**
+ * 把 "92/300" 拆成「主数字 + 降级分母」。
+ *
+ * 战绩页里绝大多数数值都是「当前/上限」，两部分一样大就会互相抢注意力，
+ * 一屏六个指标看起来全是同样粗细的数字，扫不出哪个是重点。
+ * 不是这种形状的（"前 15%"、"Lv.70"）原样输出，不做任何猜测。
+ */
+function recordValueHtml(value) {
+  const text = String(value ?? '').trim();
+  const pair = /^([\d.,]+)\s*\/\s*([\d.,]+)$/.exec(text);
+  if (pair) return `${esc(pair[1])}<em>/${esc(pair[2])}</em>`;
+  if (/^[\d.,]+$/.test(text)) return esc(text);
+  /*
+   * 文字型的值（「来生泅渡其十二」「已解锁」）按数字的 21px 排会占三行，
+   * 把整张卡片撑高、一排卡就参差不齐。包一层小字号，并允许两行截断。
+   */
+  return `<span class="record-metric-text">${esc(text)}</span>`;
+}
+
+/** 主资源的百分比环。纯 SVG，不依赖图片，主题色跟着 --accent 走。 */
+function recordRingHtml(percent) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  const radius = 44;
+  const circumference = 2 * Math.PI * radius;
+  const dash = (circumference * pct) / 100;
+  return `<div class="record-ring">
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <circle class="record-ring-track" cx="50" cy="50" r="${radius}"></circle>
+      <circle class="record-ring-fill" cx="50" cy="50" r="${radius}" stroke-dasharray="${dash.toFixed(
+        1
+      )} ${(circumference - dash).toFixed(1)}"></circle>
+    </svg>
+    <b>${Math.round(pct)}<em>%</em></b>
+  </div>`;
+}
+
 function recordAvatarHtml(avatar) {
   const name = String(avatar?.name || '');
   const icon = String(avatar?.icon || '');
@@ -2406,7 +2687,9 @@ function recordMetricHtml(metric) {
   const tone = metric.tone ? ` is-${esc(metric.tone)}` : '';
   return `<div class="record-metric${tone}">
     <span class="record-metric-label">${esc(metric.label)}</span>
-    <strong class="record-metric-value">${esc(metric.value)}${metric.unit ? `<em>${esc(metric.unit)}</em>` : ''}</strong>
+    <strong class="record-metric-value">${recordValueHtml(metric.value)}${
+      metric.unit ? `<em>${esc(metric.unit)}</em>` : ''
+    }</strong>
     ${metric.note ? `<span class="record-metric-note">${esc(metric.note)}</span>` : ''}
   </div>`;
 }
@@ -2449,17 +2732,38 @@ function recordItemHtml(item) {
   </div>`;
 }
 
+/*
+ * 指标卡首屏露出几张。
+ */
+const METRIC_PREVIEW = 6;
+
+/*
+ * 分区里默认露出几条。
+ *
+ * 终末地「据点与调度券」这类分区一给就是十几个条目，全铺开是一整屏长条，
+ * 而玩家真正要看的往往只是头几个。超过这个数就折叠，想细看再展开。
+ */
+const SECTION_PREVIEW = 4;
+
 function recordSectionHtml(section) {
   const items = (section.items || []).filter(Boolean);
   if (!items.length) return '';
+  const layout = section.layout || 'rows';
+  const shown = items.slice(0, SECTION_PREVIEW).map(recordItemHtml).join('');
+  const rest = items.slice(SECTION_PREVIEW);
+  const more = rest.length
+    ? `<details class="record-more">
+        <summary>展开其余 ${rest.length} 项</summary>
+        <div class="record-section-body is-${esc(layout)}">${rest.map(recordItemHtml).join('')}</div>
+      </details>`
+    : '';
   return `<section class="record-section">
     <div class="record-section-head">
       <h2>${esc(section.title)}</h2>
       ${section.hint ? `<span>${esc(section.hint)}</span>` : ''}
     </div>
-    <div class="record-section-body is-${esc(section.layout || 'rows')}">
-      ${items.map(recordItemHtml).join('')}
-    </div>
+    <div class="record-section-body is-${esc(layout)}">${shown}</div>
+    ${more}
   </section>`;
 }
 
@@ -2473,25 +2777,66 @@ function recordBodyHtml(view) {
       <p>${esc(view.empty)}</p></div>`;
   }
 
+  /*
+   * 树脂 / 理智 / 电量这类主资源，解析器会同时给一个 headline 和一条进度条，
+   * 排下来就是「大数字 126/160」紧接着「原粹树脂 126/160 [进度条]」——
+   * 同一个数字连说两遍，还白占一行高度。
+   * 这里把重复的那条收进 headline：大卡片底部铺一条细填充，比例看得见，行也省了。
+   * 只在「第一条进度条的标签和 headline 完全一致」时收，别的游戏／别的功能不受影响。
+   */
+  const bars = Array.isArray(view.bars) ? view.bars.slice() : [];
+  let heroPercent = -1;
+  if (view.headline && bars.length) {
+    const first = bars[0];
+    const max = Number(first.max);
+    if (first.label === view.headline.label && Number.isFinite(max) && max > 0) {
+      heroPercent = Math.max(0, Math.min(100, (Number(first.value) / max) * 100));
+      bars.shift();
+    }
+  }
+
+  /*
+   * 主资源卡：左边「标签 + 大数字 + 状态胶囊」，右边一个百分比环。
+   * 上一版只有左边，右侧空出一大块；补上环之后，一眼既能读到绝对值，
+   * 也能读到「离满还有多少」——后者才是玩家每天真正在意的那个数。
+   */
   const hero = view.headline
     ? `<div class="record-hero">
-        <span class="record-hero-label">${esc(view.headline.label)}</span>
-        <strong class="record-hero-value">${esc(view.headline.value)}</strong>
-        ${view.headline.note ? `<span class="record-hero-note">${esc(view.headline.note)}</span>` : ''}
+        <div class="record-hero-main">
+          <span class="record-hero-label">${esc(view.headline.label)}</span>
+          <strong class="record-hero-value">${recordValueHtml(view.headline.value)}</strong>
+          ${view.headline.note ? `<span class="record-hero-note">${esc(view.headline.note)}</span>` : ''}
+        </div>
+        ${heroPercent >= 0 ? recordRingHtml(heroPercent) : ''}
       </div>`
     : '';
 
-  const bars = (view.bars || []).length
-    ? `<div class="record-bars">${view.bars.map(recordBarHtml).join('')}</div>`
+  const barsHtml = bars.length
+    ? `<div class="record-bars">${bars.map(recordBarHtml).join('')}</div>`
     : '';
 
-  const metrics = (view.metrics || []).length
-    ? `<div class="record-metrics">${view.metrics.map(recordMetricHtml).join('')}</div>`
-    : '';
+  /*
+   * 指标同理：一屏十来张卡等于没有重点。
+   * 前 6 张是玩家每天要看的，剩下的收进「还有 N 项」，不占首屏高度。
+   */
+  const allMetrics = Array.isArray(view.metrics) ? view.metrics : [];
+  let metrics = '';
+  if (allMetrics.length) {
+    const head = allMetrics.slice(0, METRIC_PREVIEW).map(recordMetricHtml).join('');
+    const rest = allMetrics.slice(METRIC_PREVIEW);
+    metrics =
+      `<div class="record-metrics">${head}</div>` +
+      (rest.length
+        ? `<details class="record-more">
+            <summary>还有 ${rest.length} 项</summary>
+            <div class="record-metrics">${rest.map(recordMetricHtml).join('')}</div>
+          </details>`
+        : '');
+  }
 
   const sections = (view.sections || []).map(recordSectionHtml).join('');
 
-  return `${hero}${bars}${metrics}${sections}`;
+  return `${hero}${barsHtml}${metrics}${sections}`;
 }
 
 /* --------------------------- 页面主体 --------------------------- */
@@ -2509,6 +2854,8 @@ function recordTabsHtml(data, feature, game) {
   const games = (data?.games || []).filter((item) => (matrix[item.key] || []).some((key) => RECORD_FEATURE_SET.has(key)));
   const roles = state.hoyolab?.['hoyolab-miyoushe']?.roles || [];
   const owned = new Set(roles.filter((role) => role?.uid).map((role) => role.game));
+  // 终末地走森空岛，登录态与米游社无关，单独补一个小圆点
+  if ((state.skland?.roles || []).length) owned.add('endfield');
 
   const gameTabs = games
     .map((item) => {
@@ -2537,36 +2884,76 @@ function recordTabsHtml(data, feature, game) {
        <button class="record-tab${state.record.schedule === 2 ? ' is-active' : ''}" data-action="record-schedule" data-value="2">上期</button>`
     : '';
 
-  return `
-    ${gameTabs ? `<div class="record-tabs record-tabs-game">${gameTabs}</div>` : ''}
+  /*
+   * 两排标签各包一行，左边一个「游戏 / 玩法」小标。
+   * 之前两排都是散落的小胶囊，视觉上跟正文一样重，扫不出「这是一级导航」；
+   * 收进同一个容器之后才有段控的意思，选中的那个也就压得住下面一大片内容。
+   */
+  if (!gameTabs && !featureTabs && !scheduleTabs) return '';
+  return `<div class="record-switch">
+    ${
+      gameTabs
+        ? `<div class="record-switch-row">
+            <span class="record-switch-label">游戏</span>
+            <div class="record-tabs record-tabs-game">${gameTabs}</div>
+          </div>`
+        : ''
+    }
     ${
       featureTabs || scheduleTabs
-        ? `<div class="record-tabs record-tabs-feature">${featureTabs}${scheduleTabs}</div>`
+        ? `<div class="record-switch-row">
+            <span class="record-switch-label">玩法</span>
+            <div class="record-tabs record-tabs-feature">${featureTabs}${scheduleTabs}</div>
+          </div>`
         : ''
-    }`;
+    }
+  </div>`;
 }
 
 function recordView() {
   const feature = state.record.feature;
   const game = state.record.game;
   const data = state.features;
-  const status = state.hoyolab?.['hoyolab-miyoushe'];
+  const viaSkland = recordSourceOf(game) === 'skland';
+
+  /*
+   * 森空岛的登录态放在渲染路径里自取。
+   * 首屏 state.features 还没回来时预取拿不到东西，卡片会一直停在「读取中」；
+   * 取到之后主动重绘一次，和米游社登录卡是同一套做法。
+   */
+  if (viaSkland && !state.skland) {
+    refreshSklandStatus().then(() => {
+      if (state.route === 'record') render({ preserveScroll: true });
+    });
+  }
+
+  const status = viaSkland ? state.skland : state.hoyolab?.['hoyolab-miyoushe'];
   const role = recordRoleOf(game);
   const cache = state.record.cache[recordCacheKey(game, feature, state.record.schedule)] || null;
+  /* 冷却剩余（毫秒）：页头按钮和错误块都要用，这里统一算一次。森空岛没有冷却。 */
+  const cooling = viaSkland ? 0 : recordCooldownLeft(game);
   const featureMeta = (data?.features || []).find((item) => item.key === feature) || {};
   const gameMeta = (data?.games || []).find((item) => item.key === game) || {};
 
   let body = '';
   if (status?.loading || (!status && data)) {
-    body = `<div class="empty"><div class="empty-icon">${icon('login')}</div><h3>正在读取米游社登录状态</h3>
+    body = `<div class="empty"><div class="empty-icon">${icon('login')}</div><h3>正在读取${viaSkland ? '森空岛' : '米游社'}登录状态</h3>
       <p>第一次打开战绩页会多等一会儿。</p></div>`;
   } else if (!status?.loggedIn) {
-    body = `${hoyolabLoginCard()}
+    body = viaSkland
+      ? `${sklandLoginCard()}
+      <div class="record-hint">
+        <p>${icon('info', 'xs')}终末地的战绩来自森空岛，需要先用鹰角通行证登录一次；登录态会被保存，下次不用再扫。</p>
+      </div>`
+      : `${hoyolabLoginCard()}
       <div class="record-hint">
         <p>${icon('info', 'xs')}战绩数据来自米游社公开的战绩接口，需要先登录一次；登录态会被保存，下次不用再扫。</p>
       </div>`;
   } else if (!role) {
-    body = `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>这个账号下没有${esc(gameMeta.name || '这个游戏')}的角色</h3>
+    body = viaSkland
+      ? `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>这个鹰角账号下没有终末地角色</h3>
+      <p>先在游戏里创建角色，再回这里点右上角「刷新」；也可以换一个鹰角通行证账号。</p></div>`
+      : `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>这个账号下没有${esc(gameMeta.name || '这个游戏')}的角色</h3>
       <p>换一个游戏看看，或者用另一个米游社账号登录。</p></div>`;
   } else if (cache?.loading) {
     body = `<div class="empty"><div class="empty-icon">${icon('refresh')}</div><h3>正在读取${esc(featureMeta.name || '战绩')}</h3>
@@ -2574,12 +2961,22 @@ function recordView() {
   } else if (cache?.error) {
     body = `<div class="empty"><div class="empty-icon">${icon('alert')}</div><h3>读取失败</h3>
       <p>${esc(cache.error)}</p>
+      ${
+        cooling
+          ? `<p class="record-cooldown">${icon('clock', 'xs')}冷却剩余 ${recordWaitText(cooling)}，到点后点「刷新」即可。</p>`
+          : ''
+      }
       <p class="record-url">${esc(cache.url || '')}</p>
       <div class="record-error-actions">
-        <button class="btn ghost" data-action="record-refresh">${icon('refresh', 'xs')}重试</button>
+        <button class="btn ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? '冷却中' : '重试'}</button>
         ${
           cache.needVerify
             ? `<button class="btn ghost" data-action="record-open-web">${icon('external', 'xs')}打开官方战绩页</button>`
+            : ''
+        }
+        ${
+          cache.needLogin && viaSkland
+            ? `<button class="btn ghost" data-action="skland-login">${icon('login', 'xs')}重新登录森空岛</button>`
             : ''
         }
       </div></div>`;
@@ -2590,40 +2987,29 @@ function recordView() {
       <p>点右侧「刷新」读一次。</p></div>`;
   }
 
-  const rawJson = cache?.view?.raw
-    ? JSON.stringify(cache.view.raw, null, 2)
-    : cache?.view
-      ? ''
-      : '';
-
   return `<div class="page record-page">
     ${toolsBackBar()}
-    <div class="page-head">
-      <div>
+    <div class="page-head record-head">
+      <div class="record-head-title">
         <div class="eyebrow">${PAGE_META.record.eyebrow}</div>
-        <h1>战绩</h1>
-        <p class="page-desc">${esc(featureMeta.desc || '米游社账号在各游戏里的实时进度与周期玩法成绩。')}</p>
+        <h1>战绩${featureMeta.name ? `<em>${esc(featureMeta.name)}</em>` : ''}</h1>
       </div>
       <div class="record-head-actions">
-        <button class="btn ghost" data-action="record-refresh">${icon('refresh', 'xs')}刷新</button>
+        ${
+          viaSkland && feature === 'daily-note'
+            ? `<button class="btn ghost" data-action="skland-sign">${icon('check', 'xs')}签到</button>`
+            : ''
+        }
+        <button class="btn ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? `冷却中 ${recordWaitText(cooling)}` : '刷新'}</button>
       </div>
     </div>
 
     ${recordTabsHtml(data, feature, game)}
 
-    ${recordAccountLineHtml()}
+    ${viaSkland ? sklandRecordAccountLineHtml() : recordAccountLineHtml()}
     ${recordRoleLineHtml(game, role, cache)}
 
     <div class="record-body">${body}</div>
-
-    ${
-      rawJson
-        ? `<details class="record-raw">
-            <summary>原始返回（排查字段用）</summary>
-            <pre>${esc(rawJson)}</pre>
-          </details>`
-        : ''
-    }
   </div>`;
 }
 
@@ -2635,6 +3021,219 @@ function recordView() {
  * 这几家官方都没有「列出我绑定的角色」接口，所以登录后只保存凭据，
  * 不假装能显示角色，避免用户登上了却看不到东西还以为坏了。
  */
+/* ------------------------------------------------------------------ */
+/* 森空岛登录（终末地的官方数据源）                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 森空岛状态：登录态 + 绑定的终末地角色。
+ *
+ * 为什么状态里要带角色：终末地的便笺和战争回响都要 roleId + serverId，
+ * 而这两个值只有森空岛的「绑定角色」接口给得出来。
+ * 拿不到角色时页面停在「这个账号下没有终末地角色」，比空着一张卡片强。
+ */
+/*
+ * 同一个状态可能被两处同时要（战绩页渲染 + 账号弹窗打开前），
+ * 所以用一个在途 Promise 兜住：后到的调用等前一次的结果，不会拿到「读取中」。
+ */
+let sklandStatusPending = null;
+
+async function refreshSklandStatus(force = false) {
+  if (!force && state.skland?.loaded) return state.skland;
+  if (!force && sklandStatusPending) return sklandStatusPending;
+  state.skland = { ...(state.skland || {}), loading: true };
+  sklandStatusPending = (async () => {
+    try {
+      if (!window.launcher?.skland?.status) throw new Error('当前版本不支持森空岛登录');
+      const result = await window.launcher.skland.status({});
+      state.skland = {
+        loading: false,
+        loaded: true,
+        loggedIn: Boolean(result?.loggedIn),
+        hasCookies: Boolean(result?.hasCookies),
+        activeId: result?.activeId || '',
+        accounts: result?.accounts || [],
+        roles: result?.roles || [],
+        error: '',
+      };
+    } catch (error) {
+      state.skland = { loading: false, loaded: true, loggedIn: false, roles: [], error: humanError(error) };
+    }
+    return state.skland;
+  })();
+  try {
+    return await sklandStatusPending;
+  } finally {
+    sklandStatusPending = null;
+  }
+}
+
+/**
+ * 未登录时的森空岛卡片。
+ *
+ * 文案里把「什么数据从这儿来」说清楚 —— 用户看到终末地只有抽卡和截图时，
+ * 不会想到要去登一个叫森空岛的东西，不写明白这张卡永远没人点。
+ */
+function sklandLoginCard() {
+  const view = state.skland || { loading: true };
+  /*
+   * 「待接管」：分区里已经有森空岛的 cookie，但账号还没落到我们的存储里。
+   * 常见于用户在旧版本里登过一次、或者登录窗口关早了。
+   * 这时候不该让人再登一遍密码 —— 点一下就能把已有登录接管过来。
+   */
+  const adopt = !view.loggedIn && Boolean(view.hasCookies);
+  const chip = view.loading
+    ? `<span class="miyo-state">读取中</span>`
+    : view.loggedIn
+      ? `<span class="miyo-state is-on">${icon('check', 'xs')}已登录</span>`
+      : adopt
+        ? `<span class="miyo-state is-on">${icon('link', 'xs')}待接管</span>`
+        : `<span class="miyo-state">未登录</span>`;
+
+  const roles = Array.isArray(view.roles) ? view.roles : [];
+  const accounts = Array.isArray(view.accounts) ? view.accounts : [];
+  const activeId = String(view.activeId || '');
+  const roleLine = view.loggedIn
+    ? roles.length
+      ? `<p class="miyo-hint">${icon('gamepad', 'xs')}已绑定：${roles
+          .map((role) => `${esc(role.nickname || '未命名')}${role.serverName ? `（${esc(role.serverName)}）` : ''}`)
+          .join('、')}</p>`
+      : `<p class="miyo-hint">${icon('alert', 'xs')}这个鹰角账号下还没有终末地角色，先在游戏里创建角色再回来刷新。</p>`
+    : adopt
+      ? `<p class="miyo-hint">${icon('check', 'xs')}检测到这个窗口里已经有森空岛登录状态，点「接管已有登录」就能直接用，不用重新输密码。</p>`
+      : '';
+
+  /*
+   * 多账号：森空岛本身允许一个客户端挂多个鹰角号（官方的账号切换就是这个意思），
+   * 我们存的是「每个号各自的 accountToken + cred」，互不干扰。
+   * 摆成一排胶囊，点哪个切哪个，最后固定一个「添加」——
+   * 没有账号列表的时候只出「添加」，不然一行空胶囊更大材小用。
+   */
+  const accountLine = accounts.length
+    ? `<div class="skland-accounts">
+        <span class="skland-accounts-label">${icon('shield', 'xs')}账号</span>
+        ${accounts
+          .map((item) => {
+            const active = String(item.id) === activeId;
+            const tail = item.userId && item.nickname ? `鹰角 ${String(item.userId).slice(-6)}` : '';
+            return `<button class="skland-account${active ? ' is-active' : ''}" data-action="skland-use" data-value="${esc(
+              item.id
+            )}" title="${esc(tail || item.label || '')}">${esc(item.label || '森空岛账号')}</button>`;
+          })
+          .join('')}
+        <button class="skland-account is-add" data-action="skland-login" data-value="add">＋ 添加账号</button>
+      </div>`
+    : '';
+
+  const actions = view.loggedIn
+    ? `<button class="btn ghost" data-action="skland-login" data-value="add">${icon('link', 'xs')}添加账号</button>
+       <button class="btn ghost" data-action="skland-logout">退出当前</button>`
+    : adopt
+      ? `<button class="btn accent" data-action="skland-login">${icon('link', 'xs')}接管已有登录</button>
+         <button class="btn ghost" data-action="skland-login" data-value="relogin">换个账号</button>`
+      : `<button class="btn accent" data-action="skland-login">${icon('link', 'xs')}打开森空岛登录</button>`;
+
+  return `<div class="page glass-panel miyo-card miyo-alt">
+    <div class="miyo-head">
+      <div>
+        <div class="eyebrow">SKLAND</div>
+        <h2>森空岛</h2>
+        <p class="miyo-games"><span>明日方舟：终末地</span></p>
+        <p class="page-desc">终末地的理智、每日/每周任务、据点、帝江号与战争回响，全部来自森空岛的官方接口。用鹰角通行证登录一次即可，登录态只保存在本机。</p>
+      </div>
+      <div class="miyo-actions">${chip}${actions}</div>
+    </div>
+    <div class="miyo-methods">
+      <span>扫码登录</span><span>手机验证码</span><span>账号密码</span>
+      <em>凭据用系统钥匙串加密保存，不会上传</em>
+    </div>
+    ${accountLine}
+    ${roleLine}
+    ${view.error ? `<p class="miyo-hint">${esc(view.error)}</p>` : ''}
+  </div>`;
+}
+
+async function doSklandLogin(mode) {
+  if (!window.launcher?.skland?.login) {
+    toast('当前版本不支持森空岛登录', 'error');
+    return;
+  }
+  toast(mode === 'add' ? '已打开登录窗口，登完会加到账号列表里' : '已打开森空岛登录窗口，扫码或输手机号即可', 'info');
+  state.skland = { ...(state.skland || {}), loading: true };
+  if (state.route === 'record' || state.route === 'tools') render({ preserveScroll: true });
+  try {
+    const result = await window.launcher.skland.login({ relogin: mode === 'relogin', add: mode === 'add' });
+    if (!result?.ok) {
+      if (!result?.cancelled) toast(result?.reason || '登录失败', 'error');
+      await refreshSklandStatus(true);
+      if (state.route === 'record' || state.route === 'tools') render({ preserveScroll: true });
+      return;
+    }
+    await refreshSklandStatus(true);
+    toast('森空岛登录成功，凭据已保存到本机', 'success');
+    // 登录后角色可能变了，旧的战绩缓存全部作废
+    state.record.cache = {};
+    if (state.route === 'record') await reloadRecord();
+    else render({ preserveScroll: true });
+  } catch (error) {
+    toast(humanError(error) || '登录失败', 'error');
+    await refreshSklandStatus(true);
+    if (state.route === 'record' || state.route === 'tools') render({ preserveScroll: true });
+  }
+}
+
+/** 多个森空岛账号之间切换。切完把战绩缓存全作废 —— 角色和 UID 都变了。 */
+async function doSklandUseAccount(accountId) {
+  if (!accountId) return;
+  try {
+    const result = await window.launcher.skland.useAccount({ accountId });
+    if (!result?.ok) {
+      toast(result?.error || '切换账号失败', 'error');
+      return;
+    }
+    await refreshSklandStatus(true);
+    state.record.cache = {};
+    toast('已切换森空岛账号', 'success');
+    if (state.route === 'record') await reloadRecord();
+    else render({ preserveScroll: true });
+  } catch (error) {
+    toast(humanError(error) || '切换账号失败', 'error');
+  }
+}
+
+async function doSklandLogout() {
+  try {
+    await window.launcher.skland.logout({});
+    state.skland = { loading: false, loaded: true, loggedIn: false, roles: [], accounts: [] };
+    state.record.cache = {};
+    toast('已退出森空岛', 'info');
+    render({ preserveScroll: true });
+  } catch (error) {
+    toast(humanError(error) || '退出失败', 'error');
+  }
+}
+
+/** 在便笺页直接领今天的签到奖励。 */
+async function doSklandSign() {
+  const role = recordRoleOf('endfield');
+  if (!role) {
+    toast('还没读到终末地角色', 'error');
+    return;
+  }
+  try {
+    toast('正在签到…', 'info');
+    const result = await window.launcher.skland.sign({ roleId: role.uid });
+    if (result?.ok === false) {
+      toast(result.error || '签到失败', 'error');
+      return;
+    }
+    const awards = Array.isArray(result?.data?.awards) ? result.data.awards : [];
+    toast(awards.length ? `签到成功：${awards.map((item) => `${item.name || ''}×${item.count || 0}`).join('、')}` : '签到成功', 'success');
+  } catch (error) {
+    toast(humanError(error) || '签到失败', 'error');
+  }
+}
+
 function passportLoginCard(providerId, games) {
   const provider = state.features?.providers?.[providerId] || {};
   const status = state.passport?.[providerId];
@@ -2688,7 +3287,11 @@ function passportLoginCard(providerId, games) {
     </div>
     ${
       view.loggedIn
-        ? `<p class="miyo-hint">已保存登录凭据（${new Date(view.savedAt || Date.now()).toLocaleString('zh-CN')}）。${esc(label)}目前没有开放战绩查询接口，凭据会留给之后新增的功能使用。</p>`
+        ? `<p class="miyo-hint">已保存登录凭据（${new Date(view.savedAt || Date.now()).toLocaleString('zh-CN')}）。${
+            providerId === 'hypergryph'
+              ? '这个凭据只用于启动器识别账号；终末地的战绩与便笺请用上面的森空岛登录。'
+              : `${esc(label)}目前没有开放战绩查询接口，凭据会留给之后新增的功能使用。`
+          }</p>`
         : ''
     }
     ${view.error ? `<p class="miyo-hint">${esc(view.error)}</p>` : ''}
@@ -2704,7 +3307,20 @@ function otherLoginCards(games) {
     ),
   ].filter((id) => id !== 'hoyolab');
   if (!providerIds.length) return '';
-  return providerIds.map((id) => passportLoginCard(id, games)).join('');
+  return providerIds
+    .map((id) => {
+      /*
+       * 鹰角只留森空岛一张卡。
+       *
+       * 通行证登录的用处只有「启动游戏时复用登录态」，而战绩、便笺、抽卡 token
+       * 全都要经过森空岛那条链路 —— 两个入口摆在一起，用户反而不知道该点哪个。
+       * 用户提过「森空岛和鹰角通行证一样的话就把通行证取消」，这里照此执行：
+       * 鹰角渠道只出森空岛卡片，通行证分区仍然保留（森空岛登录会接管里面的凭证）。
+       */
+      if (id === 'hypergryph') return sklandLoginCard();
+      return passportLoginCard(id, games);
+    })
+    .join('');
 }
 
 /** 当前选中渠道 + 上次选过的渠道；登录面板需要知道登完显示谁。 */

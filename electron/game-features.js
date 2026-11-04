@@ -59,6 +59,20 @@ const FEATURES = [
     site: 'game-record',
   },
   {
+    /*
+     * 终末地的周期挑战。官方的叫法是「战争回响」，
+     * 定位和米家的深渊 / 忘却之庭一样：按赛季轮换、按周结算、有评级。
+     * 它只有鹰角有，所以矩阵里只挂在 endfield 上。
+     */
+    key: 'war-echoes',
+    name: '战争回响',
+    eyebrow: 'WAR ECHOES',
+    desc: '本期战争回响的赛季进度、地牢评级与出战干员',
+    category: 'record',
+    needsLogin: true,
+    site: 'skland',
+  },
+  {
     key: 'theater',
     name: '幻想真境剧诗',
     eyebrow: 'IMAGINARIUM',
@@ -267,7 +281,14 @@ const GAMES = [
     login: {
       provider: 'hypergryph',
       methods: ['qrcode', 'sms', 'password'],
-      note: '走鹰角通行证网页登录，抓 loginToken 后换 u8_token；抽卡记录靠它',
+      /*
+       * 抽卡记录和战绩数据用的是两条不同的链：
+       *   抽卡 —— 游戏内 WebView 日志里的 u8_token（endfield-gacha.js）
+       *   战绩 —— 森空岛的 cred（electron/skland.js）
+       * 前者用户玩着游戏就自动有了，后者要显式登录一次森空岛。
+       */
+      skland: true,
+      note: '战绩与便笺读森空岛（鹰角同账号）；抽卡记录在游戏里抽一次就自动同步',
     },
   },
   {
@@ -437,6 +458,13 @@ const TRAITS = {
     notice: { kind: 'notice', api: 'bh3' },
   },
   endfield: {
+    /*
+     * 鹰角没有对外的战绩站，终末地的实时数据全部来自森空岛
+     * （zonai.skland.com）。kind 写 'skland' 是为了让调用方知道
+     * 这条走的是 electron/skland.js 的鉴权链，而不是米哈游那套 DS2。
+     */
+    'daily-note': { kind: 'skland', api: 'card/detail' },
+    'war-echoes': { kind: 'skland', api: 'card/war-echoes' },
     gacha: { kind: 'db', table: 'GachaImport' },
     'play-time': { kind: 'local' },
     screenshot: { kind: 'local' },

@@ -10,8 +10,9 @@ function shouldSkipDir(name) {
   );
 }
 
-async function walkFiles(root, signal) {
+async function walkFiles(root, signal, onProgress) {
   const files = [];
+  let lastScan = 0;
   async function walk(dir, relative) {
     if (signal && signal.cancelled) return;
     let entries;
@@ -36,6 +37,15 @@ async function walkFiles(root, signal) {
           continue;
         }
         files.push({ rel, full, size: stat.size });
+        /*
+         * 扫描本身也要报进度。一万三千个文件挨个 stat，冷缓存下就是几十秒，
+         * 这段时间一个事件都不发，界面会停在「读取官方清单…」不动，看着像卡死。
+         */
+        const now = Date.now();
+        if (onProgress && now - lastScan > 400) {
+          lastScan = now;
+          onProgress({ scanned: files.length, current: rel });
+        }
       }
     }
   }
@@ -44,7 +54,14 @@ async function walkFiles(root, signal) {
 }
 
 async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, signal, copyDirs = [] }) {
-  const files = await walkFiles(sourceRoot, signal);
+  const files = await walkFiles(sourceRoot, signal, (progress) =>
+    onProgress({
+      phase: 'scan',
+      processed: progress.scanned,
+      total: 0,
+      current: `扫描基础客户端：${progress.current}`,
+    })
+  );
   let processed = 0;
   let linked = 0;
   let copied = 0;
@@ -124,6 +141,63 @@ async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, s
   return { total: files.length, processed };
 }
 
+/**
+ * 删一棵目录树，删不掉就让旧目录「让路」。
+ *
+ * 运行时目录里的文件都是从基础客户端硬链接过来的，其中内嵌 Chromium 的缓存目录
+ * （原神是 YuanShen_Data\webCaches\<版本>\Service Worker，星铁/绝区零同理）经常
+ * 被残留句柄或只读属性咬住。以前直接 fsp.rm({ recursive, force }) 一句，rmdir
+ * 一失败整个任务就抛异常，而界面上进度条还停在「读取官方清单」—— 看着像卡死，
+ * 其实任务早就挂了。
+ *
+ * 三档处理：带重试的整树删除 → 逐项删除只看真正删不掉的 → 整体改名让路
+ * （同卷 rename 只要求父目录可写，子目录里的句柄不挡路）。只有改名也失败才抛错，
+ * 且抛的是看得懂的中文。
+ */
+async function removeTreeResilient(root) {
+  if (!fs.existsSync(root)) return '';
+  try {
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    return '';
+  } catch {
+    /* 落到逐项删 */
+  }
+  let entries = [];
+  try {
+    entries = await fsp.readdir(root, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  const stuck = [];
+  for (const entry of entries) {
+    try {
+      await fsp.rm(path.join(root, entry.name), {
+        recursive: true,
+        force: true,
+        maxRetries: 6,
+        retryDelay: 200,
+      });
+    } catch {
+      stuck.push(entry.name);
+    }
+  }
+  if (!stuck.length) {
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
+    return '';
+  }
+  const stalePath = `${root}.stale-${Date.now()}`;
+  try {
+    await fsp.rename(root, stalePath);
+    return stalePath;
+  } catch {
+    throw new Error(
+      `清理残留目录失败：${stuck.slice(0, 3).join('、')}${
+        stuck.length > 3 ? ' 等' : ''
+      } 正被其它程序占用。请先关闭正在运行的游戏、等杀毒软件扫描结束后再重新尝试。`
+    );
+  }
+}
+
 async function prepareLinkedRuntime({ baseRoot, packRoot, targetRoot, onProgress, signal, copyDirs = [] }) {
   if (!baseRoot || !fs.existsSync(baseRoot)) throw new Error('找不到基础客户端目录');
   if (!packRoot || !fs.existsSync(packRoot)) throw new Error('找不到渠道差异文件目录');
@@ -138,7 +212,13 @@ async function prepareLinkedRuntime({ baseRoot, packRoot, targetRoot, onProgress
     throw new Error('链接运行时必须和基础客户端在同一个磁盘分区');
   }
 
-  await fsp.rm(targetRoot, { recursive: true, force: true });
+  const stalePath = await removeTreeResilient(targetRoot);
+  if (stalePath) {
+    onProgress?.({
+      phase: 'clean',
+      current: `旧目录删不干净，已改名放行：${path.basename(stalePath)}`,
+    });
+  }
   await fsp.mkdir(targetRoot, { recursive: true });
   const linkResult = await hardlinkTree({ sourceRoot: baseRoot, targetRoot, onProgress, signal, copyDirs });
   if (signal && signal.cancelled) return { cancelled: true, ...linkResult };
@@ -166,4 +246,4 @@ async function copyTree(sourceRoot, targetRoot) {
   }
 }
 
-module.exports = { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree };
+module.exports = { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree, removeTreeResilient };

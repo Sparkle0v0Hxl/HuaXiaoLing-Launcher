@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.8.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.9.2--alpha1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,7 +19,7 @@
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 > 其他提问渠道QQ群：1018651207
 
-**当前版本：v2.8.0**
+**当前版本：v2.9.2-alpha1**（预发布，建议先试不要长期使用）
 
 > [!WARNING]
 > **第一次运行时，请把启动器目录加入杀毒软件白名单。**
@@ -133,7 +133,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.8.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.9.2-alpha1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -207,7 +207,17 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.8.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.9.2-alpha1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.9.2-alpha1</b></summary>
+
+- 硬链接生成不再「假死」：清理旧运行时目录撞上 EPERM 时以前整任务直接失败，界面却还挂着「正在读取官方清单」的滚动动画。现在三档容错——重试、逐项删、改名让路，删不动也不失败。
+- 失败态收口：出错时进度区立刻变「已中止 · 原因见下方」，EPERM/EBUSY 翻成中文并带路径。
+- 清理与扫描有实时文案，扫描基础客户端时计数持续上涨。
+- 覆盖原神 B服、终末地、明日方舟三条硬链接路径。
+
+</details>
 
 <details>
 <summary><b>v2.8.0</b></summary>

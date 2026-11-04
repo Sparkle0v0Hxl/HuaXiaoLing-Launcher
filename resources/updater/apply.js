@@ -48,6 +48,30 @@ const MISS_LIMIT = 3;
 /** 存活超过这么久基本已经进了主窗口，没必要一直盯到 45 秒。 */
 const ALIVE_ENOUGH_MS = 8 * 1000;
 
+/**
+ * 决定「这次更新算不算装上」的文件。
+ *
+ * 其余文件被占用时跳过只是少改一处，下次再补；但这几个跳过，启动器就还是旧版本，
+ * 界面上却会写「已更新到 x.y.z」——用户以为装上了，实际没变，下次还是同样的包、
+ * 同样的失败，永远出不去。所以它们单独一套规则：等得更久，装不上就整体失败。
+ */
+const CRITICAL_FILES = new Set([
+  EXE_NAME,
+  'resources/app.asar',
+  'resources/app/package.json',
+  'resources/app/electron/main.js',
+]);
+
+function isCritical(rel) {
+  return CRITICAL_FILES.has(String(rel || '').replace(/\\/g, '/'));
+}
+
+/**
+ * 本次更新被挪到 `.updating` 旁路上、当场没删掉的文件。
+ * 写进 last-update.json，主进程下次启动照单清理，不靠扫目录猜。
+ */
+const parkedFiles = [];
+
 /* ---------------------------------------------------------------- */
 /* 参数                                                               */
 /* ---------------------------------------------------------------- */
@@ -162,6 +186,20 @@ async function waitFileWritable(file, timeoutMs) {
   return !isFileLocked(file);
 }
 
+/**
+ * 写文件。遇到「被占用、写不进去」时先把旧的挪到 .updating 旁路上再写。
+ *
+ * 为什么非挪不可：覆盖脚本本身是拿 `花筱灵启动器.exe` 当 Node 跑起来的，而这个运行时
+ * 启动时会把 icudtl.dat、v8_context_snapshot.bin 一并读进来占着（日志里就是
+ * `copyfile ... UNKNOWN: unknown error`）。以前遇到这种情况是「跳过」，结果本地
+ * 这两个文件永远停在旧版，和标准包对不上——下次更新时增量的基准校验（baseSha256）
+ * 必然失败，只能退回去重下 188 MB 整包。**跳一次，以后每一次都打不上增量**，
+ * 用户看到的就是「增量包老是失败」。
+ *
+ * Windows 对以共享方式打开的文件允许改名，所以「挪开 → 写新的」走得通；真失败就把
+ * 旧的挪回原位，绝不留「文件凭空消失」的状态。挪出来的那份当场删，删不掉记进
+ * parkedFiles，交给主进程下次启动清理。
+ */
 function copyFileReplacing(source, destination) {
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   if (fs.existsSync(destination)) {
@@ -172,7 +210,100 @@ function copyFileReplacing(source, destination) {
       /* ignore */
     }
   }
-  fs.copyFileSync(source, destination);
+  try {
+    fs.copyFileSync(source, destination);
+    return;
+  } catch (error) {
+    const parked = parkOccupied(destination);
+    if (!parked) throw error;
+    try {
+      fs.copyFileSync(source, destination);
+    } catch (second) {
+      // 新文件没落地就把旧的挪回去，否则这个文件就等于丢了
+      try {
+        fs.rmSync(destination, { force: true });
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.renameSync(parked, destination);
+      } catch {
+        /* ignore */
+      }
+      throw second;
+    }
+    try {
+      fs.rmSync(parked, { force: true });
+    } catch {
+      // 还被本进程占着，删不掉；登记下来让主进程下次启动清
+      parkedFiles.push(parked);
+    }
+  }
+}
+
+/** 把占着的文件挪到 .updating 旁路上；成功返回新路径，挪不动返回 ''。 */
+function parkOccupied(file) {
+  const parked = `${file}.updating`;
+  try {
+    fs.rmSync(parked, { force: true });
+  } catch {
+    /* 上次残留还占着，下面改名会失败并如实上报 */
+  }
+  try {
+    fs.renameSync(file, parked);
+    return parked;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 替换正在运行的主程序（就是本脚本自己）。
+ *
+ * 运行中的 exe 映像被系统以 FILE_SHARE_DELETE 打开：写不进去，但**允许改名**。
+ * 所以流程是「先把自己挪开 → 再写新文件」，中途失败就把旧的挪回来，
+ * 绝不留下「程序目录里没有主程序」这种状态。
+ * 挪出来的 .updating 仍被本进程占着，删不掉，留给下次启动的主进程清理。
+ *
+ * @returns {{ok: boolean, parked?: string, reason?: string}}
+ */
+function replaceRunningExe(sourceFile, exePath) {
+  const parked = `${exePath}.updating`;
+  try {
+    fs.rmSync(parked, { force: true });
+  } catch {
+    /* 上次残留的旧映像还占着，删不掉就只能作罢，下面改名会失败并走跳过分支 */
+  }
+  try {
+    fs.renameSync(exePath, parked);
+  } catch (error) {
+    try {
+      fs.rmSync(parked, { force: true });
+    } catch {
+      /* ignore */
+    }
+    return {
+      ok: false,
+      reason: `主程序被占用，改名失败：${error && error.code ? error.code : error && error.message}`,
+    };
+  }
+  try {
+    copyFileReplacing(sourceFile, exePath);
+    return { ok: true, parked };
+  } catch (error) {
+    // 新文件没落地就把旧的挪回去，否则用户桌面上就没有能启动的程序了
+    try {
+      fs.rmSync(exePath, { force: true });
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.renameSync(parked, exePath);
+    } catch {
+      /* ignore */
+    }
+    return { ok: false, reason: `写入新主程序失败：${error && error.message ? error.message : error}` };
+  }
 }
 
 /**
@@ -182,7 +313,7 @@ function copyFileReplacing(source, destination) {
  * 只数「以引号开头的数据行」——名字的比对交给 tasklist 自己（它内部按 Unicode 比），
  * 我们只取第二列的 PID（纯数字，怎么编码都不会错）。
  */
-function listLauncherPids(exeName) {
+function listLauncherPids(exeName, excludePid = 0) {
   try {
     const result = spawnSync('tasklist', ['/FO', 'CSV', '/NH', '/FI', `IMAGENAME eq ${exeName}`], {
       windowsHide: true,
@@ -194,7 +325,10 @@ function listLauncherPids(exeName) {
     for (const line of text.split(/\r?\n/)) {
       // 没有匹配时 tasklist 只吐一行提示信息，不以引号开头
       const hit = /^"[^"]*","(\d+)"/.exec(line.trim());
-      if (hit) pids.push(Number(hit[1]));
+      if (!hit) continue;
+      const pid = Number(hit[1]);
+      if (excludePid && pid === excludePid) continue;
+      pids.push(pid);
     }
     return pids;
   } catch (error) {
@@ -206,31 +340,96 @@ function listLauncherPids(exeName) {
 /**
  * 等旧进程退出。
  *
- * 光看进程名是不够的：用户机器上可能同时装着另一个副本，它跑着也不该挡住这次更新。所以额外核一件事——本副本的主程序文件是否还被占着。本副本在跑时它的
- * exe 一定打不开（镜像只放行共享读），别的副本占不到这个文件。
+ * 这里有两个必须避开的「自己」：
+ *   1. 本脚本是用 `花筱灵启动器.exe` 起来的（updater.js 走 process.execPath + ELECTRON_RUN_AS_NODE），
+ *      进程名和主程序完全一样，tasklist 一定列得到自己；
+ *   2. 本脚本正在运行，就持有那个 exe 的文件句柄，isFileLocked 永远返回 true。
+ * 两条凑在一起 = 永远认为「启动器还在跑」，等满 60 秒后放弃更新。
+ * 2.8.0 → 2.8.1 全部卡在「启动器还在运行，没能退出」就是这个原因。
+ *
+ * 所以改成：按 PID 判断真正的父进程（拉起本脚本的主进程）死活，其余同名进程一律不管
+ * —— 它们要么是主进程的渲染/GPU 子进程（会跟着退），要么是用户另开的副本，
+ * 再或者是 netease-api 这种同 exe 拉起来的长驻子进程，都不该拦住这次更新。
  */
 async function waitForMainProcessExit(target) {
-  const exePath = path.join(target, EXE_NAME);
+  const selfPid = process.pid;
+  // detached 只是换进程组，父子关系不变；主进程一退，这个 PID 就查不到了。
+  const mainPid = Number(process.ppid) || 0;
+  /*
+   * 第二条判据：主窗口进程还活着时，这些程序资源一定被它占着（asar 是内存映射
+   * 加载的，exe 是本脚本自己的映像所以不算）。它们同时可写 = 主进程已经放手。
+   *
+   * 只看 ppid 是不够的：拉起本脚本的那个进程未必就是主窗口进程（手动跑脚本、
+   * 被别的托管进程拉起、PID 被系统复用），那种情况下 ppid 一直活着，更新就
+   * 卡在这里等满 60 秒然后放弃——用户看到的就是「下完了装不上」。
+   */
+  const watched = [
+    path.join(target, 'resources', 'app.asar'),
+    path.join(target, 'resources', 'app', 'electron', 'main.js'),
+    path.join(target, 'resources', 'app', 'package.json'),
+  ].filter((file) => fs.existsSync(file));
+
   const deadline = Date.now() + PROCESS_WAIT_MS;
   for (;;) {
-    const pids = listLauncherPids(EXE_NAME);
-    if (!pids.length) return true;
-    if (!isFileLocked(exePath)) {
-      log(`[warn] 检测到 ${pids.length} 个 ${EXE_NAME}（PID ${pids.join(', ')}），但它们没有占用 ${exePath}，判断为其他副本，继续`);
-      return true;
+    const others = listLauncherPids(EXE_NAME, selfPid);
+    if (mainPid > 0 && !pidAlive(mainPid)) {
+      if (others.length) {
+        log(`[warn] 主进程已退出，另有同名进程（PID ${others.join(', ')}）仍在运行，不影响本次更新`);
+      }
+      return { ok: true, reason: '' };
+    }
+    if (!others.length) return { ok: true, reason: '' };
+    // 父进程还在，但程序资源已经没人占着 —— 主窗口进程其实已经退了
+    if (watched.length && watched.every((file) => !isFileLocked(file))) {
+      log(`[warn] 父进程（PID ${mainPid}）还在，但程序资源已释放，判断主进程已退出，继续`);
+      return { ok: true, reason: '' };
     }
     if (Date.now() >= deadline) {
-      log(`[error] 等了 ${Math.round(PROCESS_WAIT_MS / 1000)} 秒，${EXE_NAME}（PID ${pids.join(', ')}）仍在运行`);
-      return false;
+      const stillParent = mainPid > 0 && pidAlive(mainPid);
+      /*
+       * 这两种情况要分开说：前者是真有进程没退，后者是进程其实退了、但文件
+       * 被别的东西（绝大多数是杀毒软件的实时扫描）按着。写成同一句「启动器
+       * 还在运行」，用户会去任务管理器里找并不存在的进程。
+       */
+      const reason = stillParent
+        ? `主进程（PID ${mainPid}）等了 ${Math.round(PROCESS_WAIT_MS / 1000)} 秒还没退出`
+        : `程序文件被别的东西占用了（等了 ${Math.round(PROCESS_WAIT_MS / 1000)} 秒也拿不到写权限）`;
+      log(`[error] ${reason}`);
+      return { ok: false, reason };
     }
-    log(`等待进程退出：${EXE_NAME}（PID ${pids.join(', ')}）`);
+    log(`等待进程退出：${EXE_NAME}（PID ${others.join(', ')}）`);
     await sleep(1000);
+  }
+}
+
+/** 这个 PID 还活着吗（Windows 上 Node 用 kill(pid, 0) 探活，EPERM 也算活）。 */
+function pidAlive(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && error.code === 'EPERM');
   }
 }
 
 /* ---------------------------------------------------------------- */
 /* 拉起 / 看护                                                        */
 /* ---------------------------------------------------------------- */
+
+/**
+ * 拉起新启动器前把「当前进程是 Node 模式」这类运行态变量清掉。
+ * apply.js 本身是被主进程用 ELECTRON_RUN_AS_NODE=1 拉起的；如果原样继承给新启动器，
+ * 新进程会以纯 Node 模式跑（没有窗口），用户看到的就是「下载完 / 覆盖完没反应、不会重启成新版本」。
+ */
+function cleanEnv() {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_DISABLE_ASAR;
+  delete env.ELECTRON_ENABLE_LOGGING;
+  delete env.ELECTRON_ENABLE_STACK_DUMPING;
+  return env;
+}
 
 function relaunchExe(target, meta) {
   const declared = String((meta && meta.relaunch) || '').trim();
@@ -247,7 +446,7 @@ function startLauncher(target, exe) {
   }
   log(`重新启动启动器：${exe}`);
   try {
-    const child = spawn(exe, [], { cwd: target, detached: true, windowsHide: true, stdio: 'ignore' });
+    const child = spawn(exe, [], { cwd: target, detached: true, windowsHide: true, stdio: 'ignore', env: cleanEnv() });
     child.on('error', (error) => {
       log(`[error] 拉起失败：${error && error.message ? error.message : error}`);
     });
@@ -268,7 +467,7 @@ async function launchAndWatch(target, exe, attemptLabel) {
   guardLog(attemptLabel);
   let child = null;
   try {
-    child = spawn(exe, [], { cwd: target, detached: true, windowsHide: true, stdio: 'ignore' });
+    child = spawn(exe, [], { cwd: target, detached: true, windowsHide: true, stdio: 'ignore', env: cleanEnv() });
   } catch (error) {
     guardLog(`[error] 启动失败：${error && error.message ? error.message : error}`);
     return { alive: false, child: null, startedAt: 0 };
@@ -353,6 +552,51 @@ function backupDirName(meta, kind) {
   return `backup-${from}`;
 }
 
+/**
+ * 更新要占的磁盘：新文件 + 旧文件的备份，两份要同时在盘上。
+ *
+ * 主程序 250 MB、app.asar 约 37 MB，加备份就是接近 600 MB。以前不检查，
+ * 空间不够时表现是「备份复制一半失败 → 覆盖也在半路断掉」，启动器起不来，
+ * 用户只看到窗口消失。提前说清楚比装到一半崩掉好。
+ */
+function ensureDiskSpace(target, source, files) {
+  let incoming = 0;
+  let outgoing = 0;
+  for (const relative of files) {
+    try {
+      const sourceFile = resolveJoined(source, relative);
+      if (fs.existsSync(sourceFile)) incoming += fs.statSync(sourceFile).size;
+    } catch {
+      /* 量不到就当 0 */
+    }
+    try {
+      const destination = resolveJoined(target, relative);
+      if (fs.existsSync(destination)) outgoing += fs.statSync(destination).size;
+    } catch {
+      /* 量不到就当 0 */
+    }
+  }
+  const needed = incoming + outgoing;
+  if (needed <= 0) return;
+  // 取不到剩余空间（系统不支持）就不拦，宁可照常试也不要误判成失败
+  let free = 0;
+  try {
+    const stat = fs.statfsSync ? fs.statfsSync(target) : null;
+    if (stat) free = Number(stat.bavail) * Number(stat.bsize);
+  } catch {
+    free = 0;
+  }
+  if (!free) return;
+  const mb = (value) => Math.round(value / 1024 / 1024);
+  if (free < needed) {
+    throw new Error(
+      `磁盘空间不够：这次更新需要约 ${mb(needed)} MB（新文件加一份备份），` +
+        `当前只剩约 ${mb(free)} MB。清理出空间后再点更新，启动器没有被动过。`
+    );
+  }
+  log(`磁盘空间检查通过：需要约 ${mb(needed)} MB，可用 ${mb(free)} MB`);
+}
+
 async function invokeUpdate(target, meta) {
   const source = String(meta.source || '');
   const files = Array.isArray(meta.files) ? meta.files : [];
@@ -362,9 +606,17 @@ async function invokeUpdate(target, meta) {
   if (!source || !fs.existsSync(source)) throw new Error(`更新包解压目录不见了：${source}`);
   if (!files.length) throw new Error('apply-meta.json 里没有要覆盖的文件清单');
 
-  if (!(await waitForMainProcessExit(target))) {
-    throw new Error('启动器还在运行，没能退出，本次更新已放弃（可以重试）');
+  const waited = await waitForMainProcessExit(target);
+  if (!waited.ok) {
+    throw new Error(
+      `${waited.reason}，本次更新已放弃。启动器没有被改动，可以重试` +
+        '（若反复出现，多半是杀毒软件在扫描安装目录，把整个目录加进白名单后再点更新）。'
+    );
   }
+
+  /* ---- 0. 磁盘空间 ---- */
+  // 放在备份之前：这时候还没动过任何文件，说「空间不够」是干净的失败
+  ensureDiskSpace(target, source, files);
 
   /* ---- 1. 备份 ---- */
   const backupRoot = path.join(statusDir, backupDirName(meta, 'update'));
@@ -378,7 +630,11 @@ async function invokeUpdate(target, meta) {
     if ((index + 1) % 50 === 0 || index + 1 === files.length) log(`备份中 ${index + 1}/${files.length}`);
     const destination = resolveJoined(target, relative);
     if (!fs.existsSync(destination)) continue;
-    if (!(await waitFileWritable(destination, SHORT_LOCK_TIMEOUT_MS))) {
+    // 主程序 exe 是本脚本自己的映像：写不了（EBUSY）但读得动，
+    // 备份只是读它，别在这里干等——跳过的话回滚时就没有主程序可还原。
+    // 其余关键文件（app.asar 等）必须备份成功，所以给足等待时间。
+    const backupTimeout = relative === EXE_NAME ? 0 : isCritical(relative) ? LOCK_TIMEOUT_MS : SHORT_LOCK_TIMEOUT_MS;
+    if (backupTimeout && !(await waitFileWritable(destination, backupTimeout))) {
       log(`[skip] 文件被占用，跳过备份：${relative}`);
       continue;
     }
@@ -403,6 +659,8 @@ async function invokeUpdate(target, meta) {
 
   /* ---- 2. 覆盖 ---- */
   const skipped = [];
+  // 关键文件没装上的单独收在这：它们决定这次更新算不算数
+  const criticalFailed = [];
   let written = 0;
   for (let index = 0; index < files.length; index += 1) {
     const relative = files[index];
@@ -410,10 +668,30 @@ async function invokeUpdate(target, meta) {
     const sourceFile = resolveJoined(source, relative);
     if (!fs.existsSync(sourceFile)) continue;
     const destination = resolveJoined(target, relative);
-    const timeout = relative.includes('/') ? SHORT_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS;
+    /*
+     * 主程序就是本脚本自己的映像：直接写必然 EBUSY（实测 EBUSY），以前这里一定被跳过，
+     * 结果是「app 换了新版本、exe 还是旧的」。Windows 只允许给运行中的映像改名
+     * （FILE_SHARE_DELETE），所以先把自己挪到 .updating，再把新 exe 写到原位置。
+     * 旧映像继续留在内存里跑，不影响；.updating 由下次启动的主进程清理。
+     */
+    if (relative === EXE_NAME) {
+      const result = replaceRunningExe(sourceFile, destination);
+      if (result.ok) {
+        written += 1;
+        parkedFiles.push(result.parked);
+        log(`主程序已替换（旧映像改名到 ${path.basename(result.parked)}，下次启动清理）`);
+      } else {
+        log(`[skip] 覆盖失败 ${relative}：${result.reason}`);
+        skipped.push(relative);
+      }
+      continue;
+    }
+    // 关键文件给足等待：卡在这里顶多慢一点，装不上却报成功才是真麻烦
+    const timeout = isCritical(relative) ? LOCK_TIMEOUT_MS : relative.includes('/') ? SHORT_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS;
     if (!(await waitFileWritable(destination, timeout))) {
       log(`[skip] 文件被占用，暂不覆盖：${relative}`);
       skipped.push(relative);
+      if (isCritical(relative)) criticalFailed.push(relative);
       continue;
     }
     try {
@@ -422,9 +700,48 @@ async function invokeUpdate(target, meta) {
     } catch (error) {
       log(`[skip] 覆盖失败 ${relative}：${error && error.message ? error.message : error}`);
       skipped.push(relative);
+      if (isCritical(relative)) criticalFailed.push(relative);
     }
   }
   log(`覆盖完成：${written} 个文件，跳过 ${skipped.length} 个`);
+
+  /*
+   * 关键文件没换掉就必须整体失败。
+   *
+   * 以前这里只记日志、照常写「已更新」标记并拉起，结果是用户看到新版号、
+   * 跑的还是旧程序，再点更新又是同一个包、同样的失败。现在把这些文件还原
+   * 回去，让启动器停在能用的旧版本，并给出可操作的提示。
+   */
+  if (criticalFailed.length) {
+    const reason = criticalFailed.join('、');
+    log(`[error] 关键文件没能覆盖：${reason}`);
+    const restoreList = files.filter((rel) => !skipped.includes(rel));
+    if (restoreList.length) {
+      try {
+        await restoreFiles({
+          target,
+          sourceRoot: backupRoot,
+          files: restoreList,
+          statusDir,
+          backupMarker: {
+            action: 'rollback',
+            returnedTo: String(meta.fromVersion || ''),
+            revertedFrom: version,
+            appliedAt: new Date().toISOString(),
+            backupRoot,
+            reason: `关键文件覆盖失败：${reason}`,
+          },
+        });
+        log('已还原到更新前的版本');
+      } catch (error) {
+        log(`[error] 自动还原失败：${error && error.message ? error.message : error}`);
+      }
+    }
+    throw new Error(
+      `更新没装上：${reason} 没能覆盖（多半被杀毒软件或另一个程序占着）。` +
+        '已经还原到更新前的版本，启动器可以照常使用，把安装目录加进杀毒白名单后重试即可。'
+    );
+  }
 
   const exePath = path.join(target, EXE_NAME);
   if (!fs.existsSync(exePath)) {
@@ -463,6 +780,7 @@ async function invokeUpdate(target, meta) {
     filesWritten: written,
     skippedFiles: skipped,
     backupRoot,
+    parkedFiles,
   });
 
   /* ---- 4. 拉起 + 看护 ---- */
@@ -534,9 +852,8 @@ async function invokeRollback(target, meta) {
   const statusDir = String(meta.statusDir || '');
   if (!source || !fs.existsSync(source)) throw new Error(`备份目录不存在：${source}`);
 
-  if (!(await waitForMainProcessExit(target))) {
-    throw new Error('启动器还在运行，没能退出，回滚已放弃');
-  }
+  const waited = await waitForMainProcessExit(target);
+  if (!waited.ok) throw new Error(`启动器还在运行，没能退出，回滚已放弃（${waited.reason}）`);
 
   await restoreFiles({
     target,
@@ -647,3 +964,8 @@ main().catch((error) => {
   console.error(`[error] ${message}`);
   process.exitCode = 1;
 });
+
+// 被 require 时不跑主流程，只把纯逻辑交给自测脚本（直接运行仍然照常执行）
+if (require.main !== module) {
+  module.exports = { ensureDiskSpace, isCritical, waitForMainProcessExit };
+}

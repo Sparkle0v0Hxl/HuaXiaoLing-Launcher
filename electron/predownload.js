@@ -104,6 +104,8 @@ function stateFromReport(report) {
   };
   if (report.error) base.error = String(report.error);
   if (report.reason) base.reason = String(report.reason);
+  // 异环只覆盖启动器侧资源，带出去让界面别写成「更新游戏」
+  if (report.scope) base.scope = String(report.scope);
   for (const key of [
     'packs',
     'matchedPacks',

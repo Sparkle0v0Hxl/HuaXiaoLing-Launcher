@@ -26,6 +26,25 @@ const { httpFetch } = require('./http-fetch');
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+/** 逐段比较版本号：a 比 b 新返回 1，一样返回 0，更旧返回 -1。 */
+function compareVersion(a, b) {
+  const pa = String(a || '').replace(/^v/i, '').split(/[.\-+_]/).map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '').replace(/^v/i, '').split(/[.\-+_]/).map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+/**
+ * 异环这里能更新的只有 NTELauncher 那部分资源，游戏本体不在范围内。
+ * 带出去给界面用，免得按钮写成「更新游戏」让人以为本体也能装。
+ */
+const NTE_SCOPE_LAUNCHER = 'launcher';
+
 /** 找 Config.ini（复用 neverness-channels 的查找逻辑，避免两份实现）。 */
 function findConfigRoot(startPath, levels = 8) {
   let dir = startPath;
@@ -330,10 +349,19 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
   try {
     const ini = await fetchText(iniUrl, signal);
     const latestVersion = (ini.match(/^Version=(.+)$/m) || [])[1]?.trim() || '';
-    const state = latestVersion && localVersion && latestVersion !== localVersion ? 'update' : 'none';
+    /*
+     * 必须远程真的比本地新才算有更新。
+     *
+     * 原来是 latestVersion !== localVersion，只要字面不同就报 update。版本号
+     * 格式一变（官方改了命名、本地带构建后缀）就会天天报「有更新」，可游戏
+     * 本体一个字节都没动——用户点了「更新游戏」，装完发现版本还是那个版本。
+     * 而且这里比对的是启动器资源的版本，本来就不代表本体有新版本。
+     */
+    const newer = Boolean(latestVersion && localVersion) && compareVersion(latestVersion, localVersion) > 0;
     return {
       kind: 'nte',
-      state,
+      state: newer ? 'update' : 'none',
+      scope: NTE_SCOPE_LAUNCHER,
       localVersion,
       latestVersion,
       targetVersion: latestVersion,

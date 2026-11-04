@@ -47,6 +47,12 @@ const { multiDownload } = require('./multi-download');
  * （自测脚本）自动降级回 Node fetch。
  */
 const { httpFetch, nodeRequest, segmentFetch } = require('./http-fetch');
+/*
+ * 清单签名校验。sha256 只能证明「文件没传坏」，证明不了「清单没被换」——
+ * 两者走同一条通道，能改清单的人顺手就能把 sha256 一起改掉。签名用的是只有
+ * 发包机才有的私钥，改任何受保护字段都会在这里被挡下。
+ */
+const minisign = require('./minisign');
 
 const EXE_NAME = '花筱灵启动器.exe';
 const DEFAULT_TIMEOUT = 15000;
@@ -244,6 +250,13 @@ async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
 
   const version = String(data.version || '').trim().replace(/^v/i, '');
   if (!version) throw new Error('更新源里没有版本号');
+  // 有签名就必须验过；没签名（过渡期的老清单）交给上层按「已验签过的版本」决定放不放行
+  const sigCheck = minisign.verifyManifest(data);
+  if (sigCheck.state === 'invalid') {
+    const error = new Error(`更新清单签名校验失败：${sigCheck.reason}`);
+    error.code = 'SIGNATURE_INVALID';
+    throw error;
+  }
   return {
     version,
     title: String(data.title || '').trim(),
@@ -254,6 +267,8 @@ async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
     size: Number(data.size) || 0,
     mandatory: Boolean(data.mandatory),
     deltas: parseDeltas(data, raw),
+    sigState: sigCheck.state,
+    sigReason: sigCheck.reason,
     source: raw,
   };
 }
@@ -280,6 +295,7 @@ async function resolveManifest(candidates) {
    */
   let best = null;
   let lastError = null;
+  let sigError = null;
   let remaining = list.length;
   let settle = () => {};
   let graceTimer = null;
@@ -287,12 +303,29 @@ async function resolveManifest(candidates) {
     settle = resolve;
   });
 
+  let index = 0;
   for (const candidate of list) {
+    const order = index;
+    index += 1;
     readManifest(candidate)
       .then(
         (manifest) => {
-          if (!best || compareVersions(manifest.version, best.manifest.version) > 0) {
-            best = { manifest, source: manifest.source };
+          /*
+           * 版本相同的时候不能「谁先返回用谁」。
+           *
+           * 各源清单里的下载地址并不一样：GitHub / jsDelivr 上那份写的是
+           * github.com 直连，Gitee 镜像那份写的是带加速前缀的地址。同一时间
+           * 全部返回 2.8.2，先到的那条就决定了用户走哪条线路——国内机器上
+           * 这条恰好直连，188 MB 就下成了几十 KB/s，而且每次表现还不一样。
+           * 所以版本持平时改用调用方给定的顺序，谁优先级高用谁。
+           */
+          if (!best) {
+            best = { manifest, source: manifest.source, order };
+          } else {
+            const diff = compareVersions(manifest.version, best.manifest.version);
+            if (diff > 0 || (diff === 0 && order < best.order)) {
+              best = { manifest, source: manifest.source, order };
+            }
           }
           /*
            * 已经有可用结果了，就别让剩下那条死链再把用户拖满一个超时。
@@ -307,6 +340,8 @@ async function resolveManifest(candidates) {
         },
         (error) => {
           lastError = error;
+          // 签名不对比「连不上」严重得多：混在普通网络错误里会被用户当成网络问题忽略掉
+          if (error && error.code === 'SIGNATURE_INVALID') sigError = error;
         }
       )
       .finally(() => {
@@ -320,6 +355,7 @@ async function resolveManifest(candidates) {
 
   await finished;
   if (best) return { ok: true, manifest: best.manifest, source: best.source };
+  if (sigError) return { ok: false, code: 'SIGNATURE_INVALID', error: sigError.message };
   return {
     ok: false,
     error: lastError && lastError.message ? lastError.message : String(lastError || '读不到更新源'),
@@ -360,6 +396,7 @@ async function checkForUpdate({ location, currentVersion }) {
       sha256: '',
       size: 0,
       mandatory: false,
+      code: resolved.code || '',
       error: resolved.error || '读不到更新源',
     };
   }
@@ -377,6 +414,8 @@ async function checkForUpdate({ location, currentVersion }) {
     size: manifest.size,
     mandatory: manifest.mandatory,
     deltas: manifest.deltas || [],
+    sigState: manifest.sigState || 'none',
+    sigReason: manifest.sigReason || '',
     // 匹配「当前版本 -> 目标版本」的增量；界面上据此提示「本次走增量」
     delta:
       (manifest.deltas || []).find(
@@ -500,6 +539,13 @@ async function downloadOne({ url, dest, expectedSize, report, minSpeed = 0 }) {
         headers,
         connections: DOWNLOAD_CONNECTIONS,
         minSpeed,
+        /*
+         * 两条栈的「CDN 认不认 Range」必须分开记。
+         * node:https 读不到系统代理，靠代理出网的机器上它必然探测失败；
+         * 要是把它记成「这台 CDN 不支持分段」，换到 Chromium 栈时缓存直接命中
+         * false，连探测都不做就退回单连接——16 连接变 1 连接，速度掉几十倍。
+         */
+        stackName: plan.name,
       });
     } catch (error) {
       // 慢速判定要交给上层重开，不能在这里吞掉
@@ -514,12 +560,143 @@ async function downloadOne({ url, dest, expectedSize, report, minSpeed = 0 }) {
   return await downloadSingle({ url, dest, expectedSize, report });
 }
 
+/* ---------------------------------------------------------------- */
+/* 下载地址：先挑一条快的，再开始下                                   */
+/* ---------------------------------------------------------------- */
+
 /**
- * 下载更新包：只走清单给的官方地址，靠多连接吃满带宽。
+ * 转发型加速前缀（拼在原始 https 地址前面即可用）。
  *
- * 以前这里是「官方 + 一串加速镜像，谁快用谁」，实际维护下来镜像比直连更不可靠：
- * 免费前缀今天通明天挂，还得先花几秒探测。现在整层删掉——直连 16 连接已经能到
- * 6~10 MB/s，少一层转发也少一个能篡改下载内容的地方（sha256 仍在最后把关）。
+ * 为什么又加回来：2026-11 那次把镜像整层删掉，理由是「本机直连 16 连接能到
+ * 6~10 MB/s」——那是国际出口通畅时的实测。国内大部分机器直连 GitHub Release
+ * 是几十 KB/s 甚至直接超时，而转发型镜像在那类网络里反而快得多，两类用户
+ * 的结论完全相反，所以「只留一个」注定要牺牲一半人。
+ *
+ * 现在的做法不再是二选一：开下载前先并发向每条线路各要一小段，谁先给、
+ * 给得快就用谁。直连快就走直连（少一层转发，也少一个能改包的中间人），
+ * 直连慢才落到镜像；镜像全挂也只是回到直连，不会比现在更差。
+ *
+ * sha256 仍由清单把关，中间人改不了包的内容。
+ */
+const ACCEL_PREFIXES = [
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+  'https://gh.llkk.cc/',
+  'https://ghproxy.net/',
+];
+
+/** 探测时每条线路要多少字节。太小测不出速度，太大白等。 */
+const PROBE_BYTES = 192 * 1024;
+/** 单条线路的探测上限。探测是并发的，整体耗时约等于最慢那条。 */
+const PROBE_TIMEOUT = 6000;
+/** 小于这个体积的包不值得先探测（增量包往往只有几十 KB，探测反而更慢）。 */
+const PROBE_MIN_SIZE = 2 * 1024 * 1024;
+/** 直连比最快的镜像慢不超过这个比例时，仍然优先直连。 */
+const DIRECT_PREFERENCE = 0.8;
+
+/** 由官方地址派生出候选线路：官方直连在最前，后面是各加速前缀。 */
+function accelerateCandidates(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return [];
+  const list = [raw];
+  if (/^https:\/\/(www\.)?(github\.com|githubusercontent\.com|raw\.githubusercontent\.com|objects\.githubusercontent\.com)\//i.test(raw)) {
+    for (const prefix of ACCEL_PREFIXES) {
+      const candidate = prefix + raw;
+      if (!list.includes(candidate)) list.push(candidate);
+    }
+  }
+  return list;
+}
+
+/**
+ * 向一条线路要最前面一小段，测它能不能通、有多快。
+ * 只看首段的瞬时速度——完整包动辄上百 MB，等下完再判断就太晚了。
+ */
+async function probeSource(url, timeoutMs) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await httpFetch(url, {
+      signal: controller.signal,
+      headers: { 'user-agent': BROWSER_UA, accept: '*/*', range: `bytes=0-${PROBE_BYTES - 1}` },
+    });
+    // 206 = 认 Range；200 = 无视 Range 从开头整包给，也算通
+    if (!response.ok && response.status !== 206) return { url, ok: false };
+    const buffer = await response.arrayBuffer();
+    const ms = Math.max(1, Date.now() - started);
+    return { url, ok: true, bytes: buffer.byteLength, ms, speed: (buffer.byteLength / ms) * 1000 };
+  } catch {
+    return { url, ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 拿到第一条可用线路后，最多再等这么久，给别的线路一个反超的机会。 */
+const PROBE_GRACE = 1200;
+
+/**
+ * 给候选线路排个序：快的在前。
+ *
+ * 探测失败（超时、被墙、镜像挂了）的线路直接出局，所以「免费镜像随时会挂」
+ * 不再是需要提前担心的事——挂了这条就不会被选中。
+ *
+ * 不等所有线路都回来：拿到第一条能用的之后只再宽限 1.2 秒。否则一条死链
+ * 就能把探测拖满 6 秒超时，用户还没开始下载就先干等着。
+ */
+async function rankSources(url, expectedSize = 0) {
+  const list = accelerateCandidates(url);
+  if (list.length <= 1) return list;
+  if (expectedSize && expectedSize < PROBE_MIN_SIZE) return list;
+
+  const usable = [];
+  let remaining = list.length;
+  let settle = () => {};
+  let graceTimer = null;
+  const done = new Promise((resolve) => {
+    settle = resolve;
+  });
+
+  for (const item of list) {
+    probeSource(item, PROBE_TIMEOUT)
+      .then((result) => {
+        if (result.ok && result.bytes > 0) {
+          usable.push(result);
+          if (!graceTimer) {
+            graceTimer = setTimeout(settle, PROBE_GRACE);
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          if (graceTimer) clearTimeout(graceTimer);
+          settle();
+        }
+      });
+  }
+
+  await done;
+  if (!usable.length) return list;
+
+  usable.sort((a, b) => b.speed - a.speed);
+  const fastest = usable[0];
+  const direct = usable.find((item) => item.url === url);
+
+  // 直连能用，且没比最快的镜像慢太多，就还是走直连
+  if (direct && direct.speed >= fastest.speed * DIRECT_PREFERENCE) {
+    return [url, ...usable.filter((item) => item.url !== url).map((item) => item.url)];
+  }
+  const ordered = usable.map((item) => item.url);
+  // 没测通的官方地址留在最后兜底：万一最快的那条中途断了还有原路可退
+  if (!ordered.includes(url)) ordered.push(url);
+  return ordered;
+}
+
+/**
+ * 下载更新包：先挑一条快的线路，中途断了就换下一条。
  *
  * 这里不再做「平均速度低就重开一遍」：那种重来会把已经下好的进度清零，用户看到
  * 的就是进度条归零、又从 0 慢慢爬。真正该处理的「卡住」交给 multiDownload 的
@@ -528,7 +705,19 @@ async function downloadOne({ url, dest, expectedSize, report, minSpeed = 0 }) {
 async function downloadHttp({ url, dest, expectedSize, report }) {
   const official = String(url || '').trim();
   if (!official) throw new Error('没有可用的下载地址');
-  return await downloadOne({ url: official, dest, expectedSize, report });
+  const sources = await rankSources(official, expectedSize);
+  let lastError = null;
+  for (const source of sources) {
+    try {
+      return await downloadOne({ url: source, dest, expectedSize, report });
+    } catch (error) {
+      // 4xx 是地址本身有问题，换线路也没用
+      if (error && error.retryable === false) throw error;
+      lastError = error;
+      console.warn(`[update] 这条线路下载失败，换下一条：${source} — ${error && error.message}`);
+    }
+  }
+  throw lastError || new Error('下载失败');
 }
 
 async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
@@ -620,9 +809,23 @@ function runPowerShell(script, timeoutMs = 10 * 60 * 1000) {
 
 async function extractZip(zipPath, extractRoot) {
   await fsp.mkdir(extractRoot, { recursive: true });
-  await runPowerShell(
-    `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
-  );
+  // 优先用 .NET 的 ZipFile 解压：实测部分机器 / 旧版 PowerShell 的 Expand-Archive
+  // 在解压大体积 ZIP（>100MB）时会中途静默退出（exit 0 但只抽出半截），导致覆盖后
+  // 启动器缺文件打不开。.NET 的 ZipFile 更稳，Expand-Archive 作为兜底。
+  const dotNet = `[System.IO.Compression.ZipFile]::ExtractToDirectory(${JSON.stringify(zipPath)}, ${JSON.stringify(extractRoot)})`;
+  try {
+    await runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; ${dotNet}`);
+    return;
+  } catch (err) {
+    try {
+      await runPowerShell(
+        `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
+      );
+      return;
+    } catch (err2) {
+      throw new Error(`解压更新包失败：${err2 && err2.message ? err2.message : err2}`);
+    }
+  }
 }
 
 function findPackageRoot(extractRoot) {
@@ -691,7 +894,20 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
   const extractRoot = path.join(tempRoot, 'extract');
   await extractZip(zipPath, extractRoot);
   const source = findPackageRoot(extractRoot);
-  if (!source) throw new Error('这个 ZIP 不是有效的花筱灵便携版更新包');
+  if (!source) {
+    // 解压成功却找不到启动器主程序，多半是 ZIP 结构不对 / 抽出半截。把解压清单留下来方便排障。
+    try {
+      const dumped = (await listFiles(extractRoot)).slice(0, 300);
+      await fsp.writeFile(
+        path.join(tempRoot, 'stage-debug.json'),
+        JSON.stringify({ extractRoot, tempRoot, fileCount: dumped.length, files: dumped }, null, 2),
+        'utf8'
+      );
+    } catch {
+      /* 诊断写入失败不影响主流程报错 */
+    }
+    throw new Error('这个 ZIP 不是有效的花筱灵便携版更新包（解压后找不到启动器主程序；解压清单已记入 stage-debug.json）');
+  }
 
   let packageVersion = '';
   try {
@@ -1208,12 +1424,21 @@ async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', t
       if (!fs.existsSync(baseFile)) throw new Error(`本地缺少基准文件，无法打补丁：${rel}`);
       const baseSize = (await fsp.stat(baseFile)).size;
       if (Number(entry.baseSize) && baseSize !== Number(entry.baseSize)) {
-        throw new Error(`基准文件大小不符：${rel}`);
+        throw new Error(
+          `基准文件大小不符：${rel}（本地 ${baseSize} 字节，期望 ${entry.baseSize} 字节）`
+        );
       }
       if (entry.baseSha256) {
         const actualBase = await sha256File(baseFile);
         if (actualBase !== String(entry.baseSha256).toLowerCase()) {
-          throw new Error(`基准文件校验不符：${rel}`);
+          /*
+           * 两边都留一段前缀：用户把这个日志发回来，一眼就能看出是「本地被改过」
+           * 还是「增量包基准写错了」。差一个字节就得退回整包，这是设计如此，
+           * 但要让人知道是哪一步拦下的。
+           */
+          throw new Error(
+            `基准文件校验不符：${rel}（本地 ${actualBase.slice(0, 12)}…，期望 ${String(entry.baseSha256).slice(0, 12)}…）`
+          );
         }
       }
       const patchFile = path.join(bundle, normalizeRel(entry.patch));
@@ -1310,4 +1535,6 @@ module.exports = {
   updateStatusDir,
   prepareRollback,
   cleanTemp,
+  rankSources,
+  accelerateCandidates,
 };

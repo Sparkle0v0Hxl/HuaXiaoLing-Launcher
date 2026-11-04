@@ -141,6 +141,32 @@ const SETTINGS_TABS = [
   ['about', '关于', 'info', '版本信息与相关链接'],
 ];
 
+/* ------------------------------------------------------------------ */
+/* 网络代理：系统代理导入 + 连通性测试                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 测试结果放在模块级变量里，不放 DOM。设置页每次重绘都会重建这段 HTML，
+ * 存在 DOM 里的话一点开关就消失了；存在这里，重绘时还能照原样贴回去。
+ */
+let proxyProbe = null; // { state:'running'|'done', ok:boolean, text:string }
+
+function proxyTestText() {
+  if (!proxyProbe) return '';
+  if (proxyProbe.state === 'running') return '正在测试，最多等 10 秒…';
+  return proxyProbe.text || '';
+}
+
+/** 更新结果行；节点不在（用户切到别的分组）时只存内存，下次渲染自然带上 */
+function setProxyProbe(next) {
+  proxyProbe = next;
+  const node = document.querySelector('#proxy-test-result');
+  if (!node) return;
+  node.textContent = proxyTestText();
+  node.classList.toggle('is-ok', Boolean(next && next.state === 'done' && next.ok));
+  node.classList.toggle('is-bad', Boolean(next && next.state === 'done' && !next.ok));
+}
+
 /** 把 process.platform 翻成人看的名字，写进反馈用的那段环境信息里。 */
 function platformText() {
   const key = String((state.app && state.app.platform) || '').toLowerCase();
@@ -465,6 +491,12 @@ function storagePanelHtml() {
     <div class="storage-list">${groups.map(storageCardHtml).join('')}</div>`;
 }
 
+/*
+ * 关于页的正文原本是一整篇二十多段的小作文，密密麻麻堆在一起，
+ * 想确认「某个功能到底有没有」只能通读一遍。
+ * 现在改成分组要点：五组各三条短句，扫一眼就知道有没有想要的能力；
+ * 版权与开源声明不属于「我能做什么」，收进底部折叠。
+ */
 function settingsView() {
   const settings = state.settings;
   const demos = state.games.filter((g) => g.demo).length;
@@ -570,7 +602,7 @@ function settingsView() {
 
         <section class="${group('window', true)} material-panel" ${groupAttr('window')}>
           <h2>${icon('sparkle')}窗口材质与背景</h2>
-          <p class="desc">复用系统合成层，或铺一张自己的背景图。</p>
+          <p class="desc">背景图与透明模糊效果</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>窗口材质</strong><span>亚克力 / 云母需要 Windows 11 并开启「透明效果」；云母会自动关掉半透明底色。</span></div>
             <div class="setting-control">
@@ -630,7 +662,7 @@ function settingsView() {
 
         <section class="${group('appearance')} ui-scale-panel" ${groupAttr('appearance')}>
           <h2>${icon('type')}界面缩放</h2>
-          <p class="desc">调整整个启动器的字号和布局大小，适配不同分辨率的屏幕。</p>
+          <p class="desc">整体字号与布局缩放</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>缩放比例</strong><span>100% 是默认大小。放大后所有文字、按钮和图标一起等比变化，不会错位。</span></div>
             <div class="setting-control ui-scale-control">
@@ -653,7 +685,7 @@ function settingsView() {
 
         <section class="${group('sound')} sound-settings-panel" ${groupAttr('sound')}>
           <h2>${icon('volume')}界面音效</h2>
-          <p class="desc">按钮、导航和通知的反馈音，独立于歌曲音量；歌曲音量与 3D 音效在音乐页里调整。</p>
+          <p class="desc">界面音效，与歌曲音量分开</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>界面音效</strong><span>按钮、导航和开关操作时播放轻量反馈音；关闭后完全静音。</span></div>
             <div class="setting-control">${soundSwitchMarkup('enabled', state.sound.enabled)}</div>
@@ -689,7 +721,7 @@ function settingsView() {
 
         <section class="${group('sound')}" ${groupAttr('sound')}>
           <h2>${icon('music')}音乐</h2>
-          <p class="desc">决定启动器打开后音乐的行为。</p>
+          <p class="desc">启动后音乐的行为</p>
           <div class="setting-row setting-row-split">
             <div class="setting-pair">
               <strong>打开时继续上次的音乐</strong>
@@ -705,7 +737,7 @@ function settingsView() {
 
         <section class="${group('behavior', true)}" ${groupAttr('behavior')}>
           <h2>${icon('settings')}行为</h2>
-          <p class="desc">托盘、开机自启、自动同步等。游戏帧率请到「工具 → 对应游戏 → 画质配置」调整。</p>
+          <p class="desc">托盘、开机自启与同步开关</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>关闭时收进托盘</strong><span>开启：点右上角 ✕ 只是收进托盘，画面还在后台跑，双击托盘图标可以回来。关闭：点 ✕ 直接退出启动器。第一次点 ✕ 时问过一次，之后都以这里为准。</span></div>
             <div class="setting-control">${switchMarkup('closeToTray', settings.closeToTray)}</div>
@@ -738,7 +770,7 @@ function settingsView() {
 
         <section class="${group('storage', true)}" ${groupAttr('storage')}>
           <h2>${icon('folder-open')}存储</h2>
-          <p class="desc">下载、运行时、终末地渠道包与管理员权限。</p>
+          <p class="desc">下载目录、渠道包与权限</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>语音包语言</strong><span>只下载勾中的配音，默认只要中文；改完下次更新或安装时生效，已经下好的不会立刻删。仅对原神 / 星穹铁道 / 绝区零 / 崩坏3 生效——终末地的语音藏在 Unity 资源包里，官方没有拆分粒度，只能跟着整包一起下。</span></div>
             <div class="setting-control">
@@ -896,7 +928,7 @@ function settingsView() {
 
         <section class="${group('files', true)}" ${groupAttr('files')}>
           <h2>${icon('trash')}文件管理</h2>
-          <p class="desc">缓存、启动背景视频、封面和日志都存在数据目录里。下面按用途分开列，想清哪类就点哪类：清掉的都是会自动重建的东西，账号、设置、抽卡记录和你自己换的封面不会被碰。</p>
+          <p class="desc">按用途清缓存，不动账号与抽卡记录</p>
           ${
             tab === 'files'
               ? (() => {
@@ -909,7 +941,7 @@ function settingsView() {
 
         <section class="${group('update', true)}" ${groupAttr('update')}>
           <h2>${icon('download')}软件更新</h2>
-          <p class="desc">更新源已经内置：先看启动器目录里那份 <code>latest.json</code>，没有就去官方 Release 取，装完就能自己升级。更新包走 16 条连接分块并发下载，单连接被限速时能吃到剩下的带宽；下完做 sha256 校验。开着 Steam++ 这类加速器也不会再因为证书检查失败。</p>
+          <p class="desc">内置更新源，下载后做 sha256 校验</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。一直卡在「检查更新」或下载不动时，点右边「用国内镜像源」换成 Gitee 上的清单试一次。</span></div>
             <div class="setting-control update-source-control">
@@ -927,6 +959,9 @@ function settingsView() {
             <div class="setting-control update-source-control">
               <input class="text-input" id="proxy-rules" value="${esc(settings.proxyRules || '')}" placeholder="留空 = 直连，例：http://127.0.0.1:7890" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-proxy-rules">保存</button>
+              <button class="btn btn-ghost" data-action="import-system-proxy" title="读系统里已经配好的代理（Clash、v2rayN 开着的那个），自动填进左边的输入框">${icon('link')}用系统代理</button>
+              <button class="btn btn-ghost" data-action="test-proxy" title="拿真实地址试一次，看这条代理到底通不通">${icon('refresh')}测试连接</button>
+              <span class="proxy-test-result" id="proxy-test-result">${esc(proxyTestText())}</span>
             </div>
           </div>
           <div class="setting-row">
@@ -948,6 +983,15 @@ function settingsView() {
             <div class="setting-control update-action-control">
               <button class="btn btn-ghost" data-action="view-update-log">${icon('file-text')}查看日志</button>
               <button class="btn btn-ghost" data-action="open-update-log">${icon('folder')}打开文件</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>导出诊断信息</strong>
+              <span>把版本、系统、代理与更新源设置、最近 240 条网络请求（只记地址、状态码、耗时，不含请求内容和任何账号密码），连同更新日志和崩溃日志，合并成一个 txt 放到桌面。遇到「更新失败」「封面不显示」这类问题时，把这个文件发回来最省事。</span>
+            </div>
+            <div class="setting-control update-action-control">
+              <button class="btn btn-ghost" data-action="export-diagnostics">${icon('shield')}导出到桌面</button>
             </div>
           </div>
           ${
@@ -975,7 +1019,7 @@ function settingsView() {
 
         <section class="${group('community')}" ${groupAttr('community')}>
           <h2>${icon('link')}项目主页与反馈</h2>
-          <p class="desc">源码、版本说明、已知问题都放在项目仓库里；有 bug 或者想要新功能，从下面的「问题反馈」进去写，会直接带上你现在用的版本号。</p>
+          <p class="desc">源码、版本说明与问题反馈</p>
           <div class="setting-row">
             <div class="setting-copy">
               <strong>项目主页</strong>
@@ -1005,28 +1049,37 @@ function settingsView() {
 
         <section class="${group('about', true)}" ${groupAttr('about')}>
           <h2>${icon('info')}关于</h2>
-          <p class="desc">一个本地优先的桌面游戏书架：自己管更新、自己清缓存、把抽卡记录备份到你自己的网盘，外加一台能放歌的音乐台。</p>
+          <p class="desc">本地优先的桌面游戏书架</p>
           <div class="setting-row" style="border-bottom:0;padding-bottom:0">
             <div class="about-block">
               <div class="about-name">花筱灵启动器</div>
               <div class="about-version">VERSION ${esc(state.app.version || '1.0.0')} · ELECTRON ${esc(state.app.electron || '')}</div>
-              <div class="about-note">
-                更新包支持增量：只下和你本地版本差异的那一小块，差分包打不上会自动改回完整包；下载时显示百分比、已下字节和实时速度，下完自动关闭、覆盖、重新启动，弹窗点「稍后再说」会记 24 小时，不再反复提醒。
-                内置原神、崩坏：星穹铁道、绝区零、崩坏3、明日方舟、异环、明日方舟：终末地的启动入口，也支持添加任意本地游戏；装在哪、切哪个服、缺不缺资源，启动器都会自己认，游戏有官方更新时「开始游戏」会直接变成「更新游戏」，点了就下、下完自动就位。
-                切服不用重下：多渠道游戏（官服 / B服 / 国际服）共用一份客户端，运行时按渠道自动组装，更新一次全服通用；组装在旁边的独立目录里做，你装好的官方客户端一个字节都不动。
-                终末地 / 明日方舟的渠道包不随安装包装：第一次切到某个服时会写清要下多少（官服 9 MB、B服 194 MB、国际服 / Play 约 940 MB），点了才下，带百分比与速度、可取消续传，下过一次就一直在。
-                渠道包有单独的管理窗口：每个渠道一行，写清状态和占用，能单独下载、更新、释放；后台自动更新两个游戏各一个开关，只在你切过那个游戏的服之后才默认开启。
-                终末地 / 明日方舟的启动方式是让游戏看到官方启动器在运行——父进程指向本机带官方签名的 Games.exe，不改游戏文件、不注入、不读内存、不拦网络；介意的话请用官方启动器启动。
-                启动页会先查显卡加速是否真的可用，不可用时自动换成静态版本图，不让软件渲染白烧一个核；显卡正常的机器默认仍然是动态视频。
-                设置里有文件管理：网页缓存、账号分区缓存、临时文件、动态背景、过期封面、下载缓存、日志分七类列清占用，能按类清、也能一次清安全项，登录态和自定义封面都不动。
-                抽卡记录可以自动备份到你自己的网盘：填 WebDAV 地址与应用密码即可，7 天一次、AES-256-GCM 加密、网盘留最近 5 份；恢复只按记录 Id 合并，永不覆盖本地。密码走 Windows 自带加密存储，不落明文。
-                抽卡记录三池一页看完：条形图带真头像、红条 = 吃到保底，自动算平均出金和当前垫数。
-                另带一台音乐台：网易云 / QQ / 酷狗 / 酷我多平台搜歌、歌单链接导入、队列分组与过滤、音效与歌词，直播间连上后还能听观众弹幕点歌。
-                界面与代码为原创实现；启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有。
-                游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。
-                功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。
-                游戏列表、设置、歌单、抽卡记录和时长都保存在本地，默认不上传；只有你自己打开「抽卡记录云备份」之后，抽卡记录才会加密传到你自己填的那个网盘。
+              <div class="about-contact">
+                <span class="about-contact-label">交流群</span>
+                <button class="about-qq" data-action="copy-text" data-value="1018651207" title="点击复制群号">QQ 群 1018651207</button>
               </div>
+              <div class="about-groups">
+                ${[
+                  ['更新', ['只下差异块，同盘有同内容就硬链接', '16 路并发，跟随系统里的代理设置', '打不上自动回退完整包，清单带签名']],
+                  ['游戏', ['内置 7 款入口，也能添加任意本地游戏', '切服共用客户端，更新一次全服通用', '渠道包按服下，带进度与断点续传']],
+                  ['战绩', ['米游社四款 + 终末地走森空岛', '便笺与周期玩法的星数、评级', '终末地可在页面上直接签到']],
+                  ['工具', ['抽卡记录三池一页，保底与垫数', 'WebDAV 云备份，7 天一次、加密', '音乐台：多平台搜歌与弹幕点歌']],
+                  ['排查', ['读系统代理并当场测速', '一键导出诊断 txt', '按七类清缓存，不动登录态']],
+                ]
+                  .map(
+                    ([title, points]) =>
+                      `<div class="about-group">
+                        <h3>${esc(title)}</h3>
+                        <ul>${points.map((point) => `<li>${esc(point)}</li>`).join('')}</ul>
+                      </div>`
+                  )
+                  .join('')}
+              </div>
+              <details class="about-legal">
+                <summary>素材版权与开源说明</summary>
+                <p>界面与代码为原创实现；启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有。游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。</p>
+                <p>游戏列表、设置、歌单、抽卡记录和时长都保存在本地，默认不上传；只有你自己打开「抽卡记录云备份」之后，抽卡记录才会加密传到你自己填的那个网盘。</p>
+              </details>
               <div class="about-links">
                 <button class="link-btn" data-action="open-changelog">${icon('file-text')}版本更新日志</button>
                 <button class="link-btn" data-action="install-update">${icon('download')}导入更新包</button>

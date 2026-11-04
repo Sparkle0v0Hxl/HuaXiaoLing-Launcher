@@ -33,10 +33,12 @@
     starrail: '崩坏：星穹铁道',
     zzz: '绝区零',
     bh3: '崩坏3',
+    endfield: '明日方舟：终末地',
   };
 
   const FEATURE_LABEL = {
     'daily-note': '每日便笺',
+    'war-echoes': '战争回响',
     abyss: '深境螺旋',
     theater: '幻想真境剧诗',
     stygian: '幽境危战',
@@ -69,6 +71,21 @@
   function num(value, fallback) {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback === undefined ? 0 : fallback;
+  }
+
+  /**
+   * 「当前值 / 上限」这类字段的统一写法。
+   *
+   * 米游社偶尔会返回比上限还大的当前值（模拟宇宙积分、差分宇宙周常都遇到过），
+   * 直接印成 18000/10000 看起来就像算错了 —— 用户第一反应是「你这数据不对」。
+   * 超过上限时按上限显示，真实累计值降级到 note 里：仍然可查，但不刺眼。
+   */
+  function ratioOf(cur, max) {
+    const c = num(cur);
+    const m = num(max);
+    if (!m) return { value: String(c), note: '' };
+    if (c > m) return { value: `${m}/${m}`, note: `本周已获 ${c}` };
+    return { value: `${c}/${m}`, note: '' };
   }
 
   function text(value) {
@@ -434,6 +451,8 @@
       tone: stamina >= staminaMax ? 'warn' : '',
     });
 
+    const rogue = ratioOf(d.current_rogue_score, d.max_rogue_score);
+    const train = ratioOf(d.current_train_score, d.max_train_score);
     view.metrics.push(
       {
         key: 'reserve',
@@ -449,24 +468,25 @@
       {
         key: 'rogue',
         label: '模拟宇宙积分',
-        value: `${num(d.current_rogue_score)}/${num(d.max_rogue_score)}`,
+        value: rogue.value,
+        note: rogue.note,
       },
       {
         key: 'train',
         label: '开拓等级经验',
-        value: `${num(d.current_train_score)}/${num(d.max_train_score)}`,
+        value: train.value,
+        note: train.note,
       }
     );
 
     // 每周任务类字段在不同版本叫法不一样，有就显示
-    const tournCur = num(d.rogue_tourn_weekly_cur);
-    const tournMax = num(d.rogue_tourn_weekly_max);
-    if (tournMax) {
-      view.metrics.push({ key: 'tourn', label: '差分宇宙周常', value: `${tournCur}/${tournMax}` });
+    const tourn = ratioOf(d.rogue_tourn_weekly_cur, d.rogue_tourn_weekly_max);
+    if (num(d.rogue_tourn_weekly_max)) {
+      view.metrics.push({ key: 'tourn', label: '差分宇宙周常', value: tourn.value, note: tourn.note });
     }
-    const gridMax = num(d.grid_fight_weekly_max);
-    if (gridMax) {
-      view.metrics.push({ key: 'grid', label: '虚构叙事周常', value: `${num(d.grid_fight_weekly_cur)}/${gridMax}` });
+    const grid = ratioOf(d.grid_fight_weekly_cur, d.grid_fight_weekly_max);
+    if (num(d.grid_fight_weekly_max)) {
+      view.metrics.push({ key: 'grid', label: '虚构叙事周常', value: grid.value, note: grid.note });
     }
 
     const expeditions = list(d.expeditions);
@@ -630,6 +650,7 @@
     if (game === 'starrail') return parseStarrailNote(data);
     if (game === 'zzz') return parseZzzNote(data);
     if (game === 'bh3') return parseBh3Note(data);
+    if (game === 'endfield') return parseEndfieldNote(data);
     return emptyResult(game, 'daily-note', '这个游戏的便笺还没接入。');
   }
 
@@ -1067,7 +1088,12 @@
               ? `${nodes.length} 节点${num(item.round_num) ? ` · ${num(item.round_num)} 轮` : ''}`
               : '',
             stars: num(item.star_num),
-            starsMax: nodes.length ? nodes.length * 3 : 3,
+            /*
+             * 星铁每层**上限就是 3 星**（三个节点各一颗），不是「节点数 ×3」。
+             * 写成 nodes.length*3 时，未解锁的层只有 1~2 个节点，满星就成了 6/9，
+             * 页面上会出现「明明打满 3 颗，却显示 3/6」的错。
+             */
+            starsMax: 3,
             meta: [
               text(item.maze_id) ? `式舆 #${text(item.maze_id)}` : '',
               bool(item.is_chaos) ? '混沌回忆' : '',
@@ -1170,7 +1196,7 @@
               .filter(Boolean)
               .join(' · '),
             stars: num(item.star_num),
-            starsMax: nodes.length ? nodes.length * 3 : 3,
+            starsMax: 3,
             meta: [
               bool(item.is_fast) ? '快速通关' : '',
               ...nodes.map((node) => fmtTime(node.challenge_time)).filter(Boolean).slice(0, 1),
@@ -1297,7 +1323,7 @@
               .join(' · '),
             /* star_num 是字符串，num() 会把 "★" 之类的东西变成 0，先用 text 判断是否纯数字 */
             stars: /^\d+$/.test(text(item.star_num).trim()) ? num(item.star_num) : null,
-            starsMax: nodes.length ? nodes.length * 3 : 3,
+            starsMax: 3,
             meta: [
               bool(item.is_fast) ? '快速通关' : '',
               fmtTime(item.last_update_time),
@@ -1661,6 +1687,324 @@
   }
 
   /* ---------------------------------------------------------------- */
+  /* 终末地 · 便笺（森空岛 card/detail）                                 */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * 森空岛的终末地卡片信息量比米家便笺大不少：理智只是其中一个字段，
+   * 同时还带回干员总数、据点、帝江号和成就。
+   * 既然数据都拿到了，就全铺出来 —— 只画一根体力条等于白读了一次接口。
+   *
+   * 字段名是森空岛的驼峰命名，和米家的下划线风格完全不同，别混用。
+   */
+  function parseEndfieldNote(data) {
+    const d = dict(data);
+    const view = baseResult('endfield', 'daily-note');
+    view.raw = d;
+
+    const base = dict(d.base);
+    const dungeon = dict(d.dungeon);
+    const daily = dict(d.dailyMission);
+    const weekly = dict(d.weeklyMission);
+    const bp = dict(d.bpSystem);
+    const achieve = dict(d.achieve);
+
+    const stamina = num(dungeon.curStamina);
+    const staminaMax = num(dungeon.maxStamina);
+    const staminaLeft = remainText(0, dungeon.maxTs);
+
+    if (!Object.keys(base).length && !staminaMax) {
+      return { ...view, empty: '森空岛还没有返回这个角色的数据。刚创建的角色要等一次同步。' };
+    }
+
+    view.headline = {
+      label: '理智',
+      value: staminaMax ? `${stamina}/${staminaMax}` : '—',
+      note: staminaMax && stamina >= staminaMax ? '已回满' : staminaLeft ? `${staminaLeft}后回满` : '',
+    };
+
+    if (staminaMax) {
+      view.bars.push({
+        key: 'stamina',
+        label: '理智',
+        value: stamina,
+        max: staminaMax,
+        note: staminaMax && stamina >= staminaMax ? '已回满' : staminaLeft ? `${staminaLeft}后回满` : '',
+        tone: staminaMax && stamina >= staminaMax ? 'ok' : '',
+      });
+    }
+    const dailyMax = num(daily.maxDailyActivation);
+    if (dailyMax) {
+      view.bars.push({
+        key: 'daily',
+        label: '每日活跃',
+        value: num(daily.dailyActivation),
+        max: dailyMax,
+        note: '',
+        tone: num(daily.dailyActivation) >= dailyMax ? 'ok' : '',
+      });
+    }
+    const weeklyMax = num(weekly.total);
+    if (weeklyMax) {
+      view.bars.push({
+        key: 'weekly',
+        label: '每周任务',
+        value: num(weekly.score),
+        max: weeklyMax,
+        note: '',
+        tone: num(weekly.score) >= weeklyMax ? 'ok' : '',
+      });
+    }
+
+    /*
+     * 上次登录：日期放主数字、时刻放副注。
+     * 直接塞 "11-03 18:05" 的话，22px 的字在 128px 宽的卡里会折成两行，
+     * 同一排其它卡都是一行，看着就这一张歪了。
+     */
+    const lastLogin = fmtTime(base.lastLoginTime);
+    const [lastDate, lastClock] = lastLogin ? lastLogin.split(' ') : [];
+
+    view.metrics.push(
+      { key: 'level', label: '管理员等级', value: base.level ? `Lv.${num(base.level)}` : '—' },
+      { key: 'world', label: '世界等级', value: base.worldLevel ? String(num(base.worldLevel)) : '—' },
+      { key: 'chars', label: '干员', value: String(num(base.charNum)) },
+      { key: 'weapons', label: '武器', value: String(num(base.weaponNum)) },
+      { key: 'achieve', label: '成就', value: String(num(achieve.count)) },
+      { key: 'last', label: '上次登录', value: lastDate || '—', note: lastClock || '' }
+    );
+
+    if (bp.maxLevel) {
+      view.metrics.push({
+        key: 'bp',
+        label: '协议通行证',
+        value: `${num(bp.curLevel)}/${num(bp.maxLevel)}`,
+      });
+    }
+
+    /* 据点：等级 + 调度券 + 收藏品，三样是终末地日常最常看的 */
+    const domains = list(d.domain);
+    if (domains.length) {
+      view.sections.push({
+        key: 'domain',
+        title: '据点与调度券',
+        hint: domains.length > 1 ? `${domains.length} 个据点` : '',
+        layout: 'rows',
+        items: domains.map((raw, index) => {
+          const item = dict(raw);
+          const money = dict(item.moneyMgr);
+          const collections = list(item.collections).map(dict);
+          const collected = collections.reduce(
+            (sum, row) =>
+              sum + num(row.puzzleCount) + num(row.trchestCount) + num(row.pieceCount) + num(row.blackboxCount),
+            0
+          );
+          const moneyText = money.total !== undefined ? `${num(money.total)}/${num(money.count)}` : '';
+          return {
+            key: `domain-${index}`,
+            title: text(item.name) || `据点 ${index + 1}`,
+            subtitle: [`Lv.${num(item.level)}`, moneyText ? `调度券 ${moneyText}` : ''].filter(Boolean).join(' · '),
+            stars: null,
+            starsMax: null,
+            meta: collected ? [`收藏 ${collected}`] : [],
+            tone: '',
+            avatars: [],
+          };
+        }),
+      });
+    }
+
+    /* 帝江号：房间等级列表，房间类型是数字枚举，翻译不了就用序号 */
+    const rooms = list(dict(d.spaceShip).rooms);
+    if (rooms.length) {
+      view.sections.push({
+        key: 'ship',
+        title: '帝江号',
+        hint: `${rooms.length} 个舱室`,
+        layout: 'rows',
+        items: rooms.slice(0, 12).map((raw, index) => {
+          const item = dict(raw);
+          return {
+            key: `room-${index}`,
+            title: text(item.name) || `舱室 ${index + 1}`,
+            subtitle: `Lv.${num(item.level)}`,
+            stars: null,
+            starsMax: null,
+            meta: text(item.id) ? [`#${text(item.id)}`] : [],
+            tone: '',
+            avatars: [],
+          };
+        }),
+      });
+    }
+
+    const mission = text(dict(base.mainMission).description);
+    if (mission) {
+      view.sections.push({
+        key: 'mission',
+        title: '主线进度',
+        hint: '',
+        layout: 'rows',
+        items: [
+          {
+            key: 'mission',
+            title: mission,
+            subtitle: '',
+            stars: null,
+            starsMax: null,
+            meta: [],
+            tone: '',
+            avatars: [],
+          },
+        ],
+      });
+    }
+
+    return view;
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* 终末地 · 战争回响（森空岛 war-echoes）                              */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * 战争回响的评级规则和游戏里一致：满 9 星且 +任务全清是 S+，满 9 星是 S，
+   * 之后按 7/5/3/1 星切 A/B/C/D。这套阈值是官方展示口径，不要自己拍。
+   */
+  function warEchoesRating(stars, allPlus) {
+    const n = Math.max(0, Math.min(Math.round(num(stars)), 9));
+    if (n === 9) return allPlus ? 'S+' : 'S';
+    if (n >= 7) return 'A';
+    if (n >= 5) return 'B';
+    if (n >= 3) return 'C';
+    if (n >= 1) return 'D';
+    return '—';
+  }
+
+  /** 按开始/结束时间挑当前赛季；接口给的是秒级时间戳字符串。 */
+  function pickCurrentSeason(seasons, seasonId) {
+    const rows = list(seasons).map(dict);
+    if (!rows.length) return null;
+    const wanted = text(seasonId);
+    if (wanted) {
+      const found = rows.find((row) => text(row.id) === wanted);
+      if (found) return found;
+    }
+    const now = Date.now() / 1000;
+    const ordered = rows.slice().sort((a, b) => num(a.startTs) - num(b.startTs));
+    const active = ordered.find((row) => num(row.startTs) <= now && now <= num(row.endTs));
+    return active || ordered[ordered.length - 1];
+  }
+
+  function pickCurrentWeek(weeks) {
+    const rows = list(weeks).map(dict);
+    if (!rows.length) return null;
+    const now = Date.now() / 1000;
+    const ordered = rows.slice().sort((a, b) => num(a.startTs) - num(b.startTs));
+    const active = ordered.find((row) => num(row.startTs) <= now && now <= num(row.endTs));
+    return active || ordered[ordered.length - 1];
+  }
+
+  /** 一个地牢组里三档难度，取"已通关的最高档"来展示。 */
+  function pickDungeon(group) {
+    const row = dict(group);
+    for (const key of ['cruelDungeon', 'hardDungeon', 'normalDungeon']) {
+      const dungeon = dict(row[key]);
+      if (bool(dungeon.isPass)) return { dungeon, tier: key };
+    }
+    return { dungeon: dict(row.normalDungeon), tier: 'normalDungeon' };
+  }
+
+  const WAR_ECHOES_TIER = {
+    normalDungeon: '普通',
+    hardDungeon: '困难',
+    cruelDungeon: '残酷',
+  };
+
+  function parseEndfieldWarEchoes(data) {
+    const d = dict(data);
+    const view = baseResult('endfield', 'war-echoes');
+    view.raw = d;
+
+    const season = pickCurrentSeason(d.seasons);
+    if (!season) return { ...view, empty: '本期还没有战争回响赛季数据，可能这个赛季还没开始。' };
+
+    const week = pickCurrentWeek(season.weeks);
+    const stars = num(week ? week.stars : season.stars);
+    const allPlus = bool(week ? week.allPlusTasks : season.allPlusTasks);
+    const rating = warEchoesRating(stars, allPlus);
+
+    view.headline = {
+      label: '本期评级',
+      value: rating,
+      note: `${stars} 星${allPlus ? ' · +任务全清' : ''}`,
+    };
+
+    view.metrics.push(
+      { key: 'season', label: '赛季', value: text(season.name) || '—' },
+      { key: 'week', label: '轮换', value: week ? text(week.name) || '—' : '—' },
+      { key: 'end', label: '结束时间', value: fmtTime(week ? week.endTs : season.endTs) || '—' }
+    );
+
+    /* 奖章：金银铜按"达到即计入"累计，和游戏里的展示口径一致 */
+    const achieves = list(d.achieves).map(dict);
+    if (achieves.length) {
+      const passed = achieves.filter((row) => num(row.firstPassTs) > 0);
+      const gold = passed.filter((row) => num(row.star) >= 3).length;
+      const silver = passed.filter((row) => num(row.star) === 2).length;
+      const bronze = passed.filter((row) => num(row.star) <= 1).length;
+      view.metrics.push({
+        key: 'honor',
+        label: '奖章',
+        value: `${gold + silver + bronze}`,
+        note: `金 ${gold} · 银 ${silver} · 铜 ${bronze}`,
+      });
+    }
+
+    const groups = list(week ? week.dungeonGroups : []);
+    if (groups.length) {
+      view.sections.push({
+        key: 'groups',
+        title: '本期地牢',
+        hint: `${groups.length} 组`,
+        layout: 'rows',
+        items: groups.map((raw, index) => {
+          const group = dict(raw);
+          const { dungeon, tier } = pickDungeon(group);
+          const record = dict(dungeon.bestRecord);
+          const chars = list(record.chars).map((entry) => {
+            const row = dict(entry);
+            return {
+              name: '',
+              icon: text(row.avatarUrl),
+              value: num(row.level) ? `Lv.${num(row.level)}` : '',
+              rarity: num(dict(row.rarity).key) || null,
+              element: text(dict(row.property).value),
+            };
+          });
+          return {
+            key: `group-${index}`,
+            title: text(group.name) || `地牢 ${index + 1}`,
+            subtitle: [
+              WAR_ECHOES_TIER[tier],
+              bool(dungeon.isPass) ? '已通关' : '未通关',
+              num(dungeon.recommendLevel) ? `推荐 Lv.${num(dungeon.recommendLevel)}` : '',
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            stars: num(group.star) || null,
+            starsMax: 3,
+            meta: bool(group.plusTask) ? ['+任务已完成'] : [],
+            tone: bool(dungeon.isPass) ? 'ok' : 'muted',
+            avatars: chars,
+          };
+        }),
+      });
+    }
+
+    return view;
+  }
+
+  /* ---------------------------------------------------------------- */
   /* 调度                                                              */
   /* ---------------------------------------------------------------- */
 
@@ -1676,6 +2020,7 @@
     }
     try {
       if (f === 'daily-note') return parseNote(g, data);
+      if (g === 'endfield' && f === 'war-echoes') return parseEndfieldWarEchoes(data);
       if (g === 'genshin' && f === 'abyss') return parseGenshinAbyss(data);
       if (g === 'genshin' && f === 'theater') return parseGenshinTheater(data);
       if (g === 'genshin' && f === 'stygian') return parseGenshinStygian(data);

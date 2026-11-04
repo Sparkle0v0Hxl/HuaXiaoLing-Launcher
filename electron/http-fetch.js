@@ -22,6 +22,7 @@ const http = require('node:http');
 const https = require('node:https');
 const zlib = require('node:zlib');
 const { Readable } = require('node:stream');
+const proxyTunnel = require('./proxy-agent');
 
 let electronNetFetch = null;
 try {
@@ -54,7 +55,7 @@ const httpAgent = new http.Agent(agentOptions);
  * 就是一个空 302（不是 206），多连接会整体判失败、悄悄退回单连接——
  * 表现就是「加了多线程还是几十 KB/s」。
  */
-function nodeRequest(url, options = {}, redirects = 0) {
+function performRequest(url, options = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     let target;
     try {
@@ -81,8 +82,9 @@ function nodeRequest(url, options = {}, redirects = 0) {
         path: `${target.pathname}${target.search}`,
         method: (options.method || 'GET').toUpperCase(),
         headers,
-        // 同 host 复用空闲连接：小文件下载省掉每次的 TCP/TLS 握手
-        agent: isHttps ? httpsAgent : httpAgent,
+        // 同 host 复用空闲连接：小文件下载省掉每次的 TCP/TLS 握手。
+        // 走代理时用隧道的 Agent（每个代理一个池，同样是 keep-alive）
+        agent: options.agent || (isHttps ? httpsAgent : httpAgent),
         // 国内 CDN 的证书链在 Node 内置 CA 里可能缺一环；这条路径只是兜底，
         // 不校验证书反而更不容易「两边都连不上」
         rejectUnauthorized: false,
@@ -102,10 +104,12 @@ function nodeRequest(url, options = {}, redirects = 0) {
           delete nextHeaders.Origin;
           // GET/HEAD 重发不带 body；POST 的 307/308 才需要原样重发
           const keepBody = body && (status === 307 || status === 308);
+          // 剥掉 agent：跨域重定向要按新目标重新选路（代理可能只对某些域名生效）
+          const { agent: _dropAgent, ...restOptions } = options;
           resolve(
             nodeRequest(
               nextUrl,
-              { ...options, headers: nextHeaders, body: keepBody ? body : undefined },
+              { ...restOptions, headers: nextHeaders, body: keepBody ? body : undefined },
               redirects + 1
             )
           );
@@ -151,20 +155,107 @@ function nodeRequest(url, options = {}, redirects = 0) {
   });
 }
 
+/**
+ * 带选路的 node 请求：直连 / 代理隧道二选一，失败自动换另一条。
+ *
+ * 为什么不在请求里写死 agent：用户的代理配置是「按目标域名」生效的（Clash
+ * 规则模式、PAC 都一样）——国际服的 CDN 要走加速器，国内接口反而必须直连。
+ * 所以每条请求都问一次 proxy-agent，由它按 origin 缓存决策结果。
+ *
+ * 失败处理：代理挂掉就标记 5 分钟，期间直接走直连；直连挂掉同理。真正两条
+ * 都不通时抛错，由上层（segmentFetch / httpFetch）退回 Chromium 栈。
+ */
+async function nodeRequest(url, options = {}) {
+  // 调用方自己指定了 agent（自测、特殊场景），不插手
+  if (options.agent) return performRequest(url, options);
+
+  const route = await proxyTunnel.routeFor(url);
+  if (route.proxy) {
+    try {
+      return await performRequest(url, { ...options, agent: proxyTunnel.agentFor(route.proxy) });
+    } catch (error) {
+      if (proxyTunnel.isAbort(error)) throw error;
+      // 拥塞型失败（连接被重置、超时）不熔断：让它自动降并发继续用，
+      // 否则机场限制连接数时会一路退回 Chromium 的 6 条，比改之前更慢
+      if (!proxyTunnel.noteFailure(route.proxy, error)) proxyTunnel.markProxyBroken();
+      // 代理不通（没开、端口错、规则把 CDN 判成直连）：再试一次直连
+    }
+  }
+  try {
+    return await performRequest(url, options);
+  } catch (error) {
+    if (!proxyTunnel.isAbort(error)) proxyTunnel.markDirectBroken();
+    throw error;
+  }
+}
+
+/*
+ * 请求留痕。
+ *
+ * 默认什么都不挂：自测脚本直接 require 这个文件时不需要诊断模块。主进程启动
+ * 时调用 setRequestLogger() 注入，之后每条请求都记一条元数据（地址、状态码、
+ * 耗时、走的哪条栈、错误信息），不记 body、不记 header。
+ *
+ * 记日志本身绝不能影响请求，所以整段都包在 try 里。
+ */
+let requestLogger = null;
+
+function setRequestLogger(fn) {
+  requestLogger = typeof fn === 'function' ? fn : null;
+}
+
+function reportRequest(url, method, startedAt, transport, status, error) {
+  if (!requestLogger) return;
+  try {
+    requestLogger({
+      url: String(url),
+      method,
+      status,
+      ms: Date.now() - startedAt,
+      transport,
+      error: error ? error.message || String(error) : '',
+    });
+  } catch {
+    /* 诊断日志写失败不能反过来把请求搞挂 */
+  }
+}
+
 async function httpFetch(url, options = {}) {
   const { dispatcher, ...rest } = options; // dispatcher 是 undici 专属参数，Chromium 栈不认
+  const startedAt = Date.now();
+  const method = String(rest.method || 'GET').toUpperCase();
   if (electronNetFetch) {
     try {
-      return await electronNetFetch(url, rest);
+      const response = await electronNetFetch(url, rest);
+      reportRequest(url, method, startedAt, 'chromium', response.status, null);
+      return response;
     } catch (error) {
       // Chromium 栈连不上时退回 Node 的 https 栈再试一把：两边各自的可达性盲区
       // （系统代理配置异常、证书库被改、个别 CDN 的 TLS 实现差异）不同，互为兜底。
-      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) throw error;
-      return nodeRequest(url, rest);
+      if (error && (error.name === 'AbortError' || error.message === 'ABORTED')) {
+        reportRequest(url, method, startedAt, 'chromium', 0, error);
+        throw error;
+      }
+      try {
+        const response = await nodeRequest(url, rest);
+        reportRequest(url, method, startedAt, 'node', response.status, null);
+        return response;
+      } catch (fallbackError) {
+        // 两条路都断了：记成一条，比记两条「Chromium 失败 + Node 失败」更好读
+        reportRequest(url, method, startedAt, 'node', 0, fallbackError);
+        throw fallbackError;
+      }
     }
   }
   // 纯 Node 环境（自测脚本）：用原生 fetch，行为最完整
-  return fetch(url, rest);
+  try {
+    const response = await fetch(url, rest);
+    reportRequest(url, method, startedAt, 'fetch', response.status, null);
+    return response;
+  } catch (error) {
+    reportRequest(url, method, startedAt, 'fetch', 0, error);
+    throw error;
+  }
 }
 
 /**
@@ -200,4 +291,14 @@ async function segmentFetch(url, options = {}) {
   return httpFetch(url, options);
 }
 
-module.exports = { httpFetch, nodeRequest, segmentFetch };
+/**
+ * 「直连优先」取数：和 segmentFetch 是同一个实现，只是名字说清适用面。
+ *
+ * 不只 Range 分段要用它 —— 预下载的 chunk（几 MB 的整块）也一样：
+ * Chromium 栈对同一个 host 最多 6 条 socket，16 路文件级并发走过去，
+ * 实际只有 6 条在跑，剩下 10 路排队。换 node:https 才是 16 条真连接。
+ * 直连不通时自动退回 Chromium 栈（并熔断 5 分钟），代理环境不会因此挂掉。
+ */
+const directFetch = segmentFetch;
+
+module.exports = { httpFetch, nodeRequest, directFetch, segmentFetch, setRequestLogger };

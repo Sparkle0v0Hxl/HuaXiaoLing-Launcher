@@ -915,7 +915,16 @@ function predownloadChannelOk(game, server) {
 
 function predownloadInfo(server) {
   const info = server && server.predownload;
-  return info && typeof info === 'object' ? info : null;
+  if (!info || typeof info !== 'object') return null;
+  if (String(info.scope || '') === 'launcher') return info;
+  /*
+   * 异环这套清单只覆盖 NTELauncher 侧资源，游戏本体不在里面——这是产品事实，
+   * 不是运行时状态。scope 字段是 2.8.3 才落的盘，之前存的那些状态里没有，
+   * 直接读就会退回「更新游戏」的说法。这里按 kind 补回来，用户升到新版
+   * 不用等下一次后台检测就能看到正确文案。
+   */
+  if (String(info.kind || '') === 'nte') return { ...info, scope: 'launcher' };
+  return info;
 }
 
 function predownloadMeta(info) {
@@ -932,10 +941,12 @@ function cardPredownloadEntry(game) {
   if (!predownloadChannelOk(game, server)) return '';
   const info = predownloadInfo(server);
   const pdState = String((info && info.state) || '');
+  // 异环只有启动器侧资源能更新，别把它说成「预下载新版本」
+  const launcherOnly = String((info && info.scope) || '') === 'launcher';
   const known = {
-    available: { cls: 'is-ready', title: '预下载新版本' },
-    done: { cls: 'is-done', title: '应用预下载更新' },
-    update: { cls: 'is-update', title: '应用官方更新' },
+    available: { cls: 'is-ready', title: launcherOnly ? '启动器资源有新版本' : '预下载新版本' },
+    done: { cls: 'is-done', title: launcherOnly ? '应用启动器资源更新' : '应用预下载更新' },
+    update: { cls: 'is-update', title: launcherOnly ? '更新异环启动器资源（不含游戏本体）' : '应用官方更新' },
     unsupported: { cls: 'is-block', title: '这个服务器不支持预下载，点开看原因' },
     none: { cls: 'is-idle', title: '查看预下载状态' },
   };
@@ -1031,6 +1042,7 @@ function predownloadDetail(info, busy) {
   if (state === 'done') {
     if (info.storedFiles) bits.push(`已存 ${info.storedFiles} 个分块 · ${fmtBytes(info.storedBytes)}`);
     if (info.categoryCount) bits.push(`含 ${info.categoryCount} 份剧情分类包`);
+    bits.push('已备好，等官方新版本正式发布后再点应用才会装进游戏；期间正常进游戏不受影响');
   }
   /*
    * 「下了一半」要能自己说出来。以前这里只有一句「可以预下载」，用户停掉之后
@@ -1129,7 +1141,10 @@ function openPredownloadModal(gameId, serverId) {
             <h2>预下载</h2>
             <p>${esc(game.name)} · ${esc(server.name)} · 新版本上线前先把内容拉到本地，上线后再应用</p>
           </div>
-          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          <div class="modal-head-actions">
+            <button class="modal-close" id="pd-minimize" style="display:none" title="最小化到任务面板">−</button>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
         </div>
         <div class="modal-body">
           <div class="pd-status" id="pd-status">${predownloadStatusMarkup(server)}</div>
@@ -1165,18 +1180,23 @@ function openPredownloadModal(gameId, serverId) {
       </div>
     </div>`;
 
-  openModal(html, {
-    onClose: () => {
-      // 关窗即视为停止：先记下，免得后端抛回「已取消」时又弹一条错误提示
-      if (running) {
-        cancelled = true;
-        api.predownload.cancel(jobId).catch(() => {});
-      }
-      if (unsubscribe) unsubscribe();
-      pdModalRepaint = null;
-      pdModalStoryRepaint = null;
-    },
-  });
+  function onClose() {
+    // 被最小化守卫拦下来的关窗：只是收进任务坞，不算关闭，也不取消
+    if (guardFired) {
+      guardFired = false;
+      return;
+    }
+    // 跑着的时候关窗 = 取消下载（点最小化按钮才是收进任务坞）
+    if (running) {
+      cancelled = true;
+      api.predownload.cancel(jobId).catch(() => {});
+    }
+    if (unsubscribe) unsubscribe();
+    pdModalRepaint = null;
+    pdModalStoryRepaint = null;
+  }
+
+  openModal(html, { onClose });
 
   const phase = document.querySelector('#pd-phase');
   const count = document.querySelector('#pd-count');
@@ -1194,6 +1214,79 @@ function openPredownloadModal(gameId, serverId) {
   let cancelled = false;
   let paused = false;
   let unsubscribe = null;
+  let stashed = false; // 收进过任务坞没有
+  let guardFired = false; // 关窗被守卫拦成最小化没有
+
+  const minimizeBtn = document.querySelector('#pd-minimize');
+
+  // 任务坞里那条：预下载也塞进 sophonJobs，和下载 / 更新共用左下角任务面板。
+  const job = {
+    id: jobId,
+    gameId,
+    serverId,
+    gameName: game.name,
+    serverName: server.name,
+    mode: 'predownload',
+    status: 'starting',
+    percent: 0,
+    phase: '准备中…',
+    stats: '',
+  };
+
+  /** 从任务坞里撤掉这一条（完成 / 失败 / 取消都走它）。 */
+  const endJob = () => {
+    if (activeSophonJob === job) activeSophonJob = null;
+    sophonUi = null;
+    taskModalGuard = null;
+    sophonJobs = sophonJobs.filter((item) => item.id !== jobId);
+    document.body.classList.remove('sophon-minimized');
+    renderTaskDock();
+  };
+
+  /*
+   * 最小化到任务面板：整块界面从 #modal-root 拔下来存着（进度条 / 监听都还在），
+   * 坞里挂一条能看进度、能停的任务。预下载本身在主进程跑，不受影响。
+   */
+  const minimized = () => {
+    if (!running) return;
+    const node = document.querySelector('.modal-backdrop');
+    if (!node) return;
+    stashed = true;
+    hiddenTaskModalClose = onClose;
+    stashTaskModal(node);
+    document.body.classList.add('sophon-minimized');
+    job.status = 'running';
+    activeSophonJob = job;
+    if (!sophonJobs.some((item) => item.id === jobId)) sophonJobs.push(job);
+    renderTaskDock();
+    sophonUi = {
+      restore: () => {
+        if (restoreTaskModal()) stashed = false;
+      },
+      cancel: () => {
+        cancelled = true;
+        api.predownload.cancel(jobId).catch(() => {});
+        running = false;
+        stashed = false;
+        dropStashedTaskModal();
+        hiddenTaskModalClose = null;
+        endJob();
+        dom.modalRoot.innerHTML = '';
+        document.body.classList.remove('modal-open');
+        toast('已停止预下载', 'info');
+      },
+    };
+  };
+
+  if (minimizeBtn) minimizeBtn.addEventListener('click', minimized);
+
+  /* 下载中被关窗（✕ / Esc / 点遮罩）不是取消：先收进任务坞接着下。 */
+  taskModalGuard = () => {
+    if (!running) return false;
+    guardFired = true;
+    minimized();
+    return true;
+  };
 
   const currentServer = () => {
     const live = state.games.find((item) => item.id === gameId);
@@ -1216,7 +1309,21 @@ function openPredownloadModal(gameId, serverId) {
         pdState === 'available' && info && info.partial && stored ? '继续预下载' : '开始预下载'
       }`;
     }
-    if (apply) apply.style.display = pdState === 'done' || pdState === 'update' ? '' : 'none';
+    if (apply) {
+      apply.style.display = pdState === 'done' || pdState === 'update' ? '' : 'none';
+      // done：官方新版本还没上线，应用只会清掉缓存、游戏也变不了新，禁用并说明
+      if (pdState === 'done') {
+        apply.disabled = true;
+        apply.title = '新版本还没正式发布，暂时不能应用；上线后这里会变成可点的「应用更新」';
+        apply.innerHTML = `${icon('download')}新版本上线后应用`;
+        // 顺手把「清除」按钮的措辞也点明：现在清掉才会白下
+        if (clearBtn && stored) clearBtn.title = '删掉已经下好的预下载内容（游戏文件不受影响）；没上线前清了就得重下';
+      } else if (pdState === 'update') {
+        apply.disabled = false;
+        apply.title = '用已下好的预下载内容把新版本装上，命中缓存的部分不耗流量';
+        apply.innerHTML = `${icon('download')}应用更新`;
+      }
+    }
     // 有东西占着盘就给「清除」，体积跟着走；下完 / 下一半 / 官方撤了都算
     if (clearBtn) {
       clearBtn.style.display = stored ? '' : 'none';
@@ -1232,11 +1339,44 @@ function openPredownloadModal(gameId, serverId) {
   pdModalRepaint = repaint;
   pdModalStoryRepaint = repaintStory;
 
+  /*
+   * 把进度同步进任务坞那一条。
+   *
+   * 最小化之后面板整块被收进 stash，用户能看到的只有左下角坞里那一行；
+   * 以前 onProgress 只改面板自己的 DOM，job.percent 永远是 0、phase 永远
+   * 停在「准备中…」，坞里就是个一动不动的进度条 —— 看着像卡死。
+   */
+  const syncDockJob = (percent, label, processed, total, bytesDone, totalBytes, event) => {
+    if (!sophonJobs.includes(job)) return;
+    job.status = 'running';
+    job.percent =
+      event.phase === 'done' ? 100 : Math.max(0, Math.min(99, Math.round(percent)));
+    job.phase = event.phase === 'done' ? '完成' : label;
+    const parts = [];
+    if (totalBytes) parts.push(`${fmtBytes(bytesDone)} / ${fmtBytes(totalBytes)}`);
+    else if (total) parts.push(`${processed} / ${total}`);
+    if (Number(event.reusedChunks)) parts.push(`命中缓存 ${event.reusedChunks} 块`);
+    if (parts.length) job.stats = parts.join(' · ');
+    // 只改文字与进度条，不重建列表：重建会把用户正按着的那一条换成新节点
+    if (!patchTaskDockJob(job)) renderTaskDock();
+  };
+
   const onProgress = (event) => {
     if (!event || event.jobId !== jobId) return;
     const total = Number(event.total) || 0;
     const processed = Number(event.processed) || 0;
-    const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+    const bytesDone = Number(event.bytesDone) || 0;
+    const totalBytes = Number(event.totalBytes) || 0;
+    /*
+     * 百分比优先按字节算：安装阶段「文件数」走得很不均匀，一个 4GB 的大包能让
+     * 进度条在 87/500 上停十几分钟。没有字节数据（version / manifest / extract
+     * 这些阶段）才退回块数。
+     */
+    const percent = totalBytes
+      ? Math.min(100, (bytesDone / totalBytes) * 100)
+      : total
+        ? Math.min(100, (processed / total) * 100)
+        : 0;
     const base = PREDOWNLOAD_PHASES[event.phase] || '处理中…';
     const counted = ['download', 'install', 'patch'].includes(event.phase);
     const tip = counted ? '' : String(event.current || '');
@@ -1265,6 +1405,7 @@ function openPredownloadModal(gameId, serverId) {
       if (parts.length) stats.textContent = parts.join(' · ');
     }
     if (current) current.textContent = String(event.current || '');
+    syncDockJob(percent, base, processed, total, bytesDone, totalBytes, event);
   };
 
   const resetFoot = () => {
@@ -1278,12 +1419,14 @@ function openPredownloadModal(gameId, serverId) {
     pause.style.display = 'none';
     pause.textContent = '暂停';
     paused = false;
+    if (minimizeBtn) minimizeBtn.style.display = 'none';
   };
 
   const run = async (kind) => {
     cancelled = false;
     running = true;
     progress.style.display = 'block';
+    if (minimizeBtn) minimizeBtn.style.display = '';
     errorBox.textContent = '';
     start.disabled = true;
     apply.disabled = true;
@@ -1298,7 +1441,22 @@ function openPredownloadModal(gameId, serverId) {
       if (cancelled || (result && result.cancelled)) {
         toast('已停止，下次可以从头再来或继续', 'info');
       } else if (kind === 'apply') {
-        toast(`更新已应用到 ${result.tag || '新版本'}`, 'success');
+        /*
+         * 异环那套实现把失败收进 result.failed 而不是抛异常，result.ok 会
+         * 是 false。以前不看这个字段，明明一个文件都没装上却弹「更新已应用」，
+         * 用户下次进来还是同样的状态，永远不知道其实没成功。
+         */
+        if (result && result.ok === false) {
+          const failed = Array.isArray(result.failed) ? result.failed : [];
+          const first = failed.length ? String(failed[0] || '') : '';
+          const text = failed.length
+            ? `更新没有全部完成，${failed.length} 个文件没通过校验${first ? `（例如 ${first}）` : ''}，可以重试`
+            : '更新没有完成，可以重试';
+          errorBox.textContent = text;
+          toast(text, 'error');
+        } else {
+          toast(`更新已应用到 ${result.tag || '新版本'}`, 'success');
+        }
       } else {
         toast(`预下载完成，目标版本 ${result.targetVersion || ''}`, 'success');
       }
@@ -1315,6 +1473,18 @@ function openPredownloadModal(gameId, serverId) {
       if (cancelled) await runPredownloadCheck(gameId, serverId);
       repaint();
       repaintServerRows();
+      /*
+       * 结束（完成 / 失败 / 取消）都要把坞里那一条撤掉。
+       * 以前只有「最小化后再点停止」这条路会走 endJob：正常跑完时 job 一直留在
+       * sophonJobs 里、status 还是 running，于是「下载完了坞里仍显示还在」，
+       * 点进去也没有界面（面板早结了）。顺手把收起来的 DOM 丢掉，别留僵尸。
+       */
+      if (stashed) {
+        dropStashedTaskModal();
+        hiddenTaskModalClose = null;
+        stashed = false;
+      }
+      endJob();
     }
   };
 

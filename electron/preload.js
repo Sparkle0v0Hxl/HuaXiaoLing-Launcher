@@ -21,6 +21,13 @@ contextBridge.exposeInMainWorld('launcher', {
   pickUpdateSource: () => ipcRenderer.invoke('update:pick-source'),
   updateBackup: () => ipcRenderer.invoke('update:backup'),
   rollbackUpdate: () => ipcRenderer.invoke('update:rollback'),
+  // 网络代理：一键读系统代理、实测一条规则能不能连出去
+  proxy: {
+    system: () => ipcRenderer.invoke('proxy:system'),
+    test: (rules) => ipcRenderer.invoke('proxy:test', rules),
+  },
+  // 诊断：把版本、网络请求记录、更新与崩溃日志导出成桌面上的一个 txt
+  exportDiagnostics: () => ipcRenderer.invoke('diag:export'),
   endfieldLogin: () => ipcRenderer.invoke('endfield:login-token'),
 
   // 游戏能力注册表：前端据此决定显示哪些入口，不必硬编码游戏名
@@ -44,6 +51,19 @@ contextBridge.exposeInMainWorld('launcher', {
     login: (input) => ipcRenderer.invoke('passport:login', input),
     status: (input) => ipcRenderer.invoke('passport:status', input),
     logout: (input) => ipcRenderer.invoke('passport:logout', input),
+  },
+
+  // 森空岛（终末地 / 明日方舟的官方数据源）
+  skland: {
+    login: (input) => ipcRenderer.invoke('skland:login', input),
+    loginToken: (input) => ipcRenderer.invoke('skland:login-token', input),
+    status: (input) => ipcRenderer.invoke('skland:status', input),
+    roles: (input) => ipcRenderer.invoke('skland:roles', input),
+    logout: (input) => ipcRenderer.invoke('skland:logout', input),
+    useAccount: (input) => ipcRenderer.invoke('skland:use-account', input),
+    note: (input) => ipcRenderer.invoke('skland:note', input),
+    record: (input) => ipcRenderer.invoke('skland:record', input),
+    sign: (input) => ipcRenderer.invoke('skland:sign', input),
   },
 
   // 截图管理

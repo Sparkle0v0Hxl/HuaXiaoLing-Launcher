@@ -39,13 +39,33 @@ function notesMarkup(notes) {
   return '<ul>' + clean.map((line) => '<li>' + esc(line) + '</li>').join('') + '</ul>';
 }
 
+/**
+ * 把检查时间写成「14:32」/「11-02 09:10」这种短格式。
+ *
+ * 状态行以前只说「已是最新」，用户没法判断这句话是刚查的还是三天前查的——
+ * 于是「自动更新没用」这个反馈永远问不出所以然。带上时间就能一眼看出到底查没查。
+ */
+function clockText(ts) {
+  const value = Number(ts) || 0;
+  if (!value) return '';
+  const d = new Date(value);
+  const pad = (n) => String(n).padStart(2, '0');
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+}
+
 function updateStatusText() {
   const info = state.update || {};
   const current = `当前 v${state.app.version || '1.0.0'}`;
+  const when = clockText(info.checkedAt);
   if (info.downloading) return `${current} · 正在下载更新（${Number(info.percent) || 0}%）`;
-  if (info.error) return `${current} · ${info.error}`;
+  // 说「上次检查失败」而不是干巴巴一个错误：否则用户会以为是当前状态坏了
+  if (info.error) return `${current} · 上次检查失败${when ? `（${when}）` : ''}：${info.error}`;
   if (info.hasUpdate) return `${current} · 发现新版本 v${info.latest}${info.mandatory ? '（建议尽快更新）' : ''}`;
-  if (info.checkedAt) return `${current} · 已是最新${info.latest ? `（远端 v${info.latest}）` : ''}`;
+  if (info.checkedAt) return `${current} · 已是最新${info.latest ? `（远端 v${info.latest}）` : ''} · 检查于 ${when}`;
   return `${current} · 还没检查过`;
 }
 
