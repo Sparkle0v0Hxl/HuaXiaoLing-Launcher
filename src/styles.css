@@ -34106,12 +34106,41 @@ body.sidebar-collapsed .sidebar::after {
   background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.32), rgba(var(--accent-rgb), 0.18));
 }
 .start-screen .start-dock .start-dock-play.is-updating {
-  /* 同样的问题：半透明底 + 掉到 0.9 透明度的深色字，等着的时候字就没了 */
-  color: var(--accent-text);
+  /*
+   * 这颗按钮的底是「花火红 → 火花金」的实心渐变（见上文 .start-dock-play），
+   * 不是 is-update 那种半透明主题色底，所以文字要跟基础态一样用深色 ink。
+   * 之前这里写的是 --accent-text（深色主题＝亮粉），等于亮粉字压在红底上，
+   * 再加上会溢出按钮的路径文本，整颗按钮就糊成一片。
+   *
+   * overflow:hidden 是兜底：任何文案都不许再溢出这颗 46px 的胶囊。
+   */
+  position: relative;
+  overflow: hidden;
+  color: var(--accent-ink);
   cursor: progress;
   opacity: 0.94;
 }
+/* 进度填充：从左往右涨的半透明白，压在红金渐变上浅色/深色主题都看得见 */
+.start-screen .start-dock .start-dock-play.is-updating .start-dock-update-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--update-progress, 0%);
+  background: rgba(255, 255, 255, 0.22);
+  transition: width 0.4s ease;
+  pointer-events: none;
+}
+/* 文案单行 + 省略号：长文案（以前是整条文件路径）不许换行撑破按钮 */
+.start-screen .start-dock .start-dock-play.is-updating .start-dock-update-label {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .start-screen .start-dock .start-dock-play.is-updating .icon {
+  position: relative;
+  flex: none;
   animation: hxl-spin 1.1s linear infinite;
 }
 @keyframes hxl-spin {

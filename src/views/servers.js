@@ -1339,11 +1339,44 @@ function openPredownloadModal(gameId, serverId) {
   pdModalRepaint = repaint;
   pdModalStoryRepaint = repaintStory;
 
+  /*
+   * 把进度同步进任务坞那一条。
+   *
+   * 最小化之后面板整块被收进 stash，用户能看到的只有左下角坞里那一行；
+   * 以前 onProgress 只改面板自己的 DOM，job.percent 永远是 0、phase 永远
+   * 停在「准备中…」，坞里就是个一动不动的进度条 —— 看着像卡死。
+   */
+  const syncDockJob = (percent, label, processed, total, bytesDone, totalBytes, event) => {
+    if (!sophonJobs.includes(job)) return;
+    job.status = 'running';
+    job.percent =
+      event.phase === 'done' ? 100 : Math.max(0, Math.min(99, Math.round(percent)));
+    job.phase = event.phase === 'done' ? '完成' : label;
+    const parts = [];
+    if (totalBytes) parts.push(`${fmtBytes(bytesDone)} / ${fmtBytes(totalBytes)}`);
+    else if (total) parts.push(`${processed} / ${total}`);
+    if (Number(event.reusedChunks)) parts.push(`命中缓存 ${event.reusedChunks} 块`);
+    if (parts.length) job.stats = parts.join(' · ');
+    // 只改文字与进度条，不重建列表：重建会把用户正按着的那一条换成新节点
+    if (!patchTaskDockJob(job)) renderTaskDock();
+  };
+
   const onProgress = (event) => {
     if (!event || event.jobId !== jobId) return;
     const total = Number(event.total) || 0;
     const processed = Number(event.processed) || 0;
-    const percent = total ? Math.min(100, (processed / total) * 100) : 0;
+    const bytesDone = Number(event.bytesDone) || 0;
+    const totalBytes = Number(event.totalBytes) || 0;
+    /*
+     * 百分比优先按字节算：安装阶段「文件数」走得很不均匀，一个 4GB 的大包能让
+     * 进度条在 87/500 上停十几分钟。没有字节数据（version / manifest / extract
+     * 这些阶段）才退回块数。
+     */
+    const percent = totalBytes
+      ? Math.min(100, (bytesDone / totalBytes) * 100)
+      : total
+        ? Math.min(100, (processed / total) * 100)
+        : 0;
     const base = PREDOWNLOAD_PHASES[event.phase] || '处理中…';
     const counted = ['download', 'install', 'patch'].includes(event.phase);
     const tip = counted ? '' : String(event.current || '');
@@ -1372,6 +1405,7 @@ function openPredownloadModal(gameId, serverId) {
       if (parts.length) stats.textContent = parts.join(' · ');
     }
     if (current) current.textContent = String(event.current || '');
+    syncDockJob(percent, base, processed, total, bytesDone, totalBytes, event);
   };
 
   const resetFoot = () => {
@@ -1439,6 +1473,18 @@ function openPredownloadModal(gameId, serverId) {
       if (cancelled) await runPredownloadCheck(gameId, serverId);
       repaint();
       repaintServerRows();
+      /*
+       * 结束（完成 / 失败 / 取消）都要把坞里那一条撤掉。
+       * 以前只有「最小化后再点停止」这条路会走 endJob：正常跑完时 job 一直留在
+       * sophonJobs 里、status 还是 running，于是「下载完了坞里仍显示还在」，
+       * 点进去也没有界面（面板早结了）。顺手把收起来的 DOM 丢掉，别留僵尸。
+       */
+      if (stashed) {
+        dropStashedTaskModal();
+        hiddenTaskModalClose = null;
+        stashed = false;
+      }
+      endJob();
     }
   };
 

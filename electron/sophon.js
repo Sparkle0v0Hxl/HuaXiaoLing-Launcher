@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 const { hardlinkTree } = require('./runtime');
 const { httpFetch, segmentFetch } = require('./http-fetch');
 const { multiDownload } = require('./multi-download');
+const linkSource = require('./link-source');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -705,10 +706,26 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
     await fsp.writeFile(cacheFile, buffer);
   }
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
-  const script = `Expand-Archive -LiteralPath '${cacheFile.replace(/'/g, "''")}' -DestinationPath '${targetRoot.replace(
-    /'/g,
-    "''"
-  )}' -Force`;
+  /*
+   * 解压前先把目标目录里的同名条目删掉。
+   *
+   * Expand-Archive -Force 是原地覆盖写：如果那份文件是上次生成时从官服客户端硬链接
+   * 过来的，覆盖会顺着 inode 把官服里的同一份 SDK 也改掉（B服 SDK 打进官服目录，
+   * 官服启动就会带着 B站渠道进游戏）。只删 zip 里真实存在的条目，不做整目录清理。
+   */
+  const zipPath = cacheFile.replace(/'/g, "''");
+  const outPath = targetRoot.replace(/'/g, "''");
+  const script = [
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+    `$zip = [System.IO.Compression.ZipFile]::OpenRead('${zipPath}')`,
+    'try {',
+    '  foreach ($entry in $zip.Entries) {',
+    `    $p = Join-Path '${outPath}' $entry.FullName`,
+    '    if (Test-Path -LiteralPath $p -PathType Leaf) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }',
+    '  }',
+    '} finally { $zip.Dispose() }',
+    `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${outPath}' -Force`,
+  ].join('; ');
   await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
     timeout: 180000,
@@ -733,6 +750,29 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
 async function writeFileIsolated(target, content) {
   await fsp.rm(target, { force: true });
   await fsp.writeFile(target, content, 'utf8');
+}
+
+/**
+ * 覆盖写之前先把硬链接断开。
+ *
+ * 运行时目录里的文件绝大多数是从基础客户端硬链接过来的**同一个 inode**。
+ * 直接 open(target, 'w') + truncate 会顺着 inode 把基础客户端那一份一起截断改写 ——
+ * 现实里的表现是「更新过国际服之后，官服的文件变成了国际服的版本」，官服一启动
+ * 就校验失败，而用户完全想不到是更新另一个服造成的。
+ *
+ * 先 unlink 再新建：两边从此各持一份，谁更新都不影响对方。
+ * 只读属性的包体（从压缩包解出来的）先去掉只读，否则 Windows 上 unlink 会 EPERM。
+ */
+async function openForWrite(target) {
+  try {
+    await fsp.unlink(target);
+  } catch (error) {
+    if (error && error.code !== 'ENOENT') {
+      await fsp.chmod(target, 0o666).catch(() => {});
+      await fsp.unlink(target).catch(() => {});
+    }
+  }
+  return fsp.open(target, 'w');
 }
 
 function channelConfig(gameKey, channel, tag, sdkVersion = '') {
@@ -850,6 +890,11 @@ async function prepareSophon({
   maxFileSize = 0,
   audioLanguages,
   includeStoryResources = false,
+  /*
+   * 同一台机器上另外几份同一款游戏的客户端根目录（官服 / B服 / 国际服 各一份）。
+   * 清单里内容完全相同的文件直接从那边硬链接过来，不再下载。
+   */
+  linkSources = [],
 }) {
   if (!CHANNELS[gameKey]?.[channel]) throw new Error('这个服务器没有 Sophon 清单');
   if (!fs.existsSync(baseRoot)) throw new Error('基础客户端目录不存在');
@@ -915,6 +960,8 @@ async function prepareSophon({
   let skipped = 0;
   let reusedChunks = 0;
   let cacheHits = 0;
+  let externalLinked = 0;
+  let externalBytes = 0;
   let bytesDone = 0;
   const localHandles = new Map();
 
@@ -933,6 +980,32 @@ async function prepareSophon({
   }
 
   await fsp.mkdir(targetRoot, { recursive: true });
+  /*
+   * 跨客户端复用源：同一台机器上还装着别的渠道的同一款游戏时，
+   * 官方同一个构建产物的资源包往往逐字节相同，直接硬链接过来即可，
+   * 不必再下一遍（官服 7.2 + 国际服 7.1 要更新到 7.2，就是这种局面）。
+   * 同卷是硬链接的硬限制，跨卷的源在这里就被筛掉了。
+   */
+  const externalRoots = linkSource.usableSources(linkSources, {
+    targetRoot,
+    excludeRoots: [baseRoot],
+  });
+  if (externalRoots.length) {
+    onProgress?.({
+      phase: 'install',
+      processed: 0,
+      total,
+      linked,
+      downloaded,
+      skipped,
+      reusedChunks,
+      cacheHits,
+      externalLinked,
+      bytesDone,
+      totalBytes,
+      current: `发现 ${externalRoots.length} 份同款客户端，内容相同的文件直接复用`,
+    });
+  }
   // 持久分块缓存目录：sophon-cache/chunks/<md5>，跨版本 / 跨游戏复用同一分块时不再走网络
   const chunkCacheDir = cacheDir ? path.join(cacheDir, 'chunks') : '';
   for (const file of normalized) {
@@ -1023,6 +1096,43 @@ async function prepareSophon({
       continue;
     }
 
+    /*
+     * 基础客户端里没有对应文件，再去别的渠道客户端里找同一个文件。
+     * 命中就直接硬链接 —— 这一步是「国际服 7.1 更新到 7.2」最省流的地方：
+     * 官服那份 7.2 里绝大多数资源包与目标清单逐字节相同，等于零下载。
+     * 校验口径复用 quickFileMatches（size + 首尾分块 md5），与 skipped 判定完全一致。
+     */
+    if (externalRoots.length) {
+      const reused = await linkSource.reuseFromSources({
+        file,
+        target,
+        gameKey,
+        sources: externalRoots,
+        match: (candidate) => quickFileMatches(file, candidate),
+      });
+      if (reused.ok) {
+        linked += 1;
+        externalLinked += 1;
+        externalBytes += file.size;
+        bytesDone += file.size;
+        onProgress?.({
+          phase: 'install',
+          processed,
+          total,
+          linked,
+          downloaded,
+          skipped,
+          reusedChunks,
+          cacheHits,
+          externalLinked,
+          bytesDone,
+          totalBytes,
+          current: file.file,
+        });
+        continue;
+      }
+    }
+
     // 就地更新时，若某个分块的本地源就是当前文件自身（entry.file === 该文件），
     // 必须在截断 target 之前先把它的字节读出来，否则截断后源被清空、只能退回重新下载。
     const selfSourced = new Map();
@@ -1047,7 +1157,9 @@ async function prepareSophon({
       await openHandle.close().catch(() => {});
       localHandles.delete(targetKey);
     }
-    const handle = await fsp.open(target, 'w');
+    // 必须走 openForWrite：这个 target 很可能是上一次生成时从基础客户端硬链接过来的，
+    // 直接 open('w') 会连带改掉基础客户端那份文件（详见 openForWrite 的注释）。
+    const handle = await openForWrite(target);
     try {
       await handle.truncate(file.size);
       for (const chunk of file.chunks) {
@@ -1109,6 +1221,9 @@ async function prepareSophon({
     // 也方便安装/更新后核对口径（预下载那边必须和这里用同一个值）。
     includeStoryResources: includeStoryResources === true,
     linked,
+    // 其中有多少是从「别的渠道客户端」硬链接过来的（跨客户端复用），界面可以单独说明省了多少
+    externalLinked,
+    externalBytes,
     downloaded,
     skipped,
     reusedChunks,
@@ -1133,4 +1248,10 @@ module.exports = {
   pickManifests,
   storyResourceSummary,
   fetchLauncherConfig,
+  // 仅供 .tmp 自测脚本按官方清单口径统计「能复用多少」，运行时不依赖这两个
+  fetchBranch,
+  fetchBuild,
+  quickFileMatches,
+  // 仅供 .tmp/test-sophon-write-isolation.js 断言「覆盖写会不会顺着硬链接改掉源文件」
+  openForWrite,
 };

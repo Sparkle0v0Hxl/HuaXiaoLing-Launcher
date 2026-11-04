@@ -28,6 +28,7 @@ const { pathToFileURL } = require('node:url');
 const crypto = require('node:crypto');
 
 const { JsonStore } = require('./store');
+const clientChannel = require('./client-channel');
 const { DownloadManager } = require('./downloads');
 const hgBackgrounds = require('./hg-backgrounds');
 const { ensureSeedData } = require('./seed');
@@ -270,6 +271,34 @@ function storyResourcesEnabled(game, server) {
   if (server && typeof server.includeStoryResources === 'boolean') return server.includeStoryResources;
   if (game && typeof game.includeStoryResources === 'boolean') return game.includeStoryResources;
   return store.data?.settings?.includeStoryResources === true;
+}
+
+/**
+ * 同一台机器上别的渠道 / 别的目录的同一款游戏客户端 —— 可以当硬链接的源。
+ *
+ * 为什么需要：官方同一个构建产物的资源包是逐字节相同的。官服原神已经更到 7.2、
+ * 国际服还停在 7.1 时，更新国际服要用的新文件其实已经躺在官服目录里了，直接
+ * 硬链接过来就等于 0 下载，不必再为同一份内容走一遍网络。
+ *
+ * 只收「目录里确实有 exe」的行：路径被删掉 / 移动过的残留行不能当源，
+ * 否则每次更新都要白白 stat 几千个不存在的路径。
+ */
+function externalLinkSources(game, server, targetRoot) {
+  const target = targetRoot ? path.resolve(targetRoot).toLowerCase() : '';
+  const out = [];
+  const seen = new Set();
+  for (const item of game.servers || []) {
+    if (item.id === server.id) continue;
+    if (!item.root || !item.path || !targetExists(item.path)) continue;
+    const root = path.resolve(item.root);
+    const key = root.toLowerCase();
+    if (!key || key === target || seen.has(key)) continue;
+    if (!fs.existsSync(root)) continue;
+    // 官服 / B服 共用同一个目录是正常玩法，同一根目录只当一次源
+    seen.add(key);
+    out.push(root);
+  }
+  return out;
 }
 
 let portableRoot = '';
@@ -4477,35 +4506,95 @@ function autoClickNteStart(gameId) {
   })();
 }
 
-function channelFromInstallPath(exePath) {  let folder = exePath;
-  try {
-    const configPath = path.join(path.dirname(exePath), 'config.ini');
-    if (fs.existsSync(configPath)) {
-      const text = fs.readFileSync(configPath, 'utf8');
-      const biz = (text.match(/game_biz\s*=\s*([^\r\n]+)/i) || [])[1] || '';
-      const cps = (text.match(/cps\s*=\s*([^\r\n]+)/i) || [])[1] || '';
-      const channelLine = (text.match(/^channel\s*=\s*(\d+)/im) || [])[1] || '';
-      // 国际服优先
-      if (/global/i.test(biz) || /hoyoverse/i.test(cps)) return 'global';
-      // B服：cps 带 bilibili，或 channel=14（B服客户端常见只有 channel 标记）
-      if (/bilibili/i.test(cps) || /bilibili/i.test(biz) || channelLine === '14') return 'bilibili';
-      if (/_cn/i.test(biz)) return 'official';
-    }
-  } catch {
-    /* fall through to path hints */
-  }
-  if (/global|国际服/i.test(folder)) return 'global';
-  if (/bilibili|b服/i.test(folder)) return 'bilibili';
-  if (/GenshinImpact\.exe$/i.test(exePath)) return 'global';
-  if (/YuanShen\.exe$/i.test(exePath)) return 'official';
-  return 'official';
+/*
+ * 渠道判定的实现拆到 electron/client-channel.js：那边负责编码自适应（UTF-16 的
+ * config.ini）和多字段交叉（game_biz / cps / uapc）。
+ * 2.9.1 修复：星铁 / 绝区零的国际服客户端没有 game_biz，以前一律落进「官服」。
+ */
+
+/*
+ * exe 自带的版本信息兜底：config.ini 读不出来、路径里也没有线索时，
+ * 国际服客户端的 CompanyName 是 COGNOSPHERE / HoYoverse，国服是米哈游。
+ * 只在前两步都没结论时才跑，结果按路径缓存，检测一轮最多问几次 PowerShell。
+ */
+const exeCompanyChannelCache = new Map();
+function exeCompanyChannel(exePath) {
+  if (!exePath) return Promise.resolve('');
+  if (exeCompanyChannelCache.has(exePath)) return Promise.resolve(exeCompanyChannelCache.get(exePath));
+  return new Promise((resolve) => {
+    const script = [
+      '$ErrorActionPreference = "SilentlyContinue"',
+      `$p = ${JSON.stringify(String(exePath))}`,
+      'if (Test-Path -LiteralPath $p) { (Get-Item -LiteralPath $p).VersionInfo.CompanyName } else { "" }',
+    ].join('; ');
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+      { windowsHide: true, timeout: 8000 },
+      (error, stdout) => {
+        const company = String(stdout || '').trim();
+        let channel = '';
+        /*
+         * 公司名是「客户端到底是谁发行的」最硬的旁证，比目录名可靠：
+         *   COGNOSPHERE / HoYoverse → 米哈游系国际服
+         *   Yostar                  → 明日方舟国际服（EN/JP/KR 由 Yostar 发行）
+         *   米哈游 / Hypergryph     → 国服
+         * 明日方舟的 B服 由鹰角与 B站联合运营，exe 公司名仍是 Hypergryph，
+         * 所以这里判不出来 —— 那种情况交给目录名与用户手动选，不硬猜。
+         */
+        if (/cognosphere|hoyoverse|yostar/i.test(company)) channel = 'global';
+        else if (/mihoyo|米哈游|hypergryph|鹰角/i.test(company)) channel = 'official';
+        exeCompanyChannelCache.set(exePath, channel);
+        resolve(channel);
+      }
+    );
+  });
 }
 
 // 检测到的 exe 属于哪个渠道。终末地读不了 config.ini，只能看文件特征。
-function detectionChannel(game, exePath) {
+async function detectionChannel(game, exePath) {
   if (!exePath) return '';
-  if (game && game.builtinKey === 'endfield') return endfieldChannelOf(path.dirname(exePath));
-  return channelFromInstallPath(exePath);
+  const key = String(game?.builtinKey || '');
+  if (key === 'endfield') return endfieldChannelOf(path.dirname(exePath));
+  /*
+   * 异环的渠道不写在游戏目录里，而在官方启动器的 NTELauncher/Config/Config.ini
+   * 的 Branch 上（publish_ob → 官服、_b → B服）。项目里本来就有现成的读取实现
+   * （neverness-channels.js，切换渠道就是改这几个字段），只是检测链路一直没接，
+   * 于是国际服客户端会被当成官服写进官服行 —— 和米哈游那三款是同一个毛病。
+   */
+  if (key === 'neverness') {
+    try {
+      const read = await nevernessChannels.readNevernessChannel({
+        installRoot: path.dirname(exePath),
+        gamePath: exePath,
+      });
+      if (read && read.channel) return read.channel;
+    } catch {
+      /* 读不到就继续往下走通用判定 */
+    }
+  }
+  const fromConfig = clientChannel.configChannelFromPath(exePath);
+  if (fromConfig) return fromConfig;
+  const fromPath = clientChannel.pathChannelHint(exePath);
+  /*
+   * 明日方舟的国际服 / 台服由不同发行商运营，客户端里没有米哈游式的 config.ini，
+   * 只能靠目录名与 exe 公司名。判出 global 后要落到 international 组的第一行
+   * （server.channel 是 global-en），否则 serverForDetected 找不到行又退回官服。
+   */
+  if (key === 'arknights') {
+    // 明日方舟国际服的服务器行是 global-en / global-jp / global-kr，
+    // 客户端本身分不出区域，落到组里第一行；其余交给用户手动选。
+    if (fromPath === 'taiwan') return 'taiwan';
+    if (fromPath === 'global') return 'global-en';
+    if (fromPath) return fromPath;
+    const fromExe = await exeCompanyChannel(exePath);
+    return fromExe === 'global' ? 'global-en' : fromExe || 'official';
+  }
+  if (fromPath) return fromPath;
+  const fromExe = await exeCompanyChannel(exePath);
+  if (fromExe) return fromExe;
+  return 'official';
 }
 
 // 检测结果应该写进「真实渠道」那一行，而不是永远写进官服那一行：
@@ -4596,7 +4685,7 @@ async function discoverBuiltinServers() {
     }
     const found = roots.flatMap((root) => walkExecutables(root, execNames[game.builtinKey]));
     for (const exePath of found) {
-      const channel = detectionChannel(game, exePath);
+      const channel = await detectionChannel(game, exePath);
       const server = (game.servers || []).find((item) => item.channel === channel);
       if (!server) continue;
       if (
@@ -4685,12 +4774,91 @@ async function detectServerExecutable(game, server) {
   const candidates = await collectGameCandidates(game.builtinKey);
   const channel = server.channel || 'official';
   if (!channel || channel === 'custom') return candidates[0] || null;
-  return candidates.find((item) => detectionChannel(game, item) === channel) || null;
+  for (const item of candidates) {
+    // 逐个问渠道：真渠道要靠 config.ini / 版本信息判，目录名不可靠
+    // eslint-disable-next-line no-await-in-loop
+    if ((await detectionChannel(game, item)) === channel) return item;
+  }
+  return null;
+}
+
+/*
+ * 把「放错行」的客户端搬回它真正的渠道那一行（2.9.1 新增）。
+ *
+ * 为什么要单独修：检测逻辑现在会看 config.ini 的 cps / uapc 了，但老用户的
+ * launcher-data.json 里已经存着「官服那一行 = 国际服客户端」这种错配。不清掉的话，
+ * 每次更新检查都按 hkrpg_cn / nap_cn 去和客户端比对、gameBiz 也一直传 *_cn，
+ * 光修检测不会让他们自愈。
+ *
+ * 依据只用 config.ini —— 那是客户端自己写的，可信；读不出渠道就一个字都不动，
+ * 绝不按目录名猜。目标行已经有可用客户端时，也不搬（两行都有东西就不替用户做决定），
+ * 只把这一行的错误路径清掉，让它老实显示「未配置」。
+ */
+async function repairServerChannels() {
+  if (!store) return 0;
+  let changed = 0;
+  const norm = (value) => String(value || '').replace(/[\\/]+$/, '').toLowerCase();
+  for (const game of store.data.games) {
+    if (!game.builtin || !game.builtinKey) continue;
+    const servers = game.servers || [];
+    for (const server of servers.slice()) {
+      if (!server.path || !targetExists(server.path)) continue;
+      /*
+       * 四种情况一律不动，宁可漏修也不能动用户的数据：
+       *   · confirmed：用户手动选过的启动程序，渠道标签错也是他的选择；
+       *   · packPath：这一行挂的是资源替换包（B服 / 国际服增量包），不是完整客户端；
+       *   · 别的服务器用同一个 exe 或同一个目录：官服 / B服 共用一个安装目录是正常玩法；
+       *   · 没有任何渠道相同的那一行。
+       */
+      if (server.confirmed || server.packPath) continue;
+      const ownPath = norm(server.path);
+      const ownRoot = norm(server.root || path.dirname(server.path));
+      const shared = servers.some(
+        (item) =>
+          item !== server &&
+          (norm(item.path) === ownPath ||
+            (ownRoot && (norm(item.root) === ownRoot || norm(item.originalRoot) === ownRoot)))
+      );
+      if (shared) continue;
+      const actual = clientChannel.configChannelFromPath(server.path);
+      if (!actual || actual === server.channel) continue;
+      const target = servers.find((item) => item !== server && item.channel === actual);
+      if (!target) continue;
+      const targetUsable = Boolean(target.path && targetExists(target.path));
+      const movedPath = server.path;
+      if (!targetUsable) {
+        target.path = movedPath;
+        target.root = server.root || path.dirname(movedPath);
+        target.incomplete = false;
+        target.unavailable = false;
+        target.packPath = '';
+      }
+      server.path = '';
+      server.root = '';
+      server.packPath = '';
+      server.incomplete = true;
+      server.unavailable = false;
+      if (game.activeServerId === server.id) {
+        game.activeServerId = target.id;
+        game.target = target.path;
+        game.workDir = target.root;
+      } else if (game.target && game.target === movedPath) {
+        game.target = target.path;
+        game.workDir = target.root;
+      }
+      writeLaunchLog(
+        `channel-repair ${game.builtinKey}: ${server.name}(${server.channel}) → ${target.name}(${target.channel}) ${movedPath}`
+      );
+      changed += 1;
+    }
+  }
+  return changed;
 }
 
 async function detectBuiltins(onlyMissing = true) {
   if (!store) return 0;
-  let updated = 0;
+  // 先修历史错配再检测，理由同 games:detect（否则两行会指向同一个 exe）
+  let updated = await repairServerChannels();
   for (const game of store.data.games) {
     if (!game.builtin || !game.builtinKey) continue;
     if (onlyMissing && game.target && targetExists(game.target)) continue;
@@ -4699,7 +4867,7 @@ async function detectBuiltins(onlyMissing = true) {
       const active = (game.servers || []).find((server) => server.id === game.activeServerId);
       // 检测到的客户端属于哪个渠道，就写进哪个渠道那一行。
       // 只装了 B服 / 国际服 的玩家本来就没有官服客户端，不能把路径塞进官服行。
-      const detected = serverForDetected(game, detectionChannel(game, found));
+      const detected = serverForDetected(game, await detectionChannel(game, found));
       if (detected && (!detected.path || !targetExists(detected.path))) {
         detected.path = found;
         detected.root = path.dirname(found);
@@ -4717,6 +4885,7 @@ async function detectBuiltins(onlyMissing = true) {
     }
   }
   updated += await discoverBuiltinServers();
+  updated += await repairServerChannels();
   if (updated) await store.saveNow();
   return updated;
 }
@@ -11735,6 +11904,13 @@ function musicLoginWindow(target) {
     if (!targets.length) {
       return { ok: false, error: '没有找到可以自动检测的游戏' };
     }
+    /*
+     * 先修历史错配，再检测。
+     * 顺序很重要：老数据里「官服行 = 国际服客户端」时，先检测会把同一条路径
+     * 也写进国际服行，两行指向同一个 exe，后面的修复就看不出该清哪一条了。
+     * 先修能把路径搬回国际服行，检测再写一次也只是原地覆盖。
+     */
+    let repaired = await repairServerChannels();
     const updated = [];
     for (const game of targets) {
       if (!game.builtinKey) continue;
@@ -11743,7 +11919,10 @@ function musicLoginWindow(target) {
         const active = (game.servers || []).find((server) => server.id === game.activeServerId);
         const activeHadPath = Boolean(active && active.path);
         // 同 detectBuiltins：写进真实渠道那一行，没有官服客户端时不再凭空占用官服行。
-        const detected = serverForDetected(game, detectionChannel(game, found));
+        const channel = await detectionChannel(game, found);
+        // 留一行日志：以后用户再报「被识别成官服」，从 launch.log 就能看到判定结果与依据
+        writeLaunchLog(`detect ${game.builtinKey}: ${channel || '未知'} ← ${found}`);
+        const detected = serverForDetected(game, channel);
         if (detected) {
           detected.path = found;
           detected.root = path.dirname(found);
@@ -11758,7 +11937,9 @@ function musicLoginWindow(target) {
         updated.push(game.name);
       }
     }
-    if (updated.length) {
+    // 检测完再扫一遍：discover 类逻辑可能又把路径写回了旧行
+    repaired += await repairServerChannels();
+    if (updated.length || repaired) {
       await store.saveNow();
       pushState(true);
     }
@@ -11971,6 +12152,16 @@ function musicLoginWindow(target) {
       await ensureArknightsRuntime(game, server);
     }
     /*
+     * 版本号跟着当前客户端走。以前它是「一个游戏一个」，官服更到 7.2 再切到还是 7.1
+     * 的国际服，启动页仍写着 v7.2 —— 看着像切了个假服。以目标客户端 config.ini
+     * 为准重读一次；读不出来（非米哈游客户端 / 没这份 ini）就保持原值不动。
+     */
+    const clientVersion = clientChannel.gameVersionFromPath(server.path);
+    if (clientVersion) {
+      game.version = clientVersion;
+      game.versionName = clientVersion;
+    }
+    /*
      * 切成功了：记下「用过切服」，并在这个用户还没表过态（null）时把对应游戏的
      * 渠道包自动更新打开。两个游戏各一个开关：只切过终末地的人，不该被顺手打开
      * 明日方舟那条。手动关掉的（false）保持关着 —— 用户明确表过态就不替他改。
@@ -11988,6 +12179,13 @@ function musicLoginWindow(target) {
     game.workDir = server.root || path.dirname(server.path);
     await store.saveNow();
     pushState(true);
+    /*
+     * 切完再问一次这个渠道有没有更新（不阻塞返回，界面先切过去）。
+     * 以前这一步要等 30 分钟的自动检查，切到落后的那个服时按钮不会变「更新游戏」。
+     */
+    setTimeout(() => {
+      refreshPredownloadAfterSwitch(game).catch(() => {});
+    }, 400);
     return publicGame(game);
   });
 
@@ -12513,6 +12711,8 @@ function musicLoginWindow(target) {
               channel: server.channel,
               baseRoot: base.root,
               targetRoot,
+              // 除了当基础的那份，其它渠道客户端里也有大量同内容文件，一并拿来硬链接
+              linkSources: externalLinkSources(game, server, targetRoot),
               cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
               audioLanguages: store.data?.settings?.audioLanguages,
               // 绝区零那 111 份分类剧情资源（约 19.73GB）要不要一起装。默认不装。
@@ -12569,19 +12769,45 @@ function musicLoginWindow(target) {
     sophonJobs.set(jobId, signal);
     beginBackgroundTask();
     /*
+     * 别的渠道客户端（官服 / B服 / 国际服）可以作为硬链接源：
+     * 官方同一个构建产物的资源包逐字节相同，另一份已经更新过的话，
+     * 这次更新只需要链接、不需要为同一份内容再下一次。
+     */
+    const linkSources = externalLinkSources(game, server, server.root);
+    if (linkSources.length) {
+      writeLaunchLog(`update ${game.id}: 可用复用源 ${linkSources.length} 份 → ${linkSources.join(' ; ')}`);
+    }
+    /*
+     * 更新时以「客户端自己声明的渠道」为准，不跟着服务器行的标签走。
+     *
+     * 行的 channel 是启动器推断/用户手选的，可能错配（比如 B服 那一行挂着官服客户端）；
+     * 而 prepareSophon 收尾会用这个 channel 整份重写 config.ini ——
+     * 只要标签错一次，就会把玩家的官服客户端改写成 B服，之后每次登录都要先弹一次
+     * 「二级地址解析失败」再回退。config.ini 里读不到渠道时才回退到行标签。
+     */
+    const actualChannel =
+      (server.channel !== 'custom' && clientChannel.configChannelFromPath(server.path)) || server.channel;
+    if (actualChannel !== server.channel) {
+      writeLaunchLog(
+        `update ${game.id}: 行标签 ${server.channel} 与客户端实际渠道 ${actualChannel} 不一致，按客户端渠道更新`
+      );
+    }
+    /*
      * 之前预下载过的话，chunk/ 里就是新版本的分块，先把它吃掉：
      * 命中的分块 0 流量，缺的才联网补。没有预下载产物时 hasCache 为 false，
      * 这里整段跳过，行为与原来完全一致。
      */
-    if (predownload.hasCache({ gameKey: game.builtinKey, channel: server.channel, installRoot: server.root })) {
+    if (predownload.hasCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root })) {
       try {
         const appliedResult = await predownload.apply({
           gameKey: game.builtinKey,
-          channel: server.channel,
+          channel: actualChannel,
           installRoot: server.root,
           cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
           audioLanguages: store.data?.settings?.audioLanguages,
           includeCategory: storyResourcesEnabled(game, server),
+          // 预下载产物 + 别的渠道客户端的同内容文件，两条路都能省掉下载
+          linkSources,
           signal,
           onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
         });
@@ -12629,12 +12855,12 @@ function musicLoginWindow(target) {
        */
       let ldiff = null;
       try {
-        const launcherConfig = await fetchLauncherConfig(game.builtinKey, server.channel);
+        const launcherConfig = await fetchLauncherConfig(game.builtinKey, actualChannel);
         const userEnabled = store.data?.settings?.enableLdiff !== false;
         if (userEnabled && launcherConfig.enableLdiff) {
           ldiff = await applyHdiffPrepass({
             gameKey: game.builtinKey,
-            channel: server.channel,
+            channel: actualChannel,
             installRoot: server.root,
             cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
             audioLanguages: store.data?.settings?.audioLanguages,
@@ -12662,17 +12888,26 @@ function musicLoginWindow(target) {
       if (signal.cancelled) return { ok: false, cancelled: true };
       const result = await prepareSophon({
         gameKey: game.builtinKey,
-        channel: server.channel,
+        // 同理：写回 config.ini 用的就是这个 channel，必须取客户端真实渠道
+        channel: actualChannel,
         baseRoot: server.root,
         targetRoot: server.root,
         cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
         audioLanguages: store.data?.settings?.audioLanguages,
         // 必须和安装那条路径用同一个取值，否则会出现「安装时不装、一更新就补 19.73GB」
         includeStoryResources: storyResourcesEnabled(game, server),
+        linkSources,
         signal,
         onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
+      if (result.externalLinked) {
+        writeLaunchLog(
+          `update ${game.id}: 从其它渠道客户端硬链接复用 ${result.externalLinked} 个文件（${(
+            Number(result.externalBytes || 0) / 1024 ** 3
+          ).toFixed(2)} GB），没走下载`
+        );
+      }
       if (game.activeServerId === server.id) {
         const exe = result.executable || server.path;
         game.target = exe;
@@ -13025,13 +13260,21 @@ function musicLoginWindow(target) {
         ? predownload.endfieldInstallRoot(game, server)
         : predownload.hoyoInstallRoot(server);
     if (!installRoot) throw new Error('还没有配置这个游戏的客户端目录');
+    /*
+     * 渠道以客户端自己的 config.ini 为准（2.9.1）。
+     * 老数据里可能把国际服客户端记在官服那一行，repairServerChannels 会搬走，
+     * 但「点更新」这条链不该依赖那次修复已经跑过：这里再问一次客户端本身，
+     * 免得拿着 nap_cn / hkrpg_cn 去和国际服客户端比对版本。
+     */
+    const clientChannelOfServer =
+      game.builtinKey === 'endfield' ? '' : clientChannel.configChannelFromPath(server.path);
     return {
       game,
       server,
       installRoot,
       base: {
         gameKey: game.builtinKey,
-        channel: server.channel,
+        channel: clientChannelOfServer || server.channel,
         installRoot,
         cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
         audioLanguages: store.data?.settings?.audioLanguages,
@@ -13084,6 +13327,29 @@ function musicLoginWindow(target) {
     }
   }
 
+
+  /*
+   * 切服之后按新渠道补查一次更新状态。
+   *
+   * 自动检查只认「当前在用的那一服」，而且 30 分钟才轮一次：切到另一个渠道
+   * （官服 7.2 ↔ 国际服 7.1）之后，那颗按钮要等半小时才可能变成「更新游戏」，
+   * 中间那段就是「切过去了、可是没提示要更新」，看着像这个服永远是最新的。
+   * 这里在切服成功后立刻问一次，结果照常落盘 + 推状态，按钮当回合就能变。
+   */
+  async function refreshPredownloadAfterSwitch(game) {
+    if (!game || quitting) return;
+    const server = (game.servers || []).find((item) => item.id === game.activeServerId);
+    if (!server || !server.root) return;
+    // 正在预下载 / 正在更新时别插队，免得两边抢同一份清单
+    if (predownloadJobs.size) return;
+    try {
+      const { base } = resolvePredownload({ gameId: game.id, serverId: server.id });
+      const report = await predownloadSim.check({ ...base, verify: false });
+      if (report) await savePredownloadState(server, report);
+    } catch (error) {
+      writeLaunchLog(`predownload check after switch ${game.id}: ${error.message}`);
+    }
+  }
 
   async function autoRefreshPredownloadStatus() {
     const now = Date.now();

@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.9.0-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.9.1-4c8dff?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.9.0**
+**当前版本：v2.9.1**
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.9.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.9.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,21 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.9.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.9.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.9.1</b></summary>
+
+
+- 星铁、绝区零的国际服客户端不再被认成官服：它们的 `config.ini` 常常没有 `game_biz`（渠道写在 `cps` 与 `uapc` 里），文件还可能是 UTF-16，旧代码按 utf8 读、读不出来最后一行是 `return 'official'`——于是「解析失败」和「真的是官服」变成同一个结果，路径被塞进官服那一行。新增 `electron/client-channel.js` 作为唯一判定入口：编码自适应（UTF-8 / BOM / UTF-16LE / UTF-16BE）、`game_biz` 与 `cps` `uapc` `channel` 交叉判断、读不出返回空而不再默认官服，后面还有安装路径与 exe 发行商两层兜底。顺手补齐异环（读 `NTELauncher/Config/Config.ini` 的 Branch）、崩坏3（认 `bh3_cn`）、明日方舟（按 Yostar / 台服目录判到国际服那一行）。
+- 已经写错行的会自动搬回去：目标行空着就搬，占着就只清掉错的那条，先修再检测，不会出现两行指向同一个 exe。四类一律不动——手动选过路径的行、资源替换包、和别的服务器共用同一个 exe 或目录（官服 / B服 共用是正常玩法）、没有对应渠道行的游戏。排查看 `data/launch.log`，每次检测会写一行 `detect starrail: global ← D:\...\StarRail.exe`。
+- 预下载与安装提速 1.76 倍：病根全在代码里——安装阶段一个文件一个文件串行（磁盘队列深度只有 1）、`zstdDecompressSync` 同步解压卡住主进程、每块数据算两次 md5、文件写完再整文件读一遍校验。现在文件级 4 路并发（`HXL_APPLY_CONCURRENCY` 可调）、解压走异步线程池、分块能首尾相接铺满文件时边写边算 md5（省掉最后那遍全文件读，对不上再整文件复核一次才删），进度事件 120ms 节流。同机基准 240MB / 40 文件：87.8 → 154.8 MB/s。大文件里也能及时响应「停止」了。
+- 更新会借用同盘另一个客户端里内容相同的文件：同一台机器装两份客户端很常见（官服 + 国际服，或 B服 与官服共用），以前只有「生成第二份客户端」会整棵硬链接，就地更新不看别的目录。现在更新时在同盘其它渠道目录里找同内容文件，判定沿用「大小相同 + 首尾分块 md5 相同」，命中就直接硬链接过来，不下载、不写盘、不占额外空间；只认同盘，硬链接不能跨卷。实测从官服 7.2 生成国际服那份：2975 个文件 / 140.04 GB 里 2918 个 / 139.12 GB 是复用，真正新增 57 个文件 / 0.93 GB。跑完写一行 `launch.log`。注意硬链接共享 inode：本启动器更新时会先断开链接再写，但用官方启动器原地更新官服可能改写共享的那份，重跑一次更新即可校验回来。
+- 任务坞的更新进度不再停着不动：坞里那条原来永远 0% / 阶段永远「准备中…」，因为它只改了面板自己的 DOM，没同步到坞里的任务对象；跑完也不消失，`endJob` 只有点停止那条路会调。现在百分比按字节优先刷新（安装阶段按文件数，否则一个大包能让进度卡在 87/500 十几分钟），下完或取消都在 `run()` 的 finally 里统一收尾、清掉暂存的 DOM。
+- 更新不再把客户端转服：更新收尾会用渠道整份重写 `config.ini`，而以前这个「渠道」取的是服务器行的标签——行标签错一次，官服客户端就被写成 B服，之后每次登录都先弹一次「二级地址解析失败」再回退官服网关。现在以客户端 `config.ini` 自己声明的渠道为准，读不出来才回退行标签，两者不一致往 `launch.log` 记一行。同一处还修了覆盖写的隐患：运行时目录的文件是硬链接到基础客户端的同一个 inode，原来 `open(target,'w') + truncate` 会顺着 inode 改掉基础客户端那份，现在先 unlink 再写；B站 SDK 解压同样改成先按 zip 条目删同名再解压。
+- 切服当场查一次更新，版本号也跟着当前客户端走：自动检查原来只认「当前在用的那一服」且 30 分钟一轮，切到版本落后的服要等半小时才出现「更新游戏」。现在 `servers:activate` 成功后几百毫秒内按新渠道补查一次（有任务在跑时不插队），启动页版本号也由目标客户端的 `config.ini` 纠正，不会出现「切到 7.1 的国际服还显示 v7.2」。
+
+</details>
 
 <details>
 <summary><b>v2.9.0</b></summary>

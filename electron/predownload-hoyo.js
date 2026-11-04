@@ -44,6 +44,7 @@ const {
   ensureManifests,
 } = require('./sophon');
 const { httpFetch } = require('./http-fetch');
+const linkSource = require('./link-source');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -73,6 +74,23 @@ function channelInfo(gameKey, channel) {
 function md5(buffer) {
   return crypto.createHash('md5').update(buffer).digest('hex');
 }
+
+/*
+ * zstd 解压走异步接口。
+ *
+ * 以前用的是 zstdDecompressSync：解压本身要几百毫秒到几秒（大块 8~16MB），
+ * 而它跑在主进程的主线程上 —— 解压期间事件循环是停的，IPC 发不出去、
+ * 进度事件挤在一起，界面看着就是「进度条一次跳一大格，然后半天不动」。
+ * 异步版丢进 libuv 线程池，主线程可以继续调度，也不影响窗口响应。
+ * Electron 45 / Node 24 有 zlib.zstdDecompress；老版本自动回退同步实现。
+ */
+const zstdDecompressAsync =
+  typeof zlib.zstdDecompress === 'function'
+    ? (buffer) =>
+        new Promise((resolve, reject) => {
+          zlib.zstdDecompress(buffer, (error, output) => (error ? reject(error) : resolve(output)));
+        })
+    : async (buffer) => zlib.zstdDecompressSync(buffer);
 
 async function md5File(file) {
   return new Promise((resolve, reject) => {
@@ -841,7 +859,7 @@ async function readCachedChunk(dir, chunk) {
     if (chunk.compressedSize && stat.size !== chunk.compressedSize) return null;
     const compressed = await fsp.readFile(file);
     if (chunk.compressedMd5 && md5(compressed) !== chunk.compressedMd5) return null;
-    const raw = zlib.zstdDecompressSync(compressed);
+    const raw = await zstdDecompressAsync(compressed);
     if (chunk.uncompressedMd5 && md5(raw) !== chunk.uncompressedMd5) return null;
     return raw;
   } catch {
@@ -865,7 +883,7 @@ async function fetchChunk(chunk, signal) {
       if (chunk.compressedMd5 && md5(compressed) !== chunk.compressedMd5) {
         throw new Error('分块压缩数据校验失败');
       }
-      const raw = zlib.zstdDecompressSync(compressed);
+      const raw = await zstdDecompressAsync(compressed);
       if (chunk.uncompressedMd5 && md5(raw) !== chunk.uncompressedMd5) {
         throw new Error('分块解压数据校验失败');
       }
@@ -876,6 +894,101 @@ async function fetchChunk(chunk, signal) {
     }
   }
   throw new Error(`分块下载失败 ${chunk.id}：${lastError?.message || '未知错误'}`);
+}
+
+/**
+ * 用一个文件的 chunk 清单把目标文件拼出来 —— apply 的核心步骤。
+ *
+ * 单独抽成函数是为了能被测试直接驱动：并发写盘和「边写边算 md5」这两件事一旦
+ * 写错，后果是把游戏文件写坏，不能只靠肉眼跑一遍。
+ *
+ * 校验规则：chunk 按 offset 排好后若能首尾相接铺满整个文件，就在写入过程中
+ * 增量算 md5，省掉最后再把整文件读一遍（30GB 的更新等于少读 30GB）；
+ * 铺不满就用整文件 md5 兜底；增量结果对不上时再复核一次，避免清单 offset
+ * 不规范时误删文件。
+ *
+ * @param {object} file 清单项：{ file, size, md5, chunks, chunkPrefix }
+ * @param {object} ctx  { installRoot, chunkDir, hasCache, signal, onChunk }
+ *                      onChunk({ bytes, reused }) 每个 chunk 落盘后回调
+ */
+async function assembleFile(file, ctx) {
+  const target = safeJoin(ctx.installRoot, file.file);
+  if (await quickFileMatches(file, target)) {
+    ctx.onChunk?.({ bytes: file.size, reused: false, skippedFile: true });
+    return { applied: 0, skipped: 1, reused: 0, bytes: file.size };
+  }
+  /*
+   * 别的渠道客户端里已经有同内容文件（比如官服已经更到新版本、这里更的是国际服），
+   * 直接硬链接过去：整份文件免下载，也免掉解压 + 写盘那一步。
+   * 校验用 quickFileMatches，和「本地是否已就位」完全同一套口径。
+   */
+  if (ctx.linkSources?.length) {
+    const reused = await linkSource.reuseFromSources({
+      file,
+      target,
+      gameKey: ctx.gameKey,
+      sources: ctx.linkSources,
+      match: (candidate) => quickFileMatches(file, candidate),
+    });
+    if (reused.ok) {
+      ctx.onChunk?.({ bytes: file.size, reused: false, linkedFile: true });
+      return { applied: 1, skipped: 0, reused: 0, bytes: file.size, linked: 1 };
+    }
+  }
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.pd_tmp`;
+  await fsp.rm(tmp, { force: true });
+
+  const chunks = [...file.chunks].sort((a, b) => Number(a.offset) - Number(b.offset));
+  const contiguous = chunks.every((chunk, index) =>
+    index === 0
+      ? Number(chunk.offset) === 0
+      : Number(chunk.offset) ===
+        Number(chunks[index - 1].offset) + Number(chunks[index - 1].uncompressedSize || 0)
+  );
+  const hash = contiguous ? crypto.createHash('md5') : null;
+
+  let bytes = 0;
+  let reused = 0;
+  const handle = await fsp.open(tmp, 'w');
+  try {
+    await handle.truncate(file.size);
+    for (const chunk of chunks) {
+      // 大文件里也要能响应停止：以前只在文件之间检查，单个 4GB 的包点停要等很久
+      throwIfCancelled(ctx.signal);
+      await waitIfPaused(ctx.signal);
+      const entry = {
+        ...chunk,
+        url: `${file.chunkPrefix}/${chunk.id}`,
+        compressedMd5: String(chunk.compressedMd5 || '').toLowerCase(),
+        uncompressedMd5: String(chunk.uncompressedMd5 || '').toLowerCase(),
+      };
+      let raw = ctx.hasCache ? await readCachedChunk(ctx.chunkDir, entry) : null;
+      const hit = Boolean(raw);
+      if (hit) reused += 1;
+      else raw = await fetchChunk(entry, ctx.signal);
+      await handle.write(raw, 0, raw.length, chunk.offset);
+      if (hash) hash.update(raw);
+      bytes += chunk.uncompressedSize || raw.length;
+      ctx.onChunk?.({ bytes: chunk.uncompressedSize || raw.length, reused: hit });
+    }
+  } finally {
+    await handle.close();
+  }
+
+  let actual = hash ? hash.digest('hex') : await md5File(tmp);
+  const expected = String(file.md5 || '').toLowerCase();
+  if (expected && actual !== expected) {
+    // 增量哈希对不上：整文件复核一次，真错才删
+    actual = await md5File(tmp);
+    if (actual !== expected) {
+      await fsp.rm(tmp, { force: true });
+      throw new Error(`文件校验失败：${file.file}`);
+    }
+  }
+  await fsp.rm(target, { force: true });
+  await fsp.rename(tmp, target);
+  return { applied: 1, skipped: 0, reused, bytes };
 }
 
 /**
@@ -895,6 +1008,8 @@ async function applyHoyoPredownload({
   includeCategory,
   signal,
   onProgress,
+  // 同一台机器上别的渠道客户端的根目录：内容相同的文件直接硬链接，不再下载
+  linkSources = [],
 }) {
   if (!supported(gameKey)) throw new Error('这个游戏不支持米哈游预下载');
   const base = await inspect({
@@ -953,74 +1068,97 @@ async function applyHoyoPredownload({
   let applied = 0;
   let skipped = 0;
   let reusedChunks = 0;
+  let linkedFiles = 0;
   let bytesDone = 0;
 
-  for (const file of normalized) {
-    await waitIfPaused(signal);
-    throwIfCancelled(signal);
+  // 只有同盘的源才可能硬链接，跨盘的在这里就筛掉
+  const externalRoots = linkSource.usableSources(linkSources, {
+    targetRoot: installRoot,
+    excludeRoots: [],
+  });
+
+  /*
+   * 并发度默认 4。
+   *
+   * 这一步的耗时几乎全在「读 chunk 缓存 → zstd 解压 → md5 → 写盘」这条链上。
+   * 单路串行时磁盘队列深度只有 1，随机读的寻道开销全压进关键路径 —— 实测机械盘
+   * 只有 13~29 MB/s，两万个 chunk 走下来要一个多小时。文件之间并行能把队列压深，
+   * 也能让 CPU 解压和磁盘 IO 重叠起来。
+   * 不往上加的原因：机械盘开太多路会互相抢磁头，反而更慢；4 路在 SSD / HDD 上都稳。
+   * 想调可以设 HXL_APPLY_CONCURRENCY。
+   */
+  const concurrency = Math.max(1, Math.min(8, Number(process.env.HXL_APPLY_CONCURRENCY) || 4));
+  let cursor = 0;
+  /*
+   * 进度节流：一个块发一条 IPC 的话，两万多个块就是两万多条消息，渲染层光处理
+   * 事件就够卡。120ms 一条足够顺滑；每个文件写完强制补一条，保证计数不丢。
+   */
+  let lastReportAt = 0;
+  const report = (file, force) => {
+    const now = Date.now();
+    if (!force && now - lastReportAt < 120) return;
+    lastReportAt = now;
+    onProgress?.({
+      phase: 'install',
+      processed,
+      total: normalized.length,
+      applied,
+      skipped,
+      reusedChunks,
+      bytesDone,
+      totalBytes,
+      current: file.file,
+    });
+  };
+
+  const applyOne = async (file) => {
+    const result = await assembleFile(file, {
+      installRoot,
+      chunkDir: dir,
+      hasCache,
+      signal,
+      gameKey,
+      linkSources: externalRoots,
+      onChunk: (delta) => {
+        bytesDone += delta.bytes;
+        if (delta.reused) reusedChunks += 1;
+        report(file, false);
+      },
+    });
+    applied += result.applied;
+    skipped += result.skipped;
+    if (result.linked) linkedFiles += 1;
     processed += 1;
-    const target = safeJoin(installRoot, file.file);
-    if (await quickFileMatches(file, target)) {
-      skipped += 1;
-      bytesDone += file.size;
-      onProgress?.({
-        phase: 'install',
-        processed,
-        total: normalized.length,
-        applied,
-        skipped,
-        reusedChunks,
-        bytesDone,
-        totalBytes,
-        current: file.file,
-      });
-      continue;
-    }
-    await fsp.mkdir(path.dirname(target), { recursive: true });
-    const tmp = `${target}.pd_tmp`;
-    await fsp.rm(tmp, { force: true });
-    const handle = await fsp.open(tmp, 'w');
-    try {
-      await handle.truncate(file.size);
-      for (const chunk of file.chunks) {
-        const entry = {
-          ...chunk,
-          url: `${file.chunkPrefix}/${chunk.id}`,
-          compressedMd5: String(chunk.compressedMd5 || '').toLowerCase(),
-          uncompressedMd5: String(chunk.uncompressedMd5 || '').toLowerCase(),
-        };
-        let raw = hasCache ? await readCachedChunk(dir, entry) : null;
-        if (raw) {
-          reusedChunks += 1;
-        } else {
-          raw = await fetchChunk(entry, signal);
+    report(file, true);
+  };
+
+  const workerCount = Math.max(1, Math.min(concurrency, normalized.length));
+  const workers = [];
+  for (let index = 0; index < workerCount; index += 1) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const next = cursor;
+          cursor += 1;
+          if (next >= normalized.length) return;
+          await applyOne(normalized[next]);
         }
-        await handle.write(raw, 0, raw.length, chunk.offset);
-        bytesDone += chunk.uncompressedSize || raw.length;
-        onProgress?.({
-          phase: 'install',
-          processed,
-          total: normalized.length,
-          applied,
-          skipped,
-          reusedChunks,
-          bytesDone,
-          totalBytes,
-          current: file.file,
-        });
-      }
-    } finally {
-      await handle.close();
-    }
-    const actual = await md5File(tmp);
-    if (String(file.md5 || '').toLowerCase() && actual !== String(file.md5).toLowerCase()) {
-      await fsp.rm(tmp, { force: true });
-      throw new Error(`文件校验失败：${file.file}`);
-    }
-    await fsp.rm(target, { force: true });
-    await fsp.rename(tmp, target);
-    applied += 1;
+      })()
+    );
   }
+  await Promise.all(workers);
+  // 收尾强制一条满进度，别让界面停在最后一个节流点（比如 99%）
+  onProgress?.({
+    phase: 'install',
+    processed: normalized.length,
+    total: normalized.length,
+    applied,
+    skipped,
+    reusedChunks,
+    bytesDone: totalBytes,
+    totalBytes,
+    current: '',
+  });
 
   // 全部文件都过了才动版本号和清理，避免半套更新把游戏写坏。
   await setConfigIniValue(installRoot, 'game_version', base.latestVersion);
@@ -1035,6 +1173,8 @@ async function applyHoyoPredownload({
     applied,
     skipped,
     reusedChunks,
+    // 其中有多少个文件是从别的渠道客户端硬链接过来的（没走下载）
+    linkedFiles,
     files: normalized.length,
     installRoot,
   };
@@ -1082,6 +1222,7 @@ module.exports = {
   checkHoyoPredownload,
   startHoyoPredownload,
   applyHoyoPredownload,
+  assembleFile,
   clearHoyoPredownload,
   chunkDirOf,
   measureStoredChunks,

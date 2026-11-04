@@ -480,7 +480,11 @@ function startDockDownloadActions(game) {
     // 状态来自 server.predownload（后台自动检测落盘），update = 本地落后正式版。
     const updating = state.gameUpdate && state.gameUpdate.gameId === game.id;
     if (updating) {
-      return `<button class="start-dock-play is-updating" disabled title="正在更新，完成后自动变回开始游戏">
+      // 进度条用按钮上的 CSS 变量驱动：重绘时能立刻还原到上一次的百分比，
+      // 不用等下一个进度事件（否则每次重绘进度条都会掉回 0）
+      const percent = Number(state.gameUpdate.percent) || 0;
+      return `<button class="start-dock-play is-updating" disabled style="--update-progress:${percent}%" title="正在更新，完成后自动变回开始游戏">
+          <span class="start-dock-update-fill" aria-hidden="true"></span>
           ${icon('refresh', 'sm')}
           <span class="start-dock-update-label">${esc(state.gameUpdate.label || '正在更新…')}</span>
         </button>`;

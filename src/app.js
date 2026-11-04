@@ -525,6 +525,58 @@ function etaText(download) {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.ceil((seconds % 3600) / 60)} 分`;
 }
 
+/**
+ * 「更新游戏」按钮上的文字：把主进程的进度事件翻成一句人话。
+ *
+ * 为什么不能直接用 event.current：这个字段在不同阶段含义不同 ——
+ * version/manifest 阶段是一句中文（「目标版本 5.3.0」「读取官方清单…」），
+ * 但 download 阶段是分块 id、install 阶段是文件路径
+ * （`YuanShen_Data/StreamingAssets/AssetBundles/blocks/00/03…`）。
+ * 2.9.0 把这些原样塞进 dock 的胶囊按钮，46px 高的按钮被一段长路径撑破，
+ * 文字溢出压到下面的卡片上（用户截图反馈的就是这个）。
+ *
+ * 所以这里按阶段给短句，进度用百分比 / 计数表示，路径只作为 tooltip 的细节。
+ */
+const DOCK_UPDATE_PHASES = {
+  start: '准备更新',
+  version: '读取版本信息',
+  manifest: '比对文件清单',
+  download: '下载更新',
+  install: '安装更新',
+  patch: '打增量补丁',
+  extract: '解压更新包',
+  stage: '整理更新内容',
+  commit: '写入游戏目录',
+  link: '整理文件',
+  verify: '校验文件',
+  apply: '应用更新',
+};
+
+function dockUpdateText(event) {
+  const phase = String((event && event.phase) || '');
+  const processed = Number(event && event.processed) || 0;
+  const total = Number(event && event.total) || 0;
+  const bytesDone = Number(event && event.bytesDone) || 0;
+  const totalBytes = Number(event && event.totalBytes) || 0;
+  const detail = String((event && event.current) || '');
+  if (phase === 'done') return { label: '更新完成', percent: 100, detail };
+
+  // 有字节总量就用百分比（比「37/500 个文件」直观），没有就退到文件计数
+  const percent =
+    totalBytes > 1 ? Math.max(0, Math.min(99, Math.floor((bytesDone / totalBytes) * 100))) : 0;
+  const verb = DOCK_UPDATE_PHASES[phase];
+  let label = '';
+  if (verb) {
+    if (percent) label = `${verb} ${percent}%`;
+    else if (total > 0 && processed > 0) label = `${verb} ${processed}/${total}`;
+    else label = `${verb}…`;
+  } else if (detail && detail.length <= 16 && !/[\\/]/.test(detail)) {
+    // 不认识的阶段：只有短的、不像路径的文案才敢直接上按钮
+    label = detail;
+  }
+  return { label: label || '正在更新…', percent, detail };
+}
+
 function relativeDate(iso) {
   if (!iso) return '尚未启动';
   const value = new Date(iso);
@@ -1155,19 +1207,17 @@ async function boot() {
       api.onPredownloadProgress((event) => {
         const current = state.gameUpdate;
         if (!current || !event || event.jobId !== current.jobId) return;
-        let label = String(event.current || '');
-        if (event.phase === 'download' && Number(event.total) > 0) {
-          label = `更新中 ${event.processed || 0}/${event.total}`;
-        } else if (event.phase === 'apply' || event.phase === 'link') {
-          label = '正在应用更新…';
-        } else if (event.phase === 'done') {
-          label = '更新完成';
-        }
-        if (label) {
-          current.label = label;
-          const el = document.querySelector('.start-dock-update-label');
-          if (el) el.textContent = label;
-        }
+        const next = dockUpdateText(event);
+        current.label = next.label;
+        current.percent = next.percent;
+        const el = document.querySelector('.start-dock-update-label');
+        if (!el) return;
+        el.textContent = next.label;
+        const button = el.closest('.start-dock-play');
+        if (!button) return;
+        // 具体在写哪个文件只放 tooltip：路径太长，塞进按钮会把胶囊撑破
+        if (next.detail) button.title = `正在更新：${next.detail}`;
+        button.style.setProperty('--update-progress', `${next.percent}%`);
       });
     }
     api.onUpdateAvailable((info) => {
