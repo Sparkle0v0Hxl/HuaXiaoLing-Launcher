@@ -315,7 +315,13 @@ contextBridge.exposeInMainWorld('launcher', {
     // 再用 onDanmuEvent 订阅主进程转发过来的 open/pushing/danmu/status/closed/reconnecting 事件。
     danmuConnect: (payload) => ipcRenderer.send('live:danmu-connect', payload),
     danmuDisconnect: (roomId) => ipcRenderer.send('live:danmu-disconnect', roomId),
-    onDanmuEvent: (callback) => ipcRenderer.on('live:danmu-event', (_event, payload) => callback(payload)),
+    onDanmuEvent: (callback) => {
+      const channel = 'live:danmu-event';
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on(channel, listener);
+      // 返回解绑函数，渲染层可精确移除本 listener，避免重复订阅累积。
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
   },
 
   importCover: (path) => ipcRenderer.invoke('cover:import', path),

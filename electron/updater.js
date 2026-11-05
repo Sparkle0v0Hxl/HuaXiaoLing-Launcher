@@ -660,6 +660,24 @@ async function probeSource(url, timeoutMs) {
 /** 拿到第一条可用线路后，最多再等这么久，给别的线路一个反超的机会。 */
 const PROBE_GRACE = 1200;
 
+/** 从第 startIndex 条线路开始（换线路重试用）；下标越界就只留最后一条兜底。 */
+function applyStartIndex(list, startIndex) {
+  const n = Math.max(0, Math.floor(Number(startIndex) || 0));
+  const k = Math.min(n, list.length - 1);
+  return list.slice(k);
+}
+
+/**
+ * 小包（增量包）不值得先探测：PROBE_BYTES 的探测字节接近甚至超过整包，
+ * 而「裸直连永远排第一」会让国内用户每次先卡满一次超时才轮到镜像。
+ * 这里只重排顺序：镜像在前，官方直连放末尾兜底，零新增请求。
+ */
+function orderSmallSources(list, official, directFirst) {
+  if (directFirst) return list.slice();
+  const mirrors = list.filter((item) => item !== official);
+  return [...mirrors, official];
+}
+
 /**
  * 给候选线路排个序：快的在前。
  *
@@ -668,11 +686,16 @@ const PROBE_GRACE = 1200;
  *
  * 不等所有线路都回来：拿到第一条能用的之后只再宽限 1.2 秒。否则一条死链
  * 就能把探测拖满 6 秒超时，用户还没开始下载就先干等着。
+ *
+ * options.startIndex：上次失败的线路下标，换线路重试用（跳到下一批候选）。
+ * options.directFirst：一键恢复旧顺序（保险丝），排障时用。
  */
-async function rankSources(url, expectedSize = 0) {
+async function rankSources(url, expectedSize = 0, options = {}) {
   const list = accelerateCandidates(url);
   if (list.length <= 1) return list;
-  if (expectedSize && expectedSize < PROBE_MIN_SIZE) return list;
+  if (expectedSize && expectedSize < PROBE_MIN_SIZE) {
+    return applyStartIndex(orderSmallSources(list, url, options.directFirst === true), options.startIndex);
+  }
 
   const usable = [];
   let remaining = list.length;
@@ -703,7 +726,7 @@ async function rankSources(url, expectedSize = 0) {
   }
 
   await done;
-  if (!usable.length) return list;
+  if (!usable.length) return applyStartIndex(list, options.startIndex);
 
   usable.sort((a, b) => b.speed - a.speed);
   const fastest = usable[0];
@@ -711,12 +734,15 @@ async function rankSources(url, expectedSize = 0) {
 
   // 直连能用，且没比最快的镜像慢太多，就还是走直连
   if (direct && direct.speed >= fastest.speed * DIRECT_PREFERENCE) {
-    return [url, ...usable.filter((item) => item.url !== url).map((item) => item.url)];
+    return applyStartIndex(
+      [url, ...usable.filter((item) => item.url !== url).map((item) => item.url)],
+      options.startIndex
+    );
   }
   const ordered = usable.map((item) => item.url);
   // 没测通的官方地址留在最后兜底：万一最快的那条中途断了还有原路可退
   if (!ordered.includes(url)) ordered.push(url);
-  return ordered;
+  return applyStartIndex(ordered, options.startIndex);
 }
 
 /**
@@ -726,10 +752,10 @@ async function rankSources(url, expectedSize = 0) {
  * 的就是进度条归零、又从 0 慢慢爬。真正该处理的「卡住」交给 multiDownload 的
  * 停滞看门狗（45 秒没进展就换网络栈/退单连接），有进展就一直往下走。
  */
-async function downloadHttp({ url, dest, expectedSize, report }) {
+async function downloadHttp({ url, dest, expectedSize, report, sourceStartIndex = 0, directFirst = false }) {
   const official = String(url || '').trim();
   if (!official) throw new Error('没有可用的下载地址');
-  const sources = await rankSources(official, expectedSize);
+  const sources = await rankSources(official, expectedSize, { startIndex: sourceStartIndex, directFirst });
   let lastError = null;
   for (const source of sources) {
     try {
@@ -761,7 +787,7 @@ async function downloadHttp({ url, dest, expectedSize, report }) {
   throw lastError || new Error('下载失败');
 }
 
-async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
+async function downloadToFile({ url, dest, expectedSize = 0, onProgress, sourceStartIndex = 0, directFirst = false }) {
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   /*
    * 速度也一起算出来给界面用。以前只给百分比，用户看到的是「0%」和一个不动的条，
@@ -793,7 +819,7 @@ async function downloadToFile({ url, dest, expectedSize = 0, onProgress }) {
   };
 
   if (isHttpLocation(url)) {
-    return await downloadHttp({ url, dest, expectedSize, report });
+    return await downloadHttp({ url, dest, expectedSize, report, sourceStartIndex, directFirst });
   }
 
   const source = toLocalPath(url);
@@ -848,24 +874,139 @@ function runPowerShell(script, timeoutMs = 10 * 60 * 1000) {
   });
 }
 
-async function extractZip(zipPath, extractRoot) {
+/*
+ * 只读 ZIP 尾部的 EOCD + 中央目录，数出「非目录文件条目」数。
+ * 完整包里既有文件也有显式目录条目（名字以 / 结尾），直接拿 totalEntries 比
+ * 解出的文件数会 100% 误报，所以必须逐条过滤目录项。
+ * 只用到 node:fs/promises，不引第三方 ZIP 库，也不把 200MB 整包读进内存。
+ */
+const EOCD_SIG = 0x06054b50;
+const CD_SIG = 0x02014b50;
+const ZIP64_EOCD_SIG = 0x06064b50;
+const ZIP64_LOC_SIG = 0x07064b50;
+const EOCD_MIN = 22;
+const CD_MIN = 46;
+const MAX_COMMENT = 0xffff;
+
+async function readZipFileEntryCount(zipPath) {
+  const size = (await fsp.stat(zipPath)).size;
+  if (size < EOCD_MIN) throw new Error('更新包太小，不像有效的 ZIP');
+  const tailLen = Math.min(size, EOCD_MIN + MAX_COMMENT);
+  const tail = Buffer.alloc(tailLen);
+  const fh = await fsp.open(zipPath, 'r');
+  try {
+    await fh.read(tail, 0, tailLen, size - tailLen);
+  } finally {
+    await fh.close();
+  }
+  let eocd = -1;
+  for (let i = tailLen - EOCD_MIN; i >= 0; i -= 1) {
+    if (tail.readUInt32LE(i) !== EOCD_SIG) continue;
+    const commentLen = tail.readUInt16LE(i + 20);
+    if (i + EOCD_MIN + commentLen === tailLen) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('更新包里找不到 ZIP 结束标记（EOCD）');
+
+  const diskNo = tail.readUInt16LE(eocd + 4);
+  const cdDisk = tail.readUInt16LE(eocd + 6);
+  const entriesOnDisk = tail.readUInt16LE(eocd + 8);
+  let totalEntries = tail.readUInt16LE(eocd + 10);
+  let cdSize = tail.readUInt32LE(eocd + 12);
+  let cdOffset = tail.readUInt32LE(eocd + 16);
+  if (diskNo !== 0 || cdDisk !== 0 || (totalEntries !== 0xffff && entriesOnDisk !== totalEntries)) {
+    throw new Error('更新包是多卷 ZIP，暂时不支持');
+  }
+
+  // ZIP64 哨兵：普通大包用不到，纯防御，避免解析错乱到随便一个数字
+  if (totalEntries === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+    const loc = eocd - 20;
+    if (loc < 0 || tail.readUInt32LE(loc) !== ZIP64_LOC_SIG) {
+      throw new Error('更新包的 ZIP64 定位信息损坏');
+    }
+    const absOff = Number(tail.readBigUInt64LE(loc + 8));
+    const z64 = absOff - (size - tailLen);
+    if (z64 < 0 || z64 + 56 > tailLen || tail.readUInt32LE(z64) !== ZIP64_EOCD_SIG) {
+      throw new Error('更新包的 ZIP64 结束标记损坏');
+    }
+    totalEntries = Number(tail.readBigUInt64LE(z64 + 32));
+    cdSize = Number(tail.readBigUInt64LE(z64 + 40));
+    cdOffset = Number(tail.readBigUInt64LE(z64 + 48));
+  }
+  if (cdOffset + cdSize > size) throw new Error('更新包的中央目录越界');
+
+  const cd = Buffer.alloc(cdSize);
+  const ch = await fsp.open(zipPath, 'r');
+  try {
+    await ch.read(cd, 0, cdSize, cdOffset);
+  } finally {
+    await ch.close();
+  }
+  let p = 0;
+  let fileCount = 0;
+  for (let k = 0; k < totalEntries; k += 1) {
+    if (p + CD_MIN > cdSize || cd.readUInt32LE(p) !== CD_SIG) {
+      throw new Error(`更新包中央目录损坏（第 ${k + 1}/${totalEntries} 条）`);
+    }
+    const nameLen = cd.readUInt16LE(p + 28);
+    const extraLen = cd.readUInt16LE(p + 30);
+    const commentLen = cd.readUInt16LE(p + 32);
+    const nameEnd = p + CD_MIN + nameLen;
+    const next = nameEnd + extraLen + commentLen;
+    if (next > cdSize) {
+      throw new Error(`更新包中央目录条目越界（第 ${k + 1}/${totalEntries} 条）`);
+    }
+    const name = cd.toString('utf8', p + CD_MIN, nameEnd);
+    // 目录条目两种写法都排除：标准 ZIP 用 /，老 Compress-Archive 用 \。
+    if (!name.endsWith('/') && !name.endsWith('\\')) fileCount += 1;
+    p = next;
+  }
+  return fileCount;
+}
+
+async function extractZip(zipPath, extractRoot, label = '更新包') {
   await fsp.mkdir(extractRoot, { recursive: true });
+  // 先从 ZIP 本身读出「应该解出多少个文件」。ZIP 已经过清单 sha256 校验，
+  // 这个期望值可信；解完拿它和真实落盘文件数比对，半截解压就瞒不过去了。
+  // 读不出来（罕见格式）就退回旧行为：只解压、不阻断，绝不让新校验把更新搞挂。
+  let expectedFiles = 0;
+  let entryCountReadable = true;
+  try {
+    expectedFiles = await readZipFileEntryCount(zipPath);
+  } catch (error) {
+    entryCountReadable = false;
+    console.warn(`[update] 读不出 ZIP 条目数，跳过解压复核：${error && error.message}`);
+  }
   // 优先用 .NET 的 ZipFile 解压：实测部分机器 / 旧版 PowerShell 的 Expand-Archive
   // 在解压大体积 ZIP（>100MB）时会中途静默退出（exit 0 但只抽出半截），导致覆盖后
   // 启动器缺文件打不开。.NET 的 ZipFile 更稳，Expand-Archive 作为兜底。
   const dotNet = `[System.IO.Compression.ZipFile]::ExtractToDirectory(${JSON.stringify(zipPath)}, ${JSON.stringify(extractRoot)})`;
   try {
     await runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; ${dotNet}`);
-    return;
   } catch (err) {
+    // 清掉 .NET 可能留下的半截产物，再跑兜底，避免 -Force 覆盖到残留目录污染计数
+    await fsp.rm(extractRoot, { recursive: true, force: true }).catch(() => {});
+    await fsp.mkdir(extractRoot, { recursive: true });
     try {
       await runPowerShell(
         `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
       );
-      return;
     } catch (err2) {
-      throw new Error(`解压更新包失败：${err2 && err2.message ? err2.message : err2}`);
+      throw new Error(`解压${label}失败：${err2 && err2.message ? err2.message : err2}`);
     }
+  }
+  // 两条路径都不提前 return：统一在这里做「解出的文件数 == ZIP 里的文件数」复核。
+  // 读不出条目数时跳过复核，保持旧行为（绝不让新校验把本来能用的更新搞挂）。
+  const actualFiles = entryCountReadable ? (await listFiles(extractRoot)).length : 0;
+  if (entryCountReadable && actualFiles !== expectedFiles) {
+    throw new Error(
+      `解压${label}不完整：ZIP 里有 ${expectedFiles} 个文件，实际只解出 ${actualFiles} 个（差 ${expectedFiles - actualFiles} 个）。` +
+        `目录 ${extractRoot}。多半是安全软件/Defender 拦截或旧版 Expand-Archive 抽半截：` +
+        `请把程序目录和该临时目录加入杀毒软件排除项后重试，或删除 data/tmp 下 vela-update-* / vela-delta-* 残留，` +
+        `也可用 7-Zip 手动完整解压覆盖。`
+    );
   }
 }
 
@@ -878,6 +1019,108 @@ function findPackageRoot(extractRoot) {
     (fs.existsSync(path.join(dir, 'resources', 'app', 'package.json')) ||
       fs.existsSync(path.join(dir, 'resources', 'app.asar')));
   return candidates.find(looksLikePackage) || '';
+}
+
+/* ---------------------------------------------------------------- */
+/* 解压结构诊断（只在失败时跑，成功路径不做这些额外扫描）              */
+/* ---------------------------------------------------------------- */
+
+const TOP_ENTRIES_LIMIT = 40;
+const HALF_EXTRACT_MIN_FILES = 30;
+
+function listTopEntries(dir, limit) {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .slice(0, limit)
+      .map((entry) => `${entry.isDirectory() ? '[目录] ' : ''}${entry.name}`);
+  } catch {
+    return [];
+  }
+}
+
+function countFiles(root) {
+  let total = 0;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) total += 1;
+    }
+  };
+  walk(root);
+  return total;
+}
+
+function inspectCandidate(dir) {
+  const hasExe = fs.existsSync(path.join(dir, EXE_NAME));
+  const hasAppAsar = fs.existsSync(path.join(dir, 'resources', 'app.asar'));
+  const hasAppPackageJson = fs.existsSync(path.join(dir, 'resources', 'app', 'package.json'));
+  const hasAppMainJs = fs.existsSync(path.join(dir, 'resources', 'app', 'electron', 'main.js'));
+  const hasResourcesDir = fs.existsSync(path.join(dir, 'resources'));
+  const missing = [];
+  if (!hasExe) missing.push(EXE_NAME);
+  if (!hasAppPackageJson && !hasAppAsar) missing.push('resources/app.asar 或 resources/app/package.json');
+  return {
+    dir,
+    hasExe,
+    hasAppAsar,
+    hasAppPackageJson,
+    hasAppMainJs,
+    hasResourcesDir,
+    topEntries: listTopEntries(dir, TOP_ENTRIES_LIMIT),
+    resourcesEntries: hasResourcesDir ? listTopEntries(path.join(dir, 'resources'), TOP_ENTRIES_LIMIT) : [],
+    looksLikePackage: hasExe && (hasAppPackageJson || hasAppAsar),
+    missing,
+  };
+}
+
+/**
+ * 解压失败时给一份「看得出到底缺了什么 / 是不是抽半截」的诊断。
+ * findPackageRoot 保持返回 string 不动，成功路径不跑这些递归扫描。
+ */
+function inspectPackageRoot(extractRoot) {
+  const candidates = [path.join(extractRoot, '花筱灵启动器'), extractRoot].map(inspectCandidate);
+  const found = candidates.find((item) => item.looksLikePackage);
+  const source = found ? found.dir : '';
+  const topLevelEntries = listTopEntries(extractRoot, TOP_ENTRIES_LIMIT);
+  const totalFileCount = countFiles(extractRoot);
+
+  const missing = [];
+  if (!found) {
+    const missExe = candidates.every((item) => !item.hasExe);
+    const missApp = candidates.every((item) => !item.hasAppAsar && !item.hasAppPackageJson);
+    if (missExe) missing.push(EXE_NAME);
+    if (missApp) missing.push('resources/app.asar 或 resources/app/package.json');
+  }
+  const hasPartialResources = candidates.some(
+    (item) => item.hasResourcesDir || item.resourcesEntries.length > 0
+  );
+  const halfExtracted =
+    !source && (hasPartialResources || totalFileCount < HALF_EXTRACT_MIN_FILES || topLevelEntries.length < 3);
+  let reason = '';
+  if (halfExtracted) {
+    reason =
+      `疑似解压出半截：共解出 ${totalFileCount} 个文件、顶层 ${topLevelEntries.length} 项，` +
+      `凑不齐完整便携版${missing.length ? `（缺 ${missing.join('、缺 ')}）` : ''}。` +
+      `常见原因是安全软件隔离了最后写出的 ${EXE_NAME}，或旧版 Expand-Archive 在大包上静默中断。`;
+  }
+  return {
+    source,
+    exeName: EXE_NAME,
+    candidates,
+    topLevelEntries,
+    totalFileCount,
+    missing,
+    halfExtracted,
+    reason,
+  };
 }
 
 /** 递归列出目录下的所有文件（相对路径统一用 / 分隔）。 */
@@ -933,21 +1176,51 @@ async function stage({ zipPath, tempBase, version: declaredVersion = '' }) {
   await fsp.mkdir(tempBase, { recursive: true });
   const tempRoot = await fsp.mkdtemp(path.join(tempBase, 'vela-update-'));
   const extractRoot = path.join(tempRoot, 'extract');
-  await extractZip(zipPath, extractRoot);
-  const source = findPackageRoot(extractRoot);
+  await extractZip(zipPath, extractRoot, '完整包');
+  const diag = inspectPackageRoot(extractRoot);
+  const source = diag.source;
   if (!source) {
-    // 解压成功却找不到启动器主程序，多半是 ZIP 结构不对 / 抽出半截。把解压清单留下来方便排障。
+    // 解压成功却找不到启动器主程序，多半是 ZIP 结构不对 / 抽出半截。把解压清单和逐候选诊断留下来方便排障。
+    const stageDebugPath = path.resolve(tempRoot, 'stage-debug.json');
+    // cleanTemp 下次启动会删掉 vela-update-* 目录，所以再往 tempBase 根写一份作兜底
+    const stageDebugFallback = path.resolve(tempBase, 'stage-debug.json');
+    let debugWritten = false;
     try {
       const dumped = (await listFiles(extractRoot)).slice(0, 300);
-      await fsp.writeFile(
-        path.join(tempRoot, 'stage-debug.json'),
-        JSON.stringify({ extractRoot, tempRoot, fileCount: dumped.length, files: dumped }, null, 2),
-        'utf8'
+      const payload = JSON.stringify(
+        {
+          // 保留旧字段，老排障脚本还能读
+          extractRoot,
+          tempRoot,
+          fileCount: dumped.length,
+          files: dumped,
+          // 新增：到底缺什么、是不是半截、写到哪了
+          stageDebugPath,
+          exeName: diag.exeName,
+          at: new Date().toISOString(),
+          missing: diag.missing,
+          totalFileCount: diag.totalFileCount,
+          topLevelEntries: diag.topLevelEntries,
+          candidates: diag.candidates,
+          halfExtracted: diag.halfExtracted,
+          reason: diag.reason,
+        },
+        null,
+        2
       );
+      await fsp.writeFile(stageDebugPath, payload, 'utf8');
+      debugWritten = true;
+      await fsp.writeFile(stageDebugFallback, payload, 'utf8');
     } catch {
       /* 诊断写入失败不影响主流程报错 */
     }
-    throw new Error('这个 ZIP 不是有效的花筱灵便携版更新包（解压后找不到启动器主程序；解压清单已记入 stage-debug.json）');
+    const missingText = diag.missing.length ? `（缺 ${diag.missing.join('、缺 ')}）` : '';
+    const halfText = diag.halfExtracted ? ` ${diag.reason}` : '';
+    const writeNote = debugWritten ? '' : '（注意：诊断文件写入失败）';
+    throw new Error(
+      `这个 ZIP 不是有效的花筱灵便携版更新包（解压后找不到启动器主程序${missingText}）。` +
+        `${halfText}解压清单与逐候选诊断已记入 ${stageDebugPath}${writeNote}`
+    );
   }
 
   let packageVersion = '';
@@ -1421,7 +1694,7 @@ async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', t
   await fsp.mkdir(tempBase, { recursive: true });
   const tempRoot = extractedRoot || (await fsp.mkdtemp(path.join(tempBase, 'vela-delta-')));
   const bundle = path.join(tempRoot, 'delta');
-  if (!extractedRoot) await extractZip(deltaPath, bundle);
+  if (!extractedRoot) await extractZip(deltaPath, bundle, '增量包');
 
   let delta;
   try {
@@ -1562,7 +1835,9 @@ module.exports = {
   downloadToFile,
   sha256File,
   extractZip,
+  readZipFileEntryCount,
   findPackageRoot,
+  inspectPackageRoot,
   listFiles,
   isProtected,
   stage,

@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.9.3-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.9.4-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.9.3**（正式版）
+**当前版本：v2.9.4**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.9.3-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.9.4-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,18 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.9.3 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.9.4 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.9.4</b></summary>
+
+- 读国际服官方清单遇到连接被重置、超时会自动有限重试并换条网络栈 / 线路，报错翻成中文（含域名与换节点指引）；不再一次 `read ECONNRESET` 就整句英文甩给界面。
+- 自动更新：小增量包下载失败换镜像线路重试、解压后按 ZIP 文件条目数复核有没有解全（抽出半截明确报错）、失败时进度区收口、stage 报错带诊断文件完整路径与缺项、诊断导出纳入 `launch.log` 与 `stage-debug.json`。
+- 弹幕点歌·B 站：只有服务器确认鉴权（op=8）才算真连上，空 key 不再假「已连接」；加读超时看门狗，去掉「重连 3 次断开」硬上限改指数退避长期后台重试，掉线强制重取弹幕 key。
+- 弹幕点歌·其它平台：正文改从专门文本节点取（不再把用户名混进正文导致 `点歌` 认不出来），加载完校验是否真进聊天区，页面跳转 / 渲染进程异常后自动重注入并有限次自愈，累计弹幕数口径与 B 站统一。点歌写法放宽、多条按房间排队 + 去重 + 单条硬超时，不再被全局锁整批丢；没匹配上也有提示。计数与最近弹幕断线后保留只读展示，事件订阅可解绑。
+- 设置里的「运行时目录」自定义后多出「恢复默认」按钮，点一下清空、回到留空＝自动「游戏盘:\VelaRuntimes」。
+
+</details>
 
 <details>
 <summary><b>v2.9.3</b></summary>

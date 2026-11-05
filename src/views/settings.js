@@ -830,6 +830,7 @@ function settingsView() {
             <div class="setting-control">
               <span class="path-text" title="${esc(settings.runtimeRoot || '')}">${esc(settings.runtimeRoot || '自动：游戏盘:\\VelaRuntimes')}</span>
               <button class="btn btn-ghost" data-action="change-runtime-root">更改</button>
+              ${settings.runtimeRoot ? `<button class="btn btn-quiet" data-action="reset-runtime-root">恢复默认</button>` : ''}
             </div>
           </div>
           <div class="setting-row">

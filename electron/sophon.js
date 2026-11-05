@@ -9,7 +9,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { hardlinkTree, removeTreeResilient } = require('./runtime');
-const { httpFetch, directFetch, segmentFetch } = require('./http-fetch');
+const { httpFetch, nodeRequest, directFetch, segmentFetch } = require('./http-fetch');
 const { multiDownload } = require('./multi-download');
 const linkSource = require('./link-source');
 const clientChannel = require('./client-channel');
@@ -218,19 +218,83 @@ function safeJoin(root, relative) {
 const JSON_MEMO_TTL = 60 * 1000;
 const jsonMemo = new Map();
 
+/*
+ * 读官方清单的「有限重试 + 换路」。
+ *
+ * 为什么需要：国际服首个接口 fetchBranch 走 sg-hyp-api.hoyoverse.com，国内访问常被
+ * 对端/中间设备发 TCP RST 掐断，Node 层抛 read ECONNRESET。这类故障是瞬时的——
+ * 线路抖动、机场限单 IP 并发、运营商间歇重置——隔几百毫秒换条路再问一次往往就通。
+ * 而 httpFetch 的单次兜底只做「Chromium net.fetch → Node nodeRequest」一跳：它不会
+ * 回过头再给 Chromium 第二次机会，也不会重新问一次 proxyTunnel.routeFor(url)。
+ *
+ * 换路做法（刻意不改动 http-fetch.js / proxy-agent.js 一行，避免波及 16 连接分段下载）：
+ *   第 1 次 httpFetch    —— 与现状逐字一致（Chromium 优先，失败退 Node），零回归；
+ *   第 2 次 nodeRequest  —— 纯 Node 栈，按域名重新选路（routeFor），和 Chromium 的
+ *                            系统代理/系统证书库/DNS 解析器是另一套实现，避开 Chromium
+ *                            特有的失败（TLS -101、PAC 判错、MITM 证书不认）；
+ *   第 3 次 httpFetch    —— 再给 Chromium net.fetch 一次干净独立的机会，它不读
+ *                            proxyTunnel 的 5 分钟熔断标记，不受上面两次失败的污染。
+ * 每次都新建 AbortSignal：第一次超时后旧 signal 已经废了，不能复用。
+ * 全程不调用 proxyTunnel.invalidate()——它会 destroy 在途 socket，可能打断并行下载。
+ *
+ * 边界：次数封顶 3 次、总耗时封顶 45s（防止 30s×3 拖成 90s 才报错），且只对瞬时
+ * 连接故障重试；4xx、业务 retcode、JSON 解析失败、用户取消一律立刻冒泡——重试救不
+ * 回来，只会白等并放大请求量。这些接口全是轻量 GET 且成功才写 jsonMemo，天然幂等。
+ *
+ * 排障可见性：httpFetch 两次尝试会经 setRequestLogger 落进诊断日志，直接 nodeRequest
+ * 的那一次不落请求行（它不经 httpFetch）；重试后成功的下一次 fetchJson 仍会照常记录。
+ */
+const JSON_MAX_ATTEMPTS = 3;
+const JSON_ATTEMPT_TIMEOUT_MS = 30000;
+const JSON_TOTAL_BUDGET_MS = 45000;
+const JSON_RETRY_BASE_MS = 300;
+const JSON_REQUEST_FNS = [httpFetch, nodeRequest, httpFetch];
+
+function isRetryableJsonError(error) {
+  if (!error) return false;
+  if (error.cancelled === true) return false; // 用户主动取消
+  const text = `${error.code || ''} ${error.name || ''} ${error.message || ''}`;
+  if (/\bHTTP 4\d{2}\b/.test(text)) return false; // 客户端错误，重试无意义
+  if (error.retryable === true) return true; // http-fetch 的 abortFailure 标记的超时
+  return /\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b|\bECONNABORTED\b|\bEPIPE\b|\bENETRESET\b|\bENETUNREACH\b|\bEHOSTUNREACH\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bUND_ERR_SOCKET\b|\bERR_STREAM_PREMATURE_CLOSE\b|\bAbortError\b|\bTimeoutError\b|socket hang up|fetch failed|terminated|premature close|请求超时|连接被重置|HTTP 5\d{2}/i.test(
+    text
+  );
+}
+
+const jsonRetryDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function fetchJson(url) {
   const hit = jsonMemo.get(url);
   if (hit && Date.now() - hit.at < JSON_MEMO_TTL) return hit.data;
-  const response = await httpFetch(url, {
-    headers: { 'user-agent': UA, accept: 'application/json' },
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}：${url}`);
-  const json = await response.json();
-  if (json.retcode !== 0) throw new Error(json.message || `接口返回 ${json.retcode}`);
-  jsonMemo.set(url, { at: Date.now(), data: json.data });
-  if (jsonMemo.size > 32) jsonMemo.delete(jsonMemo.keys().next().value);
-  return json.data;
+
+  const deadline = Date.now() + JSON_TOTAL_BUDGET_MS;
+  let lastError = null;
+  for (let attempt = 0; attempt < JSON_MAX_ATTEMPTS; attempt += 1) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const request = JSON_REQUEST_FNS[attempt % JSON_REQUEST_FNS.length];
+    try {
+      const response = await request(url, {
+        headers: { 'user-agent': UA, accept: 'application/json' },
+        // 按剩余总预算收紧单次超时：即使连续超时，整体也不会突破 45s
+        signal: AbortSignal.timeout(Math.min(JSON_ATTEMPT_TIMEOUT_MS, remaining)),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}：${url}`);
+      const json = await response.json();
+      if (json.retcode !== 0) throw new Error(json.message || `接口返回 ${json.retcode}`);
+      jsonMemo.set(url, { at: Date.now(), data: json.data });
+      if (jsonMemo.size > 32) jsonMemo.delete(jsonMemo.keys().next().value);
+      return json.data;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableJsonError(error)) throw error;
+      if (attempt === JSON_MAX_ATTEMPTS - 1) break;
+      await jsonRetryDelay(
+        Math.min(JSON_RETRY_BASE_MS * (attempt + 1), Math.max(0, deadline - Date.now()))
+      );
+    }
+  }
+  throw lastError || new Error(`读取官方清单失败：${url}`);
 }
 
 async function fetchBranch(gameKey, channel) {

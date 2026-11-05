@@ -1335,102 +1335,240 @@ function liveSongMode() {
 /**
  * 从弹幕文本里解析点歌关键词。
  *
- * 观众的实际写法很杂：「点歌 晴天」「点歌：晴天」「点歌，晴天」「点播 晴天」都常见。
- * 以前只吃掉空白，冒号会被算进歌名（搜「：晴天」必然搜不到），
- * 于是一堆点歌看起来「没生效」。这里把前缀标点一起剥掉。
+ * 放宽过：观众写法很杂 ——「点歌 晴天」「点歌：晴天」「@主播 点歌 晴天」
+ * 「【点歌】晴天」「求点歌 晴天」「来一首 晴天」「点个 晴天」都常见。
+ * 旧版只认以「点歌/点播」开头的写法，前缀 @ / 括号 / 别名一律被当成
+ * 普通弹幕丢掉，用户看到的就是「弹幕抓到了却没点歌」。这里先逐层剥掉开头
+ * 的装饰/礼貌前缀，再用「命令词必须在开头」的严格匹配取歌名；「别点歌了
+ * 聊会天」这类闲聊不会被误判。像点歌但没解析出歌名时另给一条可观测反馈。
  */
+const LIVE_SONG_CMD = '点歌|点播|点一首|点首|来一首|来首|加一首|放一首|点个|整一首|安排一首|求一首|想听|听一首|唱一首';
+// 命令词必须在「开头」：这样「别点歌了 聊会天」这类闲聊不会被误判成点歌。
+const LIVE_SONG_HEAD_RE = new RegExp('^(?:' + LIVE_SONG_CMD + ')\\s*[:：,，、.。\\-—!！~～【】\\[\\]（）()]*\\s*([\\s\\S]+)$');
+// 开头常见的装饰/礼貌前缀，逐层剥掉（最多 4 层）后再试一次严格匹配：
+// 「@主播 点歌 晴天」「【点歌】晴天」「求点歌 晴天」「能不能点歌 晴天」。
+const LIVE_SONG_LEADIN_RE = /^(?:@[^\s:：,，、.。]{1,16}\s+|【|\[|（|\(|能不能|可以|麻烦|帮忙|帮我|劳驾|求|请|想|给|主播|要)\s*/;
+// 只认「像是以点歌命令开头」的，避免「别点歌了」也弹提示。
+const LIVE_SONG_LIKE_RE = new RegExp('^\\s*[【\\[（(@]?\\s*(?:' + LIVE_SONG_CMD + ')');
+
 function parseSongRequest(message) {
-  const match = String(message || '').match(/^\s*(?:点歌|点播)\s*[:：,，、.。\-—]?\s*(.+)$/);
+  let raw = String(message || '').trim();
+  if (!raw) return '';
+  let match = null;
+  for (let pass = 0; pass < 4 && raw; pass += 1) {
+    match = raw.match(LIVE_SONG_HEAD_RE);
+    if (match) break;
+    const stripped = raw.replace(LIVE_SONG_LEADIN_RE, '').trim();
+    if (stripped === raw) break;   // 剥不动就停，别把普通闲聊硬掰成点歌
+    raw = stripped;
+  }
   if (!match) return '';
-  return match[1]
-    .replace(/^[\s:：,，、.。\-—]+/, '')
-    .replace(/[\s。!！~～]+$/, '')
+  const keyword = match[1]
+    .replace(/^[\s:：,，、.。\-—!！~～【】\[\]（）()]+/, '')
+    .replace(/[\s:：,，、.。!！~～】\]）)]+$/, '')
     .trim()
     .slice(0, 60);
+  return keyword || '';
 }
 
-async function handleLiveDanmaku(message, user) {
-  const keyword = parseSongRequest(message);
-  if (!keyword || liveRequestBusy) return;
-  if (!keyword) return;
-  liveRequestBusy = true;
-  console.log('[点歌] 收到弹幕点歌：', keyword, 'by', user || '观众');
+/** 看着像点歌但没解析出歌名时给一条可观测反馈；普通闲聊不打扰。 */
+function looksLikeSongRequest(message) {
+  return LIVE_SONG_LIKE_RE.test(String(message || ''));
+}
+
+function clipDanmaku(message, limit = 40) {
+  return String(message || '').replace(/\s+/g, ' ').slice(0, limit);
+}
+
+/* ------------------------------------------------------------------ *
+ * 点歌队列
+ * 旧版是一把全局 liveRequestBusy 布尔锁：任一房间在搜歌，所有房间的弹幕都
+ * 静默丢弃；同一 900ms tick 里连发多条也只有第一条能进；锁没有超时，某个
+ * await 卡住就永久不解锁。改成「每房间一条串行队列 + 关键词去重 + 单条硬
+ * 超时」，房间之间互不阻塞，一条卡住只跳过自己、不拖死整条队列。
+ * ------------------------------------------------------------------ */
+const LIVE_SONG_TIMEOUT_MS = 30000;   // 单条点歌处理硬超时
+const LIVE_SONG_DEDUP_MS = 10000;     // 同房间同歌名去重窗口
+const LIVE_SONG_QUEUE_MAX = 20;       // 每房间队列上限，防刷屏堆积
+const LIVE_NOTE_GAP_MS = 4000;        // 可观测提示节流，避免刷屏
+const liveRequestQueues = new Map();  // roomKey -> { running, items, recent }
+let lastLiveNoteAt = 0;
+
+function liveNote(text, level = 'info') {
+  console.log(`[点歌] ${text}`);
+  const now = Date.now();
+  if (now - lastLiveNoteAt < LIVE_NOTE_GAP_MS) return;
+  lastLiveNoteAt = now;
   try {
-    const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
-    await api.netease.startService(apiBase).catch(() => {});
-    let song = null;
-    try {
-      // 主通道：网易云独占搜索（直接带可播放地址）
-      song = await api.netease.searchSong({ apiBase, keyword, level: state.songQuality });
-    } catch (neteaseErr) {
-      // 网易云通道失败（服务没起 / 没结果 / 会员曲扑空）：退回多平台搜索 + 解析，
-      // 避免弹幕点歌整条静默失败。手动点歌也是走这条多平台路，已经验证可靠。
-      console.warn('[点歌] 网易云搜索失败，退回多平台：', neteaseErr && neteaseErr.message);
-      try {
-        const res = await api.musicSearch({ platform: 'all', keyword, apiBase, limit: 8 });
-        const first = (res && res.songs && res.songs[0]) || null;
-        if (first) {
-          const r = await api.musicResolve({
-            song: {
-              title: first.title,
-              artist: first.artist,
-              cover: first.cover,
-              album: first.album,
-              platform: first.platform,
-              mid: first.mid,
-              hash: first.hash,
-              neteaseId: first.neteaseId,
-            },
-            apiBase,
-            level: state.songQuality,
-          });
-          if (r && r.ok && r.url) {
-            song = {
-              title: r.title || first.title,
-              artist: r.artist || first.artist,
-              cover: r.cover || first.cover || '',
-              neteaseId: r.neteaseId || first.neteaseId,
-              quality: r.level || state.songQuality,
-              url: r.url,
-              source: r.source || first.platform || '',
-            };
-          }
-        }
-      } catch (fallbackErr) {
-        console.error('[点歌] 多平台兜底也失败：', fallbackErr && fallbackErr.message);
-      }
-    }
-    if (!song) {
-      toast(`「${keyword}」暂时找不到可播放版本`, 'info');
-      return;
-    }
-    const mode = liveSongMode();
-    if (!state.songs.length) {
-      // 队列是空的：无论什么模式都直接播这首
-      state.songs.push(song);
-      saveSongs();
-      await playSongAt(0, {});
-      toast(`${user || "观众"} 点歌：${song.title}`, "success");
-    } else if (mode === "now") {
-      const at = Math.min(state.songIndex + 1, state.songs.length);
-      state.songs.splice(at, 0, song);
-      saveSongs();
-      await playSongAt(at, {});
-      toast(`${user || "观众"} 点歌（立即播放）：${song.title}`, "success");
-    } else {
-      // 下一首播放：插在当前歌曲后面，不打断正在听的
-      const at = Math.min(state.songIndex + 1, state.songs.length);
-      state.songs.splice(at, 0, song);
-      saveSongs();
-      toast(`${user || "观众"} 点歌（下一首）：${song.title}`, "success");
-      if (state.route === "song") render({ preserveScroll: true });
-    }
-  } catch (error) {
-    console.error('[点歌] 失败：', error);
-    toast(`弹幕点歌失败：${error.message}`, 'error');
-  } finally {
-    liveRequestBusy = false;
+    if (typeof toast === 'function') toast(text, level);
+  } catch { /* 提示失败不能反过来把点歌搞挂 */ }
+}
+
+function liveRoomQueue(roomKey) {
+  let q = liveRequestQueues.get(roomKey);
+  if (!q) {
+    q = { running: false, items: [], recent: new Map() };
+    liveRequestQueues.set(roomKey, q);
   }
+  return q;
+}
+
+function liveSongDuplicate(q, keyword) {
+  const now = Date.now();
+  const at = q.recent.get(keyword) || 0;
+  if (now - at < LIVE_SONG_DEDUP_MS) return true;
+  q.recent.set(keyword, now);
+  if (q.recent.size > 64) {
+    for (const [k, t] of q.recent) if (now - t >= LIVE_SONG_DEDUP_MS) q.recent.delete(k);
+  }
+  return false;
+}
+
+/** 房间关掉时清掉它没处理完的队列，避免房间已关还继续往歌单里插歌。 */
+function forgetLiveQueue(roomKey) {
+  const key = String(roomKey || 'default');
+  const q = liveRequestQueues.get(key);
+  if (!q) return;
+  q.items.length = 0;
+  if (!q.running) liveRequestQueues.delete(key);
+}
+
+/**
+ * 真正处理一条点歌：只负责「搜索 → 解析 → 入队/播放」。
+ * 队列与并发控制在下面的 handleLiveDanmaku，这里保持与旧版完全一致的业务逻辑。
+ */
+async function runLiveSongRequest(keyword, user) {
+  const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
+  await api.netease.startService(apiBase).catch(() => {});
+  let song = null;
+  try {
+    // 主通道：网易云独占搜索（直接带可播放地址）
+    song = await api.netease.searchSong({ apiBase, keyword, level: state.songQuality });
+  } catch (neteaseErr) {
+    // 网易云通道失败（服务没起 / 没结果 / 会员曲扑空）：退回多平台搜索 + 解析，
+    // 避免弹幕点歌整条静默失败。手动点歌也是走这条多平台路，已经验证可靠。
+    console.warn('[点歌] 网易云搜索失败，退回多平台：', neteaseErr && neteaseErr.message);
+    try {
+      const res = await api.musicSearch({ platform: 'all', keyword, apiBase, limit: 8 });
+      const first = (res && res.songs && res.songs[0]) || null;
+      if (first) {
+        const r = await api.musicResolve({
+          song: {
+            title: first.title,
+            artist: first.artist,
+            cover: first.cover,
+            album: first.album,
+            platform: first.platform,
+            mid: first.mid,
+            hash: first.hash,
+            neteaseId: first.neteaseId,
+          },
+          apiBase,
+          level: state.songQuality,
+        });
+        if (r && r.ok && r.url) {
+          song = {
+            title: r.title || first.title,
+            artist: r.artist || first.artist,
+            cover: r.cover || first.cover || '',
+            neteaseId: r.neteaseId || first.neteaseId,
+            quality: r.level || state.songQuality,
+            url: r.url,
+            source: r.source || first.platform || '',
+          };
+        }
+      }
+    } catch (fallbackErr) {
+      console.error('[点歌] 多平台兜底也失败：', fallbackErr && fallbackErr.message);
+    }
+  }
+  if (!song) {
+    liveNote(`「${keyword}」暂时找不到可播放版本`, 'info');
+    return;
+  }
+  const mode = liveSongMode();
+  if (!state.songs.length) {
+    // 队列是空的：无论什么模式都直接播这首
+    state.songs.push(song);
+    saveSongs();
+    await playSongAt(0, {});
+    liveNote(`${user || "观众"} 点歌：${song.title}`, "success");
+  } else if (mode === "now") {
+    const at = Math.min(state.songIndex + 1, state.songs.length);
+    state.songs.splice(at, 0, song);
+    saveSongs();
+    await playSongAt(at, {});
+    liveNote(`${user || "观众"} 点歌（立即播放）：${song.title}`, "success");
+  } else {
+    // 下一首播放：插在当前歌曲后面，不打断正在听的
+    const at = Math.min(state.songIndex + 1, state.songs.length);
+    state.songs.splice(at, 0, song);
+    saveSongs();
+    liveNote(`${user || "观众"} 点歌（下一首）：${song.title}`, "success");
+    if (state.route === "song") render({ preserveScroll: true });
+  }
+}
+
+/** 给一条点歌套一层渲染层硬超时：某个 await 卡死也只跳过这一条，不拖死队列。 */
+function withLiveTimeout(work, keyword) {
+  let timer = null;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`点歌「${keyword}」处理超时（${LIVE_SONG_TIMEOUT_MS / 1000}s）`)), LIVE_SONG_TIMEOUT_MS);
+  });
+  return Promise.race([Promise.resolve().then(work), guard]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * 弹幕入口：解析 → 每房间入队 → 串行执行。
+ * roomKey 由调用方传入（B 站传 roomId、其它平台传 room.id），不同房间互不阻塞。
+ * 旧调用 handleLiveDanmaku(message, user) 仍然可用（roomKey 落 'default'）。
+ */
+function handleLiveDanmaku(message, user, roomKey) {
+  const keyword = parseSongRequest(message);
+  if (!keyword) {
+    if (looksLikeSongRequest(message)) {
+      liveNote(`弹幕像点歌但没解析出歌名：「${clipDanmaku(message)}」`, 'info');
+    }
+    return;
+  }
+  const key = String(roomKey || 'default');
+  const q = liveRoomQueue(key);
+  if (liveSongDuplicate(q, keyword)) {
+    console.log('[点歌] 重复点歌，已跳过：', keyword, '房间', key);
+    return;
+  }
+  if (q.items.length >= LIVE_SONG_QUEUE_MAX) {
+    liveNote(`点歌排队已满（${LIVE_SONG_QUEUE_MAX} 条），「${clipDanmaku(keyword, 20)}」暂跳过`, 'info');
+    return;
+  }
+  console.log('[点歌] 收到弹幕点歌：', keyword, 'by', user || '观众', '房间', key);
+  q.items.push({ keyword, user: user || '观众' });
+  drainLiveQueue(key);
+}
+
+function drainLiveQueue(roomKey) {
+  const q = liveRoomQueue(roomKey);
+  if (q.running) return;
+  const item = q.items.shift();
+  if (!item) {
+    q.recent.clear();
+    liveRequestQueues.delete(roomKey);
+    return;
+  }
+  q.running = true;
+  withLiveTimeout(() => runLiveSongRequest(item.keyword, item.user), item.keyword)
+    .catch((error) => {
+      console.error('[点歌] 失败：', error);
+      liveNote(`弹幕点歌「${clipDanmaku(item.keyword, 20)}」失败：${error && error.message ? error.message : error}`, 'error');
+    })
+    .finally(() => {
+      q.running = false;
+      // 队列在房间关闭时可能已被清空：没活了就删掉，别留空壳子
+      if (!q.items.length) liveRequestQueues.delete(roomKey);
+      else drainLiveQueue(roomKey);
+    });
 }
 
 async function changeSongQuality(level) {

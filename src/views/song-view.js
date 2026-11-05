@@ -638,14 +638,20 @@ function liveRoomsListMarkup() {
         // -352 是接口签名问题，登录解决不了，别再把用户往死路上引。
         const failedText = String(room.status || '');
         const needBiliLogin = /鉴权失败/.test(failedText) && !/-352/.test(failedText);
-        const captured =
-          room.connected
-            ? `<p class="song-live-captured" id="live-captured-${esc(room.id)}">已捕获 <b>${room.captured || 0}</b> 条弹幕${
-                room.danmaku === 'bridge'
-                  ? '（观众发弹幕后数字不动 = 该站抓取失效）'
-                  : '（发条弹幕试试：数字不动 = 服务器没推送，看状态行的原因）'
-              }</p>`
-            : '';
+        // 计数与最近弹幕始终渲染（只读展示）：reconnecting/closed 会把 room.connected 置 false，
+        // 若按 connected 隐藏，历史计数与最近弹幕会一并消失，视觉上像「从没抓到过」。
+        // 这里数字不清零、节点不隐藏；仅断开时补一句很轻的状态说明。
+        const captured = `<p class="song-live-captured" id="live-captured-${esc(room.id)}">已捕获 <b>${room.captured || 0}</b> 条弹幕${
+            room.danmaku === 'bridge'
+              ? '（观众发弹幕后数字不动 = 该站抓取失效）'
+              : '（发条弹幕试试：数字不动 = 服务器没推送，看状态行的原因）'
+          }</p>`;
+        const liveLast = `<p class="song-live-last" id="live-last-${esc(room.id)}">最近弹幕：${esc(
+            String(room.lastDanmaku || '—').slice(0, 80)
+          )}</p>`;
+        const disconnectedNote = room.connected
+          ? ''
+          : '<small class="song-live-offline-note">连接已断开，以下为断开前记录</small>';
         return `<div class="song-live-room">
                   <div class="song-live-room-head">
                     <span class="song-live-room-title">${label} · ${esc(room.roomTitle || `房间 ${room.roomId || ''}`)}</span>
@@ -656,14 +662,9 @@ function liveRoomsListMarkup() {
                     <span>${esc(room.connecting ? '连接中…' : room.connected ? '等待「点歌 歌名」' : room.status || '已断开')}</span>
                   </div>
                   ${statusLine}
+                  ${disconnectedNote}
                   ${captured}
-                  ${
-                    room.connected
-                      ? `<p class="song-live-last" id="live-last-${esc(room.id)}">最近弹幕：${esc(
-                          String(room.lastDanmaku || '—').slice(0, 80)
-                        )}</p>`
-                      : ''
-                  }
+                  ${liveLast}
                   ${needBiliLogin ? `<button class="song-live-btn" data-action="bili-login" style="width:100%;margin-top:8px">登录B站账号</button>` : ''}
                 </div>`;
       })
@@ -707,7 +708,29 @@ function refreshLiveRoomsPanel() {
   const host = document.querySelector('#live-rooms-panel');
   if (!host) return false;
   const next = liveRoomsListMarkup();
-  if (host.innerHTML !== next) host.innerHTML = next;
+  // 按数据签名比较，别再拿模板字符串与浏览器规范化后的 innerHTML 做严格相等：
+  // 后者几乎必然不等，旧写法每次都重建整段 DOM，会打断输入框、丢焦点。
+  // 签名覆盖 liveRoomsListMarkup 里所有会随弹幕事件/状态变化的字段，漏一个都会导致对应数字或文案不刷新。
+  const sig = JSON.stringify({
+    mode: liveSongMode(),
+    rooms: state.liveRooms.map((room) => [
+      room.id,
+      room.platformLabel,
+      room.roomTitle,
+      room.roomId,
+      room.status,
+      room.connected,
+      room.connecting,
+      room.danmaku,
+      room.captured || 0,
+      String(room.lastDanmaku || '').length,
+      String(room.lastDanmaku || '—').slice(0, 80),
+    ]),
+  });
+  if (host.dataset.liveSig !== sig) {
+    host.innerHTML = next;
+    host.dataset.liveSig = sig;
+  }
   return true;
 }
 

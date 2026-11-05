@@ -1898,7 +1898,10 @@ function handleBiliDanmuEvent(payload) {
       room.lastDanmaku = String(payload.message || '').slice(0, 80);
       const lastNode = document.querySelector(`#live-last-${room.id}`);
       if (lastNode) lastNode.textContent = `最近弹幕：${room.lastDanmaku}`;
-      handleLiveDanmaku(payload.message, payload.user);
+      // 节点常驻后（song-view.js 计数/最近弹幕不再按 connected 隐藏），
+      // 就地写即可；万一节点因重绘时序缺失，补一次轻量刷新兜底。
+      if (!node || !lastNode) renderLiveIfNeeded();
+      handleLiveDanmaku(payload.message, payload.user, payload.roomId);
       break;
     }
     case 'open':
@@ -1917,12 +1920,19 @@ function handleBiliDanmuEvent(payload) {
       room.status = payload.status || room.status;
       renderLiveIfNeeded();
       break;
-    case 'reconnecting':
+    case 'reconnecting': {
       room.connecting = false;
       room.connected = false;
-      room.status = `连接中断（code ${payload.code ?? '未知'}），3 秒后自动重连 ${payload.tries}/3…`;
+      // 主进程改成指数退避 + 长期后台重试了，别再写死「3 秒 / 3 次」误导用户。
+      // delayMs 是主进程可选带的本次退避时长，没带就只说「按退避策略重试」。
+      const wait = Number(payload.delayMs || 0);
+      const waitText = wait > 0
+        ? `，${Math.max(1, Math.round(wait / 1000))} 秒后重试`
+        : '，正在按退避策略重试';
+      room.status = `连接中断（code ${payload.code ?? '未知'}），第 ${payload.tries || 1} 次重连${waitText}…`;
       renderLiveIfNeeded();
       break;
+    }
     case 'closed':
       room.connected = false;
       room.connecting = false;
@@ -1975,6 +1985,12 @@ function closeLiveRuntime(room) {
     } catch {
       /* 主进程没起来时忽略 */
     }
+  }
+  // 房间关了就把它没处理完的点歌队列清掉，别往已断开的歌单里继续插歌。
+  try {
+    if (typeof forgetLiveQueue === 'function') forgetLiveQueue(room.platform === 'bilibili' ? room.roomId : room.id);
+  } catch {
+    /* 队列模块没加载时忽略 */
   }
 }
 
@@ -2157,7 +2173,7 @@ async function startBridgeLive(room) {
       }
       for (const item of payload.messages || []) {
         room.lastDanmaku = String(item.text || '').slice(0, 80);
-        handleLiveDanmaku(item.text, item.user);
+        handleLiveDanmaku(item.text, item.user, room.id);
       }
       if (payload.messages?.length) {
         const lastNode = document.querySelector(`#live-last-${room.id}`);
@@ -2178,4 +2194,9 @@ async function startBridgeLive(room) {
   }
 }
 
-let liveRequestBusy = false;
+/*
+ * 旧版 `let liveRequestBusy = false;` 已删除：点歌并发控制改为
+ * song-playlist.js 里的「每房间串行队列 + 关键词去重 + 单条硬超时」
+ * （liveRequestQueues / handleLiveDanmaku），房间之间互不阻塞、也不会
+ * 因某个 await 卡死而永久丢弹幕。
+ */

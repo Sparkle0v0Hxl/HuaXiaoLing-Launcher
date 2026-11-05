@@ -2611,6 +2611,11 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
+    case 'reset-runtime-root': {
+      await api.updateSettings({ runtimeRoot: '' });
+      toast('已恢复默认运行时目录', 'success');
+      break;
+    }
     case 'settings-tab': {
       const key = element.dataset.value;
       if (!key || !SETTINGS_TABS.some(([id]) => id === key)) break;

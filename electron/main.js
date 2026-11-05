@@ -5717,10 +5717,28 @@ async function applyStaged(staged) {
   return { ok: true, restarting: true, version: staged.version };
 }
 
+/** 增量包下载最多换几条线路。只是「更快」，绝不能成为「更新不了」的新原因。 */
+const DELTA_DOWNLOAD_ATTEMPTS = 3;
+const RETRYABLE_NET_CODES = /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|ENETRESET|ESOCKETTIMEDOUT|ENOTFOUND|EAI_AGAIN|ABORTED)$/;
+const RETRYABLE_NET_MESSAGE = /(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ABORTED|AbortError|timeout|超时|没有响应|连不上|连接.*失败|传输失败|停滞|socket hang up|read E|HTTP 5\d\d|下载失败（5\d\d）)/i;
+
+/** 只认瞬时网络故障：校验不过、基准不符、路径非法这些重试多少次都不会变。 */
+function isDeltaRetryable(error) {
+  if (!error) return false;
+  if (error.retryable === false) return false;
+  const code = String(error.code || (error.cause && error.cause.code) || '').toUpperCase();
+  if (RETRYABLE_NET_CODES.test(code) || /^UND_ERR_/.test(code)) return true;
+  if (error.timeout === true || error.name === 'AbortError' || error.name === 'TimeoutError') return true;
+  return RETRYABLE_NET_MESSAGE.test(String(error.message || error || ''));
+}
+
 /**
  * 下载并重建增量包，产出 staged（之后交给 applyStaged 走同一套备份+覆盖+重启）。
  * 任何异常都往外抛，由 startUpdate 捕获后退回整包——增量只是「更快」，绝不能成为
  * 「更新不了」的新原因。
+ *
+ * 仅「下载」这一步做有限重试：每条线路失败就换下一条候选（镜像前置、直连末尾兜底）。
+ * sha256 校验与 stageDelta 是确定性失败，放循环外，重试只会白等。
  */
 async function downloadAndStageDelta({ delta, manifest, tempBase }) {
   const dir = path.join(tempBase, 'download');
@@ -5733,32 +5751,60 @@ async function downloadAndStageDelta({ delta, manifest, tempBase }) {
   send('update:progress', { percent: 0, phase: 'delta', label: '正在下载增量更新…' });
   let percent = -1;
   let lastPushAt = 0;
-  try {
-    await updater.downloadToFile({
-      url: delta.url,
-      dest: deltaPath,
-      expectedSize: delta.size,
-      onProgress: (progress) => {
-        const next = Math.round(progress.percent);
-        const now = Date.now();
-        // 百分比变了就推；没变但过了 800ms 也推，慢速时界面才不是死的
-        if (next === percent && now - lastPushAt < 800 && next !== 100) return;
-        percent = next;
-        lastPushAt = now;
-        updateStatus = { ...updateStatus, percent: next, delta: true, speed: progress.speed || 0 };
-        const speedText = progress.speed
-          ? ` · ${(progress.speed / 1048576).toFixed(1)} MB/s`
-          : '';
-        send('update:progress', {
-          percent: next,
-          phase: 'delta',
-          received: progress.received,
-          total: progress.total,
-          speed: progress.speed || 0,
-          label: `增量更新 ${next}%${speedText}`,
-        });
-      },
+  const onDeltaProgress = (progress) => {
+    const next = Math.round(progress.percent);
+    const now = Date.now();
+    // 百分比变了就推；没变但过了 800ms 也推，慢速时界面才不是死的
+    if (next === percent && now - lastPushAt < 800 && next !== 100) return;
+    percent = next;
+    lastPushAt = now;
+    updateStatus = { ...updateStatus, percent: next, delta: true, speed: progress.speed || 0 };
+    const speedText = progress.speed
+      ? ` · ${(progress.speed / 1048576).toFixed(1)} MB/s`
+      : '';
+    send('update:progress', {
+      percent: next,
+      phase: 'delta',
+      received: progress.received,
+      total: progress.total,
+      speed: progress.speed || 0,
+      label: `增量更新 ${next}%${speedText}`,
     });
+  };
+  try {
+    let lastError = null;
+    let downloaded = false;
+    for (let attempt = 0; attempt < DELTA_DOWNLOAD_ATTEMPTS; attempt += 1) {
+      try {
+        // 每条线路只下增量包（几百 KB）；失败就换下一批候选线路重来。
+        // 镜像前置、裸直连末尾兜底，避免每次先卡满一次直连超时。
+        await updater.downloadToFile({
+          url: delta.url,
+          dest: deltaPath,
+          expectedSize: delta.size,
+          onProgress: onDeltaProgress,
+          sourceStartIndex: attempt,
+        });
+        downloaded = true;
+        break;
+      } catch (error) {
+        await fsp.rm(deltaPath, { force: true }).catch(() => {});
+        lastError = error;
+        // 校验/基准/路径这类确定性失败不会因重试变好，直接抛给 startUpdate 退回整包
+        if (!isDeltaRetryable(error) || attempt >= DELTA_DOWNLOAD_ATTEMPTS - 1) throw error;
+        const reason = error && error.message ? error.message : String(error);
+        writeLaunchLog(`delta download attempt ${attempt + 1} 失败：${reason}`);
+        percent = -1;
+        lastPushAt = 0;
+        send('update:progress', {
+          percent: 0,
+          phase: 'delta',
+          label: `增量下载线路 ${attempt + 1} 失败，正在换线路重试…`,
+        });
+        await delay(300 * (attempt + 1));
+      }
+    }
+    if (!downloaded) throw lastError || new Error('增量包下载失败');
     const actual = await updater.sha256File(deltaPath);
     if (actual !== delta.sha256) throw new Error('增量包校验没通过（sha256 对不上）');
     send('update:progress', { percent: 100, phase: 'delta-apply', label: '正在按增量重建文件…' });
@@ -10373,6 +10419,92 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   const WS = globalThis.WebSocket || WebSocket;
   const biliDanmuConnections = new Map();
 
+  /*
+   * 组2：B 站弹幕「老捕捉不到 / 过一会就断」的稳定性修复参数。
+   * 以前 open 回调一触发就发 open 事件当「已连接」，但服务器可能只是接受了 TCP
+   * 握手、根本没推数据；也没有读超时，长连接变僵尸后永远等不到重连。
+   */
+  const BILI_FRAME_TIMEOUT = 60000;     // 60s 没收到任意帧（含 op=3 心跳回应）视为僵尸连接
+  const BILI_WATCHDOG_TICK = 15000;     // watchdog 每 15s 巡检一次
+  const BILI_FIRST_DANMU_WAIT = 15000;  // 真连上后若这段时间仍无弹幕，只给一句「房间较安静」提示（不重连）
+  const BILI_RECONNECT_BASE = 3000;     // 指数退避基数
+  const BILI_RECONNECT_MAX = 60000;     // 退避上限
+  const BILI_DECODE_LOG_LIMIT = 5;      // 解码失败日志按连接限流，别刷屏
+  const BILI_DANMU_LOG_LIMIT = 20;      // 弹幕落日志前 20 条（原来只记 5 条）
+
+  // 判断这个 state 是不是「当前仍挂在 Map 上、且没被用户主动关掉」的连接。
+  // 同 roomId 重连/重连替换时，旧 state 的异步回调靠这个判断避免误伤新连接。
+  function biliIsCurrent(state) {
+    return Boolean(state) && !state.closedByUser && biliDanmuConnections.get(state.roomId) === state;
+  }
+
+  // 统一删除：先清掉全部定时器，且只删「自己」，避免旧连接把新连接从 Map 里挤掉。
+  function biliRemoveConnection(state) {
+    biliClearAllTimers(state);
+    if (biliDanmuConnections.get(state.roomId) === state) biliDanmuConnections.delete(state.roomId);
+  }
+
+  // 限流日志：同一 state 同一 kind 最多写 limit 条，最后一条附带「已限流」说明。
+  function biliLogLimited(state, kind, limit, message) {
+    if (!state || !state.logCounts) return;
+    const key = String(kind);
+    const seen = state.logCounts[key] || 0;
+    if (seen >= limit) return;
+    state.logCounts[key] = seen + 1;
+    writeLaunchLog(seen + 1 === limit ? `${message}（后续同类日志已限流省略）` : message);
+  }
+
+  // 清掉「单条 ws 连接」的定时器（换 host / 断开时用）；reconnectTimer 是跨重连的，不动。
+  function biliClearWsTimers(state) {
+    if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+    if (state.watchdog) { clearInterval(state.watchdog); state.watchdog = null; }
+    if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
+  }
+
+  // 连接彻底删除时把所有定时器都清掉，避免后台重试 / watchdog 泄漏。
+  function biliClearAllTimers(state) {
+    biliClearWsTimers(state);
+    if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
+  }
+
+  // 第 n 次重连的退避：3s、6s、12s、24s、48s、60s、60s…
+  function biliBackoff(tries) {
+    return Math.min(BILI_RECONNECT_BASE * Math.pow(2, Math.max(0, tries - 1)), BILI_RECONNECT_MAX);
+  }
+
+  /*
+   * 统一的「断线 -> 后台重连」入口：指数退避 + 长期重试，不再有「重连 3 次就彻底 closed」。
+   * 候选 host 全耗尽、被踢、1006、watchdog 超时都走这里，由 biliReconnect 重取 token 重来一轮。
+   */
+  function biliScheduleReconnect(state, code, opts = {}) {
+    if (state.closedByUser || !biliIsCurrent(state) || state.reconnectArmed) return;
+    // 先置 armed 再 close：下面 ws.close() 会在下一轮异步触发 onDrop，
+    // 不能让它又排一次重连、更不能让它误去连下一个 host。
+    state.reconnectArmed = true;
+    // closeWs=false 用于 watchdog 这类「调用方已自己 close」的场景，避免重复关。
+    if (opts.closeWs !== false) { try { state.ws && state.ws.close(); } catch {} }
+    biliClearWsTimers(state);
+    state.connected = false;
+    state.forceToken = true;   // 异常断开：下次 biliReconnect 一律强制重取 token
+    const tries = (state.retryCount || 0) + 1;
+    state.retryCount = tries;
+    state.lastRetryAt = Date.now();
+    const delay = biliBackoff(tries);
+    if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+    writeLaunchLog(`danmu ${state.roomId}: 连接断开（code ${code ?? '未知'}），第 ${tries} 次重连，${Math.round(delay / 1000)}s 后重试`);
+    safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'reconnecting', tries, code, delayMs: delay });
+    // 保留原有 1006 / 被踢提示文案，只是从「彻底 closed」改成后台重连期间的状态提示
+    const statusText = opts.status || (code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : undefined);
+    if (statusText) {
+      safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'status', status: statusText });
+    }
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      state.reconnectArmed = false;
+      biliReconnect(state);
+    }, delay);
+  }
+
   // 取弹幕鉴权：与 live:danmu-info 共用同一套 wbi 签名逻辑，重连时主进程自己取，不绕回渲染层。
   async function getBiliDanmuInfo(roomId) {
     const id = String(roomId || '').trim();
@@ -10465,6 +10597,22 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     }
   }
 
+  // 只有服务器回了 op=8（确认 auth 包）才算「真连上」：发 open 事件、置 connected。
+  // 空 key 的连接即使握手成功也拿不到 op=8，所以旧版那种「已连接（未取得弹幕鉴权）」
+  // 的假状态不会再出现；握手成功但迟迟不推数据则由 watchdog 兜底。
+  function biliMarkReallyConnected(state) {
+    if (state.connected) return;
+    state.connected = true;
+    // 已经拿到首条弹幕，别再让「等首条弹幕」的超时器误触发换线路
+    if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
+    // 真正稳定收到弹幕后重置退避计数（只在成功的这一刻清零，不再按「>5 分钟」丢计数）
+    state.retryCount = 0;
+    state.lastRetryAt = 0;
+    biliLogLimited(state, 'really-connected', BILI_DECODE_LOG_LIMIT,
+      `danmu ${state.roomId}: 已确认真实连上（收到首条弹幕），重连计数清零`);
+    safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'open', status: '已连接' });
+  }
+
   function biliDecodeMain(buf, roomId, sender, state) {
     let offset = 0;
     while (offset + 16 <= buf.length) {
@@ -10473,16 +10621,34 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
       const version = buf.readUInt16BE(offset + 6);
       const operation = buf.readUInt32BE(offset + 8);
       if (!total || total > buf.length - offset) break;
+      // 只要进了这个循环就是「收到了一帧」：刷新 watchdog 的读时间戳。
+      state.lastFrameAt = Date.now();
       const body = buf.subarray(offset + header, offset + total);
       if (operation === 8) {
+        // 服务器确认 auth 包：空 key / 被风控的连接永远收不到 op=8（配合 connect 处的空 token 拦截），
+        // 所以拿到它才算「真连上」——不会再出现「已连接（未取得弹幕鉴权）」那种一条弹幕都没有的假状态。
         safeSend(sender, 'live:danmu-event', { roomId, type: 'pushing' });
+        biliMarkReallyConnected(state);
+        // 安静直播间可能几分钟都没弹幕：只给一句提示，绝不因「没弹幕」就换线路重连
+        // （旧版 15 秒强制重连反而制造「过一会就断」）。真正的僵尸连接交给 watchdog。
+        if (!state.waitFirstDanmuTimer) {
+          state.waitFirstDanmuTimer = setTimeout(() => {
+            state.waitFirstDanmuTimer = null;
+            if (state.connected && biliIsCurrent(state) && state.captured === 0) {
+              safeSend(sender, 'live:danmu-event', { roomId, type: 'status', status: '已连上，房间暂时没有弹幕' });
+            }
+          }, BILI_FIRST_DANMU_WAIT);
+        }
+      } else if (operation === 3) {
+        // 心跳回应 / 人气包：服务器还活着，刷新读时间戳（watchdog 已统一刷新），不必解析内容。
       } else if (operation === 5) {
         if (version === 2 || version === 3) {
           try {
             const inflated = version === 3 ? zlib.brotliDecompressSync(body) : zlib.inflateSync(body);
             biliDecodeMain(inflated, roomId, sender, state);
-          } catch {
-            /* 损坏的压缩帧忽略 */
+          } catch (error) {
+            biliLogLimited(state, `inflate-v${version}`, BILI_DECODE_LOG_LIMIT,
+              `danmu ${roomId}: op 5 压缩帧解压失败 version=${version} operation=${operation}：${error.message}`);
           }
         } else {
           try {
@@ -10493,16 +10659,15 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
                 const message = String(item.info?.[1] || '');
                 const user = String(item.info?.[2]?.[1] || '');
                 state.captured += 1;
-                /*
-                 * 前 5 条落日志：卡片上「最近弹幕」还是 — 时，翻 launch.log 就能分清
-                 * 「主进程根本没收到」和「收到了但渲染层没画出来」。
-                 */
-                if (state.captured <= 5) writeLaunchLog(`danmu ${roomId}: ${user}: ${message}`);
+                state.lastMessageAt = Date.now();  // 真正的「最后一条弹幕」时间（token 复用看它）
+                biliMarkReallyConnected(state);    // 首条弹幕 = 真连上，发 open
+                if (state.captured <= BILI_DANMU_LOG_LIMIT) writeLaunchLog(`danmu ${roomId}: ${user}: ${message}`);
                 safeSend(sender, 'live:danmu-event', { roomId, type: 'danmu', message, user, captured: state.captured });
               }
             }
-          } catch {
-            /* 非 JSON 包忽略 */
+          } catch (error) {
+            biliLogLimited(state, 'json-parse', BILI_DECODE_LOG_LIMIT,
+              `danmu ${roomId}: op 5 非 JSON 包 operation=${operation} version=${version}：${error.message}`);
           }
         }
       }
@@ -10511,14 +10676,12 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   }
 
   function biliOpenWs(state) {
+    if (!biliIsCurrent(state)) return;
     const urls = state.urls;
     if (state.urlIndex >= urls.length) {
-      safeSend(state.sender, 'live:danmu-event', {
-        roomId: state.roomId,
-        type: 'closed',
-        status: `连接失败：${urls.length} 个弹幕服务器都不通`,
-      });
-      biliDanmuConnections.delete(state.roomId);
+      // 一轮候选全失败：不再直接判死刑，交给后台重连重取 token 再来一轮
+      // （closeWs:false 因为此刻没有在途 ws，避免重复关）。
+      biliScheduleReconnect(state, 1006, { closeWs: false, status: '弹幕服务器暂时都不通，正在重试…' });
       return;
     }
     let ws = null;
@@ -10541,22 +10704,34 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     wsOn(ws, 'open', () => {
       state.opened = true;
       state.openedAt = Date.now();
+      state.lastFrameAt = Date.now();
+      // 发鉴权包。旧的 try/catch 会把失败吞掉、让界面停在假「已连接」，这里记进 launch.log。
       try {
         ws.send(biliPacketMain({ uid: 0, roomid: Number(state.roomId), protover: 2, platform: 'web', type: 2, key: state.token }));
-      } catch {}
+      } catch (error) {
+        biliLogLimited(state, 'auth-send', BILI_DECODE_LOG_LIMIT,
+          `danmu ${state.roomId}: 发送鉴权包失败：${error.message}`);
+      }
+      // 每次新 ws 都先清掉上一条 ws 遗留的定时器，避免叠加。
       if (state.heartbeat) clearInterval(state.heartbeat);
+      if (state.watchdog) clearInterval(state.watchdog);
+      if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
       state.heartbeat = setInterval(() => {
         if (ws.readyState === WS.OPEN) {
           try { ws.send(biliPacketMain({}, 2)); } catch {}
         }
       }, 20000);
-      state.connected = true;
-      if (state.lastRetryAt && Date.now() - state.lastRetryAt > 5 * 60 * 1000) state.retryCount = 0;
-      safeSend(state.sender, 'live:danmu-event', {
-        roomId: state.roomId,
-        type: 'open',
-        status: state.token ? '已连接' : '已连接（未取得弹幕鉴权，可能收不到弹幕）',
-      });
+      // 读超时 watchdog：只发心跳不验活，TCP 半开时会一直显示「已连接」却不重连。
+      // 超过 BILI_FRAME_TIMEOUT 没收到任意帧（含 op=3 心跳回应）就主动重连。
+      state.watchdog = setInterval(() => {
+        if (!biliIsCurrent(state) || state.reconnectArmed) return;
+        if (Date.now() - (state.lastFrameAt || 0) > BILI_FRAME_TIMEOUT) {
+          writeLaunchLog(`danmu ${state.roomId}: ${Math.round(BILI_FRAME_TIMEOUT / 1000)}s 没收到任何数据，判定僵尸连接，主动重连`);
+          biliScheduleReconnect(state, 1006, { status: '连接长时间没有数据，正在重连…' });
+        }
+      }, BILI_WATCHDOG_TICK);
+      // 不再在这里发 open / 置 connected：等服务器回 op=8 由 biliMarkReallyConnected 发，
+      // 彻底消除「TCP 握手成功就被当成已连接」和「一条弹幕都没推」的假状态。
     });
     wsOn(ws, 'message', (data) => {
       let buf;
@@ -10569,52 +10744,51 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     const onDrop = (code) => {
       if (done) return;
       done = true;
-      if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+      biliClearWsTimers(state);
       state.connected = false;
-      if (!state.opened) { goNext(); return; }
-      if (state.openedAt && Date.now() - state.openedAt < 5000 && state.urlIndex + 1 < urls.length) {
+      // 用户主动断开 / 旧连接已被替换：静默收尾，绝不往渲染层发事件。
+      // 事件是按 roomId 路由的，旧连接若发 'closed' 会误伤同一 roomId 的新卡片
+      // （手动重连时闪一下「已断开」），而这正是「过一会断开」要消除的观感。
+      // 主动断开时卡片本就由渲染层同步移除，不需要这条 closed 事件。
+      if (state.closedByUser || !biliIsCurrent(state)) {
+        if (biliDanmuConnections.get(state.roomId) === state) biliRemoveConnection(state);
+        return;
+      }
+      // 握手都没成功、或连上 5 秒内立刻被踢：先在本轮候选里换下一个 host。
+      // 这两种都算「线路不可用」而非稳定连接断开，换 host 更对症。
+      if (!state.opened || (state.openedAt && Date.now() - state.openedAt < 5000 && state.urlIndex + 1 < urls.length)) {
         safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'status', status: '这个弹幕服务器连上就被踢，换一个…' });
         goNext();
         return;
       }
-      if (state.closedByUser) {
-        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'closed', status: '已断开' });
-        biliDanmuConnections.delete(state.roomId);
-        return;
-      }
-      const tries = (state.retryCount || 0) + 1;
-      if (tries > 3) {
-        const hint = code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : '把这段发给作者排查';
-        safeSend(state.sender, 'live:danmu-event', {
-          roomId: state.roomId,
-          type: 'closed',
-          status: `已断开（重连 3 次都失败 · code ${code ?? '未知'}）：${hint}`,
-          code,
-        });
-        biliDanmuConnections.delete(state.roomId);
-        return;
-      }
-      state.retryCount = tries;
-      state.lastRetryAt = Date.now();
-      safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'reconnecting', tries, code });
-      setTimeout(() => biliReconnect(state), 3000);
+      // 真正的一次掉线：统一走指数退避 + 长期后台重连，不再「重连 3 次就彻底 closed」。
+      // 先置 armed（防止 ws.close 的异步 onDrop 二次入队），且本次 ws 已断不要再 close。
+      biliScheduleReconnect(state, code, { closeWs: false, status: code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : undefined });
     };
     wsOn(ws, 'error', () => { if (!done) onDrop(1006); });
     wsOn(ws, 'close', (code) => onDrop(code));
   }
 
   async function biliReconnect(state) {
-    // token 5 分钟内直接复用，否则重新取（主进程自带 wbi 签名，不用回渲染层）
-    if (!(state.lastDanmuAt && Date.now() - state.lastDanmuAt < 5 * 60 * 1000 && state.token)) {
+    if (state.closedByUser || !biliIsCurrent(state)) return;
+    // 「最后弹幕时间」用真正的 lastMessageAt（旧 lastDanmuAt 其实是建连时间，命名误导）。
+    // 异常断开（forceToken）或 5 分钟没收到过弹幕，一律重取 token，不再拿被风控踢掉的旧 key 重试。
+    const recentMessage = state.lastMessageAt && Date.now() - state.lastMessageAt < 5 * 60 * 1000;
+    if (state.forceToken || !state.token || !recentMessage) {
       try {
         const info = await getBiliDanmuInfo(state.roomId);
+        // 取 token 是异步的，期间用户可能已断开或该连接已被替换。
+        if (state.closedByUser || !biliIsCurrent(state)) return;
         state.token = info.token;
         state.hosts = info.hosts;
-        state.lastDanmuAt = Date.now();
+        state.lastMessageAt = Date.now();
+        state.forceToken = false;
       } catch (error) {
-        if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
-        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'closed', status: `重连失败：${error.message}` });
-        biliDanmuConnections.delete(state.roomId);
+        if (state.closedByUser || !biliIsCurrent(state)) return;
+        biliLogLimited(state, 'reconnect-token', BILI_DECODE_LOG_LIMIT,
+          `danmu ${state.roomId}: 重连取鉴权失败：${error.message}`);
+        // 不彻底放弃：按退避继续后台重试（旧版这里直接判死刑）。
+        biliScheduleReconnect(state, 1006);
         return;
       }
     }
@@ -10627,21 +10801,35 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     const roomId = String(payload.roomId || '');
     if (!roomId) return;
     const existing = biliDanmuConnections.get(roomId);
-    if (existing) { try { existing.ws && existing.ws.close(); } catch {} biliDanmuConnections.delete(roomId); }
+    if (existing) {
+      existing.closedByUser = true;
+      biliRemoveConnection(existing);   // 清掉旧连接的全部定时器 + 只删自己
+      try { existing.ws && existing.ws.close(); } catch {}
+    }
+    const token = String(payload.token || '');
+    const hosts = Array.isArray(payload.hosts) ? payload.hosts : [];
     const state = {
       roomId,
-      token: String(payload.token || ''),
-      hosts: Array.isArray(payload.hosts) ? payload.hosts : [],
-      lastDanmuAt: Date.now(),
+      token,
+      hosts,
+      lastDanmuAt: Date.now(),       // 保留旧字段以兼容，真正复用判断看 lastMessageAt
+      lastMessageAt: 0,             // 真正的「最后一条弹幕」时间
+      lastFrameAt: Date.now(),      // watchdog 的读时间戳
       sender: event.sender,
-      urls: biliBuildWsUrls(Array.isArray(payload.hosts) ? payload.hosts : []),
+      urls: biliBuildWsUrls(hosts),
       urlIndex: 0,
       opened: false,
       openedAt: 0,
       retryCount: 0,
       lastRetryAt: 0,
       closedByUser: false,
+      forceToken: false,
+      reconnectArmed: false,
+      reconnectTimer: null,
       heartbeat: null,
+      watchdog: null,
+      waitFirstDanmuTimer: null,
+      logCounts: {},
       captured: 0,
       ws: null,
       connected: false,
@@ -10649,7 +10837,13 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     biliDanmuConnections.set(roomId, state);
     if (typeof WS !== 'function') {
       safeSend(event.sender, 'live:danmu-event', { roomId, type: 'closed', status: '主进程缺少 WebSocket 支持' });
-      biliDanmuConnections.delete(roomId);
+      biliRemoveConnection(state);
+      return;
+    }
+    // 空 token 拦截：不带 key 服务器照样接受连接，但一条弹幕都不会推（旧版还会显示假「已连接」）。
+    if (!token) {
+      safeSend(event.sender, 'live:danmu-event', { roomId, type: 'closed', status: '弹幕鉴权失败：没有拿到 key，请重新连接或稍后再试' });
+      biliRemoveConnection(state);
       return;
     }
     biliOpenWs(state);
@@ -10659,9 +10853,8 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     const state = biliDanmuConnections.get(String(roomId || ''));
     if (!state) return;
     state.closedByUser = true;
-    if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
+    biliRemoveConnection(state);   // 清 watchdog / 心跳 / 退避定时器 + 只删自己
     try { state.ws && state.ws.close(); } catch {}
-    biliDanmuConnections.delete(String(roomId));
   });
 
   /*
@@ -14708,6 +14901,56 @@ function musicLoginWindow(target) {
         /* 没崩溃过就没有这个文件 */
       }
 
+      /*
+       * stage 失败时写的「解压结构诊断」：最有用的一份证据，以前用户拿不到——
+       * 它在 vela-update-* 里，下次启动就被 cleanTemp 删了。所以 stage 现在会
+       * 额外往 tempBase 根写一份（cleanTemp 不删根文件），这里两处都找，取最新的。
+       */
+      const findLatestStageDebug = async (limit = 12000) => {
+        const found = [];
+        for (const dir of dirs) {
+          try {
+            const file = path.join(dir, 'stage-debug.json');
+            const stat = await fsp.stat(file);
+            found.push({ path: file, mtimeMs: stat.mtimeMs });
+          } catch {
+            /* 没有根级兜底副本就算了 */
+          }
+        }
+        for (const dir of dirs) {
+          let entries;
+          try {
+            entries = await fsp.readdir(dir, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const entry of entries) {
+            if (!entry.isDirectory() || !entry.name.startsWith('vela-update-') || entry.name.includes('staging')) continue;
+            const file = path.join(dir, entry.name, 'stage-debug.json');
+            try {
+              const stat = await fsp.stat(file);
+              found.push({ path: file, mtimeMs: stat.mtimeMs });
+            } catch {
+              /* 这个目录里没有诊断文件 */
+            }
+          }
+        }
+        if (!found.length) return null;
+        found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        const latest = found[0];
+        let text = (await fsp.readFile(latest.path, 'utf8')).replace(/^\uFEFF/, '').trim();
+        if (text.length > limit) text = text.slice(-limit);
+        return { path: latest.path, text };
+      };
+      const stageDebug = await findLatestStageDebug();
+      let launchLog = '';
+      try {
+        const raw = await fsp.readFile(path.join(app.getPath('userData'), 'launch.log'), 'utf8');
+        launchLog = raw.length > 6000 ? raw.slice(-6000) : raw;
+      } catch {
+        /* 没记录过就没有这个文件 */
+      }
+
       const cfg = store?.data?.settings || {};
       const settingsSummary = {
         主题: `${cfg.theme || '跟随系统'} / 强调色 ${cfg.accent || '默认'}`,
@@ -14742,6 +14985,10 @@ function musicLoginWindow(target) {
           { title: '覆盖安装日志 update-log.txt', text: await readLog('update-log.txt') },
           { title: '自愈日志 self-heal.log', text: await readLog('self-heal.log', 6000) },
           { title: '崩溃日志 crash.log（尾部）', text: crashLog },
+          { title: '启动/运行日志 launch.log（尾部 6000 字）', text: launchLog },
+          ...(stageDebug
+            ? [{ title: `最近一次解压诊断 stage-debug.json：${stageDebug.path}`, text: stageDebug.text }]
+            : []),
         ],
       });
       await fsp.mkdir(path.dirname(target), { recursive: true }).catch(() => {});

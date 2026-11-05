@@ -334,10 +334,20 @@ const liveRuntimes = new Map();
  * 主进程持有长连接（Node 栈，实测 95 秒以上稳定），渲染层约 70 秒被本机网络层掐断的
  * 问题在这一层根治，无需渲染层再做任何 WebSocket 建连 / 重连。
  */
+let unsubscribeDanmu = null;
 try {
-  api.live.onDanmuEvent(handleBiliDanmuEvent);
+  // preload 的 onDanmuEvent 现在返回解绑函数；再次订阅前先移除旧的 listener，
+  // 避免重复订阅把 listener 越堆越多、同一条弹幕被处理多次。
+  if (typeof unsubscribeDanmu === 'function') unsubscribeDanmu();
+  unsubscribeDanmu = api.live.onDanmuEvent(handleBiliDanmuEvent) || null;
 } catch (error) {
-  /* 旧版主进程没暴露该桥时静默降级，不影响其它功能 */
+  // 旧版主进程可能没暴露该桥：不再静默降级，给出可见提示，方便排查「为什么没弹幕」。
+  console.warn('[弹幕] 事件桥订阅失败，弹幕点歌将收不到主进程事件', error);
+  try {
+    if (typeof toast === 'function') toast('弹幕事件桥订阅失败，可能收不到弹幕', 'error');
+  } catch {
+    /* toast 自身异常不该拖垮启动流程 */
+  }
 }
 
 try {
@@ -705,6 +715,13 @@ function humanError(error) {
   if (/\bENOSPC\b/.test(text)) return '磁盘空间不足，清理一些空间后再试。';
   if (/\bEACCES\b/.test(text)) {
     return `没有权限写入${at ? `：${at}` : ''}。换一个目录，或用管理员身份运行启动器。`;
+  }
+  /*
+   * 连接被重置：Node socket 层抛的是 read ECONNRESET 这种英文原文，用户看不懂，
+   * 而且它几乎只发生在访问国际服清单接口时。翻成人话并直接给出可操作指引。
+   */
+  if (/\bECONNRESET\b|\bENETRESET\b|socket hang up|连接被重置|连接已被重置/i.test(text)) {
+    return '网络连接被重置（连接中断）。读取国际服官方清单时容易被掐断：请确认加速器/代理覆盖了 sg-hyp-api.hoyoverse.com 与 sg-downloader-api.hoyoverse.com 两个域名，或换个节点、关闭加速器改直连后再试。';
   }
   /*
    * ABORTED / ERR_ABORTED 不是用户能理解的词——它是「请求被 signal 掐断」的内部
