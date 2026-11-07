@@ -141,10 +141,44 @@ const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 async function getSql() {
+  // 启动器被原地覆盖 app.asar 后，旧进程可能还缓存着旧包的 asar 头，用旧偏移
+  // 读新文件会正好落进 sql-wasm.js 的源码文本里，把 "SIni" 当成 wasm 喂给
+  // WebAssembly.instantiate，抛晦涩的 "expected magic word"。磁盘上的 wasm
+  // 本身是好的，代码修不了陈旧头，只能在喂进去之前快速失败、给一句能照做的
+  // 中文指引。预检读的是和 initSqlJs 的 locateFile 完全相同的路径，陈旧头时
+  // 两者会读到同样的错字节，所以预检能提前拦住；完全退出重开后即可恢复。
+  const hint = '抽卡数据库组件读取异常，请完全退出启动器后重新打开';
   if (!sqlModule) {
-    sqlModule = await initSqlJs({
-      locateFile: (file) => path.join(__dirname, 'vendor', file),
-    });
+    const wasmPath = path.join(__dirname, 'vendor', 'sql-wasm.wasm');
+    let head;
+    try {
+      head = fs.readFileSync(wasmPath).subarray(0, 4);
+    } catch {
+      throw new Error(hint);
+    }
+    if (
+      head.length !== 4 ||
+      head[0] !== 0x00 ||
+      head[1] !== 0x61 ||
+      head[2] !== 0x73 ||
+      head[3] !== 0x6d
+    ) {
+      // 魔数不是 \0asm：wasm 内容被陈旧 asar 头读歪了。抛错前 sqlModule 仍为
+      // null，下次调用（重启后）会重新预检重试。
+      throw new Error(hint);
+    }
+    try {
+      // 保留原有 locateFile 初始化方式：纯 Node 与 asar 内都已验证可用。
+      sqlModule = await initSqlJs({
+        locateFile: (file) => path.join(__dirname, 'vendor', file),
+      });
+    } catch (error) {
+      const text = String(error && error.message ? error.message : error || '');
+      // 其它 wasm 初始化异常（如 Aborted(CompileError...)）也统一成人话指引，
+      // 别让晦涩英文冒泡；不含这些关键词的错误原样抛出，不吞。
+      if (/magic word|WebAssembly/i.test(text)) throw new Error(hint);
+      throw error;
+    }
   }
   return sqlModule;
 }

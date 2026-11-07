@@ -7828,6 +7828,67 @@ body.sidebar-collapsed .sidebar-toggle {
   margin-bottom: 10px;
 }
 
+.playtime-trend {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+
+.playtime-trend-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.playtime-trend-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.playtime-trend-head small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.playtime-trend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 96px;
+}
+
+.trend-bar {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  border-radius: 4px 4px 0 0;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.trend-bar.is-today {
+  background: var(--accent-soft);
+}
+
+.trend-bar-fill {
+  display: block;
+  width: 100%;
+  min-height: 2px;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+}
+
+.trend-bar.is-today .trend-bar-fill {
+  background: var(--accent-text);
+}
+
 .playtime-total,
 .playtime-kpi {
   border: 1px solid var(--line);
@@ -10306,7 +10367,7 @@ body.start-mode .view {
   position: absolute;
   inset: 0 0 auto;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--notice-accent, var(--accent)), transparent);
+  background: linear-gradient(90deg, transparent, var(--notice-accent, var(--accent-text)), transparent);
   opacity: 0.7;
 }
 
@@ -10328,7 +10389,7 @@ body.start-mode .view {
   width: 36px;
   height: 36px;
   flex: none;
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
   border: 1px solid var(--line);
   border-radius: 11px;
   background: var(--accent-soft);
@@ -10364,7 +10425,7 @@ body.start-mode .view {
 
 .notice-card-count {
   margin-left: auto;
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
   font-family: var(--font-display);
   font-size: 22px;
   font-variant-numeric: tabular-nums;
@@ -10391,7 +10452,7 @@ body.start-mode .view {
 }
 
 .notice-item:hover .notice-item-text strong {
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
 }
 
 .notice-item-dot {
@@ -10400,7 +10461,7 @@ body.start-mode .view {
   margin-top: 6px;
   flex: none;
   border-radius: 50%;
-  background: var(--notice-accent, var(--accent));
+  background: var(--notice-accent, var(--accent-text));
   opacity: 0.65;
 }
 
@@ -10521,11 +10582,11 @@ body.start-mode .view {
   display: inline-flex;
   align-items: center;
   padding: 4px 11px;
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  border: 1px solid var(--notice-accent, var(--accent));
+  border: 1px solid var(--notice-accent, var(--accent-text));
   border-radius: 999px;
   background: var(--accent-soft);
 }
@@ -10594,7 +10655,7 @@ body.start-mode .view {
   max-width: 9em;
   overflow: hidden;
   padding: 2px 9px;
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -10620,7 +10681,7 @@ body.start-mode .view {
 }
 
 .news-pinned-row:hover .news-pinned-title strong {
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
 }
 
 .news-pinned-date {
@@ -10633,7 +10694,7 @@ body.start-mode .view {
 .news-pinned-badge {
   flex: none;
   padding: 2px 7px;
-  color: var(--notice-accent, var(--accent));
+  color: var(--notice-accent, var(--accent-text));
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;

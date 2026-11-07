@@ -149,7 +149,7 @@ const MUSIC_LOGIN_PRELOAD = path.join(__dirname, 'music-login-preload.js');
 const { importUigf, importsPath } = require('./gacha-import');
 // 抽卡记录云备份：纯逻辑模块（WebDAV 客户端 + 加密 + 合并），主进程只管配置与调度
 const gachaBackup = require('./gacha-backup');
-const { syncGacha } = require('./gacha-sync');
+const { syncGacha, extractUrlFromCache, cacheFiles: gachaCacheFiles } = require('./gacha-sync');
 const { syncEndfieldGacha } = require('./endfield-gacha');
 const { getStarRailFps, setStarRailFps } = require('./starrail-fps');
 const {
@@ -1171,6 +1171,22 @@ function targetExists(target) {  if (!target) return false;
   }
 }
 
+// 展示派生字段专用：同一路径 1.5 秒内不重复 statSync，避免每次推状态
+// 都对外接盘/网络盘做几十次同步 stat。实时校验（选路径、启动前）仍走
+// targetExists()，不要替换那 34 处。
+const targetExistsCache = new Map();
+function targetExistsCached(target) {
+  if (!target) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return true;
+  const now = Date.now();
+  const hit = targetExistsCache.get(target);
+  if (hit && now - hit.at < 1500) return hit.value;
+  const value = targetExists(target);
+  targetExistsCache.set(target, { at: now, value });
+  if (targetExistsCache.size > 200) targetExistsCache.clear();
+  return value;
+}
+
 const GAME_DETECTION = {  genshin: {
     exe: 'YuanShen.exe',
     registry: [
@@ -1913,10 +1929,12 @@ async function ensureNevernessCover() {
   if (!store) return;
   const game = store.data.games.find((item) => item.builtinKey === 'neverness');
   if (!game) return;
-  if (game.cover && /^covers\/official-neverness\.(?:jpg|jpeg|png)$/i.test(game.cover)) {
-    if (fs.existsSync(path.join(app.getPath('userData'), game.cover))) return;
-  }
+  const cachedCover =
+    game.cover && /^covers\/official-neverness\.(?:jpg|jpeg|png)$/i.test(game.cover)
+      ? path.join(app.getPath('userData'), game.cover)
+      : null;
   let imageUrl = 'https://nte.perfectworld.com/en/images/cover260930/slide2.jpg';
+  let liveVersion = '';
   try {
     const page = await fetch('https://nte.perfectworld.com/en/', {
       headers: { 'user-agent': BROWSER_UA, accept: 'text/html' },
@@ -1929,10 +1947,25 @@ async function ensureNevernessCover() {
       const version =
         html.match(/Version\s*([0-9]+(?:\.[0-9]+)?)/i) ||
         html.match(/web_event[_-]([0-9]+(?:\.[0-9]+)?)/i);
-      if (version && !game.version) game.version = version[1];
+      if (version) {
+        liveVersion = version[1];
+        // 首页正则抓到的版本不一定准（大版本更新后官网静态页常还挂着旧版本号），
+        // 只在没有版本号时预填，绝不覆盖已检测到的真实版本（比如从已装游戏读到的 1.5）。
+        if (!game.version) game.version = liveVersion;
+      }
     }
   } catch {
     /* use fallback hero */
+  }
+  // 已经有一张缓存图、且这次没抓到「新版本号」也没换封面地址就别反复下；
+  // 版本号变了（或首页换了新的 cover 路径）才重新拉，这样异环大版本更新后封面会自动跟着换。
+  if (
+    cachedCover &&
+    fs.existsSync(cachedCover) &&
+    (!liveVersion || liveVersion === game.nevernessCoverVersion) &&
+    (!game.nevernessCoverUrl || game.nevernessCoverUrl === imageUrl)
+  ) {
+    return;
   }
   try {
     const response = await fetch(imageUrl, {
@@ -1948,6 +1981,8 @@ async function ensureNevernessCover() {
     const fileName = `official-neverness${ext}`;
     await fsp.writeFile(path.join(dir, fileName), buffer);
     game.cover = `covers/${fileName}`;
+    if (liveVersion) game.nevernessCoverVersion = liveVersion;
+    game.nevernessCoverUrl = imageUrl;
     await store.saveNow();
     pushState(true);
   } catch (error) {
@@ -2433,8 +2468,38 @@ function ensureAnimatedStartBackgrounds(options = {}) {
       // 2.4.0 合并自对方分支 existingStartVideo：官方动图有 mp4 也有 webm
       // （崩坏3 的官方启动器背景就是 VP9/webm），缓存文件名跟随实际格式，
       // 按 mp4 → webm 顺序探测已存在且非空的那一个，不要一律写死 .mp4。
-      const cachedVideo = existingStartVideo(key);
-      const videoRelative = cachedVideo || `backgrounds/${key}.mp4`;
+      let cachedVideo = existingStartVideo(key);
+      let videoRelative = cachedVideo || `backgrounds/${key}.mp4`;
+
+      // 异环的启动页动图直接复用游戏目录里的官方 bg.mp4（本地文件），
+      // 这份文件会随游戏大版本更新（1.4 → 1.5 …）。上面 existingStartVideo
+      // 只要缓存存在就永久沿用，会导致启动器里的动图永远停在第一次复制时的
+      // 旧版本。这里在「本地源」前提下做一次新鲜度核对：源文件比缓存新、或
+      // 大小不同，就视为旧缓存失效，清掉它让后面的复制逻辑重拉最新一份。
+      if (key === 'neverness' && cachedVideo) {
+        const localSource = findNevernessStartVideo(game);
+        if (localSource) {
+          try {
+            const srcStat = fs.statSync(localSource);
+            const cacheAbs = path.join(app.getPath('userData'), videoRelative);
+            const cacheStat = fs.statSync(cacheAbs);
+            const stale =
+              cacheStat.size !== srcStat.size ||
+              cacheStat.mtimeMs < srcStat.mtimeMs - 1000;
+            if (stale) {
+              try {
+                fs.rmSync(cacheAbs, { force: true });
+              } catch {
+                /* 删不掉不影响后续覆盖 */
+              }
+              cachedVideo = '';
+              videoRelative = `backgrounds/${key}.mp4`;
+            }
+          } catch {
+            /* 源或缓存不可读就维持现状 */
+          }
+        }
+      }
 
       if (cachedVideo) {
         if (game.backgroundVideo !== videoRelative || game.startMotion !== 'video') {
@@ -2999,12 +3064,10 @@ function discoverServerRoots() {
       'Hypergryph',
       'Hypergryph\\Arknights Endfield',
       'Program Files\\Hypergryph\\Arknights Endfield',
+      'Starward',
     ]) {
       roots.add(path.join(drive, name));
     }
-  }
-  for (const extra of ['H:\\miHoYo切换器', 'H:\\Starward']) {
-    if (fs.existsSync(extra)) roots.add(extra);
   }
   return [...roots].filter((root) => {
     try {
@@ -4976,6 +5039,7 @@ async function detectBuiltins(onlyMissing = true) {
   return updated;
 }
 
+const configIniProbeCache = new Map();
 function ensureServers(game) {
   let changed = false;
   if (!Array.isArray(game.servers)) {
@@ -5017,15 +5081,21 @@ function ensureServers(game) {
      * 空的就按实际客户端补一次，别让服务器条一直显示「版本未知」。
      */
     if (server.root && !server.sophonVersion) {
-      try {
-        const text = fs.readFileSync(path.join(server.root, 'config.ini'), 'utf8');
-        const local = (text.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim();
-        if (local) {
-          server.sophonVersion = local;
-          changed = true;
+      const probe = configIniProbeCache.get(server.root);
+      if (probe && Date.now() - probe.at < 2000) {
+        // 2 秒内刚探过这个目录，别再重复同步读（多数情况这里根本没有 config.ini）
+      } else {
+        try {
+          const text = fs.readFileSync(path.join(server.root, 'config.ini'), 'utf8');
+          const local = (text.match(/game_version\s*=\s*([^\r\n]+)/i) || [])[1]?.trim();
+          if (local) {
+            server.sophonVersion = local;
+            changed = true;
+          }
+          configIniProbeCache.set(server.root, { at: Date.now() });
+        } catch {
+          configIniProbeCache.set(server.root, { at: Date.now() });
         }
-      } catch {
-        /* 没有 config.ini（非米哈游游戏 / 还没装完）就保持空 */
       }
     }
     if (!server.addedAt) server.addedAt = new Date().toISOString();
@@ -5163,7 +5233,7 @@ function publicGame(game) {
         : hasCustomCover
           ? startCoverUrlOf(game.cover)
           : game.coverUrl || coverUrl(game.cover),
-    installed: targetExists(game.target),
+    installed: targetExistsCached(game.target),
     running: running.has(game.id),
     // 启动时刻，前端拿它算「已运行多久」
     runningSince: running.get(game.id)?.startedAt || null,
@@ -5172,7 +5242,7 @@ function publicGame(game) {
     activeServerId: game.activeServerId || null,
     servers: (game.servers || []).map((server) => ({
       ...server,
-      exists: targetExists(server.path),
+      exists: targetExistsCached(server.path),
       /*
        * 目录本身还在不在。
        *
@@ -5180,7 +5250,7 @@ function publicGame(game) {
        * 界面靠这两个字段分开说人话，否则删完 B服 的人只会看到「还没选择启动程序」，
        * 根本不知道是自己把共用的客户端目录删掉了。
        */
-      rootExists: Boolean(server.root) && targetExists(server.root),
+      rootExists: Boolean(server.root) && targetExistsCached(server.root),
       active: server.id === game.activeServerId,
     })),
   };
@@ -9267,12 +9337,15 @@ function installIpc() {
       }
     }
     const server = (game.servers || []).find((item) => item.id === game.activeServerId);
-    if (!server?.root || !targetExists(server.path)) {
+    let installRoot = server?.root;
+    if (!installRoot && game.target) installRoot = path.dirname(game.target);
+    if (!installRoot && server?.path) installRoot = path.dirname(server.path);
+    if (!installRoot || !targetExists(server?.path)) {
       throw new Error('先配置这个游戏的客户端路径');
     }
     return syncGacha({
       game: game.builtinKey,
-      installRoot: server.root,
+      installRoot,
       userData: app.getPath('userData'),
     });
   });
@@ -15196,6 +15269,73 @@ function musicLoginWindow(target) {
     }
   });
 
+  /** 手动「立即备份」：直接复用 runGachaBackup（内部有锁、成败记录、pushState）。 */
+  ipcMain.handle('gacha:backup-now', async () => {
+    try {
+      return await runGachaBackup('手动');
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
+  /*
+   * 启动器设置导出 / 导入。
+   * 导出＝把 launcher-data.json 复制到用户挑的位置；导入＝读回文件后与默认合并
+   * （只增不改：本地已有的键不会被远端文件的旧值冲掉，结构不符直接报错）。
+   * 注意：sessions.enc.json（密码 / 加密口令等凭据）不在这份文件里，导出导入
+   * 不会把别人的凭据带进来，也带不走你自己的凭据——这点和抽卡云备份一样。
+   */
+  ipcMain.handle('settings:export', async () => {
+    try {
+      const source = dataFile();
+      if (!fs.existsSync(source)) throw new Error('还没生成设置文件，先改个设置再导出');
+      const result = await dialog.showSaveDialog(win && !win.isDestroyed() ? win : undefined, {
+        title: '导出启动器设置',
+        defaultPath: path.join(app.getPath('downloads') || app.getPath('userData'), '花筱灵设置.json'),
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+      await fsp.copyFile(source, result.filePath);
+      const stat = await fsp.stat(result.filePath);
+      return { ok: true, path: result.filePath, bytes: stat.size };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('settings:import', async () => {
+    try {
+      const result = await dialog.showOpenDialog(win && !win.isDestroyed() ? win : undefined, {
+        title: '导入启动器设置',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePaths || !result.filePaths.length) {
+        return { ok: false, cancelled: true };
+      }
+      const file = result.filePaths[0];
+      const raw = await fsp.readFile(file, 'utf8');
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { ok: false, error: '文件不是合法的 JSON' };
+      }
+      if (!parsed || typeof parsed !== 'object') return { ok: false, error: '文件内容不是设置数据' };
+      // 只认可顶层带 settings 的启动器数据文件，避免误导入别的东西把配置冲了
+      if (!parsed.settings || typeof parsed.settings !== 'object') {
+        return { ok: false, error: '这份文件不是启动器设置备份（缺少 settings 字段）' };
+      }
+      const merged = { ...store.data, settings: { ...store.data.settings, ...parsed.settings } };
+      store.data = merged;
+      await store.saveNow();
+      pushState(true);
+      return { ok: true, path: file };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('gacha:load', async (_event, force = false) => {
     // 用户不需要手动选库：路径为空或已失效时自动重新探测一次
     const configured = store.data.settings.starwardDbPath;
@@ -15741,11 +15881,11 @@ function musicLoginWindow(target) {
    *   2. 按「哪些值名算画质」筛一遍，还能列出画质值的名 —— 项还在但内容被清空也过不了。
    * 真正读值的兜底在 graphics:read 里：读到空结果同样作废这条记录。
    */
-  function graphicsFixedKeyUsable(registryKey) {
+  async function graphicsFixedKeyUsable(registryKey) {
     if (!registryKey) return false;
     try {
-      if (graphicsDetect.stillExists(registryKey) === false) return false;
-      const names = graphicsConfig.listValueNamesFast(
+      if (await graphicsDetect.stillExists(registryKey) === false) return false;
+      const names = await graphicsConfig.listValueNamesFast(
         registryKey,
         path.join(app.getPath('userData'), 'hxl-reg-check.reg')
       );
@@ -15800,7 +15940,7 @@ function musicLoginWindow(target) {
     // 1) 记住过的项：校验还成立就直接用，一次注册表扫描都不做
     if (!options.force) {
       const fixed = graphicsFixed.get(gameKey);
-      if (fixed && graphicsFixedKeyUsable(gameKey, game, fixed.key)) {
+      if (fixed && await graphicsFixedKeyUsable(gameKey, game, fixed.key)) {
         /*
          * 顺手喂进 graphics-detect 的探测缓存：同一个 gameKey 如果上次是另一条路径
          * （比如换了安装目录），缓存键会不同，这里把这次的结论对齐，省掉一轮扫描。
@@ -15818,7 +15958,7 @@ function musicLoginWindow(target) {
     try {
       // probe 会把同款游戏的并发请求合成一次，用户连点标签也不会连扫两遍注册表
       detect = options.force
-        ? graphicsDetect.detect(Object.assign({}, game, { _force: true }))
+        ? await graphicsDetect.detect(Object.assign({}, game, { _force: true }))
         : await graphicsDetect.probe(game);
     } catch (error) {
       detect = { ok: false, reason: String(error.message || '自动检测失败') };
@@ -15850,7 +15990,7 @@ function musicLoginWindow(target) {
     if (hit && Date.now() - hit.at < GRAPHICS_PRIME_TTL) return hit.result;
     const resolved = await resolveGraphicsKey(gameKey, game);
     if (!resolved.ok) return null;
-    const result = graphicsConfig.readGraphics(
+    const result = await graphicsConfig.readGraphics(
       resolved.registryKey,
       (name) => graphicsSchema.isGraphicsEntry(name) && !graphicsSchema.isMetaEntry(name)
     );
@@ -15929,7 +16069,7 @@ function musicLoginWindow(target) {
     }
     try {
       // 只读画质相关的键：原神项里有 345KB 的 device 数据，全量读要十几秒
-      const result = graphicsConfig.readGraphics(
+      const result = await graphicsConfig.readGraphics(
         resolved.registryKey,
         (name) => graphicsSchema.isGraphicsEntry(name) && !graphicsSchema.isMetaEntry(name)
       );
@@ -15985,7 +16125,7 @@ function musicLoginWindow(target) {
     if (!name && !entry) return { ok: false, reason: '缺少值名' };
     // 只允许写回注册表里已经存在的值，避免往游戏配置里塞垃圾键
     const tempPath = path.join(app.getPath('userData'), 'hxl-reg-check.reg');
-    const existing = graphicsConfig.listValueNamesFast(registryKey, tempPath);
+    const existing = await graphicsConfig.listValueNamesFast(registryKey, tempPath);
     const target = entry || name;
     if (!existing.includes(target)) {
       return { ok: false, reason: `注册表里没有 ${target}，拒绝新增` };
@@ -16002,11 +16142,11 @@ function musicLoginWindow(target) {
        * 报「不是 JSON，没法单独改其中的字段」—— 界面上表现成「所有选项都不可用」。
        * 所以要先看这条值到底是不是 JSON 对象，再决定走哪条路。
        */
-      const isJsonValue = entry && field && field !== entry && graphicsConfig.looksLikeJsonObject(registryKey, target);
+      const isJsonValue = entry && field && field !== entry && await graphicsConfig.looksLikeJsonObject(registryKey, target);
       if (isJsonValue) {
-        return graphicsConfig.updateJsonField(registryKey, entry, field, input?.value, backupPath, input?.type);
+        return await graphicsConfig.updateJsonField(registryKey, entry, field, input?.value, backupPath, input?.type);
       }
-      return graphicsConfig.writeValue(registryKey, entry || name, input?.value, backupPath, input?.type);
+      return await graphicsConfig.writeValue(registryKey, entry || name, input?.value, backupPath, input?.type);
     } catch (error) {
       return { ok: false, reason: String(error.message || '写入失败') };
     } finally {
@@ -16813,6 +16953,53 @@ function startEndfieldGachaWatcher() {
   endfieldGachaWatcher = setInterval(check, 5000);
 }
 
+let mihoyoGachaWatching = false;
+const mihoyoGachaSignatures = new Map();
+function startMihoyoGachaWatcher() {
+  const MIHOYO = ['genshin', 'starrail', 'zzz'];
+  const attempt = async () => {
+    if (mihoyoGachaWatching || store.data.settings.autoGacha === false) return;
+    for (const game of store.data.games) {
+      if (!MIHOYO.includes(game.builtinKey)) continue;
+      if (!running.has(game.id)) continue;
+      const server = (game.servers || []).find((item) => item.id === game.activeServerId);
+      const root = server?.root || (game.target ? path.dirname(game.target) : '') || (server?.path ? path.dirname(server.path) : '');
+      if (!root) continue;
+      // 只看缓存目录里的文件名与 mtime（轻量 stat），不整读几十 MB 的 data_2。
+      // 用户新开一次抽卡记录页，data_2 的 mtime 就会变，签名随之变化 → 触发一次同步。
+      let signature;
+      try {
+        signature = gachaCacheFiles(root, game.builtinKey)
+          .map((item) => `${item.file}:${item.mtimeMs}`)
+          .join('|');
+      } catch {
+        continue;
+      }
+      if (signature === mihoyoGachaSignatures.get(game.id)) continue;
+      let api;
+      try {
+        api = extractUrlFromCache(root, game.builtinKey); // 抛错 = 还没缓存/链接未就绪
+      } catch {
+        continue; // 缓存还没就绪，不记签名，下个 tick 用同签名重试
+      }
+      mihoyoGachaWatching = true;
+      try {
+        const result = await syncGacha({ game: game.builtinKey, installRoot: root, userData: app.getPath('userData'), api });
+        mihoyoGachaSignatures.set(game.id, signature); // 只有真的同步成功，才把这份缓存记为已处理
+        if (result.imported > 0) {
+          send('gacha:updated', result);
+          send('toast', { type: 'success', message: `${game.name || game.builtinKey} 抽卡记录已自动同步 ${result.imported} 条` });
+        }
+      } catch {
+        /* 链接过期或暂未就绪，不记签名，下个 tick 重试（与优化前行为一致，不空转也不漏） */
+      } finally {
+        mihoyoGachaWatching = false;
+      }
+    }
+  };
+  setInterval(attempt, 20000);
+}
+
 /**
  * 只比对版本号，不下任何东西。
  *
@@ -17187,6 +17374,7 @@ app.whenReady().then(async () => {
   // 游戏更新自动检测与预下载自动检查都在 registerIpc 闭包里注册（函数也在那边，
   // 放这里会 ReferenceError —— 以前就这么错过一次，见那个函数上方的说明）。
   setTimeout(startEndfieldGachaWatcher, 5000);
+  setTimeout(startMihoyoGachaWatcher, 5000);
   // 自更新：开机后 15 秒查一次，之后每 6 小时一次（老版本机器靠这个收到提示）
   settlePreviousUpdate();
   updater.cleanTemp(updateTempBase()).catch(() => {});

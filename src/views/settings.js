@@ -763,7 +763,7 @@ function settingsView() {
             <div class="setting-control">${switchMarkup('autoSyncOfficial', settings.autoSyncOfficial !== false)}</div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>自动获取终末地抽卡记录</strong><span>打开游戏内抽卡记录后，自动读取 HGWebview 日志并同步；异环仍需其导出工具生成 JSON。</span></div>
+            <div class="setting-copy"><strong>自动同步抽卡记录</strong><span>打开游戏内抽卡记录后自动读取并同步；覆盖原神、星穹铁道、绝区零与终末地。</span></div>
             <div class="setting-control">${switchMarkup('autoGacha', settings.autoGacha !== false)}</div>
           </div>
         </section>
@@ -826,6 +826,16 @@ function settingsView() {
             </div>
           </div>
           <div class="setting-row">
+            <div class="setting-copy">
+              <strong>启动器设置备份</strong>
+              <span>把启动器设置导出成一个 JSON 文件（游戏配置、外观、云备份地址等），方便换电脑或重装前留一份；导入会按字段合并，不会覆盖本地已有的键。密码和加密口令存在另一个加密文件里，不在这份导出里。</span>
+            </div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="export-settings">${icon('download')}导出</button>
+              <button class="btn btn-ghost" data-action="import-settings">${icon('upload')}导入</button>
+            </div>
+          </div>
+          <div class="setting-row">
             <div class="setting-copy"><strong>运行时目录</strong><span>B服 / 国际服的硬链接目录。留空时使用「游戏盘:\\VelaRuntimes」，必须和游戏同盘。</span></div>
             <div class="setting-control">
               <span class="path-text" title="${esc(settings.runtimeRoot || '')}">${esc(settings.runtimeRoot || '自动：游戏盘:\\VelaRuntimes')}</span>
@@ -876,7 +886,7 @@ function settingsView() {
           <div class="setting-row">
             <div class="setting-copy">
               <strong>抽卡记录云备份</strong>
-              <span>把抽卡记录传到你自己网盘的 WebDAV 目录，${Number(backup.intervalDays) || 7} 天自动一次（没有手动备份按钮）。换电脑、重装系统之后用下面的「从云端恢复」找回来。只传抽卡记录本体和它的元数据缓存——账号密码、Cookie、下载记录、启动器设置一样都不传。</span>
+              <span>把抽卡记录传到你自己网盘的 WebDAV 目录，${Number(backup.intervalDays) || 7} 天自动一次，也可以随时点「立即备份」。换电脑、重装系统之后用下面的「从云端恢复」找回来。只传抽卡记录本体和它的元数据缓存——账号密码、Cookie、下载记录、启动器设置一样都不传。</span>
               <span class="hint">${esc(gachaBackupSummary())}</span>
             </div>
             <div class="setting-control">
@@ -912,6 +922,7 @@ function settingsView() {
                 <div class="gacha-backup-actions">
                   <button class="btn btn-primary" data-action="save-gacha-backup">${icon('check')}保存</button>
                   <button class="btn btn-ghost" data-action="test-gacha-backup">${icon('server')}测试连接</button>
+                  <button class="btn btn-ghost" data-action="gacha-backup-now" ${backup.enabled ? '' : 'disabled'}>${icon('save')}立即备份</button>
                 </div>
               </div>
             </div>

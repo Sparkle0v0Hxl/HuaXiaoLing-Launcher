@@ -69,7 +69,7 @@ function applyUiScaleClass(scale) {
 const state = {
   games: [],
   settings: {},
-  stats: { launches: 0, playSeconds: 0 },
+  stats: { launches: 0, playSeconds: 0, playLog: [] },
   downloads: [],
   app: {},
   news: [],

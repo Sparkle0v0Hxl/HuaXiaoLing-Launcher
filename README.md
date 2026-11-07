@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.9.4-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.9.5-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.9.4**（正式版）
+**当前版本：v2.9.5**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.9.4-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.9.5-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,17 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.9.4 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.9.5 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.9.5</b></summary>
+
+- 启动加载不再「未响应」地卡一下：画质预读的注册表读取整链异步化，状态推送 / 配置探测 / 抽卡轮询的重复磁盘 IO 做了缓存与短路。
+- 补上小功能：抽卡云备份「立即备份」、设置导出 / 导入、首页 30 天游玩趋势、原神 / 星铁 / 绝区零抽卡自动同步（手动取根加兜底）。
+- 异环升到 1.5：版本 / 封面 / 动图都跟上，官方换图后自动重拉，修掉动图更新失效的赋值报错。
+- 抽卡读取失败给中文提示、全退重开即恢复；自动更新落地 `app.asar` 改原子替换，配合同步工具的进程占用判据，避免旧进程读到写了一半的新包。
+
+</details>
 
 <details>
 <summary><b>v2.9.4</b></summary>

@@ -11,9 +11,26 @@
  * 所有写操作都会先备份原值到 userData/registry-backup.json。
  */
 
-const { execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+
+// 把同步的 execFileSync('reg.exe') 换成异步：成功 resolve { stdout, stderr }，
+// 失败时把 stdout/stderr 挂回 error（与 execFileSync 的 error.stdout 一致），
+// 下面各函数里的兜底解码逻辑照旧可用。
+function execReg(args, options) {
+  return new Promise((resolve, reject) => {
+    execFile('reg.exe', args, options, (error, stdout, stderr) => {
+      if (error) {
+        if (error.stdout === undefined) error.stdout = stdout;
+        if (error.stderr === undefined) error.stderr = stderr;
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 function decode(buffer) {
   if (!buffer || !buffer.length) return '';
@@ -31,9 +48,9 @@ function decode(buffer) {
   }
 }
 
-function runReg(args) {
+async function runReg(args) {
   try {
-    const stdout = execFileSync('reg.exe', args, {
+    const { stdout } = await execReg(args, {
       encoding: 'buffer',
       windowsHide: true,
       // 原神的项里有 345KB 的 REG_BINARY（device 数据），整项导出要 18 秒以上，
@@ -48,9 +65,9 @@ function runReg(args) {
 }
 
 /** 只要值名、不看内容：导出到临时文件再解析，大项也不会卡。 */
-function listValueNamesFast(key, tempPath) {
+async function listValueNamesFast(key, tempPath) {
   try {
-    execFileSync('reg.exe', ['export', key, tempPath, '/y'], { windowsHide: true, timeout: 15000 });
+    await execReg(['export', key, tempPath, '/y'], { windowsHide: true, timeout: 15000 });
     // reg export 输出 UTF-16LE（BOM ff fe），hex(2) 值会被折成多行，
     // 所以不能逐行匹配，要把续行先接起来。
     let text;
@@ -82,8 +99,8 @@ function listValueNamesFast(key, tempPath) {
  * 早年用 `^\s{4}(\S+)\s+REG_` 会整条漏掉，导致「原神明明有数据却报没启动过」。
  * 现在按「行首空白 + REG_ 类型标记 + 类型后的空白」来切，值名可以含空格。
  */
-function listValueNames(key) {
-  const result = runReg(['query', key]);
+async function listValueNames(key) {
+  const result = await runReg(['query', key]);
   if (!result.ok) return [];
   const names = [];
   for (const line of result.output.split(/\r?\n/)) {
@@ -100,8 +117,8 @@ function listValueNames(key) {
 }
 
 /** 读单个值，同时返回注册表类型，写回时要用。 */
-function readValueEntry(key, name) {
-  const result = runReg(['query', key, '/v', name]);
+async function readValueEntry(key, name) {
+  const result = await runReg(['query', key, '/v', name]);
   if (!result.ok) return { raw: null, type: null };
   const match = result.output.match(/(REG_(?:SZ|DWORD|QWORD|BINARY|EXPAND_SZ|MULTI_SZ|NONE))\s+(\S+)/);
   if (!match) return { raw: null, type: null };
@@ -116,8 +133,9 @@ function readValueEntry(key, name) {
 }
 
 /** 读单个值（只要值本身）。 */
-function readValue(key, name) {
-  return readValueEntry(key, name).raw;
+async function readValue(key, name) {
+  const entry = await readValueEntry(key, name);
+  return entry.raw;
 }
 
 /**
@@ -151,11 +169,11 @@ function parseGraphicsValue(raw) {
  *
  * 返回 Map<name, { raw, type }>，形状与 readValueEntry 一致。
  */
-function exportValues(key) {
+async function exportValues(key) {
   const tempPath = path.join(require('node:os').tmpdir(), `hxl-exp-${process.pid}-${Date.now()}.reg`);
   const out = new Map();
   try {
-    execFileSync('reg.exe', ['export', key, tempPath, '/y'], { windowsHide: true, timeout: 30000 });
+    await execReg(['export', key, tempPath, '/y'], { windowsHide: true, timeout: 30000 });
     let text;
     try {
       text = fs.readFileSync(tempPath, 'utf16le');
@@ -232,9 +250,9 @@ function decodeRegValue(value) {
  *
  * 返回 { ok, key, entries: [{ name, raw, type, json }] }
  */
-function readGraphics(registryKey, isInteresting) {
+async function readGraphics(registryKey, isInteresting) {
   if (!registryKey) return { ok: false, reason: '这个游戏没有登记画质注册表位置' };
-  const values = exportValues(registryKey);
+  const values = await exportValues(registryKey);
   if (!values.size) {
     return { ok: false, reason: '没有读到画质配置（游戏可能还没启动过一次）', key: registryKey };
   }
@@ -255,8 +273,8 @@ function readGraphics(registryKey, isInteresting) {
  *   - 原来就是 DWORD 的数值项 → REG_DWORD
  * 不传 type 时沿用读到的原类型，读不到才退回 REG_SZ。
  */
-function writeValue(registryKey, name, value, backupPath, type) {
-  const previous = readValueEntry(registryKey, name);
+async function writeValue(registryKey, name, value, backupPath, type) {
+  const previous = await readValueEntry(registryKey, name);
   // JSON 这类字符串值要是被读成了 REG_BINARY 的 UTF-16，按原类型写回会变成一堆乱码，
   // 所以「内容是 JSON / 普通字符串」时一律写成 REG_SZ。
   const looksText = /^\s*[[{]/.test(String(value));
@@ -288,7 +306,7 @@ function writeValue(registryKey, name, value, backupPath, type) {
 
   const args = ['add', registryKey, '/v', name, '/t', writeType, '/d', data, '/f'];
   try {
-    execFileSync('reg.exe', args, { windowsHide: true, timeout: 8000 });
+    await execReg(args, { windowsHide: true, timeout: 8000 });
   } catch (error) {
     return { ok: false, reason: String(error.message || '写入失败') };
   }
@@ -313,9 +331,9 @@ function writeValue(registryKey, name, value, backupPath, type) {
  *
  * 返回 { ok, previous, value, type } 或 { ok:false, reason }
  */
-function updateJsonField(registryKey, name, field, value, backupPath, type) {
+async function updateJsonField(registryKey, name, field, value, backupPath, type) {
   if (!registryKey || !name || !field) return { ok: false, reason: '缺少参数' };
-  const previous = readValueEntry(registryKey, name);
+  const previous = await readValueEntry(registryKey, name);
   if (!previous.raw) return { ok: false, reason: `读不到 ${name} 的当前值` };
   const json = parseGraphicsValue(previous.raw);
   if (!json || typeof json !== 'object') {
@@ -348,7 +366,7 @@ function updateJsonField(registryKey, name, field, value, backupPath, type) {
   }
 
   json[field] = next;
-  const written = writeValue(registryKey, name, JSON.stringify(json), backupPath, type || 'REG_SZ');
+  const written = await writeValue(registryKey, name, JSON.stringify(json), backupPath, type || 'REG_SZ');
   if (!written.ok) return written;
   return { ok: true, unchanged: false, previous: previous.raw, value: next, type: written.type, field };
 }
@@ -364,9 +382,9 @@ function updateJsonField(registryKey, name, field, value, backupPath, type) {
  * 单值项因此全部报「不是 JSON，没法单独改其中的字段」，界面上就是所有选项都不可用。
  * 读一次真实值来判断，读不到就当作不是 JSON（走整条改写，那条路会有自己的校验）。
  */
-function looksLikeJsonObject(registryKey, name) {
+async function looksLikeJsonObject(registryKey, name) {
   try {
-    const previous = readValueEntry(registryKey, name);
+    const previous = await readValueEntry(registryKey, name);
     if (!previous || !previous.raw) return false;
     const text = String(previous.raw).trim();
     if (!/^[{[]/.test(text)) return false;

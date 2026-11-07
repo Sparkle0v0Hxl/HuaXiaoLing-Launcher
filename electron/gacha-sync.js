@@ -136,9 +136,9 @@ async function fetchPage(api, game, type, page, endId) {
   return json.data?.list || [];
 }
 
-async function syncGacha({ game, installRoot, userData, onProgress }) {
+async function syncGacha({ game, installRoot, userData, onProgress, api: providedApi }) {
   if (!GAMES[game]) throw new Error('不支持这个游戏的抽卡同步');
-  const api = extractUrlFromCache(installRoot, game);
+  const api = providedApi || extractUrlFromCache(installRoot, game);
   const clean = cleanApiUrl(api);
   const first = await fetchPage(clean.toString(), game, GAMES[game].types[0], 1, 0);
   const uid = first[0]?.uid;
@@ -206,4 +206,4 @@ async function syncGacha({ game, installRoot, userData, onProgress }) {
   };
 }
 
-module.exports = { syncGacha, extractUrlFromCache, GAMES };
+module.exports = { syncGacha, extractUrlFromCache, cacheFiles, GAMES };

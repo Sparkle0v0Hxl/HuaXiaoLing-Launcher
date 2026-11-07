@@ -3498,7 +3498,7 @@ function newsFeatureRelease(feature) {
           <span>${formatDate(feature.date)}</span>
           <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
           <span>${esc(feature.readTime || '')}</span>
-          <span style="margin-left:auto;color:var(--accent)">阅读全文 ${icon('chevron-right', 'xs')}</span>
+          <span style="margin-left:auto;color:var(--accent-text)">阅读全文 ${icon('chevron-right', 'xs')}</span>
         </div>
       </div>
       <div class="news-feature-art" aria-hidden="true">
@@ -3516,11 +3516,11 @@ function newsFeatureRelease(feature) {
     </button>`;
 }
 
-/** 公告条目上要挂的游戏点缀色内联变量；accent 缺省时不输出，CSS 回落 var(--accent)。 */
+/** 公告条目上要挂的游戏点缀色内联变量；accent 缺省时输出浅/深主题都清晰的 --accent-text，CSS 同此回落。 */
 function noticeAccentStyle(game, extra = '') {
   const accent = String(game?.accent || '').trim();
-  const parts = [extra.replace(/;\s*$/, ''), accent ? `--notice-accent:${accent}` : ''].filter(Boolean);
-  return parts.length ? ` style="${esc(parts.join(';'))}"` : '';
+  const parts = [extra.replace(/;\s*$/, ''), `--notice-accent:${accent || 'var(--accent-text)'}`].filter(Boolean);
+  return ` style="${esc(parts.join(';'))}"`;
 }
 
 /** 置顶行列表的同步骨架。 */
@@ -3595,7 +3595,7 @@ function newsPinnedMarkup(entries) {
             <span>${esc(noticeDate(notice.date) || '官方')}</span>
             <span style="width:2px;height:2px;border-radius:50%;background:currentColor"></span>
             <span>官方</span>
-            <span style="margin-left:auto;color:var(--notice-accent, var(--accent))">阅读原文 ${icon('chevron-right', 'xs')}</span>
+            <span style="margin-left:auto;color:var(--notice-accent, var(--accent-text))">阅读原文 ${icon('chevron-right', 'xs')}</span>
           </div>
         </div>
         <div class="news-feature-art" aria-hidden="true">
@@ -3821,7 +3821,7 @@ function noticeGameCard(game) {
   const site = noticeSite(game);
   const items = notices.slice(0, 5);
   return `
-    <article class="notice-card" style="--notice-accent: ${esc(game.accent || 'var(--accent)')}">
+    <article class="notice-card" style="--notice-accent: ${esc(game.accent || 'var(--accent-text)')}">
       <div class="notice-card-head">
         <span class="notice-card-icon">${icon('news')}</span>
         <div class="notice-card-title">

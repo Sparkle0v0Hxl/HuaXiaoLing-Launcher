@@ -189,6 +189,8 @@ contextBridge.exposeInMainWorld('launcher', {
   onNteCapture: (callback) => subscribe('nte-capture', callback),
 
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
+  exportSettings: () => ipcRenderer.invoke('settings:export'),
+  importSettings: () => ipcRenderer.invoke('settings:import'),
 
   endfield: {
     importPacks: () => ipcRenderer.invoke('endfield:import-packs'),
@@ -371,6 +373,7 @@ contextBridge.exposeInMainWorld('launcher', {
     backupTest: () => ipcRenderer.invoke('gacha:backup-test'),
     backupList: () => ipcRenderer.invoke('gacha:backup-list'),
     backupRestore: (name = '') => ipcRenderer.invoke('gacha:backup-restore', { name }),
+    backupNow: () => ipcRenderer.invoke('gacha:backup-now'),
   },
 
   downloads: {

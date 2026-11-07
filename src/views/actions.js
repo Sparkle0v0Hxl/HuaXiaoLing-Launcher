@@ -1941,6 +1941,35 @@ async function handleAction(action, id, element, event = null) {
     case 'open-data-folder':
       await api.openDataFolder();
       break;
+    /* 启动器设置导出 / 导入：备份一份 launcher-data.json，或读回合并 */
+    case 'export-settings': {
+      const result = await api.exportSettings().catch((error) => ({ ok: false, error: error.message }));
+      if (result?.cancelled) break;
+      if (!result?.ok) {
+        toast(result?.error || '导出失败', 'error');
+        break;
+      }
+      toast('设置已导出', 'success');
+      break;
+    }
+    case 'import-settings': {
+      const confirmed = await confirmDialog({
+        title: '导入启动器设置',
+        message: '会从选中的 JSON 文件读回设置，按字段合并到当前配置（本地已有的键不会被覆盖）。\n\n现在开始？',
+        confirmText: '导入',
+      });
+      if (!confirmed) break;
+      const result = await api.importSettings().catch((error) => ({ ok: false, error: error.message }));
+      if (result?.cancelled) break;
+      if (!result?.ok) {
+        toast(result?.error || '导入失败', 'error');
+        break;
+      }
+      // 某些键影响界面（主题 / 缩放 / 托盘等）：跟主进程核对一次再全量重绘
+      await api.getState().then(onState);
+      toast('设置已导入', 'success');
+      break;
+    }
     /*
      * 「查看日志 / 打开文件」这两个按钮以前完全没有处理分支——
      * markup 里写了 data-action，switch 里没有 case，点下去一点反应都没有，
@@ -2497,6 +2526,25 @@ async function handleAction(action, id, element, event = null) {
       // 抽卡页下次进去会自己重新加载（和导入后同一套机制）
       state.gacha = null;
       toast(result.text || '已从云端恢复', 'success');
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'gacha-backup-now': {
+      const state2 = gachaBackupState();
+      if (!state2.enabled) {
+        toast('先把云备份开关打开', 'error');
+        break;
+      }
+      // 先落表单再备份：用户刚改完地址没点保存也能直接备份
+      const form = gachaBackupFormPatch();
+      if (form) await api.gacha.backupSave(form).catch(() => null);
+      toast('正在备份…', 'info');
+      const result = await api.gacha.backupNow().catch((error) => ({ ok: false, error: error.message }));
+      if (result?.ok) toast(result.text || '备份成功', 'success');
+      else toast(result?.error || '备份失败', 'error');
+      // runGachaBackup 会 pushState，这里重拉一次状态让界面刷新
+      const fresh = await api.gacha.backupStatus().catch(() => null);
+      if (fresh) state.gachaBackup = fresh;
       render({ preserveScroll: true });
       break;
     }

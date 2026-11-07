@@ -19,10 +19,27 @@
  * （那样一次要几分钟，实测过）。
  */
 
-const { execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+
+// 把同步的 execFileSync('reg.exe') 换成异步：成功 resolve { stdout, stderr }，
+// 失败时把 stdout/stderr 挂回 error（与 execFileSync 的 error.stdout 一致）。
+// 注册表的重试 / 超时判定 / 解码逻辑照旧可用。
+function execReg(args, options) {
+  return new Promise((resolve, reject) => {
+    execFile('reg.exe', args, options, (error, stdout, stderr) => {
+      if (error) {
+        if (error.stdout === undefined) error.stdout = stdout;
+        if (error.stderr === undefined) error.stderr = stderr;
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* 读注册表                                                            */
@@ -51,10 +68,10 @@ function decodeBuffer(buf) {
 let lastRegFailed = false;
 let lastRegTimedOut = false;
 
-function reg(args, timeout = 60000) {
+async function reg(args, timeout = 60000) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const buf = execFileSync('reg.exe', args, {
+      const { stdout } = await execReg(args, {
         encoding: 'buffer',
         windowsHide: true,
         timeout,
@@ -62,7 +79,7 @@ function reg(args, timeout = 60000) {
       });
       lastRegFailed = false;
       lastRegTimedOut = false;
-      return decodeBuffer(buf);
+      return decodeBuffer(stdout);
     } catch (error) {
       const timedOut = error && (error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM');
       lastRegFailed = true;
@@ -74,8 +91,8 @@ function reg(args, timeout = 60000) {
   return '';
 }
 
-function subKeys(key) {
-  const out = reg(['query', key]);
+async function subKeys(key) {
+  const out = await reg(['query', key]);
   const kids = [];
   const upper = key.toUpperCase();
   for (const line of out.split(/\r?\n/)) {
@@ -88,8 +105,8 @@ function subKeys(key) {
 }
 
 /** 读一项的所有值名（值名可以带空格）。 */
-function valueNames(key) {
-  const out = reg(['query', key]);
+async function valueNames(key) {
+  const out = await reg(['query', key]);
   const names = [];
   for (const line of out.split(/\r?\n/)) {
     const m = line.match(/^\s{2,}(.+?)\s+(REG_(?:SZ|DWORD|QWORD|BINARY|EXPAND_SZ|MULTI_SZ|NONE))(?:\s|$)/);
@@ -249,11 +266,11 @@ const VENDOR_TTL = CACHE_TTL;
 const kidsCache = new Map();
 const KIDS_TTL = CACHE_TTL;
 
-function cachedSubKeys(key) {
+async function cachedSubKeys(key) {
   const now = Date.now();
   const hit = kidsCache.get(key);
   if (hit && now - hit.at < KIDS_TTL) return hit.list;
-  const list = subKeys(key);
+  const list = await subKeys(key);
   kidsCache.set(key, { at: now, list });
   return list;
 }
@@ -298,7 +315,7 @@ function remember(game, result) {
  *
  * 返回 true / false；拿不到父目录时返回 null（由调用方决定怎么处理）。
  */
-function stillExists(registryKey) {
+async function stillExists(registryKey) {
   const key = String(registryKey || '').trim();
   if (!key) return null;
   const cut = key.replace(/\\+$/, '').lastIndexOf('\\');
@@ -310,16 +327,17 @@ function stillExists(registryKey) {
   const leaf = key.slice(cut + 1);
   // reg.exe 的输出大小写不保证，按不区分大小写比
   const upperLeaf = leaf.toUpperCase();
-  return cachedSubKeys(parent).some((kid) => {
+  const list = await cachedSubKeys(parent);
+  return list.some((kid) => {
     const bang = kid.lastIndexOf('\\');
     return (bang >= 0 ? kid.slice(bang + 1) : kid).toUpperCase() === upperLeaf;
   });
 }
 
-function softwareVendors(force) {
+async function softwareVendors(force) {
   const now = Date.now();
   if (!force && vendorCache && now - vendorCacheAt < VENDOR_TTL) return vendorCache;
-  const list = subKeys('HKCU\\Software');
+  const list = await subKeys('HKCU\\Software');
   vendorCache = list;
   vendorCacheAt = now;
   return list;
@@ -333,12 +351,12 @@ const pendingProbes = new Map();
  *
  * 返回 { ok, key, score, values, reason } 或 { ok:false, reason }
  */
-function detect(game) {
+async function detect(game) {
   if (process.platform !== 'win32') return { ok: false, reason: '只有 Windows 能读注册表' };
   const cacheKey = cacheKeyOf(game);
   const cached = detectCache.get(cacheKey);
   if (cached && Date.now() - cached.at < DETECT_TTL) return cached.result;
-  const result = detectUncached(game);
+  const result = await detectUncached(game);
   detectCache.set(cacheKey, { at: Date.now(), result });
   return result;
 }
@@ -362,7 +380,7 @@ function probe(game) {
   if (running) return running;
   const task = (async () => {
     try {
-      return detect(game);
+      return await detect(game);
     } finally {
       pendingProbes.delete(cacheKey);
     }
@@ -371,7 +389,7 @@ function probe(game) {
   return task;
 }
 
-function detectUncached(game) {
+async function detectUncached(game) {
   const tokens = guessKeys(game);
   if (!tokens.length) return { ok: false, reason: '这个游戏没有可执行的路径信息，没法定位配置' };
 
@@ -402,12 +420,12 @@ function detectUncached(game) {
   const strongPattern = latin.length ? new RegExp(latin.map(escape).join('|'), 'i') : null;
   const anyPattern = new RegExp([...primary, ...chinese].map(escape).join('|'), 'i');
 
-  const vendors = softwareVendors();
+  const vendors = await softwareVendors();
   const seen = new Set();
   const candidates = [];
   for (const vendor of vendors) {
     if (IGNORE_KEY.test(vendor)) continue;
-    for (const kid of cachedSubKeys(vendor)) {
+    for (const kid of await cachedSubKeys(vendor)) {
       if (IGNORE_KEY.test(kid) || seen.has(kid)) continue;
       const strong = Boolean(strongPattern && strongPattern.test(kid));
       if (strong || anyPattern.test(kid)) {
@@ -443,7 +461,7 @@ function detectUncached(game) {
       const aliasPattern = new RegExp(aliasWords.map(escape).join('|'), 'i');
       for (const vendor of vendors) {
         if (!vendorHint.test(vendor)) continue;
-        for (const kid of cachedSubKeys(vendor)) {
+        for (const kid of await cachedSubKeys(vendor)) {
           if (IGNORE_KEY.test(kid) || seen.has(kid)) continue;
           if (aliasPattern.test(kid)) {
             candidates.push({ key: kid, strong: true, viaAlias: true });
@@ -477,7 +495,7 @@ function detectUncached(game) {
      * （真游戏项通常很短：`原神`、`Star Rail`；SDK 那种又长又杂），
      * 读到第一个够格的候选就停 —— 宁可少读几个，也不要让用户等 20 秒。
      */
-    const nameList = valueNames(candidate.key);
+    const nameList = await valueNames(candidate.key);
     if (!nameList.length) continue;
     const scored = scoreKey(candidate.key, nameList);
     if (scored.score < 4) continue;

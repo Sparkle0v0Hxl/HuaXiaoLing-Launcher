@@ -892,7 +892,7 @@ function openGachaSyncModal() {
   const installed = (state.games || []).filter(
     (game) =>
       ['genshin', 'starrail', 'zzz', 'endfield'].includes(game.builtinKey) &&
-      (game.servers || []).some((server) => server.active && server.exists)
+      (game.servers || []).some((server) => server.active && (server.exists || !!game.target))
   );
   if (!installed.length) {
     toast('先配置原神、星铁、绝区零或终末地的客户端路径', 'error');

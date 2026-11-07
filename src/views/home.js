@@ -133,7 +133,7 @@ function recentRow(game) {
       ${
         game.coverUrl
           ? `<img class="recent-cover" decoding="async" src="${esc(game.coverUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />`
-          : `<span class="recent-cover" style="display:grid;place-items:center;color:var(--accent);font-weight:700">${esc(initial(game.name))}</span>`
+          : `<span class="recent-cover" style="display:grid;place-items:center;color:var(--accent-text);font-weight:700">${esc(initial(game.name))}</span>`
       }
       <span class="recent-info">
         <span class="recent-name">${esc(game.name)}</span>
@@ -1163,6 +1163,7 @@ function homePlaytimeMarkup() {
         <div class="playtime-kpi"><strong>${launches}</strong><span>总启动次数</span></div>
         <div class="playtime-kpi"><strong>${playedCount}</strong><span>已游玩游戏</span></div>
       </div>
+      ${homePlaytimeTrendMarkup()}
       <div class="playtime-list">
         ${ordered
           .map((game) => {
@@ -1187,6 +1188,64 @@ function homePlaytimeMarkup() {
           .join('')}
       </div>
     </details>`;
+}
+
+/*
+ * 近 30 天每日游玩时长趋势图（柱状）。
+ * 数据来自 store.data.stats.playLog（finishGame 写的最近 60 段会话，每段带 start/seconds），
+ * 按「开始日期」归到最近 30 天（含今天）的桶里。纯聚合 + 渲染，不写任何持久化。
+ * playLog 不足 60 段时，更早的日期自然空缺显示为 0 高度。
+ */
+function homePlaytimeTrend(days = 30) {
+  const playLog = (state.stats && Array.isArray(state.stats.playLog)) ? state.stats.playLog : [];
+  const now = new Date();
+  // 今天 0 点（本地时区），作为第 days-1 天
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 86400000;
+  const buckets = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const dayStart = today0 - i * DAY;
+    const d = new Date(dayStart);
+    buckets.push({
+      start: dayStart,
+      label: `${d.getMonth() + 1}/${d.getDate()}`,
+      isToday: i === 0,
+      seconds: 0,
+    });
+  }
+  const firstStart = buckets[0].start;
+  for (const entry of playLog) {
+    const t = Number(entry.start) || 0;
+    if (t < firstStart) continue;
+    const idx = Math.floor((t - firstStart) / DAY);
+    if (idx >= 0 && idx < buckets.length) buckets[idx].seconds += Number(entry.seconds) || 0;
+  }
+  const sum = buckets.reduce((s, b) => s + b.seconds, 0);
+  const maxSeconds = Math.max(1, ...buckets.map((b) => b.seconds));
+  return { buckets, sum, maxSeconds };
+}
+
+function homePlaytimeTrendMarkup() {
+  const { buckets, sum, maxSeconds } = homePlaytimeTrend(30);
+  const activeDays = buckets.filter((b) => b.seconds > 0).length;
+  const bars = buckets
+    .map((b) => {
+      const height = Math.round((b.seconds / maxSeconds) * 100);
+      const tip = b.seconds ? `${b.label}：${formatPlaytime(b.seconds)}` : `${b.label}：未游玩`;
+      return `
+        <div class="trend-bar ${b.isToday ? 'is-today' : ''}" title="${esc(tip)}">
+          <span class="trend-bar-fill" style="height:${height}%"></span>
+        </div>`;
+    })
+    .join('');
+  return `
+    <div class="playtime-trend">
+      <div class="playtime-trend-head">
+        <span class="playtime-trend-title">近 30 天每日游玩时长</span>
+        <small>${activeDays} 天有记录 · 合计 ${formatPlaytime(sum)}</small>
+      </div>
+      <div class="playtime-trend-bars">${bars}</div>
+    </div>`;
 }
 
 function launchedLabel(count) {
@@ -1249,7 +1308,7 @@ function homeView() {
               <span>库中还有 <strong>${demoCount}</strong> 个示例条目，它们不会真的启动。添加你自己的游戏，或者清空示例重新开始。</span>
               <span class="notice-actions">
                 <button class="link-btn" data-action="clear-demo">清空示例</button>
-                <button class="link-btn" data-action="add-game" style="color:var(--accent)">添加游戏 ${icon('chevron-right')}</button>
+                <button class="link-btn" data-action="add-game" style="color:var(--accent-text)">添加游戏 ${icon('chevron-right')}</button>
               </span>
             </div>`
           : ''

@@ -2031,7 +2031,7 @@
       if (g === 'starrail' && f === 'simulated-universe') return parseStarrailRogue(data);
       if (g === 'zzz' && f === 'shiyu-defense') return parseZzzShiyuDefense(data);
       if (g === 'zzz' && f === 'deadly-assault') return parseZzzDeadlyAssault(data);
-      return emptyResult(g, f, '这个功能的界面还没做好。');
+      return emptyResult(g, f, '暂未接入该功能。');
     } catch (error) {
       const fallback = emptyResult(g, f, `数据解析失败：${String((error && error.message) || error)}`);
       fallback.raw = data;
