@@ -42,11 +42,22 @@ const {
   // 清单读取复用安装链路那一套：多份并发 + 大清单分段 + 解码缓存 + 单飞。
   // 预下载原来自己写了一份串行循环，绝区零带分类剧情 113 份就是 113 次往返。
   ensureManifests,
+  // 预下载 apply 侧：用「本地旧版本的分块索引 + 按 offset 读本地字节」补齐差量里
+  // 没变的那些块，否则预下载省下来的块在 apply 时会被当成缺块联网重下（星铁实测
+  // 预下载 12.70G 之后 apply 又追加 10.48G，合计 23.17G，比不做预下载直接更新还多）。
+  loadLocalChunkIndex,
+  readLocalChunk,
+  // 官方「这些资源本次不用下」的黑名单：预下载和 apply 都要按它跳过，
+  // 否则官方明确不要的资源我们照样下下来。
+  loadDeletedAssets,
+  isDeletedAsset,
 } = require('./sophon');
 const { httpFetch, directFetch } = require('./http-fetch');
 const linkSource = require('./link-source');
 const clientChannel = require('./client-channel');
 const diskSpace = require('./disk-space');
+const hdiff = require('./hdiff');
+const netThrottle = require('./net-throttle');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -317,6 +328,16 @@ function chunkDirOf(installRoot) {
   return path.join(installRoot, CHUNK_DIR);
 }
 
+/**
+ * ldiff 补丁包的存放目录。
+ *
+ * 官方和 Starward 都用安装目录下的 ldiff/ 放「下载好了但还没打」的补丁包，
+ * 沿用这个名字，将来换成官方启动器接手也不会打架。
+ */
+function patchDirOf(installRoot) {
+  return path.join(installRoot, 'ldiff');
+}
+
 function fmtBytes(value) {
   const size = Number(value) || 0;
   if (size >= 1024 ** 4) return `${(size / 1024 ** 4).toFixed(2)} TB`;
@@ -437,17 +458,25 @@ async function checkHoyoPredownload({
     const { localVersion, latestVersion, targetVersion } = base;
     const dir = chunkDirOf(installRoot);
     /*
-     * 先把 chunk/ 里已经躺着的东西数出来。
-     * 预下载中途停掉、关窗、断电，产物都留在 chunk/ 里，而「下完了」的三段标记
-     * 只在全部走完时才写 —— 所以没标记不等于没有进度。界面要能说出
-     * 「已经下了多少、接着来能省多少」，全靠这两个数字，所有分支都带上。
+     * 先把已经躺着的东西数出来。
+     * 预下载中途停掉、关窗、断电，产物都留在 chunk/（或补丁模式的 ldiff/）里，
+     * 而「下完了」的三段标记只在全部走完时才写 —— 所以没标记不等于没有进度。
+     * 界面要能说出「已经下了多少、接着来能省多少」，全靠这两个数字，所有分支都带上。
      */
-    const stored = await measureStoredChunks(dir);
+    const meta = await readMeta(installRoot);
+    /*
+     * 补丁模式下产物在 ldiff/ 而不是 chunk/：数错目录会出现「下完了却显示 0 个文件、
+     * 状态一直停在 available」，用户以为没下成又去点一遍。
+     */
+    const patchMode = Boolean(meta && meta.mode === 'ldiff');
+    const stored = patchMode
+      ? await measureStoredChunks(patchDirOf(installRoot))
+      : await measureStoredChunks(dir);
     const answer = {
       supported: true,
       kind: 'hoyo',
-      mode: 'chunk',
-      dir,
+      mode: patchMode ? 'ldiff' : 'chunk',
+      dir: patchMode ? patchDirOf(installRoot) : dir,
       installRoot,
       localVersion,
       latestVersion,
@@ -465,10 +494,26 @@ async function checkHoyoPredownload({
     if (!base.branch.pre_download || compareVersion(targetVersion, localVersion) <= 0) {
       return answer;
     }
-    const sizes = await summarizeFor(base, base.branch.pre_download);
+    // 预下载模式：补丁包是官方给的那一份差量，体积比按块下小一半
+    const sizes = patchMode
+      ? { bytesTotal: Number(meta.bytes) || 0, bytesGame: Number(meta.bytes) || 0, bytesAudio: 0 }
+      : await summarizeFor(base, base.branch.pre_download);
     const saved = (readConfigIni(installRoot).match(/^\s*predownload\s*=\s*([^\r\n]*)$/im) || [])[1] || '';
-    const meta = await readMeta(installRoot);
-    const marked = saved.trim() === marker(localVersion, targetVersion, audioLanguages);
+    const expected = marker(localVersion, targetVersion, audioLanguages);
+    /*
+     * 「下完了」不能只押在 config.ini 的 predownload= 单行标记上：sophon 更新/修复
+     * 或官方启动器重写 config.ini 时会把这一行整份清空，切服后的重查就把明明下完、
+     * 产物还在的包判回 available，界面又冒出「开始预下载」。完成收尾我们自己也写过
+     * 一份 meta（含 localVersion/targetVersion/audioKey），拿它当第二个凭据。
+     * 旧版 meta 缺字段时 metaDone 为 false，自动回退到原判据，向后兼容。
+     * 下面的 sameScope / stored.files / 0.9 阈值全部保留，产物被删仍会判回 available。
+     */
+    const metaDone =
+      Boolean(meta) &&
+      meta.localVersion === localVersion &&
+      meta.targetVersion === targetVersion &&
+      meta.audioKey === audioKey(audioLanguages);
+    const marked = saved.trim() === expected || metaDone;
     /*
      * 三段标记对了还不够，还得确认「选清单的口径」没变：
      * 用户把「剧情分类包」开关改了以后，之前下的 chunk 集合就不对了，必须重新预下载。
@@ -492,16 +537,27 @@ async function checkHoyoPredownload({
         scopeChanged: stored.files > 0 && !sameScope,
       };
     }
-    // 标记对了还要看东西还在不在：chunk/ 被人删了就是白标。
+    // 标记对了还要看东西还在不在：产物目录被人删了就是白标。
     if (!stored.files) return { ...answer, ...sizes, state: 'available' };
+    /*
+     * 光有文件不够，还得对数。config.ini 的标记只在整轮跑完才写，但产物可能被
+     * 手动删掉一部分、或被清理软件带走一半 —— 那种情况下标着 done、界面显示
+     * 「已备好，点应用」，用户点下去才发现缺包，比直接说「没下完」糟得多。
+     * 阈值与 hasCache / hasPatchCache 保持一致（0.9），三处判据口径统一。
+     */
+    const expectedCount = patchMode ? Number(meta?.patchCount) || 0 : Number(meta?.chunkCount) || 0;
+    if (expectedCount && stored.files < expectedCount * 0.9) {
+      return { ...answer, ...sizes, state: 'available', partial: true };
+    }
     const report = {
       ...answer,
       ...sizes,
       state: 'done',
       completed: true,
-      expectedChunks: meta?.chunkCount || 0,
+      expectedChunks: patchMode ? meta?.patchCount || 0 : meta?.chunkCount || 0,
     };
-    if (!verify) return report;
+    // 抽样校验只对 chunk 模式有意义：补丁包是整份 md5，不需要也不能按块抽验
+    if (!verify || patchMode) return report;
     return { ...report, ...(await verifyChunks(base, 8)) };
   } catch (error) {
     return { supported: true, state: 'error', error: error.message, installRoot };
@@ -614,6 +670,8 @@ async function downloadChunkFile(url, target, expectedSize, expectedMd5, signal,
           throwIfCancelled(signal);
           await handle.write(piece, 0, piece.length, position);
           position += piece.length;
+          // 千兆下这几万个小 chunk 全靠 16 路工人灌，限速要在这里生效
+          if (netThrottle.getLimit() > 0) await netThrottle.consume(piece.length);
           onTick?.(piece.length);
         }
         await handle.truncate(position);
@@ -648,14 +706,26 @@ async function collectChunks(build, cacheDir, audioLanguages, onProgress, signal
   // 并发读：绝区零带分类剧情是 113 份清单，串行等于 113 次往返
   const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单', signal });
   throwIfCancelled(signal);
+  /*
+   * 官方黑名单：被标为「本次不用下」的文件整份跳过。
+   *
+   * 但块是内容寻址、跨文件共享的，这里必须区分「只被删除文件引用的块」和
+   * 「还有正常文件在用的块」——直接按块名删会把后者需要的数据一起漏掉。
+   */
+  const deleted = options.deleted || null;
+  const usedByDeleted = new Set();
   for (let index = 0; index < manifests.length; index += 1) {
     const files = lists[index];
     const prefix = String(manifests[index].chunk_download?.url_prefix || '').replace(/\/$/, '');
     if (!prefix) continue;
+    const matchingField = manifests[index].matching_field;
     for (const file of files) {
       if (!file.file) continue;
+      const skip = deleted && isDeletedAsset(deleted, { file: file.file, matchingField });
       for (const chunk of file.chunks || []) {
-        if (!chunk.id || chunks.has(chunk.id)) continue;
+        if (!chunk.id) continue;
+        if (skip) usedByDeleted.add(chunk.id);
+        if (chunks.has(chunk.id)) continue;
         chunks.set(chunk.id, {
           id: chunk.id,
           url: `${prefix}/${chunk.id}`,
@@ -664,6 +734,30 @@ async function collectChunks(build, cacheDir, audioLanguages, onProgress, signal
           uncompressedMd5: String(chunk.uncompressedMd5 || '').toLowerCase(),
         });
       }
+    }
+  }
+  if (deleted && deleted.active && usedByDeleted.size) {
+    // 只删「仅被删除文件引用」的块：还有正常文件在用的块必须留下
+    const stillNeeded = new Set();
+    for (let index = 0; index < manifests.length; index += 1) {
+      const matchingField = manifests[index].matching_field;
+      for (const file of lists[index] || []) {
+        if (!file.file) continue;
+        if (isDeletedAsset(deleted, { file: file.file, matchingField })) continue;
+        for (const chunk of file.chunks || []) if (chunk.id) stillNeeded.add(chunk.id);
+      }
+    }
+    let dropped = 0;
+    for (const id of usedByDeleted) {
+      if (stillNeeded.has(id)) continue;
+      if (chunks.delete(id)) dropped += 1;
+    }
+    if (dropped > 0) {
+      onProgress?.({
+        phase: 'manifest',
+        current: `官方清单标了 ${dropped} 个分块本次不用下，已跳过`,
+        deletedSkipped: dropped,
+      });
     }
   }
   return chunks;
@@ -684,6 +778,8 @@ async function startHoyoPredownload({
   includeCategory,
   signal,
   onProgress,
+  // 只给自检 / 真机验证脚本用来「只下前 N 个补丁包」；正式链路不传 = 下全部
+  maxPatches = 0,
 }) {
   if (!supported(gameKey)) throw new Error('这个游戏不支持米哈游预下载');
   const base = await inspect({
@@ -708,6 +804,79 @@ async function startHoyoPredownload({
 
   const scope = { includeCategory: base.includeCategory };
   onProgress?.({ phase: 'version', current: `目标版本 ${base.targetVersion}` });
+
+  /*
+   * 先试「ldiff 补丁包」这条更省的路（官方启动器、Starward 用的都是它）。
+   *
+   * 两条路下的是同一份官方数据，但计价单位完全不同：
+   *   - 分块（chunk）：按「块」比对，文件里任何一个字节变动，它所在的整个块都要重下。
+   *     实测星铁 4.6.0→4.7.0 要下 12171 块 = 11.82GB。
+   *   - 补丁（ldiff） ：按「文件」给二进制差分，一个 60MB 的补丁包里可能装着上百个
+   *     小文件的差分。同一次更新只要 91 个包 = 5.82GB。
+   * 差距全在「变了但没大改」的那批文件上：5.63GB 里只有 1.24GB 是真正的二进制差分，
+   * 其余 4.39GB 是新增文件本身的压缩态。块级比法在这批文件上白下了一半。
+   *
+   * 预下载阶段**只存不打**：补丁包落到 <安装目录>/ldiff/，游戏本体一个字节都不动
+   * （预下载发生时游戏还在跑旧版本，就地改文件等于边走边拆轮胎）。真正应用留给
+   * 正式版上线后的 applyHoyoPredownload / applyHdiffPrepass。
+   *
+   * 拿不到补丁（官方没给本版本差分、绝区零那种官方关了 ldiff、接口异常）时，
+   * 静静落回原来的分块预下载，行为与改造前完全一致。
+   */
+  let patchResult = null;
+  try {
+    patchResult = await hdiff.downloadPatchPackages({
+      gameKey,
+      channel,
+      installRoot,
+      cacheDir,
+      audioLanguages,
+      includeStory: base.includeCategory === true,
+      patchRoot: patchDirOf(installRoot),
+      signal,
+      onProgress,
+      maxPatches,
+    });
+  } catch (error) {
+    onProgress?.({ phase: 'manifest', current: `补丁包下载不了，改走分块：${error.message}` });
+  }
+  if (patchResult?.ok && patchResult.patchCount > 0) {
+    await setConfigIniValue(installRoot, 'predownload', marker(base.localVersion, base.targetVersion, audioLanguages));
+    await writeMeta(installRoot, {
+      localVersion: base.localVersion,
+      targetVersion: base.targetVersion,
+      audioKey: audioKey(audioLanguages),
+      includeCategory: base.includeCategory,
+      // 模式位：apply / hasPatchCache 靠它区分「这份预下载是补丁包还是分块」
+      mode: 'ldiff',
+      patchCount: patchResult.patchCount,
+      bytes: patchResult.totalBytes,
+      savedAt: new Date().toISOString(),
+    });
+    return {
+      ok: true,
+      kind: 'hoyo',
+      mode: 'ldiff',
+      gameKey,
+      channel,
+      localVersion: base.localVersion,
+      targetVersion: base.targetVersion,
+      dir: patchDirOf(installRoot),
+      patchCount: patchResult.patchCount,
+      patchBytes: patchResult.totalBytes,
+      totalBytes: patchResult.totalBytes,
+      bytesTotal: patchResult.totalBytes,
+      files: patchResult.patchCount,
+      skipped: 0,
+    };
+  }
+  if (patchResult?.reason) {
+    onProgress?.({
+      phase: 'manifest',
+      current: `官方这次没给补丁包（${patchResult.reason}），按分块预下载`,
+    });
+  }
+
   const targetBuild = await fetchBuild(base.info, pre, '');
   const sizes = summarizeManifests(targetBuild, audioLanguages, scope);
   if (sizes.bytesCategory) {
@@ -719,7 +888,12 @@ async function startHoyoPredownload({
     });
   }
   onProgress?.({ phase: 'manifest', current: '读取目标版本清单' });
-  const targetChunks = await collectChunks(targetBuild, cacheDir, audioLanguages, onProgress, signal, scope);
+  // 官方黑名单挂在安装目录上（游戏自己写的那份），读不到就 active:false → 不过滤
+  const deletedAssets = loadDeletedAssets(installRoot, gameKey);
+  const targetChunks = await collectChunks(targetBuild, cacheDir, audioLanguages, onProgress, signal, {
+    ...scope,
+    deleted: deletedAssets,
+  });
 
   // 本地版本清单拿不到就按「全量下」处理，宁可多下也不能漏。
   const existing = new Set();
@@ -744,11 +918,56 @@ async function startHoyoPredownload({
   let processed = 0;
   let bytesDone = 0;
   let skipped = 0;
-  for (const chunk of needed) {
+
+  /*
+   * 分块下载并发化 —— 这是整条下载链里最大的一道坎。
+   *
+   * 星铁一次预下载要下 12,171 个分块，而官方分块最大只有 3.4 MB、平均 0.37 MB
+   * （实测 field=game 91,687 块 / maxMB 3.4，field=zh-cn 10,756 块 / maxMB 3.1）。
+   * 这么小的块永远够不上 multiDownload 的 8 MB 分段门槛，于是以前这里是纯串行
+   * for-await：一条连接一个接一个地拉。用同一批真实分块实测（400 块 / 149.1 MB）：
+   *
+   *   串行 1 路  4.03 MB/s
+   *   4 路  23.83 / 8 路  31.19 / 16 路  38.52（最佳） / 32 路  29.53 / 48 路  31.21
+   *
+   * 也就是说「循环改成并发」这一件事本身就能把吞吐提到 9.6 倍，再加连接数反而
+   * 因为对端限流掉回去。所以默认 16 路，与 apply 侧工人数一致；环境变量只给自测用。
+   *
+   * 并发安全：每个分块写自己的 <chunkId>.pd_tmp、成功后 rename 到自己的 <chunkId>，
+   * 块与块之间不共享文件句柄，所以并发写不会互相踩。累加量（processed/bytesDone/
+   * skipped）在单线程事件循环里自增是原子的，界面进度只是数字抖动不会错乱。
+   */
+  const downloadConcurrency = Math.max(
+    1,
+    Math.min(32, Number(process.env.HXL_PREDOWNLOAD_CONCURRENCY) || 16)
+  );
+
+  /*
+   * 进度节流：downloadChunkFile 每收到一片数据（约 64 KB）就回调一次，串行时一块
+   * 6 片还能接受；16 路并发后事件量放大 16 倍，6 万个块全开就是几十万条 IPC，
+   * 渲染进程光重绘进度条就要卡住。这里统一收到 120ms 一帧，界面反而是流畅的。
+   * 收尾会 force 推一次，避免最后停在 99%。
+   */
+  let lastProgressAt = 0;
+  const pushProgress = (chunk, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastProgressAt < 120) return;
+    lastProgressAt = now;
+    onProgress?.({
+      phase: 'download',
+      current: chunk.id,
+      processed,
+      total: needed.length,
+      skipped,
+      bytesDone,
+      totalBytes,
+    });
+  };
+
+  const downloadOne = async (chunk) => {
     await waitIfPaused(signal);
     throwIfCancelled(signal);
     const target = path.join(dir, chunk.id);
-    processed += 1;
     let reused = false;
     try {
       const stat = await fsp.stat(target);
@@ -761,39 +980,56 @@ async function startHoyoPredownload({
     if (reused) {
       skipped += 1;
       bytesDone += chunk.compressedSize || 0;
-      onProgress?.({
-        phase: 'download',
-        current: chunk.id,
-        processed,
-        total: needed.length,
-        skipped,
-        bytesDone,
-        totalBytes,
-      });
-      continue;
+      processed += 1;
+      pushProgress(chunk);
+      return;
     }
     await downloadChunkFile(chunk.url, target, chunk.compressedSize, chunk.compressedMd5, signal, (delta) => {
       bytesDone += delta;
-      onProgress?.({
-        phase: 'download',
-        current: chunk.id,
-        processed,
-        total: needed.length,
-        skipped,
-        bytesDone,
-        totalBytes,
-      });
+      pushProgress(chunk);
     });
-    onProgress?.({
-      phase: 'download',
-      current: chunk.id,
-      processed,
-      total: needed.length,
-      skipped,
-      bytesDone,
-      totalBytes,
-    });
-  }
+    processed += 1;
+    pushProgress(chunk);
+  };
+
+  /*
+   * 一个块失败就整条停下（和串行版行为一致）：预下载少一块，后面 apply 一定缺文件，
+   * 与其带病跑完再让用户在更新时发现「预下载内容不完整」，不如当场报错。
+   * fatalError 是给已经排队的工人用的刹车 —— 第一个工人出错后，其余立刻退出，
+   * 不要继续把剩下几万个块拉完。
+   */
+  let cursor = 0;
+  let fatalError = null;
+  const downloadWorkerCount = Math.max(1, Math.min(downloadConcurrency, needed.length));
+  await Promise.all(
+    Array.from({ length: downloadWorkerCount }, async () => {
+      for (;;) {
+        if (fatalError) return;
+        const index = cursor;
+        cursor += 1;
+        if (index >= needed.length) return;
+        try {
+          await downloadOne(needed[index]);
+        } catch (error) {
+          // 用户主动取消不是下载失败，原样往上抛
+          if (signal?.cancelled || error?.cancelled) throw error;
+          if (!fatalError) fatalError = error;
+          throw error;
+        }
+      }
+    })
+  );
+
+  // 收尾强推一帧满进度：节流会吞掉最后几片，别让界面停在 99%
+  onProgress?.({
+    phase: 'download',
+    current: '',
+    processed: needed.length,
+    total: needed.length,
+    skipped,
+    bytesDone: totalBytes,
+    totalBytes,
+  });
 
   await setConfigIniValue(installRoot, 'predownload', marker(base.localVersion, base.targetVersion, audioLanguages));
   await writeMeta(installRoot, {
@@ -801,6 +1037,8 @@ async function startHoyoPredownload({
     targetVersion: base.targetVersion,
     audioKey: audioKey(audioLanguages),
     includeCategory: base.includeCategory,
+    // 模式位：这份预下载是「分块缓存」还是「补丁包」，apply 时两条路完全不同
+    mode: 'chunk',
     chunkCount: needed.length,
     bytes: totalBytes,
     ...sizes,
@@ -882,7 +1120,7 @@ async function fetchChunk(chunk, signal) {
         signal: AbortSignal.timeout(120000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const compressed = Buffer.from(await response.arrayBuffer());
+      const compressed = await netThrottle.toBuffer(response);
       if (chunk.compressedMd5 && md5(compressed) !== chunk.compressedMd5) {
         throw new Error('分块压缩数据校验失败');
       }
@@ -967,13 +1205,60 @@ async function assembleFile(file, ctx) {
         uncompressedMd5: String(chunk.uncompressedMd5 || '').toLowerCase(),
       };
       let raw = ctx.hasCache ? await readCachedChunk(ctx.chunkDir, entry) : null;
-      const hit = Boolean(raw);
-      if (hit) reused += 1;
-      else raw = await fetchChunk(entry, ctx.signal);
+      const fromCatalog = Boolean(raw);
+      let fromLocalFile = false;
+      if (raw) {
+        reused += 1;
+      } else {
+        /*
+         * 再试一次「本地旧文件里的同一个分块」。
+         *
+         * chunk/ 里只有这一次预下载**新下**的块（星铁 12171 个），差量里没变的那些块
+         * （94430 个）从来没有落进 chunk/；不补这一级，apply 就会把它们全当缺块联网重下，
+         * 于是「预下载 12.70G」之后再追加 10.48G。
+         *
+         * 这里读的是**还没被改写的旧文件**：本函数先把内容写进 `.pd_tmp`，最后才
+         * rename 覆盖目标，所以组装期间目标文件原样可读。readLocalChunk 自带
+         * 「size 相等 + md5 相符」双校验，读不到或不符都返回 null，退回联网下载 ——
+         * 复用失败只会慢，不会写坏文件。
+         */
+        const localEntry = ctx.localChunks?.get(entry.uncompressedMd5);
+        if (localEntry && ctx.localChunkBase) {
+          /*
+           * 这里**不复用读句柄**，每次开、读完立刻关。
+           *
+           * 16 路并发下，本文件要读的本地字节很可能落在另一个工人正在重写的文件里。
+           * 句柄一旦跨工人持有，别人走到最后一步 `rm target` + `rename` 时就会撞上
+           * Windows 的占用/删除待决，轻则白报错、重则整次 apply 中断。
+           * 每次开合的成本是每个块一次 open/close（十万级、几十秒量级），
+           * 相比它换掉的「联网重下十几 GB」可以忽略；正确性优先。
+           */
+          const handles = new Map();
+          try {
+            raw = await readLocalChunk(ctx.localChunkBase, localEntry, chunk, handles);
+          } finally {
+            for (const pending of handles.values()) {
+              try {
+                await (await pending).close();
+              } catch {
+                /* 没打开成功或已关闭，忽略 */
+              }
+            }
+          }
+          if (raw) {
+            fromLocalFile = true;
+            reused += 1;
+          }
+        }
+      }
+      if (!raw) raw = await fetchChunk(entry, ctx.signal);
       await handle.write(raw, 0, raw.length, chunk.offset);
       if (hash) hash.update(raw);
       bytes += chunk.uncompressedSize || raw.length;
-      ctx.onChunk?.({ bytes: chunk.uncompressedSize || raw.length, reused: hit });
+      ctx.onChunk?.({
+        bytes: chunk.uncompressedSize || raw.length,
+        reused: fromCatalog || fromLocalFile,
+      });
     }
   } finally {
     await handle.close();
@@ -1028,7 +1313,9 @@ async function applyHoyoPredownload({
     throw new Error('没有读到本地版本号，无法应用更新');
   }
   const dir = chunkDirOf(installRoot);
+  const patchDir = patchDirOf(installRoot);
   const hasCache = fs.existsSync(dir);
+  const hasPatches = fs.existsSync(patchDir);
   /*
    * 必须等官方新版本正式上线（main 分支版本比本地新）才能应用。
    * 预下载只是把新版本的 chunk 提前缓存到 chunk/，游戏本体此时还是旧版本；
@@ -1037,7 +1324,7 @@ async function applyHoyoPredownload({
    * 等官方上线（check 状态变成 update）再点应用。
    */
   if (compareVersion(base.latestVersion, base.localVersion) <= 0) {
-    if (hasCache) {
+    if (hasCache || hasPatches) {
       throw new Error(
         '新版本还没正式发布，现在「应用」只会清掉已下好的预下载内容、游戏也不会变新。' +
           '请等官方上线后（启动器提示「应用官方更新」，或预下载状态变成「正式版已上线」）再来点应用。'
@@ -1054,13 +1341,28 @@ async function applyHoyoPredownload({
   });
   const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单', signal });
   throwIfCancelled(signal);
+  // 官方黑名单：apply 侧同样跳过（否则预下载不下了，正式应用时又补下回来）
+  const deletedAssets = loadDeletedAssets(installRoot, gameKey);
+  let deletedSkipped = 0;
   for (let index = 0; index < manifests.length; index += 1) {
     const list = lists[index];
     const prefix = String(manifests[index].chunk_download?.url_prefix || '').replace(/\/$/, '');
+    const matchingField = manifests[index].matching_field;
     for (const item of list) {
       if (!item.file || files.has(item.file)) continue;
+      if (isDeletedAsset(deletedAssets, { file: item.file, matchingField })) {
+        deletedSkipped += 1;
+        continue;
+      }
       files.set(item.file, { ...item, chunkPrefix: prefix });
     }
+  }
+  if (deletedSkipped > 0) {
+    onProgress?.({
+      phase: 'install',
+      current: `官方清单标了 ${deletedSkipped} 个资源本次不用下，已跳过`,
+      deletedSkipped,
+    });
   }
 
   const normalized = [...files.values()].filter((file) => !file.isFolder && file.chunks?.length);
@@ -1142,6 +1444,73 @@ async function applyHoyoPredownload({
     reserveBytes: 256 * 1024 ** 2,
   });
 
+  /*
+   * 本地旧版本的分块索引：差量里没变的块可以按 offset 直接从本地旧文件读出来，
+   * 不必联网重下。这是「预下载完再点更新」不至于比直接更新还多下一倍的关键一级。
+   *
+   * 必须用**和预下载/正式更新同一套 includeStory 口径**建索引，否则两边文件集合
+   * 对不上、该复用的块找不到源。建索引失败不致命（返回空 Map + reason）：
+   * 退化成纯 chunk 组装，只是重新变慢，不会写坏任何文件。
+   */
+  let localChunks = new Map();
+  try {
+    const built = await loadLocalChunkIndex({
+      gameKey,
+      baseRoot: installRoot,
+      cacheDir,
+      onProgress,
+      signal,
+      audioLanguages,
+      includeStory: base.includeCategory === true,
+    });
+    localChunks = built.index || new Map();
+    if (built.reason) {
+      onProgress?.({ phase: 'install', current: `本地复用不可用：${built.reason}` });
+    }
+  } catch (error) {
+    onProgress?.({ phase: 'install', current: `本地复用不可用：${error.message}` });
+  }
+
+  /*
+   * 预下载存下来的补丁包，在这里就地打完。
+   *
+   * 顺序很关键：必须**在索引建好之后、16 路工人开工之前**一次跑完。
+   *   1. 索引是在本地旧文件上建的，补丁会把文件 rm + rename 换成新内容，
+   *      索引一旦失效，那些「没变的块」就找不到源、又得联网重下 —— 白下；
+   *   2. 补丁阶段和 16 路并发组装同时进行的话，会互相踩同一个目标文件
+   *      （Windows 上还会撞「删除待决」），必须串行。
+   * 打完补丁，assembleFile 里 quickFileMatches 会把这些文件判成 skipped，
+   * 剩下的才轮到 chunk 缓存 / 本地旧块 / 联网。
+   */
+  let patchApplied = 0;
+  let patchFailed = 0;
+  if (hasPatches) {
+    try {
+      const prepass = await hdiff.applyHdiffPrepass({
+        gameKey,
+        channel,
+        installRoot,
+        cacheDir,
+        audioLanguages,
+        includeStory: base.includeCategory === true,
+        patchRoot: patchDir,
+        onProgress,
+        signal,
+        linkSources,
+      });
+      if (prepass?.ok) {
+        patchApplied = prepass.applied || 0;
+        patchFailed = prepass.failed || 0;
+        if (prepass.reason) {
+          onProgress?.({ phase: 'install', current: `补丁包未应用：${prepass.reason}` });
+        }
+      }
+    } catch (error) {
+      // 补丁失败不致命：没打上的文件照样能走 chunk 重下，只是慢一点，不会写坏东西
+      onProgress?.({ phase: 'install', current: `补丁包应用失败，改走分块：${error.message}` });
+    }
+  }
+
   const applyOne = async (file) => {
     const result = await assembleFile(file, {
       installRoot,
@@ -1150,6 +1519,8 @@ async function applyHoyoPredownload({
       signal,
       gameKey,
       linkSources: externalRoots,
+      localChunkBase: installRoot,
+      localChunks,
       onChunk: (delta) => {
         bytesDone += delta.bytes;
         if (delta.reused) reusedChunks += 1;
@@ -1227,9 +1598,11 @@ async function applyHoyoPredownload({
   };
 }
 
-/** 删掉预下载产物：chunk/ 目录 + 自己留下的 .pd_tmp。不碰游戏文件。 */
+/** 删掉预下载产物：chunk/ 与 ldiff/ 目录 + 自己留下的 .pd_tmp。不碰游戏文件。 */
 async function clearHoyoPredownloadFiles(installRoot) {
   await fsp.rm(chunkDirOf(installRoot), { recursive: true, force: true }).catch(() => {});
+  // ldiff/ 里只有我们自己下下来的补丁包，没有游戏文件，整目录可以删
+  await fsp.rm(patchDirOf(installRoot), { recursive: true, force: true }).catch(() => {});
   await sweepTempFiles(installRoot).catch(() => {});
   return true;
 }
@@ -1272,6 +1645,7 @@ module.exports = {
   assembleFile,
   clearHoyoPredownload,
   chunkDirOf,
+  patchDirOf,
   measureStoredChunks,
   compareVersion,
   readGameVersion,

@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const { multiDownload, MIN_PARALLEL_SIZE } = require('./multi-download');
+const netThrottle = require('./net-throttle');
 const { httpFetch, segmentFetch } = require('./http-fetch');
 const linkSource = require('./link-source');
 const diskSpace = require('./disk-space');
@@ -43,8 +44,24 @@ const PROFILES = [
     channel: '1',
     subChannel: '1',
     seq: '5',
-    rootFiles: [...COMMON_CHANNEL_ROOT, 'eld_Endfield.db', 'hgsdk.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [
+      ...COMMON_CHANNEL_ROOT,
+      'eld_Endfield.db', 'hgsdk.dll', 'OneChannelLC.dll', 'HGP.dll',
+      // 跨族当源（国际服 / Play / Steam 运行时 → 官服）时，源树里这 5 颗是
+      // Gryphline 版，和 Hypergryph 的 SDK / 账号体系不配套，正是「官服重二进制
+      // + 国际服 SDK」6 秒崩的镜像。补回官服官方全量清单里的官服版 5 颗，
+      // overlay 会先断链再 copy，把壳与件刷成同一套。与 EndGlobal 完全对称，
+      // 不动 GameAssembly.dll / Qt5 / CefView 等官服与国际服同版的大件。
+      'Endfield.exe',
+      'UnityPlayer.dll',
+      'AntiCheatExpert/ACE-Base.dat',
+      'AntiCheatExpert/ACE-Base64.dll',
+      'Endfield_Data/Plugins/x86_64/CrashSight64.dll',
+    ],
     dirs: COMMON_DIRS,
+    // 补 5 颗后提 packRev：老 .state 判未就绪 → 整包重下（约 112MB），
+    // 保证跨族生成官服运行时一定拿到官服版重二进制，不会留着国际服壳子。
+    packRev: 1,
   },
   {
     iconName: 'BiliEndfield',
@@ -55,8 +72,21 @@ const PROFILES = [
     channel: '2',
     subChannel: '2',
     seq: '5',
-    rootFiles: [...COMMON_CHANNEL_ROOT, 'eld_Endfield.db', 'PCGameSDK.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [
+      ...COMMON_CHANNEL_ROOT,
+      'eld_Endfield.db', 'PCGameSDK.dll', 'OneChannelLC.dll', 'HGP.dll',
+      // 同 EndOfficial：跨族当源时靠这 5 颗官服版重二进制把 Gryphline 壳刷回来。
+      'Endfield.exe',
+      'UnityPlayer.dll',
+      'AntiCheatExpert/ACE-Base.dat',
+      'AntiCheatExpert/ACE-Base64.dll',
+      'Endfield_Data/Plugins/x86_64/CrashSight64.dll',
+    ],
     dirs: ['BLPlatform64/', 'U8Data/config/'],
+    // 回退大包（2026-11-08）：只铺 SDK 白名单小包（v2.3.0 / Xel 式），不再叠 deltaOf
+    // 差异二进制。packRev 3→4：补 5 颗官服版重二进制，强制老用户重下成新小包，
+    // 见 channelPackFilesReady / packDownloadedState。
+    packRev: 4,
   },
   {
     iconName: 'GlobalEndfield',
@@ -67,10 +97,27 @@ const PROFILES = [
     channel: '6',
     subChannel: '6',
     seq: '3',
-    rootFiles: [...COMMON_CHANNEL_ROOT, 'gfsdk.dll', 'glfoundation.dll', 'OneChannelLC.dll', 'HGP.dll'],
+    rootFiles: [
+      ...COMMON_CHANNEL_ROOT,
+      'gfsdk.dll',
+      'glfoundation.dll',
+      'OneChannelLC.dll',
+      'HGP.dll',
+      // 回退大包后的纯 SDK 小包让国际服「官服重二进制 + 国际服 SDK」混搭、启动 6 秒
+      // 即退（launch.log pid 6984/12588）。补回这 5 颗渠道重二进制让壳与件配套；
+      // 均取自 EndGlobal 官方全量清单，与三服替换包国际服版 md5 逐字节一致（约 114.6MB）。
+      // 不动 GameAssembly.dll / CefView / Qt5 等大件：历史替换包亦不带、官服基底沿用；
+      // 若本机实测仍崩则回退 126 文件完整差异包。
+      'Endfield.exe',
+      'UnityPlayer.dll',
+      'AntiCheatExpert/ACE-Base.dat',
+      'AntiCheatExpert/ACE-Base64.dll',
+      'Endfield_Data/Plugins/x86_64/CrashSight64.dll',
+    ],
     dirs: COMMON_DIRS,
-    // Gryphline 版连本体二进制都不同（126 个文件 / 936 MB），见 loadRemoteManifest 注释
-    deltaOf: 'EndOfficial',
+    // 补 110MB（2026-11-09）：packRev 3→4 强制重下新增的 5 颗（老 .state 里 PackRev=3
+    // 会被判未就绪）；B服 / 官服 / Play / Steam 一行不动。
+    packRev: 4,
   },
   {
     iconName: 'PlayEndfield',
@@ -90,9 +137,18 @@ const PROFILES = [
       'play_pc_sdk.dll',
       'OneChannelLC.dll',
       'HGP.dll',
+      // 与 EndGlobal 对称：跨渠道当源时补回 Play 版 5 颗重二进制，让壳与件配套。
+      // 路径是白名单，内容由 Play 官方全量清单按同名路径下载，不硬编码 md5。
+      'Endfield.exe',
+      'UnityPlayer.dll',
+      'AntiCheatExpert/ACE-Base.dat',
+      'AntiCheatExpert/ACE-Base64.dll',
+      'Endfield_Data/Plugins/x86_64/CrashSight64.dll',
     ],
     dirs: COMMON_DIRS,
-    deltaOf: 'EndOfficial',
+    // 补 5 颗后提 packRev：老 .state 判未就绪 → 整包重下，保证跨渠道生成时
+    // 一定拿到 Play 版重二进制，不会留着别的渠道的壳子。
+    packRev: 4,
   },
   {
     iconName: 'SteamEndfield',
@@ -111,9 +167,18 @@ const PROFILES = [
       'HGP.dll',
       'steam_api64.dll',
       'steam_appid.txt',
+      // 与 EndGlobal 对称：跨渠道当源时补回 Steam 版 5 颗重二进制，让壳与件配套。
+      // 路径是白名单，内容由 Steam 官方全量清单按同名路径下载，不硬编码 md5。
+      'Endfield.exe',
+      'UnityPlayer.dll',
+      'AntiCheatExpert/ACE-Base.dat',
+      'AntiCheatExpert/ACE-Base64.dll',
+      'Endfield_Data/Plugins/x86_64/CrashSight64.dll',
     ],
     dirs: COMMON_DIRS,
-    deltaOf: 'EndOfficial',
+    // 补 5 颗后提 packRev：老 .state 判未就绪 → 整包重下，保证跨渠道生成时
+    // 一定拿到 Steam 版重二进制，不会留着别的渠道的壳子。
+    packRev: 4,
   },
   {
     /*
@@ -446,7 +511,7 @@ async function fetchEncryptedManifest(latest, profile, options = {}) {
     signal: AbortSignal.timeout(60000),
   });
   if (!response.ok) throw new Error(`${profile.iconName} 清单 HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await netThrottle.toBuffer(response);
   manifestSizeHint.set(profile.directory, buffer.length);
   await writeDiskManifest(profile, latest.version, buffer);
   return buffer;
@@ -471,17 +536,14 @@ async function loadRemoteManifest(profile, allFiles = false) {
   }
   let files = allFiles ? parsed : parsed.filter((file) => isAllowed(profile, file.path));
   /*
-   * Gryphline 三个渠道（国际服 / Play / Steam）不能只盖 SDK。
-   *
-   * 实测 1.6.4 的官方清单：国际服与国服官服有 126 个文件不同、合计 936 MB ——
-   * Endfield.exe（895 KB vs 827 KB）、GameAssembly.dll（320 MB）、UnityPlayer.dll、
-   * CefView/libcef.dll、Qt5WebEngineCore.dll、AntiCheatExpert、sdk_data.dat…… 全是
-   * 各自发行的另一份二进制。只换 SDK 拼出来的运行时是「国服的壳 + 国际服的 SDK」，
-   * 启动 3 秒就以 0xc0000005 崩掉（崩在 Endfield.exe 里偏移 0x6eeb68）。
-   *
-   * 所以这三条改成「与国服清单不同的全部文件」：官方清单里 md5 和国服一样的不下
-   * （运行时本来就硬链接过来了），不一样的、国服清单里没有的全部进包。
-   * 同时保留原来的渠道件白名单：万一用户的基础客户端是 B服，SDK 那几样也得换。
+   * 回退大包（2026-11-08）：所有渠道改回「只收 rootFiles + dirs 白名单」的小包
+   * （v2.3.0 / Xel 式）。此前给 Gryphline / B服 加的 deltaOf 差异包（126 文件/936MB）
+   * 覆盖官服本体后与根目录自带的 verify_files.json 冲突，客户端报「游戏文件损坏或
+   * 缺失，要求重装游戏」；小包只造成少量不符、游戏照常进。故 PROFILES 里已全部移除
+   * deltaOf，下面这段差异合并分支当前不会触发（无任何 profile 再设 deltaOf），
+   * 逻辑原样保留、仅留作兜底，不再作为任何渠道的默认路径。
+   * 老用户磁盘上的大包由 packRev=3 的迁移门禁（见 channelPackFilesReady）判未就绪后
+   * 自动重下成小包。
    */
   if (!allFiles && profile.deltaOf) {
     const baseline = await rawManifest(profile.deltaOf);
@@ -533,7 +595,7 @@ async function downloadFile(url, destination) {
     signal: AbortSignal.timeout(300000),
   });
   if (!response.ok) throw new Error(`下载失败 HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await netThrottle.toBuffer(response);
   await fsp.mkdir(path.dirname(destination), { recursive: true });
   await fsp.writeFile(destination, buffer);
   return buffer;
@@ -563,7 +625,7 @@ async function downloadFile(url, destination) {
 const DOWNLOAD_STALL_MS = 60 * 1000;
 
 async function downloadToFile(url, destination, options = {}) {
-  const { Readable } = require('node:stream');
+  const { Readable, Transform } = require('node:stream');
   const { pipeline } = require('node:stream/promises');
   await fsp.mkdir(path.dirname(destination), { recursive: true });
 
@@ -612,6 +674,24 @@ async function downloadToFile(url, destination, options = {}) {
     });
   }
 
+  /*
+   * 限速：这条链路走 pipeline + 'data' 事件，回调里没法 await，所以用
+   * Transform 做背压——把等待放在 _transform 里，下游自然慢下来，pipeline
+   * 的流控语义完全不变（不会丢数据、也不会把内存撑爆）。
+   *
+   * 不限速（默认）时直接把 source 接到 file，与改动前逐行等价。
+   */
+  const throttleStream = netThrottle.getLimit() > 0
+    ? new Transform({
+      transform(chunk, _encoding, callback) {
+        netThrottle.consume(chunk.length).then(
+          () => callback(null, chunk),
+          () => callback(null, chunk)
+        );
+      },
+    })
+    : null;
+
   // 卡顿检测：每 5 秒看一眼，超过 DOWNLOAD_STALL_MS 没收任何字节就主动断开，
   // 让上层以退避重试（续传会从半截文件继续，不会从头重下）。
   const stallTimer = setInterval(() => {
@@ -625,7 +705,8 @@ async function downloadToFile(url, destination, options = {}) {
   }, 5000);
 
   try {
-    await pipeline(source, file);
+    if (throttleStream) await pipeline(source, throttleStream, file);
+    else await pipeline(source, file);
   } catch (error) {
     clearInterval(stallTimer);
     // 半截文件留着：续传时接着下，校验阶段会发现坏文件
@@ -729,18 +810,87 @@ async function downloadPackFile(url, destination, options = {}) {
  *
  * 解压需要 7-Zip；优先用鹰角启动器自带的 7zg.exe。
  */
-function findSevenZip(launcherRoot = 'C:\\Program Files\\Hypergryph Launcher') {
-  const candidates = [
-    path.join(launcherRoot, '1.6.0', '7zg.exe'),
-    path.join(launcherRoot, '7zg.exe'),
+/*
+ * 找 7-Zip。
+ *
+ * 注意：鹰角启动器**不一定装在 C 盘**。原来这里默认参数写死
+ * `C:\Program Files\Hypergryph Launcher`，用户把官方启动器装在别的盘（本机就是
+ * `H:\Hypergryph Launcher`）时四个候选全部落空 → 预下载 apply 必然抛
+ * 「没找到 7-Zip」→ 一路回落到逐文件全量更新，预下载下来的包白存。
+ *
+ * 所以这里改成：先用环境变量把常见安装根铺开，再对每个根做两层扫（固定文件名 +
+ * 版本子目录里找 7zg.exe），最后才看常见 7-Zip 安装位置。
+ */
+function sevenZipRoots(launcherRoot) {
+  const roots = [];
+  if (launcherRoot) roots.push(launcherRoot);
+  for (const base of [
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : '',
+    process.env.LOCALAPPDATA,
+  ]) {
+    if (!base) continue;
+    roots.push(path.join(base, 'Hypergryph Launcher'));
+    roots.push(path.join(base, 'Hypergryph'));
+  }
+  // 非系统盘：官方启动器允许装到任意盘，逐盘扫一层（D–Z，跳过 A/B 软驱与 C 已覆盖）
+  for (let code = 68; code <= 90; code += 1) {
+    const drive = String.fromCharCode(code);
+    roots.push(`${drive}:\\Hypergryph Launcher`);
+    roots.push(`${drive}:\\Hypergryph`);
+  }
+  return roots;
+}
+
+function findSevenZip(launcherRoot = '') {
+  const direct = [
     'C:\\Program Files\\7-Zip\\7z.exe',
     'C:\\Program Files (x86)\\7-Zip\\7z.exe',
   ];
-  for (const candidate of candidates) {
+  for (const candidate of direct) {
     try {
       if (fs.existsSync(candidate)) return candidate;
     } catch {
       /* 无权限就当没有 */
+    }
+  }
+  const seen = new Set();
+  for (const root of sevenZipRoots(launcherRoot)) {
+    if (!root || seen.has(root)) continue;
+    seen.add(root);
+    try {
+      const stat = fs.statSync(root);
+      if (!stat.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    // ① 根目录直接有
+    for (const name of ['7zg.exe', '7z.exe']) {
+      const direct7z = path.join(root, name);
+      try {
+        if (fs.statSync(direct7z).isFile()) return direct7z;
+      } catch {
+        /* 继续 */
+      }
+    }
+    // ② 版本子目录（1.6.0 / 1.5.2 …）里找
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      for (const name of ['7zg.exe', '7z.exe']) {
+        const found = path.join(root, entry.name, name);
+        try {
+          if (fs.statSync(found).isFile()) return found;
+        } catch {
+          /* 继续 */
+        }
+      }
     }
   }
   return '';
@@ -1033,24 +1183,76 @@ async function measureChannelPack(profile) {
 }
 
 /**
- * 这个渠道包「是不是按当前这套差异完整下过一遍」。
- *
- * 为什么不能只看目录在不在：2.6.0 之前随安装包分发的那份 EndGlobal 只有 10 个
- * SDK 文件（55 MB），Gryphline 三个渠道真正要的是 126 个文件（936 MB）—— 目录
- * 结构完好、U8Data 也在，但缺 Endfield.exe / GameAssembly.dll 这些本体二进制，
- * 铺出来的运行时一启动就崩。老机器升级上来时目录里躺的正是这份旧的，只看
- * 「U8Data 在不在」会把它当成已就绪，于是不下载、直接拼出错的运行时。
- *
- * 判据落在 `.state/<目录>.json`：只有 updateProfile 完整跑完（每个文件过 md5、
- * staging 整体改名、写状态）才会生成它，随安装包分发的老包和 XelLauncher 里
- * 借来的包都没有。缺它就让切服时问一次、下完再切；updateProfile 会按 md5
- * 复用已有文件，所以「其实文件已经齐了，只是没状态」的机器不会真的重下 936 MB。
+ * 实测一个目录里的文件数与总字节数（递归、不跟随符号链接）。
+ * 用来核对渠道包状态文件里记的 FileCount / TotalBytes 是否真落到了磁盘上。
  */
-function packDownloadedState(root, directory) {
+function countPackFiles(dir) {
+  let count = 0;
+  let bytes = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile()) {
+        count += 1;
+        bytes += fs.statSync(full).size;
+      }
+    }
+  }
+  return { count, bytes };
+}
+
+/**
+ * 这个渠道包「是不是按当前这套小包规约完整下过一遍」。
+ *
+ * 回退大包（2026-11-08）：老用户磁盘上可能还躺着 126 文件 / 936 MB 的差异大包
+ * （或随安装包分发的旧包）。只看「目录在不在 / U8Data 在不在」会把它们当成已就绪，
+ * 于是切服时铺出与 verify_files.json 冲突的运行时、客户端报「文件损坏或缺失」。
+ * 判据落在 `.state/<目录>.json`：只有 updateProfile 完整跑完（每个文件过 md5、
+ * staging 整体改名、写状态）才会生成它，且必须带当前 packRev。
+ * PackRev 对不上（老状态 0 / 2，新规约 3）就判未就绪 → 触发重下小包；
+ * updateProfile 按 md5 复用已有文件，所以「其实文件已齐只是状态旧」不会白下大流量。
+ */
+function packDownloadedState(root, directory, profile = null) {
   try {
     const raw = fs.readFileSync(path.join(root, '.state', `${directory}.json`), 'utf8');
     const state = JSON.parse(raw);
-    return Boolean(state && state.ManifestSha256);
+    if (!state || !state.ManifestSha256) return false;
+    /*
+     * 回退大包（2026-11-08）：包规约版本（PackRev）对不上就当没下过。
+     * 四个非官服渠道统一 packRev=3；老用户 .state 里是差异大包时代的 0 或 2，
+     * ManifestSha256 非空也不能算「齐了」，必须重下小包替换掉磁盘上的大包。
+     * 旧状态文件没有 PackRev 字段，按 0 处理。
+     */
+    const wantRev = Number((profile && profile.packRev) || 0);
+    const haveRev = Number(state.PackRev || 0);
+    if (haveRev !== wantRev) return false;
+    /*
+     * 残包自愈（2026-11-09）：.state 里的 FileCount / TotalBytes 是清单的理论值，
+     * 不代表磁盘真的有这么多文件。曾出现过下载中断/被 abort 后只剩 5 个文件
+     * （缺的正好含根目录 HGP.dll 国际服版），但状态文件已按 24 个写好，于是
+     * PackRev 一过就被永久当成「已就绪」借用 → overlay 少铺 19 个 → 运行时
+     * HGP.dll 保持官服硬链接版 → 客户端自检弹「游戏文件缺失或损坏 → HGP.dll」。
+     * 所以这里再核一次磁盘实际文件数/字节数；对不上就判未就绪，切服时整包重下。
+     * 旧状态文件没有这两个字段时保持原行为，兼容老用户，不误伤 B服/官服/方舟。
+     */
+    if (Number.isFinite(Number(state.FileCount)) && Number.isFinite(Number(state.TotalBytes))
+      && (Number(state.FileCount) > 0 || Number(state.TotalBytes) > 0)) {
+      const packDir = path.join(root, directory);
+      if (!fs.existsSync(packDir)) return false;
+      let onDisk;
+      try {
+        onDisk = countPackFiles(packDir);
+      } catch {
+        return false;
+      }
+      if (onDisk.count !== Number(state.FileCount) || onDisk.bytes !== Number(state.TotalBytes)) {
+        return false;
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -1059,13 +1261,17 @@ function packDownloadedState(root, directory) {
 /**
  * 某个渠道包目录算不算齐了。
  *
- * 差异渠道（国际服 / Play / Steam）走状态文件；官服 / B服 这两个和基础客户端
- * 同二进制、老机器上随安装包带来的就是完整的，继续用轻量的 U8Data 判定，
- * 免得升级后让所有人重下 235 MB。
+ * 回退大包（2026-11-08）：四个非官服渠道（B服 / 国际服 / Play / Steam）设了
+ * packRev=3，一律走状态文件 + PackRev 双条件判定，好让老用户磁盘上的差异大包
+ * （状态里 PackRev=0/2）对不上新规约、切服前被判未就绪 → 自动重下小包。
+ * EndOfficial / Arknights 清单没变、没有 packRev，仍用轻量的 U8Data 判定，
+ * 免得升级后让所有人无谓重下。
  */
 function channelPackFilesReady(profile, dir) {
   if (!dir || !fs.existsSync(dir)) return false;
-  if (profile && profile.deltaOf) return packDownloadedState(path.dirname(dir), path.basename(dir));
+  if (profile && profile.packRev) {
+    return packDownloadedState(path.dirname(dir), path.basename(dir), profile);
+  }
   return fs.existsSync(path.join(dir, 'U8Data'));
 }
 
@@ -1104,6 +1310,9 @@ async function updateProfile(profile, root, onProgress, options = {}) {
     oldState &&
     oldState.Version === remote.version &&
     oldState.ManifestSha256 === remote.manifestSha256 &&
+    // 回退大包（2026-11-08）：PackRev 变了（差异大包时代的 0/2 → 小包规约 3）
+    // 就必须重下：光看清单 md5 会把磁盘上的大包当成「已是最新」而永远跳过。
+    Number(oldState.PackRev || 0) === Number(profile.packRev || 0) &&
     remote.files.every((file) => fs.existsSync(path.join(target, file.path)));
   if (current) {
     return { iconName: profile.iconName, version: remote.version, updated: 0, skipped: true };
@@ -1284,8 +1493,10 @@ async function updateProfile(profile, root, onProgress, options = {}) {
     UpdatedAtUtc: new Date().toISOString(),
     FileCount: remote.files.length,
     TotalBytes: remote.files.reduce((sum, file) => sum + file.size, 0),
-    // 这份包是不是「整包差异」（国际服 / Play / Steam）：给 readiness 与排查用
+    // 回退大包后所有 profile 都不再设 deltaOf，此字段恒 false，保留供排查用
     Delta: Boolean(profile.deltaOf),
+    // 包规约版本（小包=3）：判定「已下好」时要比对，见 packDownloadedState 的注释
+    PackRev: Number(profile.packRev || 0),
   };
   await fsp.mkdir(path.dirname(stateFile), { recursive: true });
   await fsp.writeFile(stateFile, JSON.stringify(state, null, 2), 'utf8');
@@ -1345,7 +1556,7 @@ module.exports = {
   updateEndfieldProfile: updateProfile,
   // 切服前的「要下多少」：确认弹窗里的体积与文件数都来自这里
   measureChannelPack,
-  // 渠道包目录算不算齐了：差异渠道看状态文件，其余看 U8Data
+  // 渠道包目录算不算齐了：设了 packRev 的渠道看状态文件 + PackRev，其余看 U8Data
   channelPackFilesReady,
   profileByDirectory,
   verifyArknightsSource,

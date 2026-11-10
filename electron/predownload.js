@@ -11,8 +11,9 @@
  * 状态存哪：
  *   - 米哈游系：权威标记写在 <游戏目录>/config.ini 的 predownload=<本地版本>,<目标版本>,<语音组合>
  *     （和 Starward / 官方启动器同一套写法），启动器自己再存一份 server.predownload 供界面直接读。
- *   - 终末地：预下载完成**没有**任何落盘标记，只能靠 Diffs/ 里每个包的 size + md5 重算，
- *     所以启动器必须自己存 { 安装路径, 目标版本 }，界面完全依赖 server.predownload。
+ *   - 终末地：Diffs/ 里每个包的 size + md5 是权威判定，另外预下载收尾会写
+ *     <安装目录>/Diffs/.hxl-predownload.json（{targetVersion,packCount,totalBytes}）——
+ *     只为了让同步的 hasCache 能区分「完整下完」和「残包」，不影响鹰角自己的命中判定。
  *
  * server.predownload 结构：
  *   {
@@ -43,17 +44,19 @@ const SUPPORT = {
   bh3: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（仅官服）' },
   endfield: { supported: true, kind: 'endfield', note: '鹰角 zip 分包预下载（Diffs/）' },
   /*
-   * 明日方舟（Hypergryph）：没有预下载。
-   * PC 端走的是启动器渠道包（ArkOfficial / ArkBilibili 整包），官方没有公开
-   * 「新版本预下载分支 + 分包清单」这类接口 —— 米哈游那套 Sophon pre_download、
-   * 终末地那套 Diffs 预下载包都不适用于它。硬做只能自造差分包，风险和收益不成比例。
+   * 明日方舟（Hypergryph）：当前不接预下载。
+   * 与终末地同一套 batch_proxy 协议：get_latest_game_rsp 里同样带 patch / pre_patch
+   * 字段（2026-11-09 实测，方舟官服带旧版本号询问时 patch 非空、pre_patch 为 null），
+   * 所以「接口不存在」这个说法是错的 —— 只是官方这一刻没有放出预下载分支。
+   * 真正没接的是产品层：没有 Diffs 落盘目录的语义、没有 UI 入口（servers.js 的
+   * PREDOWNLOAD_GAMES 不含 arknights），要接得先把 check/start/apply 三阶段补齐。
    * 这里显式登记成「不支持 + 原因」，而不是让它落到默认的「这个游戏没有接入预下载」，
    * 是因为将来要加「为什么不支持」的说明时，这句话就是唯一来源。
    */
   arknights: {
     supported: false,
     kind: 'none',
-    reason: '明日方舟 PC 版没有公开的预下载清单接口，版本更新由官方客户端自己完成',
+    reason: '明日方舟官方当前未开放预下载分支（协议本身有 pre_patch 字段，只是这一刻没放包），版本更新由官方客户端自己完成',
   },
   neverness: {
     supported: true,
@@ -151,13 +154,17 @@ function stateFromReport(report) {
 /**
  * 终末地的安装根目录不能直接用 server.root —— 那是硬链接出来的运行时目录，
  * 往里写 Diffs/ 会污染运行时，而且鹰角官方的更新流程认的是真实安装目录。
- * 运行时目录的特征是带 .hxl-endfield-runtime-v2 标记，需要排除掉。
+ * 运行时目录的特征是带标记文件，需要排除掉。
+ *
+ * 2026-11-08：架构是「每个渠道一份独立的硬链接运行时」（<运行时根>\endfield\<渠道>），
+ * 标记就是 .hxl-endfield-runtime-v2。不认它的话，运行时目录会被当成「真实安装目录」，
+ * 更新包直接写进运行时里，下一次重建就被渠道包覆盖掉，白下一次。
  */
-const RUNTIME_MARKER = '.hxl-endfield-runtime-v2';
+const RUNTIME_MARKERS = ['.hxl-endfield-runtime-v2'];
 
 function isRuntimeDir(dir) {
   try {
-    return fs.existsSync(path.join(dir, RUNTIME_MARKER));
+    return RUNTIME_MARKERS.some((marker) => fs.existsSync(path.join(dir, marker)));
   } catch {
     return false;
   }
@@ -180,6 +187,8 @@ function endfieldInstallRoot(game, server) {
       return candidate;
     }
   }
+  // 兜底不能把运行时镜像当真实安装目录：Diffs 写进去，下次重建就被渠道包覆盖，白下一次。
+  if (isRuntimeDir(server?.root)) return '';
   return server?.root || '';
 }
 
@@ -242,17 +251,114 @@ async function apply(options) {
   throw new Error('这个游戏不支持预下载');
 }
 
-/** 目录里是否真的有预下载产物（用来决定「点更新」时要不要先走应用预下载那条路）。 */
+/**
+ * 目录里是否真的有**可用**的预下载产物（用来决定「点更新」时要不要先走应用预下载那条路）。
+ *
+ * 米哈游这条不能只判目录存不存在：chunk/ 只要跑过一次预下载就会留下目录，哪怕里面
+ * 是这个版本的残渣、甚至只下了一两个块。之前这样判的后果是「点更新」永远走应用预下载
+ * 那条短路，正式更新里的 ldiff 预处理整段被跳过，一次小版本更新退化成纯 chunk 全量下载
+ * （实测原神 22.43GB、星铁 12.70GB，而走 ldiff 只需 8.34GB / 5.82GB）。
+ *
+ * 这里只做**本地同步**判据，不联网——hasCache 被 main.js 的裸 if 同步调用，改成 async
+ * 会让调用点恒真。于是判三件事：① 有真实分块（排除 .hxl- 元信息和 .pd_tmp 半成品）；
+ * ② 有 startHoyoPredownload 完整跑完才写的元信息文件；③ 磁盘上的分块数没明显少于记录值
+ * （下到一半或被清理过的残包不算）。
+ *
+ * 版本对不对得上交给 applyHoyoPredownload 按当前 main 清单自己校验；即便它失败，
+ * 调用点也有 catch 落回 ldiff，所以这里从严判不会把「能用的缓存」永久判死，只会让
+ * 「不该走的 apply」不触发。
+ */
 function hasCache({ gameKey, channel, installRoot }) {
   const info = describe(gameKey, channel);
   if (!info.supported || !installRoot) return false;
   try {
-    if (info.kind === 'hoyo') return fs.existsSync(hoyo.chunkDirOf(installRoot));
-    if (info.kind === 'endfield') return fs.existsSync(endfield.diffsDirOf(installRoot));
+    if (info.kind === 'hoyo') {
+      const dir = hoyo.chunkDirOf(installRoot);
+      let entries;
+      try {
+        // 只要**文件**：chunk/ 里正常全是分块文件，但个别用户或工具可能在里面留空子目录，
+        // 用 readdirSync 的名字列表会把目录也算成「块」，凑够 90% 就会误判成有缓存。
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return false;
+      }
+      const chunks = entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.hxl-') && !entry.name.endsWith('.pd_tmp'));
+      if (!chunks.length) return false;
+      let meta;
+      try {
+        // 文件名与 predownload-hoyo.js 的 META_FILE 保持一致；只有预下载完整收尾才写。
+        meta = JSON.parse(fs.readFileSync(path.join(dir, '.hxl-predownload.json'), 'utf8'));
+      } catch {
+        // 没有元信息 = 从来没完整跑完过一次预下载，只是残渣。
+        return false;
+      }
+      if (!meta || !meta.targetVersion || !Number(meta.chunkCount)) return false;
+      if (chunks.length < Number(meta.chunkCount) * 0.9) return false;
+      return true;
+    }
+    if (info.kind === 'endfield') {
+      /*
+       * 终末地原来是 `return fs.existsSync(diffsDirOf(installRoot))` —— 只要 Diffs\ 这个
+       * 目录还在就算有缓存。代价很实在：用户在官方启动器里手动清过 Diffs、或者预下载
+       * 下到一半被打断，目录还在但包里没东西，这里照样判「有缓存」→ 点更新走 apply →
+       * apply 校验不通过（原来还拿正式 patch 清单去核对预下载包）→ 抛异常 → 回落成
+       * 逐文件全量更新，预下载白下。和米哈游那边是同一个病。
+       *
+       * 改成和 hoyo 同构：① Diffs\ 里真有分卷包（排除 .hxl- 元信息与 .part 半成品）
+       * ② 有预下载收尾才写的元信息 ③ 元信息记的包数没明显多于磁盘实数。
+       * 老用户没有元信息文件（这一版之前下的）按「未就绪」处理：宁可让 apply 不触发、
+       * 直接走完整更新，也不要拿一个核对不了的目录去赌。
+       */
+      const state = endfield.readEndfieldMeta(installRoot);
+      if (!state.packFiles) return false;
+      if (!state.meta || !state.meta.targetVersion || !Number(state.meta.packCount)) return false;
+      if (state.packFiles < Number(state.meta.packCount) * 0.9) return false;
+      return true;
+    }
   } catch {
     return false;
   }
   return false;
+}
+
+/**
+ * 目录里是否有**预下载下来的 ldiff 补丁包**（预下载走了「补丁」那条路时用）。
+ *
+ * 和 hasCache 分开而不是混成一个布尔：两条路的产物在磁盘上是两个目录
+ * （chunk/ 与 ldiff/），点更新时该走哪条 apply 完全不同，调用点要能分别判断。
+ * 同样是纯本地同步判据（不能联网），判三件事：① ldiff/ 里有真包（排除元信息）
+ * ② 有预下载收尾写的元信息 ③ 元信息说这份是补丁模式。
+ */
+function hasPatchCache({ gameKey, channel, installRoot }) {
+  const info = describe(gameKey, channel);
+  if (!info.supported || !installRoot) return false;
+  if (info.kind !== 'hoyo') return false;
+  try {
+    const dir = hoyo.patchDirOf(installRoot);
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    const packs = entries.filter(
+      (entry) => entry.isFile() && !entry.name.startsWith('.hxl-') && !entry.name.endsWith('.part')
+    );
+    if (!packs.length) return false;
+    let meta;
+    try {
+      // 补丁模式的元信息仍写在 chunk/ 里（一份元信息描述一份预下载，不分散两处）
+      meta = JSON.parse(fs.readFileSync(path.join(hoyo.chunkDirOf(installRoot), '.hxl-predownload.json'), 'utf8'));
+    } catch {
+      return false;
+    }
+    if (!meta || meta.mode !== 'ldiff') return false;
+    if (!meta.targetVersion || !Number(meta.patchCount)) return false;
+    if (packs.length < Number(meta.patchCount) * 0.9) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function clear({ gameKey, installRoot }) {
@@ -272,6 +378,7 @@ module.exports = {
   apply,
   clear,
   hasCache,
+  hasPatchCache,
   endfieldInstallRoot,
   hoyoInstallRoot,
   isRuntimeDir,

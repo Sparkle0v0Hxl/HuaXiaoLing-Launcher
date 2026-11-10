@@ -27,6 +27,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 
 const { segmentFetch } = require('./http-fetch');
+const netThrottle = require('./net-throttle');
 
 /** 小于这个大小不值得分段。 */
 const MIN_PARALLEL_SIZE = 8 * 1024 * 1024;
@@ -235,6 +236,16 @@ async function pullSegment({ id, start, end, url, fd, fetchImpl, headers, counte
           }
           fs.writeSync(fd, value, 0, value.length, pos);
           pos += value.length;
+          /*
+           * 限速：16 条分段共享同一个全局配额，加起来不超过用户设的上限。
+           *
+           * ⚠️ 这里是 m00221 划的「16 连接热路径」。改它是因为用户明确要求
+           * 所有下载链路都能限速，而这条链路正是唯一能把千兆吃满的（终末地
+           * 差异包实测 127.8 MB/s）。为了不把热路径的性能赌进去，外面套了一层
+           * 同步短路的 if：不限速（默认）时连一次 await 都不会产生，
+           * 循环体与改动前逐条等价。
+           */
+          if (netThrottle.getLimit() > 0) await netThrottle.consume(value.length);
           counters[id] = pos - start;
           /*
            * 进度必须在这里推一把，不能只靠下面的 setInterval。

@@ -53,6 +53,168 @@ async function walkFiles(root, signal, onProgress) {
   return files;
 }
 
+/*
+ * 判断一个文件是否必须「拷贝」而不是「硬链接」。
+ *
+ * 硬链接 = 两条路径指向同一份数据，谁写都会改到对方。所以只有真正只读的资源
+ * 才能链接；任何游戏运行时会改写的文件都必须拷贝，否则渠道之间会互相污染。
+ *
+ * 2026-11-07 真实事故：终末地切服后官服一直报「检查资源完整性时发现异常」并反复
+ * 下载 1059MB。根因是 Endfield_Data\Persistent 下的 index_main.json / pref_main.json
+ * 和各 VFS 目录的 .blc 索引被硬链接了 —— 国际服下载语音包改写索引后，官服目录里的
+ * index_main.json 直接变成了国际服那份（inode 相同、大小 283452 而非官服的 276964），
+ * 于是官服读到「应该有 181 个 .chk」而自己只有 137 个，判定缺文件；下完再写又是同一份
+ * 共享文件，永远自愈不了。
+ *
+ * 资源 .chk 是只读的，继续硬链接（66GB 不必重复占盘）；索引类小文件一律拷贝。
+ *
+ * 2026-11-08 补充（HGDownloadLog.log:1669-1682 一手证据）：游戏**下载落地**的过程是
+ * 「旧文件 rename 成 .bak → temp rename 成正式名 → 删 .bak」，全程 rename、没有任何
+ * 原地覆写。Windows 同卷 rename 只改目录项、不动 inode 数据，所以 .chk/.blc 就算被
+ * 硬链接，被替换后也只是这条链接指向新 inode，另一侧那份 inode 一个字节都不会变 ——
+ * .chk 硬链接是安全的。
+ *
+ * 真正危险的是「进程内直接写文件」的那一类（.json 索引：index_main.json / pref_*.json，
+ * 尺寸在 42360→52328→52316 来回变），它们不是 rename 替换，而是同 inode 写穿。
+ * 因此 Endfield_Data\Persistent 整棵子树额外用 copyDirs 强制拷贝（见 ENDFIELD_COPY_DIRS），
+ * 宁可多占约 3.9GB 也彻底隔离基础客户端。
+ */
+const MUTABLE_INDEX_EXTS = ['.json', '.blc'];
+
+function isMutableIndexFile(rel) {
+  const ext = path.extname(rel).toLowerCase();
+  if (MUTABLE_INDEX_EXTS.indexOf(ext) < 0) return false;
+  // 只针对游戏数据目录里的索引；顶层零散 json（如 manifest）本来就该独立
+  return true;
+}
+
+/*
+ * 「必须拷贝、禁止硬链接」的完整判据（2026-11-08 扩容）。
+ *
+ * 起因：`fsutil hardlink list` 实测 `G:\Arknights Endfield`，下面这些**可写/渠道态**
+ * 文件现在就是 nlink=2（另一端全部指向 `.vela-linked-runtime\Endfield\global\...`），
+ * 也就是说它们**已经被硬链接共享了**：
+ *   config.ini 256
+ *   sdk_data.dat 64
+ *   game_files 222432
+ *   verify_files.json 73987
+ *   U8Data\config\config.bin 1568 与另外 8 个 .bin/.gryph（256~13824）
+ *   mmkv\gameprotocol_cache / gameprotocol_cache.crc / gf_login_cache / login_cache（4096）
+ *   WebviewConfig\BulletinConfig.bin / CustomerServiceConfig.bin / localBulletin / popupVersion
+ *   HGEventLog_Encrypted\sdid_s 192
+ * 老判据 `MUTABLE_INDEX_EXTS = ['.json','.blc']` 只按扩展名，上面这些**一条都盖不住**，
+ * 照它去建单工作目录会原样重演 11-07 的共享 inode 事故（官服报资源完整性异常）。
+ *
+ * 因此改成参照 Xel-Launcher `IsSafeSharedPath` 的三重判据（目录段 / 文件名片段 / 扩展名），
+ * 再加两份花筱灵专用的清单（顶层目录白名单、顶层无扩展名文件白名单）。
+ *
+ * 与 Xel 的一处**故意不同**：Xel 还规定「只有 Endfield_Data\ 下的文件才允许链接」，
+ * 花筱灵不照抄 —— 根目录那几个重二进制（GameAssembly.dll 320MB、Qt5WebEngineCore.dll
+ * 114MB、UnityPlayer.dll 35MB…）只读且巨大，硬链接能省一半盘，必须继续链接。
+ * 所以这里只走「可疑就拷贝」的黑名单，不做「只有白名单能链接」的白名单。
+ *
+ * 判据宁可多拷贝：命中的都是小文件（合计几十 MB），错判的代价是几百 MB 盘；
+ * 而漏判一次就是整个基础客户端被就地改写、修不回来。
+ */
+
+// 文件名片段（只看 basename，不做全路径匹配，避免 StreamingAssets 里误伤）
+const MUTABLE_NAME_FRAGMENTS = [
+  'config',
+  'setting',
+  'account',
+  'login',
+  'session',
+  'save',
+  'preference',
+  'userdata',
+];
+
+// 扩展名（Xel 原表 + 花筱灵实测需要的 .blc / .dat）
+const MUTABLE_EXTS = [
+  '.ini',
+  '.cfg',
+  '.config',
+  '.json',
+  '.xml',
+  '.log',
+  '.tmp',
+  '.lock',
+  '.db',
+  '.sqlite',
+  '.sqlite3',
+  '.info',
+  '.blc',
+  '.dat',
+];
+
+// 目录段：相对路径里任意一段命中就整棵拷贝
+const MUTABLE_DIR_SEGMENTS = [
+  'cache',
+  'caches',
+  'log',
+  'logs',
+  'temp',
+  'temporary',
+  'save',
+  'saves',
+  'saved',
+  'userdata',
+  'persistent',
+  'persistentdata',
+  'crash',
+  'crashes',
+];
+
+// 顶层目录整棵拷贝（花筱灵实测：这些都是游戏运行时自己写的）
+const MUST_COPY_TOP_DIRS = [
+  'u8data',
+  'sdkdata',
+  'mmkv',
+  'launcher_tmp',
+  '.switch',
+  'webviewconfig',
+  'hgeventlog_encrypted',
+  'sdklogs',
+  'crashsightlog',
+];
+
+// 顶层无扩展名 / 扩展名不足以判断的可写文件
+const MUST_COPY_ROOT_FILES = [
+  'config.ini',
+  'sdk_data.dat',
+  'game_files',
+  'verify_files',
+  'verify_files.json',
+  'eld_endfield.db',
+  'eld_platformprocess.db',
+  'marquee_config.bin',
+];
+
+function mustCopyNotLink(rel) {
+  const relLower = String(rel).toLowerCase().replace(/\\/g, '/');
+  const segments = relLower.split('/');
+  const topDir = segments[0];
+  const baseName = segments[segments.length - 1];
+
+  if (segments.length <= 1) {
+    if (MUST_COPY_ROOT_FILES.indexOf(relLower) >= 0) return true;
+  }
+  if (MUST_COPY_TOP_DIRS.indexOf(topDir) >= 0) return true;
+  // 目录段（跳过最后一段，那是文件名）
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (MUTABLE_DIR_SEGMENTS.indexOf(segments[i]) >= 0) return true;
+  }
+  // 文件名片段
+  for (const fragment of MUTABLE_NAME_FRAGMENTS) {
+    if (baseName.indexOf(fragment) >= 0) return true;
+  }
+  // 扩展名
+  const ext = path.extname(baseName);
+  if (MUTABLE_EXTS.indexOf(ext) >= 0) return true;
+  // 老判据保留（.json / .blc 索引）
+  return isMutableIndexFile(rel);
+}
+
 async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, signal, copyDirs = [] }) {
   const files = await walkFiles(sourceRoot, signal, (progress) =>
     onProgress({
@@ -66,7 +228,17 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
   let linked = 0;
   let copied = 0;
   let lastEmit = 0;
-  const copyPrefixes = copyDirs.map((dir) => dir.toLowerCase());
+  /*
+   * copyDirs 统一成小写、正斜杠的无尾斜杠形式，支持「多段路径」。
+   *
+   * 以前只取 rel 的第一段（见下方 topDir），传 'Endfield_Data/Persistent' 永远匹配不上，
+   * 结果 Persistent 下的可写索引还是被硬链接走了 —— 正是 11-07 那次官服污染事故的形状。
+   * 现在两种写法都认：单段目录（'U8Data'）按第一段比，多段前缀（'Endfield_Data/Persistent'）
+   * 按完整相对路径比，互为补充，原有判据一条不丢。
+   */
+  const copyPrefixes = copyDirs.map((dir) =>
+    String(dir).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '')
+  );
   for (const file of files) {
     if (signal && signal.cancelled) break;
     const destination = path.join(targetRoot, file.rel);
@@ -76,7 +248,18 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
     let end = slash;
     if (end < 0 || (backslash >= 0 && backslash < end)) end = backslash;
     const topDir = (end < 0 ? file.rel : file.rel.slice(0, end)).toLowerCase();
-    const shouldCopy = copyPrefixes.indexOf(topDir) >= 0;
+    const relLower = file.rel.toLowerCase().replace(/\\/g, '/');
+    /*
+     * 判据（任一命中就拷贝）：
+     *   1. copyDirs 多段前缀命中（'Endfield_Data/Persistent' 整棵子树）
+     *   2. copyDirs 单段目录命中（'U8Data' / 'sdkdata'）
+     *   3. mustCopyNotLink 三重判据（目录段 / 文件名片段 / 扩展名 + 实测清单）
+     * 剩下的纯只读资源（StreamingAssets 的 .chk、CefView、plugins、各个 .dll）才走硬链接。
+     */
+    const shouldCopy =
+      copyPrefixes.some((prefix) => relLower === prefix || relLower.startsWith(`${prefix}/`)) ||
+      copyPrefixes.indexOf(topDir) >= 0 ||
+      mustCopyNotLink(file.rel);
     try {
       if (shouldCopy) {
         await fsp.copyFile(file.full, destination);
@@ -246,4 +429,15 @@ async function copyTree(sourceRoot, targetRoot) {
   }
 }
 
-module.exports = { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree, removeTreeResilient };
+module.exports = {
+  prepareLinkedRuntime,
+  walkFiles,
+  hardlinkTree,
+  copyTree,
+  removeTreeResilient,
+  // 终末地单工作目录切服用：切服时原地覆盖渠道文件，不再重建整树。
+  overlayDirectory,
+  // 建单工作目录（以及基线刷新）时判断「拷贝还是硬链接」。
+  mustCopyNotLink,
+  isMutableIndexFile,
+};

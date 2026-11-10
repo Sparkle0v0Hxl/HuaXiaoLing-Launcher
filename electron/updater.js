@@ -40,6 +40,7 @@ const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { multiDownload } = require('./multi-download');
+const netThrottle = require('./net-throttle');
 
 /*
  * 网络请求统一走 electron/http-fetch.js：那边优先用 Chromium 网络栈（net.fetch），
@@ -486,6 +487,11 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
           const { done, value } = chunk;
           if (done) break;
           await handle.write(value);
+          /*
+           * 单连接这条腿也要限速：分段失败退到这里时，一条连接照样能跑几十 MB/s
+           * （实测启动器自更新约 12.8 MB/s，镜像好的时候更高）。
+           */
+          if (netThrottle.getLimit() > 0) await netThrottle.consume(value.length);
           received += value.length;
           report(total ? (received / total) * 100 : 0, received, total);
         }

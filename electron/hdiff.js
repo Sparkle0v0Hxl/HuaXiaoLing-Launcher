@@ -8,9 +8,10 @@ const zlib = require('node:zlib');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
-const { CHANNELS, pickManifests } = require('./sophon');
+const { CHANNELS, pickManifests, loadDeletedAssets, isDeletedAsset } = require('./sophon');
 const linkSource = require('./link-source');
 const clientChannel = require('./client-channel');
+const netThrottle = require('./net-throttle');
 
 const API = {
   cn: 'https://downloader-api.mihoyo.com/downloader/sophon_chunk/api/getPatchBuild',
@@ -186,7 +187,7 @@ async function loadPatchManifest(manifest, cacheDir) {
       signal: AbortSignal.timeout(60000),
     });
     if (!response.ok) throw new Error(`下载补丁清单失败 HTTP ${response.status}`);
-    compressed = Buffer.from(await response.arrayBuffer());
+    compressed = await netThrottle.toBuffer(response);
     await fsp.writeFile(file, compressed);
   }
   const raw = zlib.zstdDecompressSync(compressed);
@@ -196,31 +197,132 @@ async function loadPatchManifest(manifest, cacheDir) {
   return decodePatchManifest(raw);
 }
 
-async function ensurePatchPackage(prefix, patch, cacheDir) {
-  await fsp.mkdir(cacheDir, { recursive: true });
-  const file = path.join(cacheDir, `ldiff-${patch.id}`);
-  let valid = false;
+/*
+ * 补丁包落盘位置。
+ *
+ * patchRoot 是「预下载先存起来、等正式更新再打」的那份（<安装目录>/ldiff/），
+ * cacheDir 是以前就有的临时缓存目录（用户数据目录下）。两个都查：预下载存过的包
+ * 在正式更新时能直接复用，不必再下一次。
+ *
+ * 文件名统一带 ldiff- 前缀，两边同一套命名，才不会出现「这里存了、那里认不出」。
+ */
+function patchPackageFile(dir, patch) {
+  return path.join(dir, `ldiff-${patch.id}`);
+}
+
+/*
+ * 按「内容」而不是「文件名」找已经下过的补丁包。
+ *
+ * 为什么需要这一层：预下载阶段是从 pre_download 分支的清单里拿 patch.id，
+ * 正式更新时是从 main 分支的清单里拿。官方这两份清单里的 patch.id 是同一套
+ * 内容寻址命名，正常情况下一致；但一旦官方改了命名口径（或者我们哪天用错了分支），
+ * 按文件名找就会全部落空 —— 用户会发现「预下载明明下完了，更新又下一遍」，
+ * 也就是我们这次要根治的那个毛病。
+ *
+ * 先按 size 过滤再算 md5，目录里通常也就几十个文件，开销可以忽略。
+ * 只认 ldiff- 前缀，避免误吃 cacheDir 里别的东西。
+ */
+async function findByContent(dir, patch, requirePrefix = true) {
+  const size = Number(patch.patchFileSize) || 0;
+  const want = String(patch.patchFileMd5 || '').toLowerCase();
+  if (!dir || !size || !want) return '';
+  let entries;
   try {
-    const stat = await fsp.stat(file);
-    if (stat.size === patch.patchFileSize) {
-      valid = (await md5File(file)) === patch.patchFileMd5.toLowerCase();
-    }
+    entries = await fsp.readdir(dir, { withFileTypes: true });
   } catch {
-    valid = false;
+    return '';
   }
-  if (!valid) {
-    const url = `${prefix.replace(/\/$/, '')}/${patch.id}`;
-    const response = await fetch(url, {
-      headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(300000),
-    });
-    if (!response.ok) throw new Error(`下载补丁包失败 HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (patch.patchFileMd5 && md5(buffer) !== patch.patchFileMd5.toLowerCase()) {
-      throw new Error('补丁包校验失败');
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    /*
+     * 自己的目录（ldiff/、缓存目录）只认 ldiff- 前缀，避免误吃别的东西。
+     * 别家启动器留下的目录整个都是补丁包，文件名不可预期，只能靠内容认。
+     */
+    if (requirePrefix && !entry.name.startsWith('ldiff-')) continue;
+    const file = path.join(dir, entry.name);
+    try {
+      const stat = await fsp.stat(file);
+      if (stat.size !== size) continue;
+      if ((await md5File(file)) === want) return file;
+    } catch {
+      /* 单个文件读不动就跳过，继续找下一个 */
     }
-    await fsp.writeFile(file, buffer);
   }
+  return '';
+}
+
+/*
+ * 别的启动器留下的补丁包目录。
+ *
+ * Collapse 自己的历史版本把补丁包存在安装目录的 chunk_collapse/ 下，
+ * 现在的版本存在 ldiff/ 下（它的查找顺序也是 ldiff → chunk_collapse）。
+ * 用户很可能先用 Collapse 预下载过，那批包就躺在那里；我们直接认出来
+ * 就不必再下一遍 5.63GB。
+ *
+ * 这两个目录里的文件名是 Collapse 自己的 PatchNameSource，不可预期，
+ * 所以只能按「尺寸 + md5」认内容，不能按文件名。
+ */
+function foreignPatchDirs(installRoot) {
+  if (!installRoot) return [];
+  return [
+    path.join(installRoot, 'chunk_collapse'),
+    path.join(installRoot, 'ldiff'),
+  ];
+}
+
+async function ensurePatchPackage(prefix, patch, cacheDir, patchRoot = '', installRoot = '') {
+  const candidates = [];
+  if (patchRoot) candidates.push(patchPackageFile(patchRoot, patch));
+  candidates.push(patchPackageFile(cacheDir, patch));
+  for (const file of candidates) {
+    let valid = false;
+    try {
+      const stat = await fsp.stat(file);
+      if (stat.size === patch.patchFileSize) {
+        valid = (await md5File(file)) === patch.patchFileMd5.toLowerCase();
+      }
+    } catch {
+      valid = false;
+    }
+    // 命中就直接用，不打任何标记——预下载存的那份打完补丁仍然有效（内容没变）
+    if (valid) return file;
+  }
+  /*
+   * 名字对不上时再按内容找一遍：预下载用 pre_download 清单、正式更新用 main 清单，
+   * 两者的 patch.id 万一不同，这里能把预下载下过的那份认出来，不重复下。
+   */
+  for (const dir of [patchRoot, cacheDir]) {
+    if (!dir) continue;
+    const hit = await findByContent(dir, patch);
+    if (hit) return hit;
+  }
+  /*
+   * 最后看别的启动器（Collapse）留下的目录。整个目录都是补丁包，文件名不可预期，
+   * 所以 requirePrefix=false 放开前缀限制，纯靠「尺寸 + md5」认。
+   * 这是零成本的：目录不存在就 readdir 失败直接返回空。
+   */
+  for (const dir of foreignPatchDirs(installRoot)) {
+    const hit = await findByContent(dir, patch, false);
+    if (hit) return hit;
+  }
+  // 一处都没有：下到第一个候选位置（有 patchRoot 就落 patchRoot，预下载的语义）
+  const file = candidates[0];
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const url = `${prefix.replace(/\/$/, '')}/${patch.id}`;
+  const response = await fetch(url, {
+    headers: { 'user-agent': UA },
+    signal: AbortSignal.timeout(300000),
+  });
+  if (!response.ok) throw new Error(`下载补丁包失败 HTTP ${response.status}`);
+  /*
+   * 补丁包单个几 MB 到几十 MB，是 ldiff 路线的主要流量。这里必须限速：
+   * 走限速版 toBuffer，不限速时内部退回 arrayBuffer()，与原来等价。
+   */
+  const buffer = await netThrottle.toBuffer(response);
+  if (patch.patchFileMd5 && md5(buffer) !== patch.patchFileMd5.toLowerCase()) {
+    throw new Error('补丁包校验失败');
+  }
+  await fsp.writeFile(file, buffer);
   return file;
 }
 
@@ -275,6 +377,142 @@ async function linkFromReadySources({ item, target, gameKey, readySources }) {
   });
 }
 
+/*
+ * 预下载侧的「只下不打」：把补丁包存到 <安装目录>/ldiff/，等正式更新再应用。
+ *
+ * 为什么预下载不能就地打补丁：预下载发生在正式版上线之前，游戏本体还在跑，
+ * 就地改文件等于边走边拆轮胎。官方自己的做法也是「下载目录与安装目录分开」，
+ * 我们照样把补丁先存起来。
+ *
+ * 返回值带上包数/总字节，界面直接显示「补丁包 X 个 · Y GB」，不必再去遍历清单。
+ */
+async function downloadPatchPackages({
+  gameKey,
+  channel,
+  installRoot,
+  cacheDir,
+  audioLanguages,
+  includeStory = false,
+  patchRoot,
+  maxPatches = 0,
+  onProgress,
+  signal,
+}) {
+  const info = CHANNELS[gameKey]?.[channel];
+  if (!info) throw new Error('没有对应的补丁渠道');
+  const localVersion = readLocalVersion(installRoot);
+  if (!localVersion) return { ok: false, reason: 'no-local-version', localVersion: '' };
+
+  const branchUrl = `https://${
+    info.server === 'global' ? 'sg-hyp-api.hoyoverse.com' : 'hyp-api.mihoyo.com'
+  }/hyp/hyp-connect/api/getGameBranches?launcher_id=${info.launcher}&language=zh-cn&game_ids[]=${info.game}`;
+  const branchResponse = await fetch(branchUrl, { headers: { 'user-agent': UA } });
+  const branchJson = await branchResponse.json();
+  const branchData = (branchJson.data?.game_branches || []).find((item) => item.game?.id === info.game);
+  const pre = branchData?.pre_download;
+  if (!pre) return { ok: false, reason: 'no-predownload', localVersion };
+
+  // 预下载分支自己的 diff_tags：拿本地版本去问，才有「本地版本 → 预下载版本」的差分。
+  const diffTags = Array.isArray(pre.diff_tags) ? pre.diff_tags : [];
+  if (!diffTags.includes(localVersion)) {
+    return { ok: false, reason: 'version-not-patchable', localVersion, diffTags, tag: pre.tag || '' };
+  }
+
+  const patchBuild = await fetchPatchBuild(info, pre);
+  let manifests;
+  try {
+    manifests = pickManifests(patchBuild, audioLanguages, { includeStory });
+  } catch {
+    manifests = patchBuild.manifests || [];
+  }
+  if (!manifests.length) return { ok: false, reason: 'no-patch-manifest', localVersion };
+
+  const root = path.resolve(patchRoot || path.join(installRoot, 'ldiff'));
+  await fsp.mkdir(root, { recursive: true });
+
+  const files = new Map();
+  // 官方黑名单：被标为「本次不用下」的文件，它的补丁也不用下
+  const deletedAssets = loadDeletedAssets(installRoot, gameKey);
+  let deletedSkipped = 0;
+  for (const manifest of manifests) {
+    const parsed = await loadPatchManifest(manifest, cacheDir);
+    const matchingField = manifest.matching_field;
+    for (const item of parsed.files) {
+      if (files.has(item.file)) continue;
+      if (isDeletedAsset(deletedAssets, { file: item.file, matchingField })) {
+        deletedSkipped += 1;
+        continue;
+      }
+      files.set(item.file, { ...item, prefix: manifest.diff_download?.url_prefix || '' });
+    }
+  }
+  if (deletedSkipped > 0) {
+    onProgress?.({
+      phase: 'predownload',
+      current: `官方清单标了 ${deletedSkipped} 个资源本次不用下，它们的补丁包也跳过`,
+      deletedSkipped,
+    });
+  }
+
+  /*
+   * 按补丁包 id 去重：同一个包里装着多个文件的差分切片，只该下一次。
+   * 这也是「体积比 chunk 路线小一半」的真正原因 —— 一个 60MB 的包里
+   * 可能装着上百个小文件的差分，而 chunk 路线要为每个变了的块各下一份。
+   */
+  const patches = new Map();
+  for (const item of files.values()) {
+    const entry = item.patches.find((part) => part.tag === localVersion);
+    if (!entry) continue;
+    const patch = entry.patch;
+    if (!patch?.id) continue;
+    if (!patches.has(patch.id)) {
+      patches.set(patch.id, { patch, prefix: item.prefix || '' });
+    }
+  }
+  if (!patches.size) return { ok: false, reason: 'no-patch-entry', localVersion, tag: pre.tag || '' };
+
+  const list = [...patches.values()];
+  /*
+   * maxPatches 只给本机验证脚本用（只下前几个包确认链路通不通），
+   * 产品调用一律不传 = 0 = 下全部。不是给界面用的限速开关。
+   */
+  const queue = maxPatches > 0 ? list.slice(0, maxPatches) : list;
+  // totalBytes 永远报全量真值（界面上「这次预下载一共多大」），只有真正下多少由 queue 决定
+  const totalBytes = list.reduce((sum, item) => sum + (item.patch.patchFileSize || 0), 0);
+  const queueBytes = queue.reduce((sum, item) => sum + (item.patch.patchFileSize || 0), 0);
+  let doneBytes = 0;
+  let index = 0;
+  for (const entry of queue) {
+    if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
+    if (!entry.prefix) throw new Error('补丁清单没有下载地址');
+    // ensurePatchPackage 会先查 patchRoot 里已有的包，命中就不再下（断点续传）；
+    // 也会去 Collapse 留下的 chunk_collapse/ 与 ldiff/ 里按内容找一遍
+    const before = doneBytes;
+    await ensurePatchPackage(entry.prefix, entry.patch, cacheDir, root, installRoot);
+    doneBytes += entry.patch.patchFileSize || 0;
+    index += 1;
+    onProgress?.({
+      phase: 'predownload',
+      current: `补丁包 ${index}/${queue.length}`,
+      downloaded: doneBytes,
+      total: queueBytes,
+      index,
+      count: queue.length,
+      delta: doneBytes - before,
+    });
+  }
+
+  return {
+    ok: true,
+    mode: 'ldiff',
+    tag: patchBuild.tag || pre.tag || '',
+    localVersion,
+    targetVersion: String(pre.tag || ''),
+    patchCount: list.length,
+    totalBytes,
+  };
+}
+
 async function applyHdiffPrepass({
   gameKey,
   channel,
@@ -285,6 +523,10 @@ async function applyHdiffPrepass({
   onProgress,
   signal,
   linkSources = [],
+  // 预下载存补丁包的位置：有的话优先从这儿取，省掉重复下载
+  patchRoot = '',
+  // 预下载阶段只存不打，所以这里能选择「用完别删」，留给正式更新
+  keepPackages = false,
 }) {
   const empty = { ok: false, applied: 0, skipped: 0, failed: 0, linked: 0, patchBytes: 0, saveBytes: 0, candidates: 0, deleteTags: [] };
   const info = CHANNELS[gameKey]?.[channel];
@@ -301,31 +543,61 @@ async function applyHdiffPrepass({
   if (!branchData?.main) return { ...empty, reason: 'no-branch', localVersion };
 
   // 官方只对 diff_tags 里列出的版本出补丁，不在列表里就说明这次没法用 ldiff，直接退出。
-  const diffTags = Array.isArray(branchData.main.diff_tags) ? branchData.main.diff_tags : [];
+  // 两种口径都认：main（正式更新）与 pre_download（预下载）。预下载先存下的包在正式更新时
+  // 就是靠这个把本地版本重新对上的 —— 少一个口径就会出现「预下载下过了、更新又要下一遍」。
+  const mainTags = Array.isArray(branchData.main.diff_tags) ? branchData.main.diff_tags : [];
+  const preTags = Array.isArray(branchData.pre_download?.diff_tags) ? branchData.pre_download.diff_tags : [];
+  const diffTags = [...new Set([...mainTags, ...preTags])];
   if (diffTags.length && !diffTags.includes(localVersion)) {
     return { ...empty, reason: 'version-not-patchable', localVersion, diffTags, tag: branchData.main.tag || '' };
   }
 
   const patchBuild = await fetchPatchBuild(info, branchData.main);
+  // 万一 main 这份没给出本版本的差分、而 pre_download 给了，就用预下载那份问一遍。
+  // 这一步只影响「有没有补丁可打」，不会去动游戏文件。
+  let effectiveBuild = patchBuild;
+  if (preTags.includes(localVersion)) {
+    try {
+      const preBuild = await fetchPatchBuild(info, branchData.pre_download);
+      const preManifests = pickManifests(preBuild, audioLanguages, { includeStory });
+      if (preManifests.length) effectiveBuild = preBuild;
+    } catch {
+      /* 拿不到就沿用 main 的，不影响原来行为 */
+    }
+  }
   let manifests;
   try {
     // 必须和安装/更新用同一套清单口径，否则语音包、剧情资源的取舍会对不上。
-    manifests = pickManifests(patchBuild, audioLanguages, { includeStory });
+    manifests = pickManifests(effectiveBuild, audioLanguages, { includeStory });
   } catch {
-    manifests = patchBuild.manifests || [];
+    manifests = effectiveBuild.manifests || [];
   }
   if (!manifests.length) return { ...empty, reason: 'no-patch-manifest', localVersion };
 
   const files = new Map();
   const deleteTags = new Set();
+  // 官方黑名单：不用下的文件不参与打补丁，它的补丁包也不必再找
+  const deletedAssets = loadDeletedAssets(installRoot, gameKey);
+  let deletedSkipped = 0;
   for (const manifest of manifests) {
     const parsed = await loadPatchManifest(manifest, cacheDir);
+    const matchingField = manifest.matching_field;
     for (const item of parsed.files) {
-      if (!files.has(item.file)) {
-        files.set(item.file, { ...item, prefix: manifest.diff_download?.url_prefix || '' });
+      if (files.has(item.file)) continue;
+      if (isDeletedAsset(deletedAssets, { file: item.file, matchingField })) {
+        deletedSkipped += 1;
+        continue;
       }
+      files.set(item.file, { ...item, prefix: manifest.diff_download?.url_prefix || '' });
     }
     for (const name of parsed.deleteTags) deleteTags.add(name);
+  }
+  if (deletedSkipped > 0) {
+    onProgress?.({
+      phase: 'ldiff',
+      current: `官方清单标了 ${deletedSkipped} 个资源本次不用下，已跳过`,
+      deletedSkipped,
+    });
   }
 
   const root = path.resolve(installRoot);
@@ -359,6 +631,14 @@ async function applyHdiffPrepass({
         }
       })
     : [];
+  /*
+   * 跨渠道复用失效要说出来：以前这里完全静默，用户只看到「补丁包照下一整轮」，
+   * 明明旁边摆着一份硬链接过来的、逐字节相同的客户端。最常见的成因就是源客户端
+   * 版本号读不出来（config.ini 缺失/被改），而不是真的没有可复用源。
+   */
+  if (linkSources.length && !readySources.length) {
+    onProgress?.({ phase: 'ldiff', current: '跨渠道复用不可用：源客户端版本号对不上，本次只打补丁包' });
+  }
   const packages = new Map(); // id → 已下载的补丁包，避免同一个包被反复 md5 校验
   const usedPackages = new Set();
   let applied = 0;
@@ -372,7 +652,9 @@ async function applyHdiffPrepass({
   const ensurePackage = async (prefix, patch) => {
     if (packages.has(patch.id)) return packages.get(patch.id);
     if (!prefix) throw new Error('补丁清单没有下载地址');
-    const file = await ensurePatchPackage(prefix, patch, cacheDir);
+    // patchRoot 里可能是预下载时存下的那份，命中就不再下；
+    // 也会去 Collapse 留下的 chunk_collapse/ 与 ldiff/ 里按内容找一遍
+    const file = await ensurePatchPackage(prefix, patch, cacheDir, patchRoot, root);
     packages.set(patch.id, file);
     usedPackages.add(file);
     return file;
@@ -427,26 +709,60 @@ async function applyHdiffPrepass({
 
     const patch = entry.patch;
     const sourcePath = patch.originalFileName ? path.resolve(root, patch.originalFileName) : target;
-    if (!sourcePath.startsWith(`${root}${path.sep}`) || !fs.existsSync(sourcePath)) continue;
+    if (!sourcePath.startsWith(`${root}${path.sep}`)) continue;
+    /*
+     * 源文件不存在有两种情况，必须分开处理：
+     *   - 纯新增文件（patch.originalFileMd5 为空）：补丁本身就是整文件压缩，
+     *     hpatchz 传空 oldPath 就能还原出来。以前这里直接 continue，等于把
+     *     「新版本新增的文件」全推给 chunk 下载 —— 而 5.63G 里有 4.39G 正是这批，
+     *     不补这条支路，ldiff 路线省不到一半。
+     *   - 本地文件被删/改名（有 originalFileMd5）：源都不在，打不了，交给 chunk。
+     */
+    const hasSource = fs.existsSync(sourcePath);
+    const pureCreate = !hasSource && !patch.originalFileMd5;
+    if (!hasSource && !pureCreate) continue;
 
     const tempDiff = path.join(cacheDir, `ldiff-slice-${patch.id}-${processed}.hdiff`);
     const tempOut = `${target}.hpatch-tmp`;
     try {
       // 补丁是针对「某个确切旧内容」做的；本地文件 md5 对不上就说明用户改过或已更新，
       // 强行套用只会产出错误内容，直接放弃交给 chunk。
-      if (patch.originalFileMd5) {
+      if (hasSource && patch.originalFileMd5) {
         const actual = await md5File(sourcePath);
         if (actual !== patch.originalFileMd5.toLowerCase()) continue;
       }
       const packageFile = await ensurePackage(item.prefix, patch);
       const slice = await readSlice(packageFile, patch.patchOffset, patch.patchLength);
-      await fsp.writeFile(tempDiff, slice);
-      await fsp.mkdir(path.dirname(target), { recursive: true });
-      await execFileAsync(
-        path.join(__dirname, 'vendor', 'hpatchz.exe'),
-        [sourcePath, tempDiff, tempOut],
-        { windowsHide: true, timeout: 180000 }
-      );
+      /*
+       * 补丁片段不一定是 HDIFF 压缩，也可能是「原样字节」。
+       *
+       * 官方的补丁片段有两种形态（Collapse 里叫 Patch 和 CopyOver）：
+       *   - HDIFF：真正的二进制差分，要用 hpatchz 配旧文件才能还原；
+       *   - 裸字节：这段就是完整的新文件内容，直接写出去即可，根本不该起 hpatchz。
+       *
+       * 我们这批星铁 4.6.0→4.7.0 实测 2309 段全是 HDIFF（含 602 个纯新增文件），
+       * 所以现有「纯新增传空 oldPath」是安全的；但这是服务端的选择，别的游戏、
+       * 或以后的版本完全可能给裸字节，那时 hpatchz 会直接报错、这批文件白下。
+       * 读 5 字节就能判，顺手把这个分支补上。
+       */
+      const isHDiff = slice.length >= 5 && slice.subarray(0, 5).toString('latin1') === 'HDIFF';
+      if (!isHDiff) {
+        // 裸字节：片段长度应当等于新文件大小，写完直接走下面的 md5 校验。
+        if (slice.length !== item.size) {
+          throw new Error(`补丁片段不是 HDIFF 且长度与清单不符：${item.file}`);
+        }
+        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await fsp.writeFile(tempOut, slice);
+      } else {
+        await fsp.writeFile(tempDiff, slice);
+        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await execFileAsync(
+          path.join(__dirname, 'vendor', 'hpatchz.exe'),
+          // 纯新增文件：oldPath 传空串（hpatchz 的 uncompress 用法）
+          [pureCreate ? '' : sourcePath, tempDiff, tempOut],
+          { windowsHide: true, timeout: 180000 }
+        );
+      }
       const actualTarget = await md5File(tempOut);
       if (actualTarget !== item.md5.toLowerCase()) {
         throw new Error(`补丁结果校验失败：${item.file}`);
@@ -510,8 +826,12 @@ async function applyHdiffPrepass({
   }
 
   // 补丁包单个几十 MB、合计可达数 GB，用完就清，别长期占用户盘。
-  for (const file of usedPackages) {
-    await fsp.rm(file, { force: true }).catch(() => {});
+  // keepPackages 是给「预下载先存不应用」那条路用的；打完补丁后这些包就没用了，
+  // 留着白占几 GB，所以默认全删（连预下载存到 ldiff/ 的那批也一起删）。
+  if (!keepPackages) {
+    for (const file of usedPackages) {
+      await fsp.rm(file, { force: true }).catch(() => {});
+    }
   }
 
   return {
@@ -531,4 +851,11 @@ async function applyHdiffPrepass({
   };
 }
 
-module.exports = { applyHdiffPrepass, fetchPatchBuild, decodePatchManifest, linkFromReadySources, readLocalVersion };
+module.exports = {
+  applyHdiffPrepass,
+  downloadPatchPackages,
+  fetchPatchBuild,
+  decodePatchManifest,
+  linkFromReadySources,
+  readLocalVersion,
+};

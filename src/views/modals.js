@@ -665,12 +665,24 @@ const DOWNLOAD_UNSUPPORTED_SITES = {
 /*
  * 接入了一键下载、但只实测过部分渠道的游戏 → 允许下载的渠道白名单。
  * 崩坏3 只有官服在 HoYoPlay 分发体系里（B服走 B 站自有启动器、国际服 game_id
- * 无法唯一定位）；明日方舟只实测了官服分发接口。渠道行本身还在，只是下载弹窗
- * 里不列出，避免用户选了才在 estimate 阶段报错。
+ * 无法唯一定位）；明日方舟国服走鹰角清单，国际服 EN / JP / KR 走 Yostar
+ * 自己那套 CRC64 清单（三区协议已实网跑通），台服协议未验证所以仍不列出。
+ * 渠道行本身还在，只是下载弹窗里不列出，避免用户选了才在 estimate 阶段报错。
  */
 const DOWNLOAD_CHANNELS_OK = {
   bh3: ['official'],
-  arknights: ['official'],
+  arknights: ['official', 'global-en', 'global-jp', 'global-kr'],
+};
+
+/*
+ * 明日方舟的 EN / JP / KR 是三套独立客户端（主程序、平台库、资源包都不同），
+ * 绝不能装进同一个目录互相覆盖。目录名跟官方 Yostar 客户端一致，用户以后要拿
+ * 官方启动器接管也能直接认出来。
+ */
+const YOSTAR_DIR_NAMES = {
+  'global-en': 'Arknights_EN',
+  'global-jp': 'Arknights_JP',
+  'global-kr': 'Arknights_KR',
 };
 
 /**
@@ -679,7 +691,7 @@ const DOWNLOAD_CHANNELS_OK = {
  * D:\HuaXiaoLingGames\<builtinKey>）；一个都没装时退回 C 盘。
  * 目录名用 builtinKey 而不是中文名，避免个别老游戏对中文路径的兼容问题。
  */
-function defaultDownloadDir(game) {
+function defaultDownloadDir(game, channel = '') {
   const installedRoot = ((state.games || []).map((item) =>
     (item.servers || []).find((server) => server.exists && server.root)
   ).find(Boolean) || {}).root || '';
@@ -688,7 +700,11 @@ function defaultDownloadDir(game) {
   // 直接导致 mkdir ENOENT、空间预估失败。
   const m = /^([a-zA-Z]:)[\\/]/.exec(installedRoot);
   const drive = m ? m[1] : 'C:';
-  return `${drive}\\HuaXiaoLingGames\\${game.builtinKey || 'game'}`;
+  const suffix = YOSTAR_DIR_NAMES[channel];
+  const leaf = suffix
+    ? `${game.builtinKey || 'game'}-${suffix}`
+    : (game.builtinKey || 'game');
+  return `${drive}\\HuaXiaoLingGames\\${leaf}`;
 }
 
 /**
@@ -844,7 +860,7 @@ function openGameDownloadModal(gameId) {
           <div class="field">
             <label>安装目录</label>
             <div class="input-group">
-              <input id="dl-dir" value="${esc(defaultDownloadDir(game))}" spellcheck="false" />
+              <input id="dl-dir" value="${esc(defaultDownloadDir(game, choices[0].channel))}" spellcheck="false" />
               <button type="button" class="btn btn-ghost" id="dl-detect" title="扫描注册表和常见目录，找已经装好的客户端">${icon('refresh')}自动检测</button>
               <button type="button" class="btn btn-ghost" id="dl-browse" title="选择安装目录">${icon('folder')}浏览</button>
             </div>
@@ -938,6 +954,9 @@ function openGameDownloadModal(gameId) {
   const errorBox = document.querySelector('#dl-error');
   const dirInput = document.querySelector('#dl-dir');
   const backdrop = document.querySelector('.modal-backdrop');
+  // 三区是独立客户端：换渠道时把「还是默认目录」的输入框一起换掉，
+  // 但用户手改过目录就不要覆盖（只认与上一次默认值完全相等的情况）。
+  let autoDir = defaultDownloadDir(game, choices[0].channel);
 
   const job = {
     id: jobId,
@@ -1152,6 +1171,10 @@ function openGameDownloadModal(gameId) {
         job.serverId = server.id;
         job.serverName = server.name;
       }
+      // 换区时把默认目录换成该区专属目录（用户没手动改过才动）
+      const nextAuto = defaultDownloadDir(game, input.value);
+      if (dirInput.value.trim() === autoDir) dirInput.value = nextAuto;
+      autoDir = nextAuto;
       refreshEstimate();
     });
   });
@@ -2055,6 +2078,14 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       }
       const free = Number(result.freeBytes) || 0;
       const base = Number(result.baseBytes) || 0;
+      /*
+       * copyBytes 是「真正要写盘的那部分」，只有 terminal（终末地单工作目录）那条链路会给。
+       * 基础客户端 67GB 里 62GB 是只读资源，硬链接过去不占额外空间，真正落盘的只有
+       * Persistent / U8Data / sdkdata 约 3.7GB —— 拿 67GB 去比剩余空间会误报「可能不够」。
+       * 米哈游 Sophon 那条链路不传判据，copyBytes 为 null，仍按原来的 baseBytes 逻辑走。
+       */
+      const copyCost = result.copyBytes === null || result.copyBytes === undefined ? null : Number(result.copyBytes) || 0;
+      const need = copyCost === null ? base : copyCost;
       sumFree.textContent = free ? `${formatSize(free)}（${result.drive || '目标盘'}）` : '读不到磁盘信息';
       sumReuse.textContent = base
         ? `约 ${formatSize(base)}${result.partial ? '（还在统计）' : ''}`
@@ -2064,12 +2095,13 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       } else if (!base) {
         sumSpace.textContent = '没有基础客户端，全部要下载';
         sumSpace.classList.add('is-warn');
-      } else if (base > free) {
+      } else if (need > free) {
         // 硬链接只是省掉「内容相同」的那部分，不能承诺一定装得下
-        sumSpace.textContent = '可能不够：基础客户端比剩余空间大，相同文件会复用，仍建议先腾些空间';
+        const what = copyCost === null ? '基础客户端' : '实际要写入的部分';
+        sumSpace.textContent = `可能不够：${what}比剩余空间大，相同文件会复用，仍建议先腾些空间`;
         sumSpace.classList.add('is-warn');
       } else {
-        sumSpace.textContent = '够用';
+        sumSpace.textContent = copyCost === null ? '够用' : `够用（实际只需写入约 ${formatSize(copyCost)}）`;
         sumSpace.classList.add('is-ok');
       }
       // 上一次可能因为缺基础客户端被拦住，条件补齐后要把按钮还回去

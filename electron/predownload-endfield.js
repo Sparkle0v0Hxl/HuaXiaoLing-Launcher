@@ -27,6 +27,7 @@ const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 
 const { PROFILES, findSevenZip, decryptManifest, encryptManifest } = require('./endfield-packs');
+const netThrottle = require('./net-throttle');
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -151,6 +152,38 @@ function compareVersion(a, b) {
     if (diff) return diff > 0 ? 1 : -1;
   }
   return 0;
+}
+
+/** 预下载完成标记（落在 Diffs/ 里，不影响鹰角「同名+同 size+同 md5」的命中判定）。 */
+const META_FILE = '.hxl-predownload.json';
+
+/** 只读目录项数真包 + 读元信息，供 hasCache 的同步判据用（不能联网、不能 async）。 */
+function readEndfieldMeta(installRoot) {
+  try {
+    const dir = diffsDirOf(installRoot);
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const packs = entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.hxl-') && !entry.name.endsWith('.part'));
+    let meta = null;
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(dir, META_FILE), 'utf8'));
+    } catch {
+      meta = null;
+    }
+    return { dir, packFiles: packs.length, meta };
+  } catch {
+    return { dir: diffsDirOf(installRoot), packFiles: 0, meta: null };
+  }
+}
+
+function writeEndfieldMetaSync(installRoot, meta) {
+  try {
+    const dir = diffsDirOf(installRoot);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, META_FILE), JSON.stringify(meta, null, 2), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function diffsDirOf(installRoot) {
@@ -324,6 +357,7 @@ async function downloadPack(pack, target, signal, onTick) {
           throwIfCancelled(signal);
           await handle.write(piece, 0, piece.length, position);
           position += piece.length;
+          if (netThrottle.getLimit() > 0) await netThrottle.consume(piece.length);
           onTick?.(piece.length);
         }
         await handle.truncate(position);
@@ -426,6 +460,16 @@ async function startEndfieldPredownload({ channel, installRoot, signal, onProgre
       skipped,
       bytesDone,
       totalBytes,
+    });
+  }
+
+  if (skipped || downloaded) {
+    // 预下载收尾写元信息：hasCache 靠它区分「完整下完」和「下到一半的残包」。
+    writeEndfieldMetaSync(installRoot, {
+      targetVersion: target,
+      packCount: packs.length,
+      totalBytes,
+      completedAt: new Date().toISOString(),
     });
   }
 
@@ -574,7 +618,19 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
 
   const localVersion = readLocalVersion(installRoot);
   const latest = await fetchLatest(profile, localVersion);
-  const packs = packList(latest.patch);
+  /*
+   * 必须用 pre_patch 的包列表来校验 Diffs/。
+   *
+   * 预下载阶段（:364）下的是 pre_patch 里的包，落到 Diffs/；正式更新阶段的 patch
+   * 是另一份清单（包可能同名不同 md5，也可能多几卷）。原来这里取 latest.patch，
+   * 就会拿正式清单去校验预下载产物 —— 一不符就抛「预下载内容不完整…请先把预下载跑完」，
+   * 用户明明已经下完了，于是整条预下载白下、回落成逐文件全量。
+   *
+   * patch 存在时它的包通常与 pre_patch 指向同一批分卷（官方就是这么发的），
+   * 但校验口径必须跟下载口径一致，所以优先 pre_patch，没有才退 patch。
+   */
+  const sourceList = latest.pre_patch?.patches?.length ? latest.pre_patch : latest.patch;
+  const packs = packList(sourceList);
   if (!packs.length) {
     throw new Error(
       '官方这次没有发布增量包（只给了整包），启动器无法应用预下载内容。请在官方启动器里完成这次更新，或用启动器的「更新游戏」走逐文件校验。'
@@ -605,7 +661,9 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
     // 分卷包：解压第一卷，7z 会自动连读 .002 / .003 …
     const ordered = [...scanned.matched].sort((a, b) => a.name.localeCompare(b.name, 'en'));
     const args = ['x', ordered[0].file, `-o${tempDir}`, '-y'];
-    if (latest.patch?.cd_key) args.push(`-p${latest.patch.cd_key}`);
+    // 解压密码同样要跟「这批包是从哪份清单下的」一致：预下载的包用 pre_patch 的 cd_key。
+    const cdKey = String(sourceList?.cd_key || latest.patch?.cd_key || '');
+    if (cdKey) args.push(`-p${cdKey}`);
     await runSevenZip(zip, args);
 
     let manifest = null;
@@ -617,8 +675,10 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
     } catch {
       manifest = null;
     }
-    if (!manifest && latest.patch?.v2_patch_info_url) {
-      const response = await fetch(latest.patch.v2_patch_info_url, {
+    // 差分清单地址也按同一份来源取（pre_patch 优先），否则会拿正式更新那份清单去套预下载的包。
+    const patchInfoUrl = String(sourceList?.v2_patch_info_url || latest.patch?.v2_patch_info_url || '');
+    if (!manifest && patchInfoUrl) {
+      const response = await fetch(patchInfoUrl, {
         headers: { 'user-agent': UA },
         signal: AbortSignal.timeout(60000),
       });
@@ -753,6 +813,7 @@ module.exports = {
   applyEndfieldPredownload,
   clearEndfieldPredownload,
   diffsDirOf,
+  readEndfieldMeta,
   readLocalVersion,
   compareVersion,
 };

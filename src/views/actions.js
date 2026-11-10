@@ -1316,7 +1316,7 @@ async function handleAction(action, id, element, event = null) {
       const game = state.games.find((item) => item.id === element.dataset.game);
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
       // 和「切换服务器」用同一条提示：进度可见，别让人对着一条不会动的 toast 等几十秒
-      const busy = beginBusyToast(`正在为 ${server ? server.name : '渠道'}生成运行时…`);
+      const busy = beginBusyToast(`正在为 ${server ? server.name : '渠道'}铺渠道文件…`);
       const offProgress =
         typeof api.onEndfieldProgress === 'function'
           ? api.onEndfieldProgress((progress) => {
@@ -1330,7 +1330,7 @@ async function handleAction(action, id, element, event = null) {
           serverId: element.dataset.server,
         });
         busy.done(
-          `「${server ? server.name : '新服务器'}」运行时已就绪：链接 ${result.linked} 个文件，覆盖 ${result.overlay} 个差异文件`,
+          `「${server ? server.name : '新服务器'}」渠道文件已就绪：复用 ${result.linked} 个文件，覆盖 ${result.overlay} 个差异文件`,
           'success'
         );
       } catch (error) {
@@ -2360,19 +2360,28 @@ async function handleAction(action, id, element, event = null) {
         toast('先配置明日方舟客户端路径', 'error');
         break;
       }
+      const isYostar = ['global-en', 'global-jp', 'global-kr'].includes(server.channel);
       const ok = await confirmDialog({
         title: '更新明日方舟游戏本体',
-        message: `将从官方接口对比完整游戏清单，只下载有差异的文件。\n\n当前客户端：${server.root || server.path}\n\n首次对比可能读取大量文件，更新期间请勿启动游戏。`,
+        message: isYostar
+          ? `将从 Yostar 官方接口按 CRC64 清单逐文件校验，只下载有差异的文件。\n\n当前客户端：${server.root || server.path}\n\n更新期间请勿启动游戏。`
+          : `将从官方接口对比完整游戏清单，只下载有差异的文件。\n\n当前客户端：${server.root || server.path}\n\n首次对比可能读取大量文件，更新期间请勿启动游戏。`,
         confirmText: '开始更新',
       });
       if (!ok) break;
       toast('正在检查明日方舟游戏版本…', 'info');
       try {
         const result = await api.endfield.updateArknightsGame();
+        // 国服清单链路给 updated + skipped；Yostar 三区给 downloaded（没有 skipped），
+        // 按渠道分开读字段，别让「已更新到 X：undefined 个文件」出现在成功提示里。
+        const changed = isYostar ? Number(result.downloaded) : Number(result.updated);
+        // 国服清单链路用 skipped 表示「没动文件」；Yostar 三区返回体没有这个字段，
+        // 用「本次下载文件数为 0」判断，别把已是最新说成「已更新到 X：0 个文件」。
+        const noChange = isYostar ? changed === 0 : Boolean(result.skipped);
         toast(
-          result.skipped
+          noChange
             ? `明日方舟已是最新版本（${result.version}）`
-            : `明日方舟已更新到 ${result.version}：${result.updated} 个文件`,
+            : `明日方舟已更新到 ${result.version}：${changed || 0} 个文件`,
           'success'
         );
         await api.getState().then(onState);

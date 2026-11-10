@@ -61,6 +61,14 @@ const hgBackgrounds = require('./hg-backgrounds');
 const { ensureSeedData } = require('./seed');
 const { linkTrees, previewTrees } = require('./link');
 const { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree } = require('./runtime');
+/*
+ * 终末地「每渠道独立硬链接运行时」用的两个工具：
+ *   · overlayDirectory：把渠道包原地覆盖到该渠道运行时目录上，写入前先解除硬链接；
+ *   · mustCopyNotLink：判断一个文件能不能硬链接（可写文件必须复制）。
+ * prepareLinkedRuntime 保留给别的游戏用；终末地自己的 buildEndfieldChannelRuntime
+ * 会在整树重建时把旧目录的 Persistent（用户下好的语音包）整体搬过去，不会丢下载内容。
+ */
+const { overlayDirectory, mustCopyNotLink } = require('./runtime');
 const { loadGachaHistory } = require('./gacha');
 const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
@@ -76,6 +84,8 @@ const { httpFetch, nodeRequest, setRequestLogger } = require('./http-fetch');
 // node:https 的代理隧道：Chromium 栈自动吃系统代理但只有 6 条连接，
 // node 能开 16 条却不认代理。这一层把两边补起来（顶层 require，要进打包清单）。
 const proxyTunnel = require('./proxy-agent');
+// 全局下载限速：所有下载链路共享一个带宽上限（用户要求「全统一」）
+const netThrottle = require('./net-throttle');
 // 运行诊断：网络请求留痕 + 一键导出。挂在 http-fetch 上，只记元数据不记内容。
 const diagnostics = require('./diagnostics');
 // 诊断报告里要写「当前内置的签名公钥是谁」，用同一个常量，避免两处各写一份对不上
@@ -189,6 +199,16 @@ const predownload = require('./predownload');
 // 预下载演练模式：官方没开预下载时也能把整条链路走完（见 predownload-sim.js 顶部）。
 const predownloadSim = require('./predownload-sim');
 const nevernessChannels = require('./neverness-channels');
+/*
+ * 明日方舟国际服（Yostar：EN / JP / KR）。
+ *
+ * 这三个区和国服是**完全两套客户端**：发行商不同（Yostar vs 鹰角/B站）、协议不同
+ * （Yostar REST + CRC64 vs 鹰角加密分卷）、主程序不同，所以既不能走 profileForChannel
+ * （那是鹰角清单），也不能像国服官服/B服那样从同一个安装目录硬链接拼出来。
+ *
+ * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ */
+const yostarPacks = require('./yostar-packs');
 
 app.setName('花筱灵启动器');
 /* AUMID 尾缀 .x1：Explorer 的任务栏图标缓存按 AUMID 键值存储，旧 ID
@@ -319,9 +339,24 @@ function externalLinkSources(game, server, targetRoot) {
   const target = targetRoot ? path.resolve(targetRoot).toLowerCase() : '';
   const out = [];
   const seen = new Set();
+  /*
+   * 明日方舟的 Yostar 三区（EN / JP / KR）和国服是**两套完全独立的客户端**：
+   * 不仅 arknights.exe 不同，连 streamingassets 下同名 .ab 的内容都不一样
+   * （实测 EN↔JP 有 421 个同路径不同哈希的文件）。把它们当硬链接源会做出
+   * 「壳是国服、资源是日服」的混合体，所以这两个方向都要切断：
+   *   · 目标是 Yostar 区 → 不拿国服 / B服 / 其它区当源
+   *   · 目标是国服 / B服 → 不拿 Yostar 区当源
+   * 同区之间（EN↔JP↔KR）也不当源：真要省空间得按 CRC64 逐文件比对，
+   * 那是另一套镜像方案，不在当前「先跑通三区接入」的范围内。
+   */
+  const targetIsYostar = game.builtinKey === 'arknights' && yostarPacks.isYostarChannel(server.channel);
   for (const item of game.servers || []) {
     if (item.id === server.id) continue;
     if (!item.root || !item.path || !targetExists(item.path)) continue;
+    if (game.builtinKey === 'arknights') {
+      const itemIsYostar = yostarPacks.isYostarChannel(item.channel);
+      if (targetIsYostar || itemIsYostar) continue;
+    }
     const root = path.resolve(item.root);
     const key = root.toLowerCase();
     if (!key || key === target || seen.has(key)) continue;
@@ -570,6 +605,9 @@ function loadWindowIcon() {
 
 let win = null;
 let splashWindow = null;
+// splash 真正 show 出来的时间戳。主窗亮起前要等它「显示过 + 至少 1050ms」，
+// 不能只看 splashWindow 对象非空 —— 见 createWindow 里的 waitForSplash 闸门。
+let splashShownAt = 0;
 let tray = null;
 let store = null;
 let downloads = null;
@@ -974,9 +1012,25 @@ function defaultSettings() {
      * 但它会**在正式更新过程中就地改写游戏文件**，一旦更新中途断了，
      * 目录里会留下「已修补 + 未修补」的混合状态（和 chunk 模式中途失败同一性质，
      * 靠「检查完整资源」修复）。介意这一点的可以在这里关掉，退回纯 chunk。
-     * 官方 enable_ldiff 为 false 的渠道（绝区零三渠道）无论这个开关如何都不会跑。
+     *
+     * 是否真的跑，判据是「官方给没给你当前版本的补丁」（applyHdiffPrepass 里按
+     * diff_tags 判），与官方配置里的 enable_ldiff 无关 —— Starward 声明了那个字段
+     * 却从没读过，Collapse 连字段都没解析。没有补丁的渠道（崩坏3）会在扫盘前就以
+     * version-not-patchable 退出，不会白算一轮 md5。
      */
     enableLdiff: true,
+    /*
+     * 下载限速（单位 KB/s，0 = 不限速）。
+     *
+     * 为什么需要：几条下载链路的吞吐差得很远，最快的能把宽带整条吃满——
+     * 终末地国际服差异包实测 127.8 MB/s，等于 1 Gbps 满载，同一条宽带下
+     * 别人看视频必然卡。这里给一个全局上限，所有下载链路（启动器自更新、
+     * 米哈游更新/预下载、终末地渠道包/差异包）共享同一个配额。
+     *
+     * 用 KB/s 而不是 MB/s：界面上要能设到「1 MB/s」以下的细档，用 KB 存整数
+     * 最简单，也避免浮点数在存储里反复乘除。
+     */
+    downloadLimitKBps: 0,
     // 自更新：清单地址留空则不检查；支持 https / 局域网共享 / 本地路径
     updateManifest: '',
     autoCheckUpdate: true,
@@ -1187,6 +1241,81 @@ function targetExistsCached(target) {
   return value;
 }
 
+/*
+ * 米哈游四款（原神 / 星铁 / 绝区零 / 崩3）切服时由 prepare*Runtime 生成的
+ * 独立硬链接运行时，落在 <盘>:\VelaRuntimes\<game>\<channel>，是完整客户端、
+ * 不是「资源替换包」。终末地也在 VelaRuntimes 下，但它有自己那一整套
+ * endfieldChannelOf / isEndfieldRuntimeDir 链路，这里绝不碰终末地。
+ */
+const MIHOYO_RUNTIME_KEYS = ['genshin', 'starrail', 'zzz', 'bh3'];
+
+/*
+ * 这个目录是不是米哈游四款切服生成的独立硬链接运行时。
+ * 默认落在 <盘>:\VelaRuntimes\<game>\<channel>；用户在设置里自定义过运行时根
+ * （settings.runtimeRoot）时则是 <自定义根>\<game>\<channel>。两处都要认：
+ * 只认默认布局时，自定义根下生成的运行时既扫不回启动器，又会在启动扫描里
+ * 被当成「资源替换包」标成需要重建、切服被拦（对抗性复核 P1-2）。
+ * 终末地也在 VelaRuntimes 下，靠 gameKey 白名单挡住，绝不碰它那套链路。
+ */
+function isMihoyoRuntimeDir(dir, gameKey) {
+  if (!MIHOYO_RUNTIME_KEYS.includes(gameKey) || !dir) return false;
+  const parts = path.resolve(dir).toLowerCase().split(/[\\/]/);
+  const i = parts.lastIndexOf('velaruntimes');
+  if (i >= 0 && parts[i + 1] === gameKey.toLowerCase()) return true;
+  const configured = String(store.data.settings.runtimeRoot || '').trim();
+  if (!configured) return false;
+  const norm = path.resolve(dir).toLowerCase();
+  const custom = path.resolve(configured, gameKey).toLowerCase();
+  return norm === custom || norm.startsWith(custom + path.sep);
+}
+
+/*
+ * 读一个 exe「自己声明」的渠道：config.ini 优先、目录名兜底。
+ * 展示派生字段和自动检测都要用，config.ini 可能是 UTF-16，解码一遍不便宜，
+ * 所以同一路径 2 秒内复用结果（与 targetExistsCached 同思路）。
+ * 返回 { config, path }，两者都可能为空 —— 空表示「认不出来」，绝不瞎猜官服。
+ */
+const declaredChannelCache = new Map();
+function declaredChannelOf(exePath) {
+  if (!exePath) return { config: '', path: '' };
+  const now = Date.now();
+  const hit = declaredChannelCache.get(exePath);
+  if (hit && now - hit.at < 2000) return hit.value;
+  const value = {
+    config: clientChannel.configChannelFromPath(exePath),
+    path: clientChannel.pathChannelHint(exePath),
+  };
+  declaredChannelCache.set(exePath, { at: now, value });
+  if (declaredChannelCache.size > 200) declaredChannelCache.clear();
+  return value;
+}
+
+/*
+ * 展示层判据：这一行服务器到底算不算「有可用客户端」。
+ *
+ * 光有 exe 还不够：米哈游三件套里 B服/国际服若 path 还指着官服目录（独立硬链接
+ * 运行时没生成），就不该算这一服可用 —— 界面不该显示绿点，也不该显示「与官服
+ * 共用目录」。用户手动确认过的行（server.confirmed）永远尊重用户选择。
+ * 终末地那项「有官服本体当基础就算可切换」是自愈专用，原样保留在第二分支。
+ */
+function serverExistsForView(game, server, endfieldHasBase) {
+  const declared = declaredChannelOf(server.path);
+  const strongest = declared.config || declared.path;
+  const channelOk =
+    server.confirmed ||
+    !strongest ||
+    strongest === server.channel ||
+    (String(server.channel).startsWith('global') && strongest === 'global');
+  if (!channelOk) return false;
+  return (
+    targetExistsCached(server.path) ||
+    (endfieldHasBase &&
+      game.builtinKey === 'endfield' &&
+      server.channel !== 'official' &&
+      ENDFIELD_PACK_NAMES[server.channel] != null)
+  );
+}
+
 const GAME_DETECTION = {  genshin: {
     exe: 'YuanShen.exe',
     registry: [
@@ -1322,6 +1451,15 @@ const GAME_DETECTION = {  genshin: {
       'Arknights\\games\\Arknights Game\\Arknights.exe',
       'Hypergryph\\Arknights\\Arknights.exe',
       'Games\\Arknights\\Arknights.exe',
+      // Yostar 三区是独立客户端，官方启动器按 Arknights_<区> 分目录；
+      // 我方一键下载也用同样的目录名（见 modals.js 的 YOSTAR_DIR_NAMES）。
+      // 装在这儿的 exe 会被 detectionChannel 按 game-launcher-config.json 的 tag 分区。
+      'YostarGames\\Arknights_EN\\Arknights.exe',
+      'YostarGames\\Arknights_JP\\Arknights.exe',
+      'YostarGames\\Arknights_KR\\Arknights.exe',
+      'HuaXiaoLingGames\\arknights-Arknights_EN\\Arknights.exe',
+      'HuaXiaoLingGames\\arknights-Arknights_JP\\Arknights.exe',
+      'HuaXiaoLingGames\\arknights-Arknights_KR\\Arknights.exe',
     ],
     // PlatformProcess.exe 只在鹰角启动器的子目录里出现，不能当作游戏入口
     relative: ['Arknights.exe', 'games\\Arknights Game\\Arknights.exe'],
@@ -2932,20 +3070,155 @@ function runtimePaths(baseRoot, gameKey, channel, overrideRoot = '') {
   };
 }
 
-// 终末地的 U8Data/config 保存渠道登录态，sdkdata 保存 SDK 渠道配置。
-// 这些目录不能和基础官服硬链接：B服覆盖时会原地改写官服配置，
-// 表现为「切回官服登录页消失/卡死」和「B服启动仍是官服账号」。
-const ENDFIELD_COPY_DIRS = ['U8Data', 'sdkdata'];
+/*
+ * ── 终末地：每渠道一份独立的硬链接运行时（2026-11-08 回归 v2.3.0 架构）──────
+ *
+ * 早期 v2.3.0 / Xel-Launcher / 三服切换器都是同一套：每个渠道一份独立目录，
+ * 从官服本体整树硬链出来，只铺十几个渠道差异文件。2.6.0 之后改成「官服全量 base
+ * + 936MB 差异大包覆盖」，本轮又一度改成「所有非官服渠道共用一个 work 目录、
+ * 切服只铺不还原」——切国际服把国际服的 Endfield.exe / GameAssembly.dll /
+ * UnityPlayer.dll 铺进 work，切 B服 时 B服 包不带这些重二进制，work 里就留着
+ * 国际服那套；B服 用国际服 IL2CPP + B服 SDK 启动 6 秒直接崩（2026-11-08 报障），
+ * 界面报「游戏文件损坏或缺失，要求重装游戏」。根因是「多个渠道共用一棵被叠加写入的树」。
+ *
+ * 现在回到每渠道独立：
+ *   · 官服本体只读直启（directBase 分支），官方启动器维护的那份永远自洽、绝不写；
+ *   · 其它每个渠道在 <运行时根>\endfield\<渠道> 各有一份独立目录，互不干扰；
+ *   · 目录不存在 / 基础客户端更新 / 渠道包更新时，从基础客户端整树硬链重建，
+ *     再只铺该渠道十几个差异文件（小渠道包，不含重二进制）；
+ *   · 该渠道目录已就绪且签名未变时**完全跳过**，用户下好的语音包原样保留，
+ *     切回来几秒完成、不重下一次；
+ *   · 重建用 staging + 同卷 rename，且先把 Endfield_Data\Persistent 整体搬过去，
+ *     所以整树重建也不会丢用户已下的语音包（11-07 事故的修复点）。
+ *
+ * 标记统一用 .hxl-endfield-runtime-v2：predownload / publicGame / 更新失效都认它。
+ */
+const ENDFIELD_RUNTIME_MARKER = '.hxl-endfield-runtime-v2';
+// 建运行时时整棵强制拷贝的目录（多段前缀由 runtime.js 的 hardlinkTree 支持）。
+//   U8Data / sdkdata：渠道登录态与 SDK 配置，硬链接会让一个渠道改写另一个渠道的身份；
+//   Endfield_Data/Persistent：游戏自己维护的资源索引与已下载内容（约 3.9GB），
+//     整棵拷过来之后它才真正「属于」该渠道的运行时。
+const ENDFIELD_RUNTIME_COPY_DIRS = ['U8Data', 'sdkdata', 'Endfield_Data/Persistent'];
+
+/** 两个路径是不是「同一个目录」或「互相包含」。运行时目录嵌进基础客户端里会把官服本体原地改写，反过来重建时也会连带删掉官服。 */
+function pathsOverlap(left, right) {
+  const norm = (value) =>
+    path
+      .resolve(String(value || ''))
+      .toLowerCase()
+      .replace(/[\\/]+$/, '');
+  const a = norm(left);
+  const b = norm(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
+}
+
+/**
+ * 这个目录是不是我们生成/遗留的「绝不能当基础客户端」的运行时目录。
+ *
+ * 两个标记都认：
+ *   · .hxl-endfield-runtime-v2 —— 当前架构的每渠道独立运行时；
+ *   · .hxl-endfield-work-v1     —— 2026-11-08 那一版「所有非官服渠道共用一个 work」
+ *     的混合体。它里面是「国际服重二进制 + 某渠道 SDK」的拼装结果，
+ *     如果某个用户的 launcher-data.json 里 originalRoot 丢了、server.root 恰好
+ *     指向它，endfieldBaseRoot 就会误把它当官服本体去硬链接出下一份运行时
+ *     —— 那正是 B服 启动 6 秒崩的配方。认出来就能挡住，实测通过后这个目录会被删。
+ */
+function isEndfieldRuntimeDir(dir) {
+  try {
+    const base = String(dir || '');
+    if (fs.existsSync(path.join(base, ENDFIELD_RUNTIME_MARKER))) return true;
+    if (fs.existsSync(path.join(base, '.hxl-endfield-work-v1'))) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 一条 server 的路径是不是指向「旧单 work 混合目录」（本次回退要作废的那种）。
+ *
+ * 双判据，缺一不可省：
+ *   · 路径尾部是 <根>\endfield\work —— 目录即使已被删除/重命名也认得出；
+ *   · 目录里确有 .hxl-endfield-work-v1 标记 —— 覆盖自定义 runtimeRoot 的用户。
+ * 用在升级迁移、以及「尽力而为」兜底前：指向它的路径绝不能当成「已就绪、
+ * 可以静默沿用」，否则老用户升级后点开始游戏仍会启动那个 3~9 秒就崩的混合体。
+ */
+function isEndfieldLegacyWorkRoot(dir) {
+  const value = String(dir || '');
+  const normalized = value.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+  if (normalized.endsWith('\\endfield\\work')) return true;
+  try {
+    return fs.existsSync(path.join(value, '.hxl-endfield-work-v1'));
+  } catch {
+    return false;
+  }
+}
+
+function readEndfieldRuntimeMarker(runtimeRoot) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(runtimeRoot, ENDFIELD_RUNTIME_MARKER), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    // 老架构的标记是纯文本签名（不是 JSON）：读不出来就当没建过，走重建（会保留 Persistent）。
+    return null;
+  }
+}
+
+function writeEndfieldRuntimeMarker(runtimeRoot, payload) {
+  try {
+    const markerPath = path.join(runtimeRoot, ENDFIELD_RUNTIME_MARKER);
+    // 「源=运行时」重建时，hardlinkTree 会把源运行时的 marker 一起硬链进目标；
+    // 直接 writeFileSync 覆写会写穿同一个 inode，把源渠道的 marker 也改掉
+    // （正是之前弄坏官服的同款形状）。写之前先断链，保证目标永远是独立文件：
+    // 目标是硬链时只删这一个 link（源保留），目标是独立文件时重写的等价新建。
+    // 真实客户端当源时源目录根本没有 marker，这条分支不受影响。
+    try { fs.rmSync(markerPath, { force: true }); } catch {}
+    fs.writeFileSync(
+      markerPath,
+      JSON.stringify(payload, null, 2),
+      'utf8'
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 基础客户端里「只读、可以硬链接」那一部分的指纹（文件数:总字节）。
+ *
+ * 不算可写文件：游戏每次启动都会写日志、下语音包，那些变化不该让工作目录整体刷新。
+ * 只统计 mustCopyNotLink 为假的那一批（StreamingAssets 的 .chk、CefView、plugins、各个 dll），
+ * 它们才是「基础客户端更新了就该重新链接」的对象。
+ */
+async function endfieldBaseSignature(baseRoot) {
+  const files = await walkFiles(baseRoot);
+  let count = 0;
+  let bytes = 0;
+  for (const file of files) {
+    if (mustCopyNotLink(file.rel)) continue;
+    count += 1;
+    bytes += file.size;
+  }
+  return `${count}:${bytes}`;
+}
 
 function endfieldBaseRoot(server) {
   const originalRoot = String(server?.originalRoot || '').trim();
-  if (originalRoot && fs.existsSync(originalRoot)) return path.normalize(originalRoot);
+  if (originalRoot && fs.existsSync(originalRoot) && !isEndfieldRuntimeDir(originalRoot)) {
+    return path.normalize(originalRoot);
+  }
   const root = String(server?.root || '').trim();
-  // 允许拿任何已经存在的客户端目录当基础（含已生成的链接运行时，例如
-  // G:\VelaRuntimes\endfield\global），只要它真的装着 Endfield.exe。
-  // 以前这里会拒绝 VelaRuntimes / .vela-linked-runtime 路径，导致「国际服切官服」
-  // 找不到基础客户端而报错；同源目录会在生成前用相同目录校验拦住。
+  // 允许拿任何已经存在的客户端目录当基础（例如别的渠道装好的完整客户端），只要它真的装着
+  // Endfield.exe。以前这里会拒绝 VelaRuntimes / .vela-linked-runtime 路径，导致「国际服切官服」
+  // 找不到基础客户端而报错；同源目录会在生成前用重叠校验拦住。
+  // 但「生成的渠道运行时」本身绝不能当基础：它是渠道包覆盖出来的混合文件，拿它当基础
+  // 会把上一个渠道的残留当成新运行时的起点。每渠道运行时由 server.path/root 指向，
+  // originalRoot 才记着真正的安装目录。
   if (root && fs.existsSync(root) && fs.existsSync(path.join(root, 'Endfield.exe'))) {
+    if (isEndfieldRuntimeDir(root)) return '';
     return path.normalize(root);
   }
   return '';
@@ -3020,6 +3293,119 @@ function endfieldBaseServer(game, excludeId = '') {
   return candidates[0];
 }
 
+// ── 运行时当源（MVP-1 / #6 主体）────────────────────────────────────
+// 只在「所有渠道都只剩 VelaRuntimes 里的硬链接运行时」时启用，且必须由调用方
+// 显式传 allowRuntimeBase:true。endfieldBaseRoot 的闸门（拒绝把生成的运行时
+// 当基础）一个字符都不动 —— 这个函数是平行的第三级，不是它的替代品。
+//
+// 五个渠道（官服 / B服 / 国际服 / Play / Steam）任意渠道互相为源：相同文件硬链
+// 复用，差异文件由渠道包覆盖。跨族（Hypergryph ↔ Gryphline）时源树里的 5 颗重
+// 二进制（Endfield.exe / UnityPlayer.dll / ACE 两颗 / CrashSight64.dll）是源渠道版，
+// 与目标 SDK 不配套会 6 秒崩；五个渠道包都已补上各自目标版的 5 颗，overlay 会先
+// 断链再 copy 成目标版，壳与件刷成同一套，不会混搭。Play / Steam 同样在表内
+// （用户 2026-11-10 拍板本轮一起做）：它们的 5 颗由各自 Gryphline 官方清单按同名
+// 路径下载，不是硬编码内容，清单没给时既有 channelPackFilesReady 门禁判未就绪。
+const ENDFIELD_RUNTIME_BASE_FAMILY = {
+  official: ['official', 'bilibili', 'global', 'play', 'steam'],
+  bilibili: ['official', 'bilibili', 'global', 'play', 'steam'],
+  global: ['official', 'bilibili', 'global', 'play', 'steam'],
+  play: ['official', 'bilibili', 'global', 'play', 'steam'],
+  steam: ['official', 'bilibili', 'global', 'play', 'steam'],
+};
+
+// 以运行时为源时，这些必须改成真拷贝而不是共享 inode：
+// hardlinkTree 对 .exe/.dll 走的是 fsp.link（runtime.js:263-278），而渠道包
+// overlay 会原地重写它们（overlayDirectory 先 rm 再 copy，会断链 —— 但如果
+// 目标文件压根没被 overlay 覆盖到，两个渠道就会永远共用同一个 inode）。
+const ENDFIELD_SAFE_INHERIT_COPY = [
+  'Endfield.exe',
+  'UnityPlayer.dll',
+  'GameAssembly.dll',
+  'PlatformProcess.exe',
+  'EndfieldBase.dll',
+  'HGP.dll',
+  'OneChannelLC.dll',
+  'u8_channel.dll',
+  'U8SDK.dll',
+  'U8CoreUI.dll',
+  'webviewsdk.dll',
+  'PCGameSDK.dll',
+  'hgsdk.dll',
+  'config.ini',
+  'AntiCheatExpert',
+  'Endfield_Data/Plugins',
+];
+
+// ACE 的 pld.dat 是机器/渠道绑定的本地载荷（官服 234173 / B服 234176 /
+// 国际服 7209，且不在 verify_files.json 的 521 条里、五个渠道包也都不带）。
+// 注意：hardlinkTree 的 copyDirs 只能「整段 copy」，语法上无法排除单个文件
+// （runtime.js:259-262 是前缀匹配，没有 exclude 参数）。所以这里**不引入
+// 排除机制**：AntiCheatExpert 整目录走 copy，pld.dat 会被原样复制一份到目标树。
+// 这比「不列 AntiCheatExpert、让它硬链共享 inode」更安全 —— 共享 inode 一旦被
+// ACE 原地重写就是写穿（现网官服 pld.dat 与 bench 残留目录 n=2 就是这个形状）。
+// 「copy 过来的 pld.dat 会不会让新渠道起不来」属于未证实项，见 §2.1 的 E1–E3
+// 与 §7 的 U1，必须真机验证；本轮不臆断，也不额外加删除逻辑。
+
+function endfieldRuntimeAsBase(game, server, channel, excludeRoot) {
+  const family = ENDFIELD_RUNTIME_BASE_FAMILY[channel];
+  if (!family) return null;                       // 跨族：本轮不放开，直接拒绝
+  const servers = Array.isArray(game?.servers) ? game.servers : [];
+  const picked = [];
+  for (const item of servers) {
+    if (server && item.id === server.id) continue; // 不能拿自己当源
+    const root = String(item.root || '').trim();
+    if (!root) continue;
+    if (!isEndfieldRuntimeDir(root)) continue;     // 只接受「运行时」，不是真实安装目录
+    if (!fs.existsSync(path.join(root, 'Endfield.exe'))) continue;
+    const marker = readEndfieldRuntimeMarker(root);
+    if (!marker) continue;                         // 读不出 marker＝来路不明，宁可不用
+    const sourceChannel = String(marker.channel || endfieldChannelOf(root) || '');
+    if (family.indexOf(sourceChannel) < 0) continue;
+    if (excludeRoot && pathsOverlap(root, excludeRoot)) continue;
+    picked.push({ server: item, baseRoot: path.normalize(root), channel: sourceChannel, marker });
+  }
+  if (!picked.length) return null;
+  const rank = (item) => (item.channel === 'official' ? 0 : 1); // 官服系优先：能链接的文件最多
+  picked.sort((a, b) => rank(a) - rank(b));
+  const best = picked[0];
+  return {
+    baseRoot: best.baseRoot,
+    baseKind: 'runtime',
+    baseChannel: best.channel,
+    baseRealRoot: String(best.marker.baseRealRoot || best.marker.baseRoot || ''),
+    sourceServer: best.server,
+  };
+}
+
+// 统一的基础解析（ensure 与 prepareJob 共用，保证「估算能过、真跑也能过」）
+// 三级：① 自己记住的真实安装目录 → ② 别的服务器行上的真实安装目录
+//       → ③ 运行时当源（默认关闭，必须 allowRuntimeBase:true）
+function endfieldResolveBase(game, server, channel, options = {}) {
+  const realRoot = endfieldBaseRoot(server);
+  if (realRoot && fs.existsSync(path.join(realRoot, 'Endfield.exe'))) {
+    return {
+      baseRoot: realRoot,
+      baseKind: 'real',
+      baseChannel: endfieldChannelOf(realRoot) || String(channel || ''),
+      baseRealRoot: realRoot,
+    };
+  }
+  const other = endfieldBaseServer(game, server?.id) || endfieldBaseServer(game);
+  if (other && other.baseRoot && fs.existsSync(path.join(other.baseRoot, 'Endfield.exe'))) {
+    return {
+      baseRoot: other.baseRoot,
+      baseKind: 'real',
+      baseChannel: other.channel || '',
+      baseRealRoot: other.baseRoot,
+    };
+  }
+  if (options.allowRuntimeBase === true) {
+    const runtimeBase = endfieldRuntimeAsBase(game, server, channel, options.runtimeRoot || '');
+    if (runtimeBase) return runtimeBase;
+  }
+  return null;
+}
+
 // 目标渠道运行时里允许保留哪些 SDK 配置文件。基础客户端（可能是官服 / B服 / 国际服）
 // 复制过来的其它渠道 SDK 配置会让运行时仍走错误的登录通道，必须清掉。
 const ENDFIELD_SDK_KEEP = {
@@ -3065,8 +3451,31 @@ function discoverServerRoots() {
       'Hypergryph\\Arknights Endfield',
       'Program Files\\Hypergryph\\Arknights Endfield',
       'Starward',
+      // Yostar 官方启动器与我方一键下载都会把明日方舟国际服放在这些目录下；
+      // 不列进来的话已装好的三区客户端只能靠用户手动选路径（见 bug #3）。
+      'YostarGames',
+      'YostarGames\\Arknights_EN',
+      'YostarGames\\Arknights_JP',
+      'YostarGames\\Arknights_KR',
+      'HuaXiaoLingGames',
+      // 米哈游四款切服生成的独立硬链接运行时在这里。只列这四款精确子目录，
+      // 绝不列 'VelaRuntimes' 整棵 —— 终末地运行时也在那棵树下，扫进去会把
+      // 它的渠道专属 .exe/.dll 当候选，正是之前弄坏官服的配方。
+      // walkExecutables 按当前游戏的 exe 名过滤，别的游戏不会误匹配。
+      'VelaRuntimes\\genshin',
+      'VelaRuntimes\\starrail',
+      'VelaRuntimes\\zzz',
+      'VelaRuntimes\\bh3',
     ]) {
       roots.add(path.join(drive, name));
+    }
+  }
+  // 用户在设置里自定义过运行时根时，米哈游四款的硬链接运行时不在默认
+  // VelaRuntimes 下。只补这四款精确子目录，扫到的 exe 仍要过 B3 渠道护栏。
+  const customRoot = String(store.data.settings.runtimeRoot || '').trim();
+  if (customRoot) {
+    for (const gameKey of MIHOYO_RUNTIME_KEYS) {
+      roots.add(path.resolve(customRoot, gameKey));
     }
   }
   return [...roots].filter((root) => {
@@ -3168,8 +3577,8 @@ async function syncNewerFiles(srcDir, dstDir) {
  * 方舟不走这张表（它有自己的运行时目录，且官服/B服 都只用 hgsdk）。
  */
 const ENDFIELD_FOREIGN_FILES = {
-  official: ['gfsdk.dll', 'glfoundation.dll', 'PCGameSDK.dll', 'BLPlatform64'],
-  bilibili: ['gfsdk.dll', 'glfoundation.dll'],
+  official: ['gfsdk.dll', 'glfoundation.dll', 'PCGameSDK.dll', 'BLPlatform64', 'discord_partner_sdk.dll', 'socialsdk_gf.dll'],
+  bilibili: ['gfsdk.dll', 'glfoundation.dll', 'discord_partner_sdk.dll', 'socialsdk_gf.dll'],
   global: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
   play: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
   steam: ['hgsdk.dll', 'PCGameSDK.dll', 'BLPlatform64'],
@@ -3469,8 +3878,10 @@ async function ensureEndfieldPackFor(channel, onProgress, options = {}) {
   if (!profile) throw new Error(`没有找到 ${packName} 的渠道配置`);
   /*
    * 先扫一遍所有候选位置（含 Xel-Launcher 的 load 目录）：那边有就直接借。
-   * 「有」的判断和切服弹窗、设置页徽章共用 channelPackFilesReady —— 差异渠道
-   * 必须是完整下过一遍的那份，2.6.0 之前随安装包发的小 SDK 包不算数。
+   * 「有」的判断和切服弹窗、设置页徽章共用 channelPackFilesReady —— 带 packRev
+   * 的渠道要有对应版本的 .state 记录才算数：2.6.0~2.9.5 下过的那份 936 MB
+   * 大差异包、以及更早随安装包内置的小 SDK 包，都没有这个记录 → 判未就绪 →
+   * 重下当前这一份小渠道包（updateProfile 整包替换），老用户自动收敛到小包。
    */
   for (const root of endfieldPackCandidateRoots()) {
     const dir = path.join(root, packName);
@@ -3867,6 +4278,384 @@ function packSignatureOf(dir) {
   return `${count}:${bytes}`;
 }
 
+/* ── 终末地每渠道独立硬链接运行时：建、切 ─────────────────────────────── */
+
+/**
+ * 为某一个渠道生成一份独立的硬链接运行时（staging → 一次性 rename 就位）。
+ *
+ * 只在「该渠道目录需要重建」时调用：首次切换、基础客户端/渠道包更新、目录被误删、
+ * 或用户手动点「重新生成」。每个渠道一份目录，彼此绝不共用，所以从建好那一刻起
+ * 就只可能被这一个渠道写入，不存在「叠加后要还原」的问题。
+ *
+ * 为什么不能直接往目标目录里铺：铺到一半被打断/断电，会留下一个「看着像运行时、
+ * 其实缺一半文件」的目录，下次启动又得判断它算不算建好。staging 建完整再 rename，
+ * 同卷 rename 是原子的，要么完全没有、要么完整。
+ *
+ * 硬链接策略全部交给 hardlinkTree + mustCopyNotLink：可写文件（Persistent 索引、
+ * U8Data、sdkdata、mmkv、WebviewConfig…）复制，只读资源（StreamingAssets 63GB、
+ * CefView、plugins、各个 dll）硬链接 —— 空间几乎不涨，但隔离性正确：运行时里
+ * 任何一个可写文件都不是基础客户端那一份，游戏改写它不会碰坏官服本体。
+ *
+ * 重建时用户下好的 Endfield_Data\Persistent 必须原样留住：它不是本次重建要修
+ * 的东西，却可能是几个小时的下载量。所以先把它整体搬到 staging 顶上再 rename 就位。
+ * 老实现（v2.3.0 的 prepareLinkedRuntime）在这里是 removeTreeResilient 一刀切 ——
+ * 正是「每切一次服就重下一次语音包」的源头，这次保留 Persistent 就是为了堵住它。
+ */
+async function buildEndfieldChannelRuntime({
+  baseRoot,
+  runtimeRoot,
+  onProgress,
+  signal,
+  copyDirs = ENDFIELD_RUNTIME_COPY_DIRS,
+}) {
+  const stagingRoot = `${runtimeRoot}.staging-${Date.now()}`;
+  let staleRoot = '';
+  // 下面两个变量原来声明在 if (fs.existsSync(runtimeRoot)) 块里，回滚分支要用，提到外面。
+  let carried = false;
+  const stagingPersistent = path.join(stagingRoot, 'Endfield_Data', 'Persistent');
+  // staging 是否已经就位成正式目录：决定 catch 里能不能删 staging。
+  let placed = false;
+  await fsp.mkdir(path.dirname(runtimeRoot), { recursive: true });
+  await fsp.rm(stagingRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
+  try {
+    const linkResult = await hardlinkTree({
+      sourceRoot: baseRoot,
+      targetRoot: stagingRoot,
+      copyDirs,
+      onProgress,
+      signal,
+    });
+    if (signal && signal.cancelled) throw new Error('已取消');
+    // 渠道包不在这里铺：铺完基础树就 rename 就位，随后由 applyEndfieldChannelToWork
+    // 统一做「purge → overlay → reconcile → refill」。渠道包只有十几个文件，铺两次没必要。
+    if (fs.existsSync(runtimeRoot)) {
+      /*
+       * 旧目录里**仍然可能装着用户的下载内容**：Endfield_Data\Persistent 是游戏自己
+       * 维护的资源索引 + 已下好的语音包（约 3.9GB）。重建是为了对齐新的基础客户端，
+       * 不是为了把这些删掉 —— 所以先把它整体搬进 staging，覆盖掉刚从基础客户端
+       * 拷过来的那一份（同卷 rename，瞬间完成，不占额外空间）。
+       */
+      const keptPersistent = path.join(runtimeRoot, 'Endfield_Data', 'Persistent');
+      // stagingPersistent / carried 已在函数头声明。
+      if (fs.existsSync(keptPersistent)) {
+        await fsp.rm(stagingPersistent, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
+        await fsp.mkdir(path.dirname(stagingPersistent), { recursive: true });
+        try {
+          await fsp.rename(keptPersistent, stagingPersistent);
+          carried = true;
+        } catch {
+          /* 搬不过去就保留旧的，后面整体 rename 掉，用户重新下载即可 —— 不能因此让重建失败 */
+        }
+      }
+      if (carried) writeLaunchLog(`[endfield] 重建运行时：已保留原有的 Endfield_Data\\Persistent（用户的资源与语音包）`);
+      const stale = `${runtimeRoot}.stale-${Date.now()}`;
+      try {
+        await fsp.rename(runtimeRoot, stale);
+      } catch (error) {
+        /*
+         * 旧目录改名失败（被占用 / 权限 / 跨卷）。原来的做法是直接 rm 掉旧目录重来，
+         * 但那时 Persistent 可能还在里面（carried === false 表示搬进 staging 失败），
+         * 一 rm 就等于把用户 3.9GB 语音包连目录一起删了。
+         * 现在：搬走了才允许删；没搬走就整次失败、原样留着，让用户自己去关掉占用的进程。
+         */
+        if (!carried) {
+          throw new Error(`无法把旧的运行时目录改名（可能有进程正在占用它）：${error.message}`);
+        }
+        await fsp.rm(runtimeRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 });
+      }
+      staleRoot = stale;
+    }
+    try {
+      await fsp.rename(stagingRoot, runtimeRoot);
+    } catch (error) {
+      /*
+       * 就位失败。原来这里直接落到外层 catch：staging 被删（里面装着刚搬过来的用户
+       * 语音包），旧目录还叫 .stale-*，结果=「该渠道运行时连同 3.9GB 语音包一起没」。
+       * 现在把旧目录 rename 回原处，再把 Persistent 搬回它里面，然后把错误抛出去。
+       */
+      if (staleRoot) {
+        const restored = await fsp.rename(staleRoot, runtimeRoot).then(() => true).catch(() => false);
+        if (restored) {
+          staleRoot = '';
+          if (carried) {
+            const back = path.join(runtimeRoot, 'Endfield_Data', 'Persistent');
+            await fsp.rm(back, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
+            await fsp.mkdir(path.dirname(back), { recursive: true }).catch(() => {});
+            await fsp.rename(stagingPersistent, back).catch(() => {});
+          }
+        }
+      }
+      throw error;
+    }
+    placed = true;
+    // 旧目录改名成功后才敢删：硬链接居多、删了不额外回空间，但目录项会堆着，
+    // 而且 walkFiles 之类遍历会扫到它。删失败不影响本次启动，下次重建再顺手清一遍。
+    if (staleRoot) {
+      fsp
+        .rm(staleRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 300 })
+        .then(() => writeLaunchLog(`[endfield] 已清理上一代运行时残留：${path.basename(staleRoot)}`))
+        .catch(() => {});
+    }
+    return { ...linkResult, overlay: { processed: 0 } };
+  } catch (error) {
+    // 已经就位成正式目录的不能删（那就是用户现在的运行时），只有还在 staging 阶段的才清。
+    if (!placed) {
+      await fsp.rm(stagingRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+/**
+ * 清掉上一代运行时留下的 .stale-* / .staging-* 残骸。
+ *
+ * buildEndfieldChannelRuntime 重建时把旧目录 rename 成 .stale-<时间戳>，随后异步删；
+ * 但异步删除可能被关机/杀进程打断，也可能一直失败（占用、权限）。这些目录里
+ * 绝大多数是硬链接，删了并不额外回空间，但目录项会堆着 —— 所以每次进终末地
+ * 启动链路时顺手清一遍。只删「该渠道目录的同级、名字以 <basename>.stale- 或
+ * .staging- 开头」的目录；绝不碰渠道目录本身，也不碰别的东西。删不掉就下次再试。
+ */
+async function cleanStaleRuntimeRoots(runtimeRoot) {
+  if (!runtimeRoot) return 0;
+  const parent = path.dirname(runtimeRoot);
+  const base = path.basename(runtimeRoot);
+  let entries = [];
+  try {
+    entries = await fsp.readdir(parent, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === base) continue;
+    if (!entry.name.startsWith(`${base}.stale-`) && !entry.name.startsWith(`${base}.staging-`)) continue;
+    try {
+      await fsp.rm(path.join(parent, entry.name), { recursive: true, force: true, maxRetries: 6, retryDelay: 300 });
+      removed += 1;
+    } catch {
+      /* 占着就下次再说，不能因为清残骸把启动弄失败 */
+    }
+  }
+  if (removed > 0) writeLaunchLog(`[endfield] 已清理运行时残骸 ${removed} 个`);
+  return removed;
+}
+
+/*
+ * 渠道身份：Endfield_Data\app.info 与 Endfield_Data\boot.config 必须跟着渠道走。
+ *
+ * 每份运行时都从官服本体整树重建，app.info / boot.config 复制过来时天然是
+ * 官服版（Hypergryph + hypergryph.com）。国际服 / Play / Steam 的小渠道包里带
+ * Endfield_Data\app.info + boot.config，overlay 会覆盖成 Gryphline 版；官服 / B服
+ * 渠道包不含 Endfield_Data，保持官服版即正确。
+ *
+ * 这个兜底只在「渠道包换了、但目录被复用（未整树重建）」时才有实际作用：确保
+ * 包不带这两个文件时目录里仍是与目标渠道相符的身份，而不是上一次铺进来的那份。
+ * 从干净树 + 小包起步时它是幂等的（written=0）。
+ *
+ * 厂商归属：官服 / B服 → Hypergryph（鹰角，同一套账号与平台 SDK）；
+ *          国际服 / Play / Steam → Gryphline（万代南梦宫国际）。
+ */
+const ENDFIELD_CHANNEL_IDENTITY = {
+  official: {
+    vendor: 'Hypergryph',
+    remoteBoot: 'https://game-config.hypergryph.com/api/remote_config/3/prod-engine/default/default/engine_config',
+    region: false,
+  },
+  bilibili: {
+    vendor: 'Hypergryph',
+    remoteBoot: 'https://game-config.hypergryph.com/api/remote_config/3/prod-engine/default/default/engine_config',
+    region: false,
+  },
+  global: {
+    vendor: 'Gryphline',
+    remoteBoot: 'https://game-config.gryphline.com/api/remote_config/1003/prod-engine/default/default/engine_config',
+    region: true,
+  },
+  play: {
+    vendor: 'Gryphline',
+    remoteBoot: 'https://game-config.gryphline.com/api/remote_config/1003/prod-engine/default/default/engine_config',
+    region: true,
+  },
+  steam: {
+    vendor: 'Gryphline',
+    remoteBoot: 'https://game-config.gryphline.com/api/remote_config/1003/prod-engine/default/default/engine_config',
+    region: true,
+  },
+};
+
+/**
+ * 按目标渠道改写 boot.config 文本：换掉 remoteBoot 那一行、按需增删
+ * package-region=1，其余行（gfx / gc / single-instance 等）原样保留。
+ * 保留原有的换行风格（实测客户端用 CRLF）。
+ */
+function buildChannelBootConfig(text, identity) {
+  const raw = String(text || '');
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  const lines = raw.split(/\r?\n/);
+  const trailingBlank = lines.length > 0 && lines[lines.length - 1] === '';
+  const body = trailingBlank ? lines.slice(0, -1) : lines.slice();
+  const out = [];
+  let hasRegion = false;
+  for (const line of body) {
+    if (/^remoteBoot=/i.test(line)) {
+      out.push(`remoteBoot=${identity.remoteBoot}`);
+      continue;
+    }
+    if (/^package-region=/i.test(line)) {
+      hasRegion = true;
+      if (identity.region) out.push('package-region=1');
+      continue;
+    }
+    out.push(line);
+  }
+  if (identity.region && !hasRegion) out.push('package-region=1');
+  return `${out.join(eol)}${eol}`;
+}
+
+/**
+ * 把工作目录的渠道身份对齐到目标渠道。
+ *
+ * 渠道包自带这两个文件时（只有国际服/Play/Steam 的差异包带）交给 overlayDirectory，
+ * 这里不重复写；不带的（官服 / B服）才按目标厂商改写。
+ * 写之前**必须先断链**：这两个文件若是从基础客户端硬链接来的，直接写会改掉基础客户端本体。
+ */
+async function applyEndfieldChannelIdentity({ workRoot, baseRoot, packDir, channel }) {
+  const identity = ENDFIELD_CHANNEL_IDENTITY[channel];
+  if (!identity) return { written: 0 };
+  const targets = [
+    { rel: 'Endfield_Data/app.info', build: () => `${identity.vendor}\nEndfield` },
+    { rel: 'Endfield_Data/boot.config', build: (template) => buildChannelBootConfig(template, identity) },
+  ];
+  let written = 0;
+  for (const item of targets) {
+    if (packDir && fs.existsSync(path.join(packDir, item.rel))) continue;
+    const dest = path.join(workRoot, item.rel);
+    let current = '';
+    try {
+      current = await fsp.readFile(dest, 'utf8');
+    } catch {
+      /* 工作目录里还没这个文件：拿基础客户端那份当模板 */
+      try {
+        current = await fsp.readFile(path.join(baseRoot, item.rel), 'utf8');
+      } catch {
+        continue;
+      }
+    }
+    const content = item.build(current);
+    if (current === content) continue;
+    await fsp.rm(dest, { force: true }).catch(() => {});
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
+    try {
+      await fsp.writeFile(dest, content, 'utf8');
+      written += 1;
+    } catch (error) {
+      writeLaunchLog(`[endfield] 写渠道身份失败 ${item.rel}：${error.message}`);
+    }
+  }
+  if (written > 0) {
+    writeLaunchLog(`[endfield] 渠道身份已对齐到 ${identity.vendor}（${channel}）：${written} 个文件`);
+  }
+  return { written };
+}
+
+/**
+ * 把某个渠道铺到工作目录上（切服 = 只做这一件事）。
+ *
+ * 顺序有讲究，照 Xel 的 ServerPayloadDeployment：
+ *   1. purgeForeignChannelFiles：先去掉上一个渠道的 SDK（hgsdk / gfsdk / B服三件套）；
+ *   2. overlayDirectory：渠道包整体覆盖（写入前逐文件断链，绝不写穿基础客户端）；
+ *   3. sdkdata 只留目标渠道的 sdk_*_config；
+ *   4. reconcileEndfieldRuntime：删掉基础客户端残留的外渠道平台件；
+ *   5. refill：补回全渠道通用的官方件（decoy 父进程、webviewsdk、OneChannelLC）；
+ *   6. 最后再 purge 一次 —— 补缺可能把外渠道件带回来（幂等）。
+ * 全程不碰 Endfield_Data：那是游戏自己的地盘，包括用户下好的语音包。
+ */
+async function applyEndfieldChannelToWork({ workRoot, baseRoot, packDir, channel, onProgress, signal }) {
+  const purgedBefore = await purgeForeignChannelFiles(workRoot, channel);
+  const overlayResult = await overlayDirectory({ packRoot: packDir, targetRoot: workRoot, onProgress, signal });
+
+  // 只保留目标渠道自己的 SDK 配置，避免工作目录还走上一个渠道的登录通道。
+  const channelSdk = path.join(workRoot, 'sdkdata');
+  const keepPrefixes = ENDFIELD_SDK_KEEP[channel] || [];
+  try {
+    for (const entry of await fsp.readdir(channelSdk)) {
+      if (!/^sdk_[a-z]+_config/i.test(entry)) continue;
+      const keep = keepPrefixes.some((prefix) => entry.toLowerCase().startsWith(prefix));
+      if (!keep) await fsp.rm(path.join(channelSdk, entry), { force: true });
+    }
+  } catch {
+    /* sdkdata 可能不存在 */
+  }
+
+  await reconcileEndfieldRuntime(workRoot, packDir, channel);
+
+  const refill = ['PlatformProcess.exe', 'webviewsdk.dll', 'onechannellc.dll'];
+  /*
+   * hgsdk.dll 只属于「国服 / B服 / 方舟」那一套鹰角 SDK。
+   * 国际服、Play、Steam 走的是 Gryphline（gfsdk.dll + glfoundation.dll），
+   * 补上 hgsdk 会和渠道包的 SDK 抢符号，平台层初始化时直接 0xc0000005
+   * （2026-10-31 国际服启动崩溃根因），所以只给国服系补。
+   */
+  if (channel === 'official' || channel === 'bilibili') refill.push('hgsdk.dll');
+  for (const name of refill) {
+    const runtimeFile = path.join(workRoot, name);
+    if (fs.existsSync(runtimeFile)) continue;
+    const baseFile = path.join(baseRoot, name);
+    if (!fs.existsSync(baseFile)) continue;
+    try {
+      await fsp.link(baseFile, runtimeFile);
+    } catch {
+      await fsp.copyFile(baseFile, runtimeFile).catch(() => {});
+    }
+  }
+
+  const purgedAfter = await purgeForeignChannelFiles(workRoot, channel);
+  // 渠道身份（app.info / boot.config）最后写：渠道包若自带就被 overlay 覆盖成对的，
+  // 不带的（官服 / B服）在这里按目标厂商改写，见 ENDFIELD_CHANNEL_IDENTITY 的注释。
+  const identityResult = await applyEndfieldChannelIdentity({ workRoot, baseRoot, packDir, channel });
+  return { overlay: overlayResult.processed || 0, purged: purgedBefore + purgedAfter, identity: identityResult.written || 0 };
+}
+
+// 以运行时为源建树后必须现身的文件。refill（见 applyEndfieldChannelToWork）只从
+// baseRoot 找、找不到就 continue，于是「源里没有、包里也没有」的关键件会静默缺失：
+// 树建成功、marker 写成功，用户点「开始游戏」时平台层初始化直接崩。
+// 这里点名校验，缺就 hard-fail —— 宁可这次不给建，也不把一棵注定崩的树交给用户。
+// 刻意不列 pld.dat：它是 ACE 的机器绑定载荷（官服 234173 / B服 234176 /
+// 国际服 7209），五个渠道包都不带、verify_files.json 也不收，不能要求它存在。
+const ENDFIELD_RUNTIME_REQUIRED = [
+  'Endfield.exe',
+  'PlatformProcess.exe',
+  'EndfieldBase.dll',
+  'HGP.dll',
+  'OneChannelLC.dll',
+  'U8SDK.dll',
+  'U8CoreUI.dll',
+  'u8_channel.dll',
+  'webviewsdk.dll',
+  'U8Data/config/config.bin',
+];
+
+function assertEndfieldRuntimeComplete(workRoot, channel) {
+  const required = ENDFIELD_RUNTIME_REQUIRED.slice();
+  // hgsdk.dll 只属于鹰角那一套 SDK；国际服/Play/Steam 用 gfsdk+glfoundation，
+  // 强行补 hgsdk 会抢符号（见 applyEndfieldChannelToWork 的注释）。
+  if (channel === 'official' || channel === 'bilibili') required.push('hgsdk.dll');
+  const missing = [];
+  for (const rel of required) {
+    let ok = false;
+    try {
+      ok = fs.statSync(path.join(workRoot, rel)).size > 0;
+    } catch {
+      ok = false;
+    }
+    if (!ok) missing.push(rel);
+  }
+  if (missing.length) {
+    throw new Error(`这个渠道的运行时缺少关键文件，已中止（避免启动即崩）：${missing.join('、')}`);
+  }
+}
+
 async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   if (game?.builtinKey !== 'endfield' || !server) {
     throw new Error('这个功能只用于明日方舟：终末地');
@@ -3878,23 +4667,22 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   // 官服记住的是它自己的原始安装目录；其它渠道优先用官服/别的完整客户端当基础。
   let baseRoot = '';
   let ownOfficialBase = '';
+  let resolvedBase = null;
   if (channel === 'official') {
-    baseRoot = endfieldBaseRoot(server);
-    ownOfficialBase = baseRoot;
-    // 官服自己没装客户端时，退回用别的已装渠道（如国际服）当基础强制重建运行时，
-    // 否则「国际服切官服」会因找不到基础客户端而反复失败（见 Bug 1）。
-    if (!baseRoot) {
-      const fallback = endfieldBaseServer(game, server.id) || endfieldBaseServer(game);
-      baseRoot = fallback ? fallback.baseRoot : '';
-    }
-  } else {
-    const base = endfieldBaseServer(game, server.id) || endfieldBaseServer(game);
-    baseRoot = base ? base.baseRoot : '';
+    // 官服自己的原始安装目录单独判一次：只有它才是「真·官服本体」。
+    // 直启分支必须用它 —— 用 fallback 借来的客户端直启会开错渠道的游戏。
+    ownOfficialBase = endfieldBaseRoot(server);
+    if (ownOfficialBase && !fs.existsSync(path.join(ownOfficialBase, 'Endfield.exe'))) ownOfficialBase = '';
+    baseRoot = ownOfficialBase;
   }
   if (!baseRoot) {
-    throw new Error(
-      `没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`
-    );
+    resolvedBase = endfieldResolveBase(game, server, channel, options);
+    baseRoot = resolvedBase ? resolvedBase.baseRoot : '';
+  } else {
+    resolvedBase = { baseRoot, baseKind: 'real', baseChannel: endfieldChannelOf(baseRoot) || channel, baseRealRoot: baseRoot };
+  }
+  if (!baseRoot) {
+    throw new Error(`没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`);
   }
 
   // 官服渠道直接从基础客户端启动（XelLauncher 已验证的做法，见它的 app.log：
@@ -3932,112 +4720,126 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     download: options.allowPackDownload !== false,
   });
 
+  /*
+   * ── 每渠道一份独立的硬链接运行时 ──────────────────────────────────
+   *
+   * runtimePaths() 算出 <运行时根>\endfield\<渠道>：和明日方舟共用同一套目录规则，
+   * 但每个渠道各有自己的目录，彼此绝不叠加写入。2026-11-08 那个「所有非官服渠道
+   * 共用一个 work、切服只铺不还原」的混合目录，正是 B服 加载国际服 GameAssembly.dll
+   * 启动 6 秒崩掉的根因，这里彻底回到「一个渠道一棵干净树」。
+   */
   const runtime = runtimePaths(baseRoot, 'endfield', channel, options.runtimeRoot || '');
   if (!runtime.sameDrive) {
     throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
   }
   const runtimeRoot = runtime.target;
-  if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtimeRoot).toLowerCase()) {
-    throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
+  if (pathsOverlap(baseRoot, runtimeRoot)) {
+    throw new Error('运行时目录不能和基础客户端是同一个目录，也不能互相嵌套，请换个“运行时目录”再试');
   }
 
-  const existingExecutable = path.join(runtimeRoot, 'Endfield.exe');
-  const marker = path.join(runtimeRoot, '.hxl-endfield-runtime-v2');
-  /*
-   * 标记里存的是「这个运行时是按哪一份渠道包铺出来的」：文件数 + 总字节数。
-   *
-   * 以前只判断标记在不在，于是渠道包升级（典型：国际服从 10 个 SDK 文件变成
-   * 126 个文件、936 MB 的整包差异）之后，旧运行时不会被重建，游戏还是那份拼错的
-   * 二进制。现在签名一变就重建 —— 渠道包更新后本来也该重新铺一遍。
-   */
+  // 顺手清掉上一代重建留下的 .stale-* / .staging-* 残骸（全是硬链接，删失败也不影响切服）。
+  await cleanStaleRuntimeRoots(runtimeRoot).catch(() => {});
+
+  const baseSignature = await endfieldBaseSignature(baseRoot);
   const packSignature = packSignatureOf(packDir);
-  let markerText = '';
-  try {
-    markerText = fs.readFileSync(marker, 'utf8').trim();
-  } catch {
-    markerText = '';
-  }
-  const needsBuild =
-    !fs.existsSync(existingExecutable) || !markerText || markerText !== packSignature;
+  const marker = readEndfieldRuntimeMarker(runtimeRoot);
+  const existingExecutable = path.join(runtimeRoot, 'Endfield.exe');
+  /*
+   * 只有这几种情况才整树重建（重建会把 Persistent 整体搬过去，用户的语音包不丢）：
+   *   · 目录里没有 Endfield.exe（首次建 / 被误删 / 标记读不出来）；
+   *   · 基础客户端的只读部分变了 —— 官方更新过，得从最新本体重新硬链；
+   *   · 用户手动点「重新生成」（forceRuntime）。
+   * 渠道包内容变了不整树重建，只重新铺一遍那十几个差异文件（见 needsApply）。
+   * 同一渠道来回切、基础与包都没变时两条都不满足 —— 直接复用现有目录，
+   * 几秒切过去、不重下任何语音包。
+   */
+  const baseKind = resolvedBase ? resolvedBase.baseKind : 'real';
+  const needsRebuild =
+    Boolean(options.forceRuntime) ||
+    !fs.existsSync(existingExecutable) ||
+    !marker ||
+    String(marker.base || '') !== baseSignature ||
+    // 旧 marker 没有 baseKind 字段 → 视为 'real'（历史行为），不触发额外重建
+    String(marker.baseKind || 'real') !== baseKind;
+  const needsApply =
+    needsRebuild ||
+    String((marker && marker.channel) || '') !== channel ||
+    String((marker && marker.pack) || '') !== packSignature;
 
-  // 重建前把旧运行时里的登录态/SDK 配置暂存，生成完拷回来，避免用户重新登录。
-  // ⚠️ 但「跨渠道」时绝不能把旧渠道的配置复活：例如官服运行时目录之前装过国际服，
-  // 若把国际服的 sdkdata/U8Data 拷回来，会覆盖渠道包写入的官服配置，导致
-  // 切回官服仍是国际服界面、不弹登录、资源校验一直报缺失（B服→国际服→官服循环的根因）。
-  // 所以只有「同渠道重建」才保留登录态；切换渠道一律让渠道包的配置当权威。
-  let savedState = null;
-  let savedChannel = '';
-  if (needsBuild && fs.existsSync(runtimeRoot)) {
-    savedChannel = endfieldChannelOf(runtimeRoot);
-    if (savedChannel && savedChannel === channel) {
-      savedState = {};
-      for (const dir of ENDFIELD_COPY_DIRS) {
-        const from = path.join(runtimeRoot, dir);
-        if (!fs.existsSync(from)) continue;
-        const to = path.join(os.tmpdir(), `hxl-endfield-${channel}-${Date.now()}-${dir}`);
-        await fsp.cp(from, to, { recursive: true });
-        savedState[dir] = to;
-      }
-    }
-  }
+  const emit =
+    typeof options.onProgress === 'function'
+      ? options.onProgress
+      : (progress) => send('endfield:progress', { ...progress, serverName: server.name });
 
   let result = { linked: 0, overlay: { processed: 0 } };
-  if (needsBuild) {
-    const emit =
-      typeof options.onProgress === 'function'
-        ? options.onProgress
-        : (progress) => send('endfield:progress', { ...progress, serverName: server.name });
-    emit({ phase: 'link', processed: 0, total: 0, current: `正在为${server.name}创建链接运行时…` });
-    result = await prepareLinkedRuntime({
+  let built = false;
+  if (needsRebuild) {
+    emit({ phase: 'link', processed: 0, total: 0, current: `正在为${server.name}生成独立硬链接运行时…` });
+    writeLaunchLog(`[endfield] ${server.name} 生成独立运行时：${runtimeRoot}（基础 ${baseRoot}）`);
+    result = await buildEndfieldChannelRuntime({
       baseRoot,
-      packRoot: packDir,
-      targetRoot: runtimeRoot,
-      copyDirs: ENDFIELD_COPY_DIRS,
+      runtimeRoot,
+      onProgress: emit,
+      signal: options.signal,
+      // 以运行时为源时，渠道专属的 .exe/.dll 必须真拷贝：
+      // 它们不在渠道包的 overlay 覆盖范围内时，硬链会让两个渠道永远共用
+      // 同一个 inode，等于把「切服只铺不还原」的老事故换个入口重演。
+      copyDirs: baseKind === 'runtime'
+        ? ENDFIELD_RUNTIME_COPY_DIRS.concat(ENDFIELD_SAFE_INHERIT_COPY)
+        : ENDFIELD_RUNTIME_COPY_DIRS,
+    });
+    built = true;
+  } else {
+    writeLaunchLog(`[endfield] ${server.name} 复用已有独立运行时：${runtimeRoot}`);
+  }
+
+  /*
+   * 铺渠道差异文件（小渠道包，十几个 SDK/配置文件）。每渠道一棵干净树，
+   * 所以这一步是「从基础客户端那套覆盖成目标渠道那套」，不存在跨渠道残留：
+   *   1. purgeForeignChannelFiles 去掉基础客户端带过来的外渠道 SDK；
+   *   2. overlayDirectory 整体覆盖（写入前逐文件断链，绝不写穿基础客户端）；
+   *   3. sdkdata 只留目标渠道的 sdk_*_config；
+   *   4. reconcileEndfieldRuntime 清外渠道平台件；
+   *   5. refill 补回全渠道通用官方件；
+   *   6. 渠道身份 app.info / boot.config 对齐。
+   * Endfield_Data 整棵不参与 —— 用户下好的语音包 .chk 与游戏自己维护的索引
+   * 就这样活过每一次切服与每一次重建。
+   */
+  let applied = { overlay: 0, purged: 0, identity: 0 };
+  if (needsApply) {
+    applied = await applyEndfieldChannelToWork({
+      workRoot: runtimeRoot,
+      baseRoot,
+      packDir,
+      channel,
       onProgress: emit,
     });
-    if (result.cancelled) throw new Error('已取消');
-
-    if (savedState) {
-      for (const [dir, from] of Object.entries(savedState)) {
-        const to = path.join(runtimeRoot, dir);
-        await fsp.rm(to, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 });
-        await fsp.cp(from, to, { recursive: true });
-        await fsp.rm(from, { recursive: true, force: true, maxRetries: 6, retryDelay: 200 });
-      }
+    if (applied.purged) {
+      writeLaunchLog(`[endfield] ${server.name} 清掉外渠道 SDK 文件 ${applied.purged} 项（${channel}）`);
     }
-
-    // 只保留目标渠道自己的 SDK 配置，避免运行时还走基础客户端那个渠道登录。
-    const channelSdk = path.join(runtimeRoot, 'sdkdata');
-    const keepPrefixes = ENDFIELD_SDK_KEEP[channel] || [];
-    try {
-      for (const entry of await fsp.readdir(channelSdk)) {
-        if (!/^sdk_[a-z]+_config/i.test(entry)) continue;
-        const keep = keepPrefixes.some((prefix) => entry.toLowerCase().startsWith(prefix));
-        if (!keep) await fsp.rm(path.join(channelSdk, entry), { force: true });
-      }
-    } catch {
-      /* sdkdata 可能不存在 */
-    }
-
-    // 删掉基础客户端残留的外渠道 SDK/平台文件（见 reconcileEndfieldRuntime 注释）：
-    // 这是 XelLauncher 用 manifest Removed 字段做的那一步，补上后官服运行时不再混装多套 SDK。
-    await reconcileEndfieldRuntime(runtimeRoot, packDir, channel);
-
-    await fsp.writeFile(marker, packSignature, 'utf8');
+  }
+  result.overlay = { processed: applied.overlay };
+  // 只有「以运行时为源」才做这道点名校验：真实安装目录当基础时，缺件由官方
+  // 启动器/游戏自己的修复流程兜，硬失败反而会把本来能用的用户挡在外面。
+  if (baseKind === 'runtime') {
+    assertEndfieldRuntimeComplete(runtimeRoot, channel);
+    writeLaunchLog(`[endfield] ${server.name} 关键件校验通过（源=运行时 ${baseKind}）`);
   }
 
-  // 渠道包是持续自动更新的（EndfieldBase.dll 等渠道差异文件随官方版本变化），
-  // 已建好的运行时不会重建，所以每次准备运行时都做一次差异同步，
-  // 保证国际服运行时里的 EndfieldBase.dll 一定是对应渠道的版本
-  // （否则官方完整性校验报「游戏文件缺失或损坏」）。
-  try {
-    const patched = await syncEndfieldPackDelta(runtimeRoot, packDir);
-    if (patched) {
-      writeLaunchLog(`[endfield] ${server.name} 渠道差异同步：${patched} 个文件按渠道包更新（${channel}）`);
-    }
-  } catch (error) {
-    writeLaunchLog(`[endfield] ${server.name} 渠道差异同步失败：${error.message}`);
-  }
+  writeEndfieldRuntimeMarker(runtimeRoot, {
+    v: 2,
+    channel,
+    base: baseSignature,
+    pack: packSignature,
+    // 这棵树是「拿哪个目录当源」建出来的。baseKind='runtime' 表示源本身是
+    // 另一个渠道的运行时（MVP-1 新路径），'real' 表示源是真实安装目录。
+    baseRoot: (resolvedBase && resolvedBase.baseRoot) || baseRoot,
+    baseChannel: (resolvedBase && resolvedBase.baseChannel) || '',
+    baseKind: (resolvedBase && resolvedBase.baseKind) || 'real',
+    // 源运行时背后真正的安装目录（可能是 G:\Arknights Endfield，也可能为空）
+    baseRealRoot: (resolvedBase && resolvedBase.baseRealRoot) || '',
+    updatedAt: new Date().toISOString(),
+  });
 
   // 官方启动器会持续刷新基础客户端里的平台状态（U8Data/config、sdkdata，
   // 还有 10-28 出现的 U8Data/config/Launcher.meta），而渠道包里的同名快照
@@ -4045,46 +4847,11 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   // 「检查资源完整性时发现异常，请重新下载缺失的文件」（10-29 报障根因三）。
   // 官服渠道以基础客户端为准：按 mtime 把更新的平台状态同步进运行时。
   // 注意：B服渠道的 U8Data 是 B 服渠道配置，基础客户端里是官服的，不能这样同步。
+  // 官服其实在上面就直启返回了，这段只在 fallback 借用别的客户端当基础时有效。
   if (channel === 'official') {
     for (const dirName of ['U8Data', 'sdkdata']) {
       await syncNewerFiles(path.join(baseRoot, dirName), path.join(runtimeRoot, dirName));
     }
-  }
-
-  // 旧版本 reconcile 会把这几个全渠道通用的官方文件误删，而已建好的
-  // 运行时带着 v2 标记不会触发重建，所以这里统一补缺：缺了就从基础客户端
-  // 硬链接（跨盘/被占用时退回复制；基础客户端也没有就跳过）。
-  //   - PlatformProcess.exe：decoy 启动链的签名父进程（10-29 根因一）。
-  //   - webviewsdk.dll：登录/活动页 WebView，官方完整性校验必查（10-29 根因二）。
-  //   - hgsdk.dll：鹰角官方 SDK，B服差异包不带，只能从基础客户端补。
-  //   - onechannellc.dll：官方 OneChannel 组件，保底不能靠包。
-  const refill = ['PlatformProcess.exe', 'webviewsdk.dll', 'onechannellc.dll'];
-  /*
-   * hgsdk.dll 只属于「国服 / B服 / 方舟」那一套鹰角 SDK。
-   * 国际服、Play、Steam 走的是 Gryphline（gfsdk.dll + glfoundation.dll），
-   * 补上 hgsdk 会和渠道包的 SDK 抢符号，平台层初始化时直接 0xc0000005
-   * （2026-10-31 国际服启动崩溃根因），所以只给国服系补。
-   */
-  if (channel === 'official' || channel === 'bilibili') refill.push('hgsdk.dll');
-  for (const name of refill) {
-    const runtimeFile = path.join(runtimeRoot, name);
-    if (fs.existsSync(runtimeFile)) continue;
-    const baseFile = path.join(baseRoot, name);
-    if (!fs.existsSync(baseFile)) continue;
-    try {
-      await fsp.link(baseFile, runtimeFile);
-    } catch {
-      await fsp.copyFile(baseFile, runtimeFile).catch(() => {});
-    }
-  }
-
-  /*
-   * 补缺会把基础客户端（国服）的 hgsdk.dll 带回来，而已建好的运行时不会重建，
-   * 光靠 reconcile 那一次清不干净。这里最后再按渠道扫一遍外渠道件 —— 幂等。
-   */
-  const purged = await purgeForeignChannelFiles(runtimeRoot, channel);
-  if (purged) {
-    writeLaunchLog(`[endfield] ${server.name} 清掉外渠道 SDK 文件 ${purged} 项（${channel}）`);
   }
 
   let launchPath = null;
@@ -4097,7 +4864,17 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   }
   if (!launchPath) throw new Error('运行时中没有找到启动程序');
 
-  if (channel === 'official') server.originalRoot = baseRoot;
+  /*
+   * 每个渠道都记住「自己是拿哪个真实客户端当基础建起来的」。
+   * 切过一次以后 server.root 变成该渠道的运行时目录（endfieldBaseRoot 会拒绝把
+   * 生成的运行时当基础），一旦用户只有「国际服」这一份真实客户端，
+   * 「国际服 → B服」就会找不到基础而报错。靠 originalRoot 记住真实目录，这条链才不会断。
+   */
+  // 运行时当源时，记「那个源运行时背后真正的安装目录」（marker.baseRealRoot），
+  // 这样它下次还能从第一级（真实目录）解析，不会一路退化到只剩运行时可用。
+  // baseRealRoot 为空（旧 marker / 来路不明）时退回 baseRoot——虽然它会被
+  // isEndfieldRuntimeDir 拒掉，但至少保留了现场线索，方便日志定位。
+  server.originalRoot = (resolvedBase && resolvedBase.baseRealRoot) || baseRoot;
   server.path = launchPath;
   server.root = runtimeRoot;
   server.runtimeLinked = true;
@@ -4107,7 +4884,7 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
 
   return {
     ok: true,
-    built: needsBuild,
+    built,
     runtimeRoot,
     launchPath,
     linked: result.linked || 0,
@@ -4286,6 +5063,9 @@ async function ensureArknightsRuntime(game, server, options = {}) {
   if (!server.root || server.root.includes('VelaRuntimes')) return false;
   // 国际服（EN / JP / KR）和台服由另外的发行商发行，主程序和国服不是一份，
   // 没法从国服目录硬链接拼出来，只能用它们自己的安装目录。
+  // Yostar 三区各自就是一套完整客户端（含 game-launcher-config.json 元数据），
+  // 不需要也不能再生成国服式硬链接运行时 —— 直接沿用它的目录启动即可。
+  if (yostarPacks.isYostarChannel(server.channel)) return false;
   if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) return false;
   const runtime = runtimePaths(server.root, 'arknights', server.channel, options.runtimeRoot || '');
   if (!runtime.sameDrive) return false;
@@ -4418,8 +5198,18 @@ async function prepareGenshinPackRuntime(game, server) {
     }
   }
   const version = String(game.version || '').replace(/^v/i, '') || '7.1.0';
-  const config = `[General]\nsub_channel=0\nsdk_version=\npredownload=\ngame_version=${version}\ngame_biz=hk4e_global\ncps=hyp_hoyoverse\nchannel=1\n`;
-  await fsp.writeFile(path.join(runtimeRoot, 'config.ini'), config, 'utf8');
+  const configPath = path.join(runtimeRoot, 'config.ini');
+  // 国际服预下载标记写在 config.ini 的 predownload= 行。每次切服重建这份运行时镜像时
+  // 别把已经下好的标记抹掉，否则 checkHoyoPredownload 永远判「可以预下载」、重复下一遍。
+  // 这份 config.ini 是启动器自己写的（hardlinkTree 明确跳过它），用 utf8 直读即可。
+  let predownloadMark = '';
+  try {
+    const prev = fs.readFileSync(configPath, 'utf8');
+    const mark = prev.match(/^predownload\s*=\s*(.+)$/im);
+    if (mark && mark[1].trim()) predownloadMark = mark[1].trim();
+  } catch {}
+  const config = `[General]\nsub_channel=0\nsdk_version=\npredownload=${predownloadMark}\ngame_version=${version}\ngame_biz=hk4e_global\ncps=hyp_hoyoverse\nchannel=1\n`;
+  await fsp.writeFile(configPath, config, 'utf8');
   return { runtimeRoot, executable: runtimeExe };
 }
 
@@ -4728,12 +5518,13 @@ async function detectionChannel(game, exePath) {
   const fromPath = clientChannel.pathChannelHint(exePath);
   /*
    * 明日方舟的国际服 / 台服由不同发行商运营，客户端里没有米哈游式的 config.ini，
-   * 只能靠目录名与 exe 公司名。判出 global 后要落到 international 组的第一行
-   * （server.channel 是 global-en），否则 serverForDetected 找不到行又退回官服。
+   * 只能靠目录名与 exe 公司名。Yostar 三区（EN / JP / KR）现在靠安装目录里的
+   * `game-launcher-config.json` 的 tag 精确分区 —— 我方「下载游戏」会写这份
+   * 元数据，官方启动器也写；认不出来才回落到「global → 组里第一行」。
    */
   if (key === 'arknights') {
-    // 明日方舟国际服的服务器行是 global-en / global-jp / global-kr，
-    // 客户端本身分不出区域，落到组里第一行；其余交给用户手动选。
+    const yostar = await yostarPacks.detectChannelOf(path.dirname(exePath));
+    if (yostar) return yostar;
     if (fromPath === 'taiwan') return 'taiwan';
     if (fromPath === 'global') return 'global-en';
     if (fromPath) return fromPath;
@@ -4770,6 +5561,58 @@ async function discoverBuiltinServers() {
   };
   const roots = discoverServerRoots();
   let changed = 0;
+  /*
+   * 升级自愈：清掉指向旧「单 work 混合目录」的路径。
+   *
+   * 本次回退之前，所有非官服渠道共用 G:\VelaRuntimes\endfield\work 一棵树，
+   * 里面是「国际服重二进制 + 某渠道 SDK」的混合体，切服会串渠道、启动 3~9 秒
+   * 就崩（B服 报「游戏文件损坏或缺失」）。已回退成「每渠道一份独立运行时」，
+   * 这些旧路径必须作废，否则老用户升级后直接点「开始游戏」仍会静默启动旧
+   * 混合体：launcher-data.json 里 B服/国际服 的 path 还指着它，activeServer 命中
+   * → allowPackDownload:false → 重建失败被「尽力而为」吞掉 → 又开旧目录。
+   *
+   * 只清 path（root 保留指向官服本体 originalRoot），不指向尚未生成的新目录：
+   * 悬空 path 会被下面 discoverBuiltinServers 标 incomplete、前端随之拦断切服。
+   * 靠 publicGame 的 exists 增强让前端把它当「可切换」，点切换/开始游戏时由
+   * ensureEndfieldChannelRuntime 从官服本体整树重建该渠道独立运行时并写回 path。
+   * 这是代码级自愈，所有升级用户都会自动收敛，不依赖手改任何一台机器的 data。
+   */
+  for (const game of store.data.games) {
+    if (!game.builtin || game.builtinKey !== 'endfield') continue;
+    const official = (game.servers || []).find((server) => server.channel === 'official');
+    let gameTouched = false;
+    for (const server of game.servers || []) {
+      if (server.channel === 'official') continue;
+      const dir = String(server.root || (server.path ? path.dirname(server.path) : ''));
+      if (!dir) continue;
+      // 双判据（路径尾部 + 标记）见 isEndfieldLegacyWorkRoot：目录被删/重命名、
+      // 或自定义 runtimeRoot 的旧数据都能认出来；认不出的绝不动，免得误伤用户
+      // 自己指到别处的目录。
+      if (!isEndfieldLegacyWorkRoot(dir)) continue;
+      server.path = '';
+      server.root = String(server.originalRoot || (official && official.originalRoot) || '');
+      server.runtimeLinked = false;
+      server.incomplete = false;
+      server.packPath = '';
+      server.unavailable = false;
+      server.confirmed = false;
+      changed += 1;
+      gameTouched = true;
+      writeLaunchLog(
+        `endfield legacy work root migrated: ${server.name}(${server.channel}) → rebuild on next switch`
+      );
+    }
+    if (gameTouched) {
+      // 旧 B服/国际服 可能正是当前活跃服：复位到永远可用的官服直启，
+      // 免得启动页停在一个 path 已空的服上、点「开始游戏」无从下手。
+      const active = (game.servers || []).find((server) => server.id === game.activeServerId);
+      if (active && !active.path && official && official.path && targetExists(official.path)) {
+        game.activeServerId = official.id;
+        game.target = official.path;
+        game.workDir = official.root || path.dirname(official.path);
+      }
+    }
+  }
   for (const game of store.data.games) {
     if (!game.builtin || !execNames[game.builtinKey]) continue;
     for (const server of game.servers || []) {
@@ -4796,12 +5639,35 @@ async function discoverBuiltinServers() {
         continue;
       }
       const dir = path.dirname(server.path);
-      // 终末地的链接运行时本来就没有 config.ini（那是米哈游三件套的约定），
-      // 只看我们自己写的 v2 标记；否则每次启动都会把 B服/国际服标成「需要重建」（红点）。
+      // 终末地每渠道生成的独立硬链接运行时里没有 config.ini（那是米哈游三件套的约定），
+      // 只看我们自己写的标记；否则每次启动都会把 B服/国际服标成「需要重建」（红点）。
+      // .hxl-endfield-runtime-v2 认所有渠道运行时目录；用户机器上改架构之前建的旧运行时
+      // 用的也是这个标记，别让它突然变红。
       const isEndfieldRuntime =
         game.builtinKey === 'endfield' &&
-        (server.runtimeLinked === true || fs.existsSync(path.join(dir, '.hxl-endfield-runtime-v2')));
-      const hasConfig = fs.existsSync(path.join(dir, 'config.ini')) || isEndfieldRuntime;
+        (server.runtimeLinked === true || isEndfieldRuntimeDir(dir));
+      // 明日方舟国际服 EN/JP/KR 是 Yostar 发行的独立客户端，没有米哈游式 config.ini，
+      // 它自己的元数据是 game-launcher-config.json（官方启动器与我方下载都会写）。
+      // 不把它算作「完整客户端」，每次启动都会被标成 incomplete，切服时又被
+      // servers:activate 的 incomplete 守卫拦断 —— 用户看到的就是「识别不到」。
+      const isYostarClient =
+        game.builtinKey === 'arknights' &&
+        yostarPacks.isYostarChannel(server.channel) &&
+        fs.existsSync(path.join(dir, 'game-launcher-config.json'));
+      // 米哈游四款切服生成的独立硬链接运行时同样是完整客户端。正常情况
+      // prepare*Runtime 会写一份渠道专属 config.ini，但若硬链接/合并链路漏写，
+      // 别把这一行打回「需要重建」——用 VelaRuntimes 路径 + 渠道自证认它。
+      // 终末地 / Yostar 三区 / 方舟国服各有自己的判据，一律不走这里。
+      const isMihoyoLinkedRuntime =
+        isMihoyoRuntimeDir(dir, game.builtinKey) &&
+        (clientChannel.configChannelFromPath(server.path) === server.channel ||
+          clientChannel.pathChannelHint(server.path) === server.channel) &&
+        targetExists(server.path);
+      const hasConfig =
+        fs.existsSync(path.join(dir, 'config.ini')) ||
+        isEndfieldRuntime ||
+        isYostarClient ||
+        isMihoyoLinkedRuntime;
       if (!hasConfig) {
         // 没有 config.ini：通常是资源替换包（B服 / 国际服增量包），标记为需要重建。
         // 但不要清空 path / root，否则用户手动配好的客户端会直接消失。
@@ -4834,13 +5700,41 @@ async function discoverBuiltinServers() {
     }
     const found = roots.flatMap((root) => walkExecutables(root, execNames[game.builtinKey]));
     for (const exePath of found) {
+      // 旧「单 work 混合目录」绝不能被当成客户端补回 path：它是国际服重二进制 +
+      // 某渠道 SDK 的残留，启动 3~9 秒就崩。升级迁移会把指向它的 path 清空，
+      // 这里再挡一道，免得下次启动又被 walkExecutables 补回来。用同一个双判据
+      // helper：标记被删了也还能靠 \endfield\work 路径尾部认出来。
+      if (isEndfieldLegacyWorkRoot(path.dirname(exePath))) continue;
       const channel = await detectionChannel(game, exePath);
       const server = (game.servers || []).find((item) => item.channel === channel);
       if (!server) continue;
-      if (
-        !fs.existsSync(path.join(path.dirname(exePath), 'config.ini')) &&
-        !(game.builtinKey === 'endfield' && fs.existsSync(path.join(path.dirname(exePath), '.hxl-endfield-runtime-v2')))
-      ) {
+      const exeDir = path.dirname(exePath);
+      // B3：B1 把 VelaRuntimes 四款精确子目录纳入自动扫描后，给「官服 exe 被静默
+      // 写进 B服/国际服行」上一道护栏。detectionChannel 对米哈游四款本来就优先
+      // 采用同一个 config.ini 的声明，所以正常路径下这道恒不触发；它的价值是
+      // 万一以后有人改了 detectionChannel 的兜底顺序，也不会把错渠道的 exe 写回。
+      // 只认 config.ini 强声明，目录名弱提示不参与；Yostar 三区 / 终末地 /
+      // 异环各有自己的 detectChannelOf / endfieldChannelOf，这里一律不碰。
+      if (MIHOYO_RUNTIME_KEYS.includes(game.builtinKey)) {
+        const declared = declaredChannelOf(exePath);
+        if (declared.config && declared.config !== channel) continue;
+      }
+      // 完整客户端判据（与上面 hasConfig 四处判据一一对应，只是这里针对扫描到的
+      // exe 而不是已有 path 的行）：config.ini / 终末地运行时标记 / Yostar 三区
+      // game-launcher-config.json / 米哈游 VelaRuntimes 运行时渠道自证。
+      // 少了后两项，Yostar 三区和米哈游硬链接运行时会被当成「资源替换包」标成
+      // incomplete 并 continue，server.path 永远写不回去 —— 正是「识别不到」。
+      const isCompleteClient =
+        fs.existsSync(path.join(exeDir, 'config.ini')) ||
+        (game.builtinKey === 'endfield' && isEndfieldRuntimeDir(exeDir)) ||
+        (game.builtinKey === 'arknights' &&
+          yostarPacks.isYostarChannel(channel) &&
+          fs.existsSync(path.join(exeDir, 'game-launcher-config.json'))) ||
+        (isMihoyoRuntimeDir(exeDir, game.builtinKey) &&
+          (clientChannel.configChannelFromPath(exePath) === channel ||
+            clientChannel.pathChannelHint(exePath) === channel) &&
+          targetExists(exePath));
+      if (!isCompleteClient) {
         if (!server.path || !targetExists(server.path)) {
           server.incomplete = true;
           server.packPath = exePath;
@@ -4849,7 +5743,7 @@ async function discoverBuiltinServers() {
       }
       if (server.path && targetExists(server.path)) continue;
       server.path = exePath;
-      server.root = path.dirname(exePath);
+      server.root = exeDir;
       server.incomplete = false;
       server.packPath = '';
       changed += 1;
@@ -5212,6 +6106,15 @@ function publicGame(game) {
   const hasOfficialCover = /^covers\/official-/.test(game.cover || '');
   const hasCustomCover = game.cover && !/^covers\/(builtin|official)-/.test(game.cover);
   const backgroundVideo = String(game.backgroundVideo || '');
+  /*
+   * 升级自愈的配套判据：终末地非官服渠道被清掉旧 work 混合体的 path 后，
+   * 只要还存在一个完整客户端能当基础，就仍把它算「可切换」。
+   * 否则前端 servers.js:699 会因 exists=false 拦断切服，老用户升级后就再也
+   * 切不回 B服/国际服。点「切换」/「开始游戏」时主进程会从官服本体整树
+   * 重建该渠道独立运行时并写回 path（ensureEndfieldChannelRuntime）。
+   */
+  const endfieldHasBase =
+    game.builtinKey === 'endfield' ? Boolean(endfieldBaseServer(game)) : false;
   return {
     ...game,
     backgroundVideo: /^(?:https?:|file:|data:)/i.test(backgroundVideo)
@@ -5242,7 +6145,10 @@ function publicGame(game) {
     activeServerId: game.activeServerId || null,
     servers: (game.servers || []).map((server) => ({
       ...server,
-      exists: targetExistsCached(server.path),
+      // 判据见 serverExistsForView：光有 exe 不够，B服/国际服若还指着官服目录
+      // （独立硬链接运行时没生成）就不算这一服可用。终末地那项「有官服本体
+      // 当基础就算可切换」是自愈专用，helper 里原样保留了第二分支。
+      exists: serverExistsForView(game, server, endfieldHasBase),
       /*
        * 目录本身还在不在。
        *
@@ -6357,6 +7263,20 @@ async function applyProxySettings() {
 }
 
 /**
+ * 把设置里的下载限速应用到下载层。
+ *
+ * 存储用 KB/s（整数，界面上好填），下载层用字节/秒。0 表示不限速。
+ * 任何时候都可以改，改完对正在跑的下载立刻生效——下载循环每读一块都会
+ * 重新算当前该等多久，不需要重启或者重开下载。
+ */
+function applyDownloadLimit() {
+  const kb = Number(store?.data?.settings?.downloadLimitKBps) || 0;
+  const clamped = Math.max(0, Math.min(102400, Math.round(kb)));
+  netThrottle.setLimit(clamped > 0 ? clamped * 1024 : 0);
+  return clamped;
+}
+
+/**
  * 读系统代理，转成设置页那个输入框认得的格式。
  *
  * 用户装了 Clash / v2rayN 之后，最常卡住的一步是「知道自己在用代理，但不知道
@@ -6731,8 +7651,25 @@ function createSplashWindow() {
     },
   });
   splashWindow.loadFile(path.join(ROOT, 'src', 'splash.html'));
+  /*
+   * 显示 splash 的唯一点做幂等封装，只记录一次 splashShownAt。
+   * 只在 ready-to-show 里调用：Electron 的 ready-to-show 才是「页面完成首次渲染、
+   * 合成器首帧已合成」的时刻。真机探针（_splash-probe/rts-main.js）实测：GPU 模式下
+   * did-finish-load 那一刻 capturePage 报 UnknownVizError（首帧还没画出来），要到
+   * ready-to-show 才 OK。以前在 did-finish-load 里也 show，GPU 慢/崩时窗口在立绘
+   * 还没合成时就亮出来，用户看到的就是「图没加载出来」的空白启动页 —— 别再加回来。
+   */
+  const showSplash = () => {
+    if (!splashWindow || splashWindow.isDestroyed()) return;
+    if (!splashShownAt) {
+      splashWindow.center();
+      splashWindow.show();
+      splashShownAt = Date.now();
+    }
+  };
   // 启动页版本号跟随 app.getVersion() 注入（splash.html 里那份只是兜底文案，
   // 之前硬编码 v2.4.0 一直没跟着升版，2026-10-31 用户指出）
+  // 注意：这里只做 DOM 版本号注入，绝不 show 窗口 —— 显示必须等 ready-to-show。
   splashWindow.webContents.once('did-finish-load', () => {
     if (!splashWindow || splashWindow.isDestroyed()) return;
     splashWindow.webContents
@@ -6743,8 +7680,7 @@ function createSplashWindow() {
   });
   splashWindow.once('ready-to-show', () => {
     if (!splashWindow || splashWindow.isDestroyed()) return;
-    splashWindow.center();
-    splashWindow.show();
+    showSplash();
     if (process.env.HX_SPLASH_SHOT === '1') {
       setTimeout(async () => {
         try {
@@ -6878,7 +7814,6 @@ function createWindow() {
   });
 
   win.once('ready-to-show', () => {
-    const delay = splashWindow ? 1050 : 0;
     // 启动时恢复上次选的窗口材质（必须在窗口可见前设好，否则会闪一下不透明底）
     try {
       const savedMaterial = store?.data?.settings?.material || 'none';
@@ -6888,7 +7823,7 @@ function createWindow() {
     } catch (error) {
       console.warn('[material] 恢复失败:', error.message);
     }
-    setTimeout(() => {
+    const reveal = () => {
       if (!win || win.isDestroyed()) return;
       win.show();
       if (splashWindow && !splashWindow.isDestroyed()) {
@@ -6911,7 +7846,23 @@ function createWindow() {
           app.quit();
         }, 2200);
       }
-    }, delay);
+    };
+    /*
+     * 加载图「一闪就没」的根因：以前是「主窗 ready-to-show 后固定等 1050ms」，
+     * 而 splash 的 show 在另一条事件链（ready-to-show）。GPU 首帧一慢，splash
+     * 还藏在 show:false 就被加 leaving 关掉，用户只看到直接进主界面。
+     * 现在改成等「splash 真的显示过 + 至少 1050ms」才放行；没建 splash（HX_CAPTURE）
+     * 或它已被销毁则立即放行；2500ms 硬上限兜底，GPU 再慢也不会把启动挂死。
+     */
+    const started = Date.now();
+    const waitForSplash = () => {
+      const gone = !splashWindow || splashWindow.isDestroyed();
+      const shownLongEnough = splashShownAt && Date.now() - splashShownAt >= 1050;
+      const timedOut = Date.now() - started >= 2500;
+      if (gone || shownLongEnough || timedOut) reveal();
+      else setTimeout(waitForSplash, 50);
+    };
+    waitForSplash();
   });
 
   win.on('close', (event) => {
@@ -9096,6 +10047,8 @@ function installIpc() {
       'includeStoryResources',
       // ldiff 增量加速开关：不留退路的话，介意「就地改写游戏文件」的用户没有别的选择。
       'enableLdiff',
+      // 下载限速：全局带宽上限（KB/s，0 = 不限速）
+      'downloadLimitKBps',
       // 装饰挂饰 / 角色背景水印：这两个以前不在白名单里，快照永远不带这两个键，
       // 状态回推时会把刚点下去的值抹掉，开关表现为「点了直接弹回原状」。
       'charms',
@@ -9243,6 +10196,15 @@ function installIpc() {
         settings.updateSnoozeVersion = String(patch.updateSnoozeVersion || '').trim().replace(/^v/i, '').slice(0, 32);
       } else if (key === 'updateSnoozeUntil') {
         settings.updateSnoozeUntil = Number(patch.updateSnoozeUntil) || 0;
+      } else if (key === 'downloadLimitKBps') {
+        /*
+         * 下载限速。上限按 100 MB/s 截：再高已经超过家用宽带上限，
+         * 而填个天文数字只会让「限速开着」变成摆设。0 = 不限速。
+         */
+        const value = Number(patch.downloadLimitKBps);
+        settings.downloadLimitKBps = Number.isFinite(value)
+          ? Math.max(0, Math.min(102400, Math.round(value)))
+          : 0;
       } else if (key === 'downloadDir') {
         const dir = String(patch.downloadDir || '').trim();
         if (dir) {
@@ -9283,6 +10245,8 @@ function installIpc() {
     await store.saveNow();
     // 代理改完立刻生效，不用重启：用户点保存就能看到联网行为变化
     if ('proxyRules' in patch) await applyProxySettings();
+    // 限速同理：立刻生效，正在跑的下载下一块就按新上限走（不用等下次下载）
+    if ('downloadLimitKBps' in patch) applyDownloadLimit();
     return snapshot();
   });
 
@@ -9395,10 +10359,32 @@ function installIpc() {
           }
           await store.saveNow();
           pushState(true);
+          // 预下载内容落进真实安装目录后，链接运行时要失效（与 predownload:apply 同一语义）
+          invalidateRuntimesAfterUpdate(game);
           return applied;
         }
       } catch (error) {
-        writeLaunchLog(`endfield update: predownload apply fallback: ${error.message}`);
+        /*
+         * 预下载内容用不上，回落成逐文件全量更新。
+         *
+         * 这条回落原来只写一行 launch.log —— 用户那边看到的是「我明明预下载完了，
+         * 怎么更新还是下了几十 G」，没有任何提示。现在把原因报上去，界面能说明白；
+         * 同时顺手把用不上的 Diffs 清掉（apply 失败说明这批包跟当前清单对不上，
+         * 留着只会在下一次检测里继续被当成「可以应用」）。
+         */
+        const reason = String(error?.message || error || '未知原因');
+        writeLaunchLog(`endfield update: predownload apply fallback: ${reason}`);
+        emit({ phase: 'predownload', current: `预下载内容无法应用（${reason}），改为逐文件更新` });
+        try {
+          await predownload.clear({ gameKey: 'endfield', installRoot: predownloadRoot });
+        } catch {
+          /* 清不掉不影响后面的更新 */
+        }
+        if (server.predownload) {
+          server.predownload = null;
+          await store.saveNow();
+          pushState(true);
+        }
       }
     }
     const result = await updateEndfieldGame({
@@ -9422,6 +10408,8 @@ function installIpc() {
       await store.saveNow();
       pushState(true);
     }
+    // 与其余逐文件更新落点统一：skipped（本地已是最新）时不触发无谓的运行时重建
+    if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
     return result;
   });
 
@@ -9433,17 +10421,45 @@ function installIpc() {
     }
     if (running.has(game.id)) throw new Error('请先退出明日方舟再更新');
     /*
+     * 国际服（EN / JP / KR）走 Yostar 自己的那套清单，和国服的鹰角清单毫无关系：
+     * 逐文件 CRC64 + 官方 game-launcher-config.json / manifest.json 元数据，
+     * 主程序和平台库都和国服不是一份文件。绝不能拿国服清单往它们目录里 in-place 写。
+     */
+    if (yostarPacks.isYostarChannel(server.channel)) {
+      const result = await yostarPacks.updateGame({
+        profile: server.channel,
+        installRoot: server.root,
+        allowDelete: true,
+        onProgress: (progress) => send('arknights:game-progress', progress),
+      });
+      if (result?.ok) {
+        game.version = String(result.version || game.version || '');
+        game.versionName = game.version;
+        await store.saveNow();
+        pushState(true);
+      }
+      return result;
+    }
+    // profileForChannel('arknights') 是国服全量清单（13749 文件/25.4GB）的专用哨兵值，
+    // 绝不能换成 server.channel（那会误拉终末地清单）。台服由第三个发行商发行、
+    // 协议未验证，在发起任何网络请求或写盘之前先挡住，避免被国服清单 in-place 覆盖刷坏。
+    if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
+      throw new Error('明日方舟台服暂不支持在此更新本体，请前往对应官网');
+    }
+    /*
      * 明日方舟本体走的是鹰角同一套加密逐文件清单（GET {base}/game_files），
      * 与终末地同构，直接用 updateEndfieldGame + profileForChannel('arknights') 重放即可，
      * 不需要拉起官方启动器。启动前的渠道 SDK 注入由 games:launch 里的 ensureArknightsRuntime 负责，
      * 更新完再启动依旧能正常进游戏。
      */
-    return updateEndfieldGame({
+    const result = await updateEndfieldGame({
       root: server.root,
       channel: 'arknights',
       linkSources: externalLinkSources(game, server, server.root),
       onProgress: (progress) => send('arknights:game-progress', progress),
     });
+    if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+    return result;
   });
 
   /*
@@ -9465,7 +10481,7 @@ function installIpc() {
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修复');
     const key = game.builtinKey;
     if (key === 'endfield') {
-      return updateEndfieldGame({
+      const result = await updateEndfieldGame({
         root: server.root,
         channel: server.channel,
         force: true,
@@ -9473,15 +10489,47 @@ function installIpc() {
         linkSources: externalLinkSources(game, server, server.root),
         onProgress: (progress) => send('repair:progress', progress),
       });
+      // 逐文件 rm+rename 换了 inode，硬链接运行时镜像必须失效重建
+      if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+      return result;
     }
     if (key === 'arknights') {
-      return updateEndfieldGame({
+      /*
+       * 国际服（EN / JP / KR）：走 Yostar 自己的 updateGame 做全量校验补齐。
+       * 那边没有「每个文件都能单独下」的公开接口 —— 官方只给整文件 CRC64 清单，
+       * 所以修复就是「按清单对每个文件算 CRC64，不一致的重下」。allowDelete 传 false：
+       * 修复的目的是补缺补坏，不该顺手删东西（删清单由「更新本体」那条链负责）。
+       */
+      if (yostarPacks.isYostarChannel(server.channel)) {
+        const result = await yostarPacks.updateGame({
+          profile: server.channel,
+          installRoot: server.root,
+          allowDelete: false,
+          fullVerify: true,
+          onProgress: (progress) => send('repair:progress', progress),
+        });
+        if (result?.ok) {
+          game.version = String(result.version || game.version || '');
+          game.versionName = game.version;
+          await store.saveNow();
+          pushState(true);
+        }
+        return { ...result, repaired: true };
+      }
+      // 修复带 force:true 会整盘重扫、逐文件 in-place 覆盖；台服由第三个发行商发行、
+      // 协议未验证，绝不能被国服全量清单刷坏。'arknights' 是国服清单专用哨兵值，保持原样不动。
+      if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
+        throw new Error('明日方舟台服暂不支持在此修复本体，请前往对应官网');
+      }
+      const result = await updateEndfieldGame({
         root: server.root,
         channel: 'arknights',
         force: true,
         linkSources: externalLinkSources(game, server, server.root),
         onProgress: (progress) => send('repair:progress', progress),
       });
+      if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+      return result;
     }
     if (['genshin', 'starrail', 'zzz', 'bh3'].includes(key)) {
       const signal = { cancelled: false };
@@ -9504,6 +10552,8 @@ function installIpc() {
       game.lastOfficialSync = Date.now();
       await store.saveNow();
       pushState(true);
+      // 修复换了本体文件，链接运行时若有标记也应失效（非终末地当前为 no-op）
+      invalidateRuntimesAfterUpdate(game);
       return { ok: true, version: result.tag, updated: result.files, root: server.root };
     }
     if (key === 'neverness') {
@@ -12514,6 +13564,8 @@ function musicLoginWindow(target) {
     if (!game) throw new Error('没有找到这个游戏');
     const server = game.servers.find((item) => item.id === input?.serverId);
     if (!server) throw new Error('没有找到这个服务器');
+    const prevPath = server.path;
+    const prevRoot = server.root;
     server.name = String(input?.name || '').trim().slice(0, 40) || server.name;
     const serverPath = String(input?.path || '').trim();
     if (serverPath) {
@@ -12538,6 +13590,8 @@ function musicLoginWindow(target) {
       game.target = server.path;
       game.workDir = server.root;
     }
+    // 换了安装目录/启动程序，旧渠道的预下载状态不能再挂到新目录上（切服假状态）。
+    if (prevPath !== server.path || prevRoot !== server.root) server.predownload = null;
     ensureServers(game);
     await store.saveNow();
     pushState(true);
@@ -12564,6 +13618,7 @@ function musicLoginWindow(target) {
     server.legacyRuntime = false;
     server.confirmed = false;
     server.unavailable = false;
+    server.predownload = null;
   }
 
   ipcMain.handle('servers:clear-path', async (_event, input) => {
@@ -12627,15 +13682,22 @@ function musicLoginWindow(target) {
     if (game.builtinKey === 'endfield') {
       // 有可用路径时保持“尽力而为”：渠道包/基础客户端缺失不阻断已就绪服务器的切换；
       // 没有任何路径时才把自动生成的错误抛给用户看。
-      const hadPath = server.path && targetExists(server.path);
-      const prepared = await ensureEndfieldChannelRuntime(game, server).catch((error) => {
+      // 旧单 work 混合目录绝不能算「已就绪、可以静默沿用」：它正是 B服 6 秒崩
+      // 的配方。即使迁移没覆盖到的历史数据残留了指向它的路径，这里也要当作
+      // 没有可用路径，让重建失败显式报错，而不是被「尽力而为」吞掉又启动旧目录。
+      const hadPath =
+        server.path &&
+        targetExists(server.path) &&
+        !isEndfieldLegacyWorkRoot(path.dirname(server.path));
+      // 切服是「官服删了」最常走的入口：只剩运行时可用时必须能建
+      const prepared = await ensureEndfieldChannelRuntime(game, server, { allowRuntimeBase: true }).catch((error) => {
         if (hadPath) return null;
         throw error;
       });
       if (prepared) {
         server.path = prepared.launchPath;
         server.root = prepared.runtimeRoot;
-        // 官服直接指自己客户端时不算「差异运行时」，别在界面上贴那个标签
+        // 官服直启自己客户端、没有生成独立运行时时不贴「差异运行时」标签
         server.runtimeLinked = !prepared.directBase;
       }
     }
@@ -12824,101 +13886,32 @@ function musicLoginWindow(target) {
     if (server.channel === 'official') throw new Error('官服请直接指定官服客户端');
 
     if (!ENDFIELD_PACK_NAMES[server.channel]) throw new Error('这个服务器没有对应的渠道差异包');
-    // 缺哪个渠道就现下哪个：这是「重建」按钮以前在没有 XelLauncher 的机器上
-    // 直接报「渠道差异包不存在」的根子。
-    const { packDir, downloaded: packDownloaded } = await ensureEndfieldPackFor(
-      server.channel,
-      (progress) => send('endfield:progress', { ...progress, serverName: server.name })
-    );
 
-    // 基础客户端不再要求必须是官服：只装了 B服 / 国际服 / Play / Steam 的玩家，
-    // 用他自己装好的那个客户端当基础一样能生成（链接+覆盖渠道差异文件，与渠道无关）。
-    // 官服仍然排在第一优先：和官服用同一个版本比对时能链接的文件最多。
-    // 优先拿别的服务器当基础；如果玩家整个电脑上只有这一种渠道的客户端，
-    // 就用它自己当基础（生成出来的运行时内容与它一致，只是独立一份）。
-    const base = endfieldBaseServer(game, server.id) || endfieldBaseServer(game);
-    if (!base) {
-      throw new Error(
-        `没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`
-      );
-    }
-    const baseRoot = base.baseRoot;
-
-    const runtime = runtimePaths(baseRoot, 'endfield', server.channel, input?.runtimeRoot);
-    if (!runtime.sameDrive) {
-      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
-    }
-    const runtimeRoot = runtime.target;
-    // 生成过程会先清空目标目录再写入；万一基础客户端和目标算到了同一个目录，
-    // 那一步就会把玩家的基础客户端删掉。宁可报错也不能冒这个险。
-    if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtimeRoot).toLowerCase()) {
-      throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
-    }
-    send('endfield:progress', {
-      phase: 'link',
-      processed: 0,
-      total: 0,
-      current: '正在创建链接运行时…',
-    });
+    // 渠道包缺失时会在 ensureEndfieldChannelRuntime 里现下（它自己调
+    // ensureEndfieldPackFor），这里不再重复准备一遍。
+    // 基础客户端的挑选、每渠道运行时目录的位置与重叠校验，也全部在那边统一做
+    // —— 它本来就是「启动游戏」时走的那条路，两条路合一才不会慢慢走偏。
+    /*
+     * 手动「重新生成」传 forceRuntime:true，强制从最新官服本体整树重建该渠道的
+     * 独立运行时；buildEndfieldChannelRuntime 会把旧目录的 Endfield_Data\Persistent
+     * （用户下好的语音包 + 游戏自己维护的索引）整体搬到 staging 再就位，不会丢下载内容。
+     */
     try {
-      const result = await prepareLinkedRuntime({
-        baseRoot,
-        packRoot: packDir,
-        targetRoot: runtimeRoot,
-        copyDirs: ENDFIELD_COPY_DIRS,
-        onProgress: (progress) =>
-          send('endfield:progress', {
-            ...progress,
-            serverName: server.name,
-          }),
+      const result = await ensureEndfieldChannelRuntime(game, server, {
+        runtimeRoot: input?.runtimeRoot,
+        forceRuntime: true,
+        allowRuntimeBase: true,
       });
-      if (result.cancelled) throw new Error('已取消');
-
-      // 渠道包不自带对家 sdkdata；基础客户端（可能是任意渠道）复制过来的渠道 SDK 配置
-      // 会让运行时仍走基础客户端那个渠道登录，所以只保留目标渠道自己的配置。
-      const channelSdk = path.join(runtimeRoot, 'sdkdata');
-      try {
-        for (const entry of await fsp.readdir(channelSdk)) {
-          if (!/^sdk_[a-z]+_config/i.test(entry)) continue;
-          const keep = (ENDFIELD_SDK_KEEP[server.channel] || []).some((prefix) =>
-            entry.toLowerCase().startsWith(prefix)
-          );
-          if (!keep) await fsp.rm(path.join(channelSdk, entry), { force: true });
-        }
-      } catch {
-        /* sdkdata 可能不存在 */
-      }
-
-      const candidates = ['Endfield.exe', 'PlatformProcess.exe'];
-      let launchPath = null;
-      for (const name of candidates) {
-        const candidate = path.join(runtimeRoot, name);
-        if (fs.existsSync(candidate)) {
-          launchPath = candidate;
-          break;
-        }
-      }
-      if (!launchPath) throw new Error('运行时中没有找到启动程序');
-
-      server.path = launchPath;
-      server.root = runtimeRoot;
-      server.runtimeLinked = true;
-      server.legacyRuntime = false;
-      // 重建成功后清掉「资源包/未就绪」标记，启动页状态点才会变绿。
-      server.incomplete = false;
-      game.activeServerId = server.id;
-      game.target = launchPath;
-      game.workDir = runtimeRoot;
       ensureServers(game);
       await store.saveNow();
       pushState(true);
       return {
         ok: true,
-        runtimeRoot,
-        path: launchPath,
-        linked: result.linked,
-        overlay: result.overlay?.processed || 0,
-        packDownloaded,
+        runtimeRoot: result.runtimeRoot,
+        path: result.launchPath,
+        linked: result.linked || 0,
+        overlay: result.overlay || 0,
+        packDownloaded: result.packDownloaded || false,
       };
     } catch (error) {
       pushState(true);
@@ -12933,8 +13926,17 @@ function musicLoginWindow(target) {
    * 所以这里只给两个确定的事实：目标盘还剩多少、基础客户端有多大。
    * 客户端体积靠遍历目录算，给了 4 秒上限 —— 超大客户端算不完就先报可用空间，
    * 不能让「看个数字」把界面卡住。
+   *
+   * 2026-11-08：多给一个 copyBytes —— 真正要写盘的那部分。
+   *
+   * 以前只报「基础客户端 67GB」，而实际生成时 62GB 的基础资源是硬链接（不占额外空间），
+   * 真正落盘的只有 Persistent / U8Data / sdkdata 那些可写文件约 3.7GB。界面拿 67GB 去和
+   * 剩余空间比，就会报「可能不够」把用户吓一跳，实际上绰绰有余。
+   *
+   * shouldCopyFn(rel) 为真表示「这个文件会被复制、真占盘」。传了就顺便统计 copyBytes；
+   * 不传（米哈游 Sophon 那条链路）就维持原样，只统计 baseBytes，copyBytes 返回 null。
    */
-  async function estimateRuntimeSpace(baseRoot, targetRoot) {
+  async function estimateRuntimeSpace(baseRoot, targetRoot, shouldCopyFn) {
     const drive = path.parse(path.resolve(targetRoot || baseRoot || '.')).root;
     let freeBytes = 0;
     try {
@@ -12946,6 +13948,9 @@ function musicLoginWindow(target) {
 
     let baseBytes = 0;
     let baseFiles = 0;
+    let copyBytes = 0;
+    let copyFiles = 0;
+    const countCopy = typeof shouldCopyFn === 'function';
     let partial = false;
     if (baseRoot) {
       const deadline = Date.now() + 4000;
@@ -12969,8 +13974,16 @@ function musicLoginWindow(target) {
           } else if (entry.isFile()) {
             try {
               const info = await fsp.stat(full);
-              baseBytes += Number(info.size) || 0;
+              const size = Number(info.size) || 0;
+              baseBytes += size;
               baseFiles += 1;
+              if (countCopy) {
+                const rel = path.relative(baseRoot, full).replace(/\\/g, '/');
+                if (shouldCopyFn(rel)) {
+                  copyBytes += size;
+                  copyFiles += 1;
+                }
+              }
             } catch {
               /* 读不到就跳过，不影响其它文件 */
             }
@@ -12979,7 +13992,18 @@ function musicLoginWindow(target) {
       }
     }
 
-    return { ok: true, estimate: true, drive, freeBytes, baseBytes, baseFiles, partial, targetRoot };
+    return {
+      ok: true,
+      estimate: true,
+      drive,
+      freeBytes,
+      baseBytes,
+      baseFiles,
+      copyBytes: countCopy ? copyBytes : null,
+      copyFiles: countCopy ? copyFiles : null,
+      partial,
+      targetRoot,
+    };
   }
 
   /**
@@ -12995,23 +14019,38 @@ function musicLoginWindow(target) {
     if (await pruneStaleRunning()) pushState(true);
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
 
-    // 目标目录必须和真正写入的地方是同一个：这里算的目录和
-    // ensureEndfieldChannelRuntime 用的是同一套 runtimePaths。
-    const base = endfieldBaseServer(game, server.id) || endfieldBaseServer(game);
-    const baseRoot = base ? base.baseRoot : endfieldBaseRoot(server);
+    /*
+     * 目标目录必须和真正写入的地方是同一个：这里算的目录和
+     * ensureEndfieldChannelRuntime 用的是同一套 runtimePaths（<根>\endfield\<渠道>）。
+     * 判据是「不得互相嵌套」而不是「不得相等」：每渠道目录本来就在游戏盘上，
+     * 真正危险的是渠道目录嵌进基础客户端里（会把官服本体当运行时原地改写），
+     * 或基础客户端嵌在渠道目录里（重建时连带删掉官服）。与 ensure 完全一致，
+     * 免得「估算能过、真跑却被拦」。
+     */
+    // 与 ensureEndfieldChannelRuntime 用同一个解析器，避免「估算能过、真跑却被拦」
+    // （:13840-13844 的注释已经声明了这个要求，但当时两份代码是各写各的）。
+    const resolvedBase = endfieldResolveBase(game, server, String(server.channel || ''), {
+      runtimeRoot: input?.runtimeRoot,
+      allowRuntimeBase: true,
+    });
+    const baseRoot = resolvedBase ? resolvedBase.baseRoot : '';
     if (!baseRoot) {
-      throw new Error(
-        `没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`
-      );
+      throw new Error(`没有找到可以当作基础的客户端。${server.name}需要一个已安装的终末地在同盘上做基础，请先在启动器里把已经装好的任意渠道客户端指到对应服务器上。`);
     }
     const runtime = runtimePaths(baseRoot, 'endfield', server.channel, input?.runtimeRoot);
     if (!runtime.sameDrive) {
       throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
     }
-    if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
-      throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
+    if (pathsOverlap(baseRoot, runtime.target)) {
+      throw new Error('运行时目录不能和基础客户端是同一个目录，也不能互相嵌套，请换个“运行时目录”再试');
     }
-    if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
+    /*
+     * 传 mustCopyNotLink 进去，让估算能区分「硬链接过去的」和「真写的」：
+     * 基础客户端 67GB 里 62GB 是只读资源、链接过去不占额外空间，
+     * 真正落盘的只有 Persistent / U8Data / sdkdata 那些可写文件（约 3.7GB）。
+     * 不传这个判据就会拿 67GB 去比剩余空间，白白报一句「可能不够」。
+     */
+    if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target, mustCopyNotLink);
 
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
@@ -13034,6 +14073,8 @@ function musicLoginWindow(target) {
       const result = await ensureEndfieldChannelRuntime(game, server, {
         runtimeRoot: input?.runtimeRoot,
         onProgress: emit,
+        // 预下载/重建必须和估算走同一条解析链，否则「估算通过 → 真跑 throw」
+        allowRuntimeBase: true,
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
       server.incomplete = false;
@@ -13286,11 +14327,15 @@ function musicLoginWindow(target) {
       );
     }
     /*
-     * 之前预下载过的话，chunk/ 里就是新版本的分块，先把它吃掉：
-     * 命中的分块 0 流量，缺的才联网补。没有预下载产物时 hasCache 为 false，
-     * 这里整段跳过，行为与原来完全一致。
+     * 之前预下载过的话，产物就在这里吃掉：
+     *   - 分块模式：chunk/ 里就是新版本的分块，命中的 0 流量，缺的才联网补；
+     *   - 补丁模式：ldiff/ 里是官方给的差量补丁包，就地打比按块下省一半。
+     * 两者都没有时两个判据都是 false，这里整段跳过，行为与原来完全一致。
      */
-    if (predownload.hasCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root })) {
+    if (
+      predownload.hasCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root }) ||
+      predownload.hasPatchCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root })
+    ) {
       try {
         const appliedResult = await predownload.apply({
           gameKey: game.builtinKey,
@@ -13327,6 +14372,8 @@ function musicLoginWindow(target) {
             skipped: appliedResult.skipped,
             current: `预下载内容已应用完成（复用分块 ${appliedResult.reusedChunks} 个）`,
           });
+          // 预下载内容落进真实安装目录后，链接运行时要失效（与 predownload:apply 同一语义）
+          invalidateRuntimesAfterUpdate(game);
           return { ok: true, ...appliedResult, patched: true, fromPredownload: true };
         }
       } catch (error) {
@@ -13344,18 +14391,26 @@ function musicLoginWindow(target) {
        *
        * 原神 7.0.0 → 7.1.0 实测：1151 个文件可修补；这些文件走 chunk 要下 37.26GB（压缩后、按
        * chunk id 去重），ldiff 补丁只要 9.32GB，省流 27.94GB（75.0%）。
-       * 绝区零三个渠道 enable_ldiff=false，直接跳过这轮全盘 md5。
+       *
+       * 判据与 Starward / Collapse 保持一致：**不看 enable_ldiff**。
+       * 那两家一个只在 GameConfig 里声明了这个字段却从没读过（Starward），
+       * 一个连字段都没解析（Collapse）；它们真正的判据是「补丁清单里有没有当前版本」，
+       * 也就是下面 applyHdiffPrepass 内部按 diff_tags 判的那一步。
+       * 官方配置说别用、但清单里确实给了你当前版本的补丁 —— 那这份补丁就是能用的。
+       * 没给（崩坏3 这类真没补丁的）会在里面以 version-not-patchable 干净退出，
+       * 不会白算一轮 md5：那一步在读完分支信息之后、扫盘之前。
        */
       let ldiff = null;
       try {
-        const launcherConfig = await fetchLauncherConfig(game.builtinKey, actualChannel);
         const userEnabled = store.data?.settings?.enableLdiff !== false;
-        if (userEnabled && launcherConfig.enableLdiff) {
+        if (userEnabled) {
           ldiff = await applyHdiffPrepass({
             gameKey: game.builtinKey,
             channel: actualChannel,
             installRoot: server.root,
             cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
+            // 预下载时先存下的补丁包在这儿：命中就不用再下一遍
+            patchRoot: path.join(server.root, 'ldiff'),
             audioLanguages: store.data?.settings?.audioLanguages,
             includeStory: storyResourcesEnabled(game, server),
             // 别的渠道已经更到目标版本时，这批文件直接硬链接，别去下增量补丁
@@ -13372,11 +14427,7 @@ function musicLoginWindow(target) {
             writeLaunchLog(`update ${game.id}: ldiff 跳过（${ldiff.reason}）`);
           }
         } else {
-          writeLaunchLog(
-            `update ${game.id}: 跳过 ldiff（${
-              userEnabled ? launcherConfig.defaultDownloadMode || '渠道未启用' : '用户在设置里关掉了'
-            }），走纯 chunk`
-          );
+          writeLaunchLog(`update ${game.id}: 跳过 ldiff（用户在设置里关掉了），走纯 chunk`);
         }
       } catch (error) {
         writeLaunchLog(`update ${game.id}: ldiff 预处理失败，退回纯 chunk：${error.message}`);
@@ -13418,6 +14469,8 @@ function musicLoginWindow(target) {
       game.lastOfficialSync = Date.now();
       await store.saveNow();
       pushState(true);
+      // 本体文件被刷过，链接运行时若有标记也应失效（非终末地当前为 no-op）
+      invalidateRuntimesAfterUpdate(game);
       syncOfficialGame(game, []).catch(() => {});
       // 把 ldiff 的战果带回去，界面上能显示「其中 N 个文件是本地补丁修好的，省流 X」。
       if (ldiff?.ok && ldiff.applied > 0) {
@@ -13482,6 +14535,18 @@ function musicLoginWindow(target) {
     arknights: 'endfield',
   };
 
+  /*
+   * 引擎按「渠道」再细分一次：明日方舟的三个 Yostar 服不走鹰角分卷，走 Yostar 自己
+   * 那套逐文件清单。国服官服/B服 保持 endfield（鹰角）不变。
+   *
+   * 之所以做成函数而不是改 DOWNLOADABLE_KEYS 表：那张表是按游戏查的，这里要按
+   * 「游戏 × 渠道」查，混在一起会让所有调用点都要先判断一遍渠道。
+   */
+  function engineFor(gameKey, channel) {
+    if (gameKey === 'arknights' && yostarPacks.isYostarChannel(channel)) return 'yostar';
+    return DOWNLOADABLE_KEYS[gameKey];
+  }
+
   /** 找「这个渠道」对应的服务器行；没有就报错（渠道行由 ensureServers 统一维护）。 */
   function serverForDownload(game, channel) {
     const server = (game.servers || []).find((item) => item.channel === channel);
@@ -13524,8 +14589,24 @@ function musicLoginWindow(target) {
     }
   }
 
-  /** 官方清单口径的全量体积：sophon 读清单，终末地 / 明日方舟读整包卷 total_size。 */
+  /** 官方清单口径的全量体积：sophon 读清单，终末地 / 明日方舟读整包卷 total_size，Yostar 读远端清单。 */
   async function estimateDownloadBytes(game, server, engine, installDir) {
+    if (engine === 'yostar') {
+      /*
+       * 用 planForGame 而不是 loadRemoteTargetPackage：前者会把「本地已有多少可以复用」
+       * 也算进去（downloadBytes 是真实要下的量）。全新安装时它等于 totalBytes，
+       * 但用户在已有目录上重新下载时这个差别就是几十 MB 和 3.5 GB 的差别。
+       */
+      const plan = await yostarPacks.planForGame({ profile: server.channel, installRoot: installDir });
+      return {
+        version: plan.version,
+        totalBytes: plan.totalBytes,
+        downloadBytes: plan.downloadBytes,
+        needDownload: plan.needDownload,
+        willDelete: plan.willDelete,
+        storyResources: null,
+      };
+    }
     if (engine === 'sophon') {
       await fsp.mkdir(installDir, { recursive: true });
       const preview = await prepareSophon({
@@ -13555,13 +14636,14 @@ function musicLoginWindow(target) {
   ipcMain.handle('servers:download-estimate', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
     if (!game) throw new Error('没有找到这个游戏');
-    const engine = DOWNLOADABLE_KEYS[game.builtinKey];
-    if (!engine) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
+    if (!DOWNLOADABLE_KEYS[game.builtinKey]) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
     const installDir = path.resolve(String(input?.installDir || '').trim());
     if (!installDir || installDir === path.parse(installDir).root) {
       throw new Error('请先选择一个安装目录');
     }
     const server = serverForDownload(game, String(input?.channel || ''));
+    const engine = engineFor(game.builtinKey, server.channel);
+    if (!engine) throw new Error('这个渠道暂不支持自动下载，请前往官网下载安装');
     const summary = await estimateDownloadBytes(game, server, engine, installDir);
     return {
       ok: true,
@@ -13575,10 +14657,11 @@ function musicLoginWindow(target) {
   ipcMain.handle('servers:download-game', async (_event, input) => {
     const game = store.data.games.find((item) => item.id === input?.gameId);
     if (!game) throw new Error('没有找到这个游戏');
-    const engine = DOWNLOADABLE_KEYS[game.builtinKey];
-    if (!engine) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
+    if (!DOWNLOADABLE_KEYS[game.builtinKey]) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再下载');
     const server = serverForDownload(game, String(input?.channel || ''));
+    const engine = engineFor(game.builtinKey, server.channel);
+    if (!engine) throw new Error('这个渠道暂不支持自动下载，请前往官网下载安装');
     const installDir = path.resolve(String(input?.installDir || '').trim());
     if (!installDir || installDir === path.parse(installDir).root) {
       throw new Error('请先选择一个安装目录');
@@ -13626,6 +14709,34 @@ function musicLoginWindow(target) {
           onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
         });
         executable = result.executable || '';
+      } else if (engine === 'yostar') {
+        /*
+         * 明日方舟 EN / JP / KR：Yostar 自己的逐文件清单（CRC64 校验）。
+         * 秒传 / 断点续传 / 断硬链接都在 yostarPacks.installGame 里做完了，
+         * 这里只负责把进度翻成界面认识的那套 phase 字段。
+         */
+        const result = await yostarPacks.installGame({
+          profile: server.channel,
+          installRoot: installDir,
+          signal,
+          onProgress: (progress) => {
+            const phase =
+              progress.phase === 'download' ? 'download' : progress.phase === 'install' ? 'install' : 'manifest';
+            send('sophon:progress', {
+              jobId,
+              phase,
+              current: progress.current || '',
+              processed: progress.processed || 0,
+              total: progress.total || 0,
+              bytesDone: progress.processed && progress.total && summary.totalBytes
+                ? Math.round((Number(summary.totalBytes) || 0) * (progress.processed / progress.total))
+                : 0,
+              totalBytes: Number(summary.totalBytes) || 0,
+            });
+          },
+        });
+        executable = path.join(installDir, result.executable || 'Arknights.exe');
+        version = String(result.version || version || '');
       } else {
         /*
          * 终末地 / 明日方舟：优先官方分卷整包 + 7z 解压（一卷连读 .002/.003）；
@@ -13807,7 +14918,7 @@ function musicLoginWindow(target) {
    * 用户根本不知道该点哪里。
    *
    * 三条约束，都是踩过坑才加的：
-   *   1. 同一个服务器 6 小时内不重复问，别把官方接口当轮询用；
+   *   1. 同一个服务器 2 小时内不重复问（PREDOWNLOAD_AUTO_TTL），别把官方接口当轮询用；
    *   2. 串行 + 每次间隔 1.5s，冷启动瞬间不要同时打五六个渠道，拖慢首屏；
    *   3. 查询失败**不覆盖**上一次的有效状态 —— 断网时按钮不能凭空消失。
    */
@@ -13818,23 +14929,65 @@ function musicLoginWindow(target) {
    *
    * 本体更新永远写进真实安装目录（endfieldInstallRoot 会自动排除运行时目录），
    * 运行时只是硬链接镜像 —— 所以「官服点了更新、国际服再点更新」**不会各下一次**：
-   * 第二次检测到真实目录已是最新版本，apply 没有东西可下，直接走运行时重建（秒级）。
+   * 第二次检测到真实目录已是最新版本，apply 没有东西可下，直接走运行时刷新（秒级）。
    *
-   * 终末地：删掉运行时目录里的 .hxl-endfield-runtime-v2 标记，
-   * 下次启动/切服时 ensureEndfieldChannelRuntime 检测到缺标记就自动重建硬链接。
+   * 每渠道一份独立运行时（<根>\endfield\<渠道>），标记 .hxl-endfield-runtime-v2 是 JSON。
+   * 本体更新后只把标记里的 base 签名清空：下次切到该渠道时 ensureEndfieldChannelRuntime
+   * 会发现 marker.base !== 最新 baseSignature，自动从更新后的本体整树重建。
+   * 重建走 buildEndfieldChannelRuntime 的 staging + 同卷 rename，会把旧目录的
+   * Endfield_Data/Persistent（用户下好的语音包 + 游戏自己维护的索引）整体搬过去，
+   * 所以这里触发整树重建是安全的、不会丢下载内容。
+   * 标记文件本身保留（不删），免得 publicGame 一时认不出这是运行时目录而误标红。
    */
   function invalidateRuntimesAfterUpdate(game) {
     for (const server of game.servers || []) {
       for (const dir of [server.root, server.originalRoot]) {
         if (!dir) continue;
-        const marker = path.join(dir, '.hxl-endfield-runtime-v2');
-        try {
-          if (fs.existsSync(marker)) fs.unlinkSync(marker);
-        } catch {
-          /* 删不掉就下次启动时再试 */
+        if (!isEndfieldRuntimeDir(dir)) continue;
+        const marker = readEndfieldRuntimeMarker(dir);
+        if (marker && marker.base) {
+          writeEndfieldRuntimeMarker(dir, { ...marker, base: '', updatedAt: new Date().toISOString() });
         }
       }
     }
+  }
+
+  /*
+   * 启动/切服前的轻量只读预检（边界①）。
+   *
+   * 设计约束（都是踩过坑才定的）：
+   *   · 只读本地已落盘状态，绝不联网、绝不下载、绝不写游戏本体；
+   *   · 只发 toast，绝不 return { ok:false } 阻断启动；调用方 fire-and-forget；
+   *   · 断网 / 状态缺失 / 任何异常一律静默；
+   *   · 同一游戏 30 分钟内不重复提示，别每次点开始都弹。
+   *
+   * 覆盖 7 款：预下载状态由 autoRefreshPredownloadStatus 每 30 分钟落盘到
+   * server.predownload（米哈游4 + 终末地 + 异环）；明日方舟不进预下载，
+   * 由 checkArknightsUpdateNotice 的 toast 覆盖。这里在「点开始游戏」那一刻
+   * 再把已知状态问一遍，补掉启动后 18 秒定时检查的空窗。
+   * 即时联网版本探测 / 运行时 marker / 渠道包齐备检查留到下一轮（要先修
+   * 方舟 channel 硬编码与 root 指向，否则会误报）。
+   */
+  const LAUNCH_PREFLIGHT_TTL = 30 * 60 * 1000;
+  const launchPreflightAt = new Map();
+
+  function launchPreflightNotice(game, server) {
+    const key = `${game.id}:${server?.id || ''}`;
+    const now = Date.now();
+    if (now - (launchPreflightAt.get(key) || 0) < LAUNCH_PREFLIGHT_TTL) return;
+    const st = server?.predownload;
+    if (!st || st.error || st.state !== 'update') return;
+    // 只有真正要弹 toast 时才占用节流窗口：非 update 的启动不该烧掉 30 分钟，
+    // 否则随后官方放包、状态变成 update 时，提示会被这次空跑压住漏报。
+    launchPreflightAt.set(key, now);
+    const label = String(game.name || game.builtinKey || '这个游戏');
+    // 异环只刷启动器资源，文案别写成「更新游戏本体」
+    const what =
+      st.scope === 'launcher' || game.builtinKey === 'neverness' ? '启动器资源' : '游戏本体';
+    send('toast', {
+      type: 'info',
+      message: `${label} 有官方${what}更新可应用，点「更新游戏」即可一键完成`,
+    });
   }
 
 
@@ -14389,7 +15542,13 @@ function musicLoginWindow(target) {
 
     let target = String(game.target || '').trim();
     const activeServer = (game.servers || []).find(
-      (server) => server.id === game.activeServerId && server.path && targetExists(server.path)
+      (server) =>
+        server.id === game.activeServerId &&
+        server.path &&
+        targetExists(server.path) &&
+        // 旧单 work 混合目录绝不沿用：否则 allowPackDownload 会被关掉、
+        // 重建失败又被「尽力而为」吞掉，最后静默启动那个 3~9 秒就崩的目录。
+        !isEndfieldLegacyWorkRoot(path.dirname(server.path))
     );
     if (activeServer) {
       target = activeServer.path;
@@ -14397,13 +15556,15 @@ function musicLoginWindow(target) {
       game.workDir = activeServer.root || path.dirname(activeServer.path);
     }
     if (game.builtinKey === 'endfield' && !running.has(id)) {
-      // 所有渠道统一先走自动生成：有 v2 标记就直接复用（很快），
-      // 缺标记/缺文件就重建，并把 incomplete 清掉让启动页状态点变绿。
+      // 所有渠道统一先走自动生成：该渠道的独立运行时已建好且签名未变就只复用（很快），
+      // 只有目录里连 Endfield.exe 都没有、或基础客户端更新过才会重建，并清掉 incomplete
+      // 让启动页状态点变绿。
       const efServer = (game.servers || []).find((server) => server.id === game.activeServerId);
       if (efServer) {
         // 已经能直接启动时就不要再为了补渠道包让「开始游戏」等上一场下载
         const prepared = await ensureEndfieldChannelRuntime(game, efServer, {
           allowPackDownload: !(activeServer && targetExists(activeServer.path)),
+          allowRuntimeBase: true,
         }).catch((error) => {
           // 已经有可用路径时尽力而为：重建失败不阻断启动；连路径都没有就只能报错。
           if (activeServer && targetExists(activeServer.path)) return null;
@@ -14417,6 +15578,14 @@ function musicLoginWindow(target) {
           game.workDir = prepared.runtimeRoot;
         }
       }
+    }
+    /*
+     * 启动前轻量只读预检（边界①）：只读已落盘的 server.predownload 发个 toast，
+     * 补掉「启动后 18 秒定时检查」的空窗。fire-and-forget：不联网、不下载、
+     * 不阻断启动；异环打开官方预下载那条路不提示。异常一律吞掉。
+     */
+    if (purpose !== 'predownload' && activeServer) {
+      try { launchPreflightNotice(game, activeServer); } catch {}
     }
     if (!target) {
       return { ok: false, error: '还没有配置启动程序，先编辑这个游戏吧' };
@@ -17011,10 +18180,10 @@ function startMihoyoGachaWatcher() {
 async function checkPackUpdates() {
   const groups = [];
   for (const profile of ENDFIELD_PACK_PROFILES || []) {
-    groups.push([profile, profile.directory, 'U8Data']);
+    groups.push([profile, profile.directory]);
   }
-  groups.push([ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_OFFICIAL_PROFILE.directory, '']);
-  groups.push([ARKNIGHTS_BILIBILI_PROFILE, ARKNIGHTS_BILIBILI_PROFILE.directory, '']);
+  groups.push([ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_OFFICIAL_PROFILE.directory]);
+  groups.push([ARKNIGHTS_BILIBILI_PROFILE, ARKNIGHTS_BILIBILI_PROFILE.directory]);
   const candidates = endfieldPackCandidateRoots();
   const updates = [];
   for (const [profile, dirName] of groups) {
@@ -17048,14 +18217,36 @@ async function checkPackUpdates() {
 }
 
 async function notifyPackUpdates() {
-  if (!(store.data.games || []).some((item) => item.builtinKey === 'endfield')) return;
+  /*
+   * 只提示「用户机器上确实存在的游戏」的渠道包。
+   *
+   * 原来这里是一行 `some(builtinKey === 'endfield')` 的早退：只装明日方舟、或者把终末地
+   * 这个内置游戏删掉了的机器，方舟渠道包的更新提示永远发不出去（checkPackUpdates 明明
+   * 已经比过了）。改成按 builtinKey 收集，再把 updates 按 iconName 前缀分回两个游戏：
+   *   · 终末地 5 个包的 iconName 全部以 End 开头（Endfield / BiliEndfield / GlobalEndfield /
+   *     PlayEndfield / SteamEndfield）；
+   *   · 明日方舟 3 个包全部不以 End 开头（Arknights / ArkBilibili / ArkOfficial）。
+   * 顺带修掉「两类同时有更新时只说终末地、却把 Arknights 塞进括号」的文案缺陷。
+   */
+  const wanted = new Set((store.data.games || []).map((item) => item.builtinKey).filter(Boolean));
+  if (!wanted.has('endfield') && !wanted.has('arknights')) return;
   const updates = await checkPackUpdates().catch(() => []);
   if (!updates.length) return;
-  const endfield = updates.filter((item) => item.iconName.startsWith('End')).length;
-  const names = updates.map((item) => item.iconName).join('、');
+  const label = { endfield: '终末地', arknights: '明日方舟' };
+  const familyOf = (item) => (String(item.iconName).startsWith('End') ? 'endfield' : 'arknights');
+  const lines = [];
+  for (const family of ['endfield', 'arknights']) {
+    if (!wanted.has(family)) continue;
+    const list = updates.filter((item) => familyOf(item) === family);
+    if (!list.length) continue;
+    lines.push(
+      `${label[family]}渠道包有新版本（${list.map((item) => item.iconName).join('、')}），可在设置 → 渠道包里更新`
+    );
+  }
+  if (!lines.length) return;
   send('toast', {
     type: 'info',
-    message: `${endfield ? '终末地' : '明日方舟'}渠道包有新版本（${names}），可在设置 → 渠道包里更新`,
+    message: lines.join('；'),
   });
 }
 
@@ -17192,6 +18383,37 @@ async function checkArknightsUpdateNotice() {
   const game = store.data.games.find((item) => item.builtinKey === 'arknights');
   const server = game?.servers.find((item) => item.id === game.activeServerId);
   if (!game || !server?.root) return;
+  /*
+   * 国际服（EN / JP / KR）走 Yostar 自己的版本号体系，和国服清单完全无关：
+   * 国服这周更新了、国际服可能还停在上一版，反之亦然。所以这里必须分开查，
+   * 否则要么永远不提示、要么提示一个根本装不上的版本。
+   *
+   * 版本号来源用官方 game-launcher-config.json 的 version（本地读一份、远端拿一份），
+   * 这也是官方自己判断「要不要更新」的字段。
+   */
+  if (yostarPacks.isYostarChannel(server.channel)) {
+    try {
+      const profile = yostarPacks.profileFor(server.channel);
+      const [local, remote] = await Promise.all([
+        yostarPacks.readGameConfig(server.root),
+        yostarPacks.loadRemoteTargetPackage(profile),
+      ]);
+      const localVersion = local?.version ? String(local.version) : '';
+      const remoteVersion = remote?.config?.version ? String(remote.config.version) : '';
+      if (localVersion && remoteVersion && localVersion !== remoteVersion) {
+        send('toast', {
+          type: 'info',
+          message: `明日方舟 ${profile.tag} 发现新版本 ${remoteVersion}（当前 ${localVersion}），可在设置 → 明日方舟渠道包 → 更新游戏本体`,
+        });
+      }
+    } catch {
+      /* update check is best effort */
+    }
+    return;
+  }
+  // 版本检查用的是国服清单（channel:'arknights' 哨兵值），台服由第三个发行商发行、
+  // 协议未验证，给它弹「去更新国服本体」的提示只会误导。best-effort toast，静默跳过即可。
+  if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) return;
   try {
     const stateFile = path.join(server.root, '.vela-game-state.json');
     let local = null;
@@ -17244,6 +18466,8 @@ app.whenReady().then(async () => {
   store.data.settings = { ...defaultSettings(), ...(store.data.settings || {}) };
   // 代理要在任何联网动作之前生效（更新检查、封面、公告都在后面）
   await applyProxySettings();
+  // 限速同样要在启动时就装上：开机自动检查更新那次下载也会受它约束
+  applyDownloadLimit();
   if (!previousUiRevision) store.data.settings.sidebarCollapsed = true;
   const bundledPacks = bundledEndfieldPackRoot();
   if (bundledPacks) store.data.settings.endfieldPackRoot = bundledPacks;

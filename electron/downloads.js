@@ -6,6 +6,8 @@ const http = require('node:http');
 const https = require('node:https');
 const { URL } = require('node:url');
 const crypto = require('node:crypto');
+const { Transform } = require('node:stream');
+const netThrottle = require('./net-throttle');
 
 class DownloadManager {
   constructor({ store, onChange, onToast }) {
@@ -181,7 +183,23 @@ class DownloadManager {
           this.fail(item, `下载中断：${error.message}`);
         });
 
-        res.pipe(stream);
+        // 限速：这里走的是 node 原生 res.pipe，不经过 http-fetch，
+        // 所以限速要在这里单独接一段（Transform 背压，'data' 回调里没法 await）。
+        // 不限速时 throttleStream 为 null，pipeline 与原行为逐字一致。
+        const throttleStream =
+          netThrottle.getLimit() > 0
+            ? new Transform({
+                transform(chunk, _encoding, callback) {
+                  netThrottle.consume(chunk.length).then(
+                    () => callback(null, chunk),
+                    () => callback(null, chunk)
+                  );
+                },
+              })
+            : null;
+
+        if (throttleStream) res.pipe(throttleStream).pipe(stream);
+        else res.pipe(stream);
 
         stream.on('error', (error) => {
           if (item.status === 'paused' || item.status === 'cancelled') return;

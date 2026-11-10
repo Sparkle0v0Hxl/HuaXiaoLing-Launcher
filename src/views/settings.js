@@ -793,10 +793,28 @@ function settingsView() {
           </div>
           <div class="setting-row">
             <div class="setting-copy">
-              <strong>更新时用本地补丁省流（LDIFF）</strong>
-              <span>原神 / 星穹铁道更新时，官方会额外给一份「从你当前版本到新版本」的差分补丁。开启后先用补丁就地修补本地文件，剩下的才走分块下载——实测原神 7.0.0 → 7.1.0 能省约 75% 流量。代价是它会在更新过程中直接改写游戏文件，如果中途断网会留下「补了一半」的状态，重新更新一次能自动接上，也可以用「检查完整资源」修复。绝区零官方没开这个能力，对它无效。</span>
+              <strong>正式更新时用本地补丁省流（LDIFF）</strong>
+              <span>只作用于「更新游戏」这一步，预下载不走它——预下载下多少，这个开关都不改变。开启后官方会给一份「从你当前版本到新版本」的差分补丁，先用它就地修补本地文件，剩下的才走分块下载，通常能省掉一半以上的下载量（具体看官方这次发了多少补丁）。代价是它会在更新过程中直接改写游戏文件，如果中途断网会留下「补了一半」的状态，重新更新一次能自动接上，也可以用「检查完整资源」修复。官方清单里 enable_ldiff 为 false 的渠道无论开关都不会生效：绝区零（全部渠道）、崩坏3。</span>
             </div>
             <div class="setting-control">${switchMarkup('enableLdiff', settings.enableLdiff !== false)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>下载限速</strong>
+              <span>给所有下载加一个总带宽上限，免得更新游戏时把宽带全占了、同一条网下别的设备看视频都卡。启动器自更新、原神/星穹铁道/绝区零/崩坏3 的更新与预下载、终末地的渠道包和差异包，全都算在这一个额度里（不是每个游戏各给一份）。<strong>拉到最左边＝不限速</strong>。改完立刻生效，正在跑的下载不用重开。</span>
+            </div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="download-limit" type="range" min="0" max="102400" step="1024" value="${(() => {
+                // 滑块 0~102400 KB/s（0~100 MB/s，每档 1 MB/s），与 main.js 的夹取上限一致。
+                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
+                return Math.min(102400, Math.max(0, kb));
+              })()}" aria-label="下载限速" />
+              <span class="volume-value" id="download-limit-value">${(() => {
+                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
+                if (kb <= 0) return '不限速';
+                return kb >= 1024 ? `${(kb / 1024).toFixed(kb % 1024 === 0 ? 0 : 1)} MB/s` : `${kb} KB/s`;
+              })()}</span>
+            </div>
           </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
@@ -836,7 +854,7 @@ function settingsView() {
             </div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>运行时目录</strong><span>B服 / 国际服的硬链接目录。留空时使用「游戏盘:\\VelaRuntimes」，必须和游戏同盘。</span></div>
+            <div class="setting-copy"><strong>运行时目录</strong><span>终末地各渠道的硬链接运行时目录。留空时使用「游戏盘:\\VelaRuntimes」，必须和游戏同盘。每个渠道在其中的 endfield\\&lt;渠道&gt; 各占一个独立目录，切服从官服本体整树重建后只铺该渠道差异文件，不会删掉游戏本体和已下载的语音包。</span></div>
             <div class="setting-control">
               <span class="path-text" title="${esc(settings.runtimeRoot || '')}">${esc(settings.runtimeRoot || '自动：游戏盘:\\VelaRuntimes')}</span>
               <button class="btn btn-ghost" data-action="change-runtime-root">更改</button>

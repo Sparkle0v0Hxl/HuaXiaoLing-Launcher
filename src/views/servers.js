@@ -110,10 +110,16 @@ function serverBlockHint(server) {
         next: '点「编辑」重新指定目录；文件真没了就点「重建」用其它渠道客户端生成',
       };
     }
+    // 目录还在却判「不可用」：可能是真没选 exe，也可能是这一服和别的渠道共用
+    // 了同一个安装目录、还没生成自己独立的硬链接客户端（切服运行时）。两种
+    // 都进同一个管理面板，所以提示里同时给「编辑指定」和「重建生成」两条路，
+    // 别让用户对着「未选 exe」纳闷 —— 他明明早就配过、只是共用着目录。
     return {
-      text: '还没选择启动程序（.exe）',
-      short: '未选 exe',
-      next: '点这一行 → 服务器管理 → 编辑 → 选 exe',
+      text: server.root
+        ? '这一服还没有可用的独立客户端（可能和别的渠道共用了安装目录）'
+        : '还没选择启动程序（.exe）',
+      short: server.root ? '缺独立客户端' : '未选 exe',
+      next: '点这一行 → 服务器管理 → 编辑指定，或点「重建」生成独立客户端',
     };
   }
   return null;
@@ -127,10 +133,13 @@ function serverBlockHint(server) {
  * 结果官服一起失效 —— 卡片上必须先把这个共用关系说出来。
  */
 function sharedRootWith(game, server) {
-  if (!game || !server || !server.root) return null;
+  // 这一行自己都不可用（独立运行时没生成、path 还指着别的渠道目录）时，
+  // 就别再说它「与官服共用目录」了 —— 那是错配的 path 造出来的假象。
+  if (!game || !server || !server.root || !server.exists) return null;
   return (
-    (game.servers || []).find((item) => item.id !== server.id && item.path && sameRoot(item, server)) ||
-    null
+    (game.servers || []).find(
+      (item) => item.id !== server.id && item.exists && item.path && sameRoot(item, server)
+    ) || null
   );
 }
 
@@ -138,7 +147,7 @@ function sharedRootWith(game, server) {
 /* 切换服务器：所有入口共用同一套操作                                    */
 /* ------------------------------------------------------------------ */
 
-/* 切换中标记：终末地生成运行时可能要几十秒，这期间再点同一行只会叠出第二条提示 */
+/* 切换中标记：终末地切服要整树重建该渠道的硬链接运行时，可能要几十秒（首次更久），这期间再点同一行只会叠出第二条提示 */
 let switchingKey = '';
 
 /**
@@ -297,16 +306,23 @@ function packBytesText(bytes) {
   return formatBytes(size);
 }
 
-/** 终末地生成运行时期间的进度文案（主进程发 phase / processed / total / current）。 */
+/**
+ * 终末地切换服务器期间的进度文案（主进程发 phase / processed / total / current）。
+ *
+ * 2026-11-08（回退）：架构回到「每个渠道一份独立的硬链接运行时」——
+ * 切换/重建时要从官服本体整树铺一遍硬链接（只读大件全部链过去，几乎不耗空间），
+ * 再把该渠道的十几个差异文件盖上去。所以要遍历整棵树，说的是「生成硬链接运行时」，
+ * 不是「铺几个渠道文件」。
+ */
 function endfieldProgressText(progress) {
   const name = progress.serverName || '渠道';
   const total = Number(progress.total) || 0;
   const done = Number(progress.processed) || 0;
   if (total > 0) {
     const pct = Math.min(100, Math.round((done / total) * 100));
-    return `正在为${name}生成运行时 ${pct}%（${done} / ${total} 个文件）`;
+    return `正在生成${name}的硬链接运行时… ${pct}%（${done} / ${total} 个文件）`;
   }
-  return progress.current || `正在为${name}生成运行时…`;
+  return progress.current || `正在生成${name}的硬链接运行时…`;
 }
 
 /* ── 渠道包按需下载（2.5.0） ──────────────────────────────────────
@@ -755,11 +771,17 @@ function serverRow(game, server) {
   const usable = server.exists && !server.incomplete;
   const shared = sharedRootWith(game, server);
   const block = serverBlockHint(server);
+  /*
+   * 2026-11-08（回退）：终末地仍然是「每个渠道一份独立的硬链接运行时」。
+   * 这个入口的含义是「重新生成该渠道的独立硬链接运行时」——从官服本体整树重建
+   * （只读大件走硬链接，几乎不占额外空间），再铺该渠道的差异文件。
+   * 已下载的语音包（Endfield_Data\Persistent）会保留，不会被删。
+   * 判定保持「非官服 + 目录可用」：官服直启本体，没有可重建的运行时可言。
+   */
   const canPrepare =
     game.builtinKey === 'endfield' &&
     server.channel !== 'official' &&
-    usable &&
-    server.legacyRuntime;
+    usable;
   const canUpdateSophon =
     ['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey) && usable;
   // 修复入口统一挂到服务器卡片上：米哈游走 Sophon 逐 chunk 校验，终末地 / 方舟走官方逐文件清单。
@@ -787,7 +809,11 @@ function serverRow(game, server) {
           <strong>${esc(server.name)}</strong>
           ${server.active ? '<span class="st-flag">当前</span>' : ''}
           ${!usable && status.label ? `<span class="st-chip is-warn">${status.label}</span>` : ''}
-          ${server.runtimeLinked ? '<span class="st-chip">差异运行时</span>' : ''}
+          ${
+            server.runtimeLinked
+              ? `<span class="st-chip" title="终末地每个渠道各有一份独立的硬链接运行时，切服从官服本体整树重建后只铺该渠道差异文件；已下载的语音包会保留，不会被删。">独立运行时</span>`
+              : ''
+          }
           ${
             shared
               ? `<span class="st-chip is-shared" title="${esc(
@@ -809,7 +835,7 @@ function serverRow(game, server) {
         }
         ${
           canPrepare
-            ? `<button class="st-tool" data-action="prepare-endfield" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="重新生成运行时">${icon('link')}</button>`
+            ? `<button class="st-tool" data-action="prepare-endfield" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="重新生成这个渠道的硬链接运行时（从官服本体重建，保留已下载的语音包）">${icon('link')}</button>`
             : ''
         }
         <button class="st-tool" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
@@ -1053,6 +1079,16 @@ function startDockPredownload(game) {
   return parts.join(' + ');
 }
 
+/**
+ * 预下载产物得说什么单位。
+ * 米哈游系现在优先走 ldiff 补丁包，落到盘上的是「几十个整份补丁包」而不是
+ * 「上万个分块」；这时候还写「已存 12171 个分块」是错的，用户按这个数去
+ * 目录里数会以为我们算错了。
+ */
+function predownloadUnit(info) {
+  return info && info.mode === 'ldiff' ? '个补丁包' : '个分块';
+}
+
 function predownloadDetail(info, busy) {
   if (busy) return '正在向官方查询…';
   if (!info) return '还没查过，点「检查」问一次官方有没有开放预下载';
@@ -1092,7 +1128,7 @@ function predownloadDetail(info, busy) {
     bits.push(`官方另有 ${info.preReleaseVersion} 预下载，去官方启动页下载`);
   }
   if (state === 'done') {
-    if (info.storedFiles) bits.push(`已存 ${info.storedFiles} 个分块 · ${fmtBytes(info.storedBytes)}`);
+    if (info.storedFiles) bits.push(`已存 ${info.storedFiles} ${predownloadUnit(info)} · ${fmtBytes(info.storedBytes)}`);
     if (info.categoryCount) bits.push(`含 ${info.categoryCount} 份剧情分类包`);
     bits.push('已备好，等官方新版本正式发布后再点应用才会装进游戏；期间正常进游戏不受影响');
   }
@@ -1103,7 +1139,7 @@ function predownloadDetail(info, busy) {
    * 语音或剧情开关改过，旧分块有一批用不上，只能重新核对。
    */
   if (state === 'available' && info.partial) {
-    bits.push(`上次下到 ${fmtBytes(info.storedBytes)}（${Number(info.storedFiles) || 0} 个分块），点是接着下，不会重来`);
+    bits.push(`上次下到 ${fmtBytes(info.storedBytes)}（${Number(info.storedFiles) || 0} ${predownloadUnit(info)}），点是接着下，不会重来`);
   } else if (state === 'available' && info.scopeChanged) {
     bits.push(
       `上次下的 ${fmtBytes(info.storedBytes)} 因为语音 / 剧情开关改过，只能重新核对；能对上的分块依旧会复用`
@@ -1116,7 +1152,7 @@ function predownloadDetail(info, busy) {
     } else {
       // 正式版上线后，已经下好的预下载分块照样能用，只是入口换成了「更新游戏」
       if (Number(info.storedBytes)) {
-        bits.push(`已下的 ${fmtBytes(info.storedBytes)} 分块会直接复用，不用重下`);
+        bits.push(`已下的 ${fmtBytes(info.storedBytes)} 会直接复用，不用重下`);
       }
       bits.push('预下载按钮让位，直接用「应用更新」把新版本装上');
     }

@@ -208,8 +208,30 @@ function bindView() {
     });
   }
 
-  const bgBlur = document.querySelector('#bg-blur');
-  if (bgBlur) {
+  // 下载限速：拖动时只改显示，松手才落盘（和上面两个滑块一致）。
+  // 同样记下渲染时的初值，只提交真正的改动——否则别的途径刚写进去的值会被覆盖。
+  const downloadLimit = document.querySelector('#download-limit');
+  if (downloadLimit) {
+    const label = document.querySelector('#download-limit-value');
+    const initial = downloadLimit.value;
+    const format = (kb) => {
+      if (kb <= 0) return '不限速';
+      return kb >= 1024 ? `${(kb / 1024).toFixed(kb % 1024 === 0 ? 0 : 1)} MB/s` : `${kb} KB/s`;
+    };
+    downloadLimit.addEventListener('input', () => {
+      const kb = Number(downloadLimit.value) || 0;
+      if (label) label.textContent = format(kb);
+    });
+    downloadLimit.addEventListener('change', async () => {
+      if (downloadLimit.value === initial) return;
+      const kb = Number(downloadLimit.value) || 0;
+      state.settings = { ...(state.settings || {}), downloadLimitKBps: kb };
+      const saved = await api.updateSettings({ downloadLimitKBps: kb });
+      if (saved?.settings) state.settings = saved.settings;
+    });
+  }
+
+  const bgBlur = document.querySelector('#bg-blur');  if (bgBlur) {
     const label = document.querySelector('#bg-blur-value');
     const initial = bgBlur.value;
     bgBlur.addEventListener('input', () => {

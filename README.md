@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.9.5-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.10.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.9.5**（正式版）
+**当前版本：v2.10.0**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.9.5-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.10.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,19 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.9.5 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.10.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.10.0</b></summary>
+
+- 下载限速：设置里「下载限速」0~100 MB/s 全局总带宽闸，改完即时生效，所有更新 / 预下载 / 渠道包共享同一个额度。
+- 明日方舟补上日服 / 韩服 / 国际服（EN）三个 Yostar 区服：能下载、更新、修复、自动检测渠道、启动，三区独立目录互不覆盖；台服协议未验证，暂不接入。
+- 终末地官服删了也能切服：官服 / B服 / 国际服 / Play / Steam 五个渠道的硬链接运行时现在可以任意互相为源重建另一渠道客户端——相同文件硬链复用、差异文件由渠道包覆盖成目标版重二进制；渠道专属 .exe / .dll 用独立副本防 inode 污染，缺关键件硬中止，重建失败不毁旧运行时与已下好的语音包。
+- 米哈游四款 B服 / 国际服没生成独立客户端时不再误显示「与官服共用目录 / 可用」；已生成的硬链接运行时（含自定义「运行时目录」）能正确认出，不用重选路径。
+- 星铁预下载下完切服再切回不再误报「可预下载」；启动加载图 GPU 首帧慢时不再空白。
+- 明日方舟国服更新 / 修复加渠道守卫，台服与海外三区不再被国服全量清单 in-place 刷坏。
+
+</details>
 
 <details>
 <summary><b>v2.9.5</b></summary>

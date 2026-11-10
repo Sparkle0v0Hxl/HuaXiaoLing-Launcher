@@ -13,6 +13,7 @@ const { httpFetch, nodeRequest, directFetch, segmentFetch } = require('./http-fe
 const { multiDownload } = require('./multi-download');
 const linkSource = require('./link-source');
 const clientChannel = require('./client-channel');
+const netThrottle = require('./net-throttle');
 const diskSpace = require('./disk-space');
 
 const API = {
@@ -142,6 +143,110 @@ function decodeManifest(buffer) {
 
 function md5Buffer(buffer) {
   return crypto.createHash('md5').update(buffer).digest('hex');
+}
+
+/*
+ * ── 官方「这些资源不用下」的黑名单 ─────────────────────────────────────────
+ *
+ * 官方客户端自己会在一份清单里写明「这次更新不要下这些文件」，米哈游那边是
+ * 「剔除旧资源」，鹰角那边是分卷整包用不上。我们以前完全不看这份清单——
+ * 官方主动说别下的东西，我们照下不误，白白多占流量和磁盘。
+ *
+ * 两份黑名单的格式完全不同，必须分开处理：
+ *   星穹铁道：<安装目录>\StarRail_Data\Persistent\DownloadBlacklist.json
+ *             JSON Lines，每行一个对象，取其中 "fileName":"..." 的路径；
+ *             这些路径同时对应 StreamingAssets\ 与 Persistent\ 两个前缀。
+ *   绝区零：  <安装目录>\ZenlessZoneZero_Data\Persistent\KDelResource
+ *             纯文本，一行一项，但匹配的是清单里的 matching_field（分类名，
+ *             比如 10108），不是路径。
+ *
+ * 关键设计：这份东西只用来「少下一部分文件」，一旦读不懂就必须当作没有，
+ * 绝不能因为黑名单格式变了就漏下该下的文件把游戏弄坏。所以整个函数
+ * try/catch 包死，任何异常/空文件/格式不符都返回 active: false。
+ */
+function loadDeletedAssets(installRoot, gameKey) {
+  const inactive = { active: false, paths: null, fields: null, count: 0, source: '' };
+  try {
+    if (!installRoot) return inactive;
+
+    if (gameKey === 'starrail') {
+      const file = path.join(installRoot, 'StarRail_Data', 'Persistent', 'DownloadBlacklist.json');
+      if (!fs.existsSync(file)) return inactive;
+      const text = fs.readFileSync(file, 'utf8');
+      if (!text.trim()) return inactive;
+      const names = new Set();
+      for (const line of text.split(/\r?\n/)) {
+        const at = line.indexOf('"fileName":"');
+        if (at === -1) continue;
+        const rest = line.slice(at + '"fileName":"'.length);
+        const end = rest.indexOf('"');
+        if (end <= 0) continue;
+        const name = rest.slice(0, end).replace(/\\\\/g, '/').replace(/^\/+/, '');
+        if (!name) continue;
+        // 同一条记录要在两个根目录下都算数
+        names.add(`StarRail_Data/StreamingAssets/${name}`);
+        names.add(`StarRail_Data/Persistent/${name}`);
+      }
+      if (!names.size) return inactive;
+      return { active: true, paths: names, fields: null, count: names.size, source: file };
+    }
+
+    if (gameKey === 'zzz') {
+      const dir = path.join(installRoot, 'ZenlessZoneZero_Data', 'Persistent');
+      const file = path.join(dir, 'KDelResource');
+      if (!fs.existsSync(file)) return inactive;
+      const text = fs.readFileSync(file, 'utf8').trim();
+      if (!text) return inactive;
+      // 官方这是 JSON（{"version":2,"delete":[],"download":[]}），但旧版本是纯文本。
+      // 两种都认；认不出来就当没有。
+      const fields = new Set();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && typeof parsed === 'object') {
+        const list = Array.isArray(parsed.delete) ? parsed.delete : null;
+        if (!list) return inactive;
+        for (const entry of list) {
+          const value = typeof entry === 'object' && entry ? entry.field || entry.matchingField || entry.name : entry;
+          const text2 = String(value ?? '').trim();
+          if (text2) fields.add(text2);
+        }
+      } else {
+        for (const line of text.split(/\r?\n/)) {
+          const value = line.trim();
+          if (value) fields.add(value);
+        }
+      }
+      if (!fields.size) return inactive;
+      return { active: true, paths: null, fields, count: fields.size, source: file };
+    }
+
+    return inactive;
+  } catch {
+    // 读不动就当没有：宁可多下几个文件，也不能漏下
+    return inactive;
+  }
+}
+
+/**
+ * 按上面读到的黑名单判断一个清单条目要不要跳过。
+ *
+ * @param {object} deleted loadDeletedAssets() 的返回值
+ * @param {{file?: string, matchingField?: string}} item 清单条目
+ */
+function isDeletedAsset(deleted, item) {
+  if (!deleted || !deleted.active || !item) return false;
+  if (deleted.paths && item.file) {
+    const key = String(item.file).replace(/\\/g, '/').replace(/^\/+/, '');
+    if (deleted.paths.has(key)) return true;
+  }
+  if (deleted.fields && item.matchingField != null) {
+    if (deleted.fields.has(String(item.matchingField).trim())) return true;
+  }
+  return false;
 }
 
 async function quickFileMatches(file, filePath) {
@@ -556,7 +661,7 @@ async function downloadManifestBytes(url, cacheFile, { forceSingle = false, conn
     signal: AbortSignal.timeout(120000),
   });
   if (!response.ok) throw new Error(`下载清单失败：HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  return netThrottle.toBuffer(response);
 }
 
 /**
@@ -774,7 +879,7 @@ async function downloadChunk(chunk, prefix, signal) {
         signal: AbortSignal.timeout(60000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const compressed = Buffer.from(await response.arrayBuffer());
+      const compressed = await netThrottle.toBuffer(response);
       if (chunk.compressedMd5 && md5Buffer(compressed) !== chunk.compressedMd5.toLowerCase()) {
         throw new Error('分块压缩数据校验失败');
       }
@@ -847,7 +952,7 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
       signal: AbortSignal.timeout(120000),
     });
     if (!response.ok) throw new Error(`渠道 SDK 下载失败：HTTP ${response.status}`);
-    buffer = Buffer.from(await response.arrayBuffer());
+    buffer = await netThrottle.toBuffer(response);
     if (pkg.md5 && md5Buffer(buffer) !== String(pkg.md5).toLowerCase()) {
       throw new Error('渠道 SDK 校验失败');
     }
@@ -1094,14 +1199,33 @@ async function prepareSophon({
 
   // 多份清单并发下：绝区零一次 120 份，串行光排队就要十秒
   const lists = await ensureManifests(manifests, cacheDir, onProgress, { label: '读取清单' });
+  /*
+   * 官方黑名单（「这些资源这次不用下」）。修复路径必须豁免：用户点「修复」就是
+   * 想把文件补全，这时候还按黑名单跳过，等于修不干净。
+   */
+  const deleted = verifyAll ? { active: false } : loadDeletedAssets(baseRoot, gameKey);
+  let deletedSkipped = 0;
   const files = new Map();
   for (let index = 0; index < manifests.length; index += 1) {
     const prefix = manifests[index].chunk_download?.url_prefix || '';
+    // matching_field 挂在清单上（绝区零黑名单按它匹配），不在单个文件条目里
+    const matchingField = manifests[index].matching_field;
     for (const item of lists[index]) {
       if (!item.file) continue;
       if (files.has(item.file)) continue;
-      files.set(item.file, { ...item, chunkPrefix: prefix });
+      if (deleted.active && isDeletedAsset(deleted, { file: item.file, matchingField })) {
+        deletedSkipped += 1;
+        continue;
+      }
+      files.set(item.file, { ...item, chunkPrefix: prefix, matchingField });
     }
+  }
+  if (deleted.active && deletedSkipped > 0) {
+    onProgress?.({
+      phase: 'manifest',
+      current: `官方清单标了 ${deletedSkipped} 个资源本次不用下，已跳过`,
+      deletedSkipped,
+    });
   }
 
   const localIndex = await localIndexTask;
@@ -1537,6 +1661,13 @@ module.exports = {
   readGameVersion,
   detectLocalChannel,
   loadLocalChunkIndex,
+  // 预下载 apply 侧复用：按 offset 从本地旧文件里读一个没变的分块，省掉联网重下。
+  // readLocalChunk 自带「size 相等 + md5 相符」双重校验，读不到或不符都返回 null，
+  // 调用方退回联网下载，所以复用失败不会写坏文件。
+  readLocalChunk,
   // 仅供 .tmp/test-sophon-write-isolation.js 断言「覆盖写会不会顺着硬链接改掉源文件」
   openForWrite,
+  // 官方「这次不用下」的黑名单：预下载/更新/补丁三条链路共用这一套读写
+  loadDeletedAssets,
+  isDeletedAsset,
 };
