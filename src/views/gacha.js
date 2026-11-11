@@ -954,7 +954,12 @@ function openGachaSyncModal() {
 
       if (result && result.ok === false) {
         // 仍然拿不到凭据：留在弹窗里给说明，不关窗、不弹第二个窗口
-        if (errorBox) errorBox.textContent = result.error || '同步失败';
+        if (errorBox) {
+          const waitText = result.rateLimited && result.retryAfterMs
+            ? `（约 ${Math.round(result.retryAfterMs / 60000)} 分钟后再试）`
+            : '';
+          errorBox.textContent = (result.error || '同步失败') + waitText;
+        }
         start.disabled = false;
         start.innerHTML = `${icon('refresh')}重试`;
         return;
@@ -963,6 +968,14 @@ function openGachaSyncModal() {
       closeModal();
       state.gacha = null;
       await loadGacha(true);
+      // 部分成功（被限流提前收尾）：已抓到的已入库，说清楚还差多少
+      if (result.partial) {
+        toast(
+          `已同步 ${result.imported} 条，但接口限流提前停了。等十来分钟再点同步会接着抓（已抓到的不会重抓）。`,
+          'info'
+        );
+        return;
+      }
       toast(
         result.imported
           ? `同步完成：新增 ${result.imported} 条，UID ${result.uid}`

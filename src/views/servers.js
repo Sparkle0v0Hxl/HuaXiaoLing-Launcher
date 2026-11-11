@@ -1577,6 +1577,13 @@ function openPredownloadModal(gameId, serverId) {
   const run = async (kind) => {
     cancelled = false;
     running = true;
+    /*
+     * 每轮开始清空三行子任务的「已显示过」记忆。
+     * 同一张面板上二次预下载（下完 → 应用 → 官方又放新版）时，不清空会让
+     * 已经结束的那一轮数字一直挂在行上，直到新事件盖过去 —— 看着像新任务
+     * 一上来就已经下了几个 G。
+     */
+    pdRowState = {};
     progress.style.display = 'block';
     if (minimizeBtn) minimizeBtn.style.display = '';
     errorBox.textContent = '';

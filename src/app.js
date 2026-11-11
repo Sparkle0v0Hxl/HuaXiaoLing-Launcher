@@ -148,6 +148,15 @@ const state = {
   nteCapture: { running: false, phase: '', message: '' },
   // 启动页「更新游戏」按钮的进行中状态：{ gameId, jobId, label }
   gameUpdate: null,
+  /*
+   * 启动页那块统一进度面板的唯一数据源。
+   *
+   * 以前下载/更新/硬链接生成各写各的：下载写按钮文字、更新写按钮文字、
+   * 硬链接只在弹窗里，用户看到的就是「点下载还是和以前一样」。
+   * 现在四个来源都往这一个对象里写 { gameId, kind, jobId, label, percent, stats, phase }，
+   * 面板只认它；没有在跑的任务就是 null，这块整块不显示（用户要求）。
+   */
+  task: null,
   nteAutoPage: localStorage.getItem('vela:nte-auto-page') !== '0',
   songs: [],
   songIndex: 0,
@@ -569,6 +578,7 @@ const DOCK_UPDATE_PHASES = {
   overlay: '覆盖渠道文件',
   predownload: '使用预下载内容',
   delete: '清理多余文件',
+  compare: '比对文件',
   done: '更新完成',
   error: '出错',
 };
@@ -620,6 +630,275 @@ function dockUpdateText(event) {
     label = detail;
   }
   return { label: label || '正在更新…', percent, detail, stats: scale };
+}
+
+/*
+ * ── 启动页统一进度面板 ───────────────────────────────────────────────────
+ *
+ * 用户 2026-11-11 的要求：不要任务坞、不要单独的下载列表、不要一堆弹窗，
+ * 「都统一用面板」+「面板做到开始游戏按钮的上方」+「面板本身也是个按钮，
+ * 点开就是本来那个详情过程窗口」。
+ *
+ * 数据流：主进程各条进度频道（sophon / predownload / endfield / link / repair）
+ * → setTaskState() 归一成同一份 { gameId, kind, jobId, label, percent, stats, phase }
+ * → updateTaskPanel() 就地改 DOM（不整页重绘，否则背景 <video> 会重启闪一下）。
+ *
+ * kind 决定点开面板时叫哪个详情窗口：
+ *   update    → openGameUpdateModal   （「更新游戏」那条，走 predownload/endfield）
+ *   link      → openLinkModal         （硬链接生成）
+ *   download  → openGameDownloadModal （一键下载）
+ *   sophon    → openSophonModal       （硬链接安装 / 渠道包）
+ */
+function setTaskState(next) {
+  const previous = state.task;
+  if (!next) {
+    if (!previous) return;
+    state.task = null;
+    updateTaskPanel();
+    return;
+  }
+  state.task = { ...previous, ...next };
+  updateTaskPanel();
+}
+
+/** 当前游戏正在跑的任务；没有就返回 null（面板整块不显示）。 */
+function taskStateForGame(gameId) {
+  const task = state.task;
+  if (!task) return null;
+  if (gameId && task.gameId && task.gameId !== gameId) return null;
+  return task;
+}
+
+/** 进度事件 → 面板字段。四项来源字段不一样，只在这里做一次归一。 */
+function taskFromEvent(kind, event, extra) {
+  const text = dockUpdateText(event);
+  /*
+   * 优先用主进程算好的 percent（progress-meter 按阶段分桶、滑动窗口算的，比这里再估一遍准）；
+   * 它用 -1 表示「总量还不知道」，那种情况才退回 dockUpdateText 的估算。
+   */
+  const reported = Number(event && event.percent);
+  const percent = Number.isFinite(reported) && reported >= 0 ? Math.min(100, reported) : text.percent;
+  return {
+    kind,
+    ...(extra || {}),
+    jobId: (event && event.jobId) || '',
+    label: text.label,
+    percent,
+    stats: text.stats,
+    detail: text.detail,
+    phase: String((event && event.phase) || ''),
+    // 三行子任务与整条任务的速度/剩余时间都由主进程算好（progress-meter 的 rows）
+    rows: (event && event.rows) || null,
+    bytesPerSec: Number(event && event.bytesPerSec) || 0,
+    etaSeconds: Number(event && event.etaSeconds) || 0,
+  };
+}
+
+/*
+ * 三行子任务的图标与名字。
+ *
+ * 照 Starward 那版：下载 / 安装 / 校验各占一行，各自带「完成量 / 总量」与自己的速度。
+ * 这三行的数据由主进程 progress-meter 按 phase 归好（见 electron/progress-meter.js
+ * 的 ROW_OF_PHASE），渲染层只负责画，不重新算 —— 两边各算一遍必然对不上。
+ */
+const TASK_ROW_META = [
+  { key: 'download', icon: '↓', label: '下载' },
+  { key: 'install', icon: '📦', label: '安装' },
+  { key: 'verify', icon: '✓', label: '校验' },
+];
+
+/** 当前阶段对应哪一行高亮（进度条与速度只挂在这一行）。 */
+const TASK_PHASE_ROW = {
+  download: 'download',
+  ldiff: 'download',
+  link: 'download',
+  predownload: 'download',
+  scan: 'download',
+  compare: 'download',
+  pack: 'download',
+  install: 'install',
+  patch: 'install',
+  overlay: 'install',
+  verify: 'verify',
+};
+
+/** 顶行那个「下载中 / 安装中 / 校验中」。 */
+function taskPhaseTitle(phase) {
+  const row = TASK_PHASE_ROW[String(phase || '')];
+  if (row === 'download') return '下载中';
+  if (row === 'install') return '安装中';
+  if (row === 'verify') return '校验中';
+  return '进行中';
+}
+
+/** 剩余时间写成 01:11:03 / 11:03；算不出来就返回空串，绝不显示 00:00。 */
+function taskEtaText(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  if (total <= 0) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+/** 一行子任务的 HTML；没有数据就返回空串（由调用方决定整块显不显示）。 */
+function taskRowMarkup(meta, row, activeKey) {
+  if (!row) return '';
+  const done = Number(row.done) || 0;
+  const total = Number(row.total) || 0;
+  if (!done && !total) return '';
+  const speed = Number(row.bytesPerSec) || 0;
+  const value = total > 0 ? `${shortBytes(done)} / ${shortBytes(total)}` : shortBytes(done);
+  const active = meta.key === activeKey ? ' is-active' : '';
+  // 速度只挂在正在走的那一行：三行同时显示速度会让人以为三条链路在并行跑
+  const speedText = active && speed > 0 ? `${shortBytes(speed)}/s` : '';
+  return `<span class="sdt-row${active}" data-row="${meta.key}">
+        <span class="sdt-ico">${meta.icon}</span>
+        <span class="sdt-rlabel">${meta.label}</span>
+        <span class="sdt-value">${esc(value)}</span>
+        <span class="sdt-speed">${esc(speedText)}</span>
+      </span>`;
+}
+
+function taskPanelMarkup(task) {
+  const percent = Math.max(0, Math.min(100, Number(task.percent) || 0));
+  const title = task.serverName || task.gameName || '';
+  const activeKey = TASK_PHASE_ROW[String(task.phase || '')] || '';
+  const rows = task.rows || {};
+  const rowsHtml = TASK_ROW_META.map((meta) => taskRowMarkup(meta, rows[meta.key], activeKey))
+    .filter(Boolean)
+    .join('');
+  const eta = taskEtaText(task.etaSeconds);
+  // 没有三行数据时退回原来那行文字，保证「扫清单」这类没有字节的阶段也有话说
+  const fallback = rowsHtml
+    ? ''
+    : `<span class="sdt-foot"><span class="sdt-label">${esc(task.label || '进行中…')}</span>${
+        task.stats ? `<span class="sdt-stats">${esc(task.stats)}</span>` : ''
+      }</span>`;
+  return `<button class="start-dock-task" type="button" data-action="focus-task" title="点开看详细进度">
+      <span class="sdt-head">
+        <span class="sdt-kind">${esc(taskPhaseTitle(task.phase))}</span>
+        ${title ? `<span class="sdt-title">${esc(title)}</span>` : ''}
+        <span class="sdt-percent">${percent >= 100 ? '100' : percent.toFixed(1)}%</span>
+        ${eta ? `<span class="sdt-eta">⏱ ${esc(eta)}</span>` : ''}
+      </span>
+      ${rowsHtml ? `<span class="sdt-rows">${rowsHtml}</span>` : ''}
+      <span class="sdt-bar"><span class="sdt-fill" style="width:${percent}%"></span></span>
+      ${fallback}
+    </button>`;
+}
+
+/**
+ * 把面板画进 #start-dock-task-host。
+ *
+ * 每次进度事件都会调到这里，所以只碰这一个子节点；没有宿主（不在启动页）就直接返回。
+ * 任务从无到有 / 换了阶段行数变了时改整块 innerHTML，其余时候只改数字与宽度。
+ */
+function updateTaskPanel() {
+  const host = document.querySelector('#start-dock-task-host');
+  if (!host) return;
+  const gameId = host.dataset.game || '';
+  const task = taskStateForGame(gameId);
+  if (!task) {
+    if (host.innerHTML) host.innerHTML = '';
+    host.dataset.kind = '';
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(task.percent) || 0));
+  const button = host.querySelector('.start-dock-task');
+  const activeKey = TASK_PHASE_ROW[String(task.phase || '')] || '';
+  const rows = task.rows || {};
+  // 行数会随阶段增减（刚开始只有下载行，收尾才有校验行），签名一变就整块重画
+  const signature = `${task.kind}|${Object.keys(rows)
+    .sort()
+    .map((key) => `${key}:${rows[key].total > 0 ? 1 : 0}`)
+    .join(',')}`;
+  if (!button || host.dataset.signature !== signature) {
+    host.dataset.kind = task.kind || '';
+    host.dataset.signature = signature;
+    host.innerHTML = taskPanelMarkup(task);
+    return;
+  }
+  const fill = button.querySelector('.sdt-fill');
+  if (fill) fill.style.width = `${percent}%`;
+  const percentEl = button.querySelector('.sdt-percent');
+  if (percentEl) percentEl.textContent = `${percent >= 100 ? '100' : percent.toFixed(1)}%`;
+  const kindEl = button.querySelector('.sdt-kind');
+  if (kindEl) kindEl.textContent = taskPhaseTitle(task.phase);
+  const etaEl = button.querySelector('.sdt-eta');
+  const eta = taskEtaText(task.etaSeconds);
+  if (etaEl) {
+    if (eta) etaEl.textContent = `⏱ ${eta}`;
+    else etaEl.remove();
+  } else if (eta) {
+    const head = button.querySelector('.sdt-head');
+    if (head) head.insertAdjacentHTML('beforeend', `<span class="sdt-eta">⏱ ${esc(eta)}</span>`);
+  }
+  // 三行：只改文字与高亮，不重建 DOM
+  TASK_ROW_META.forEach((meta) => {
+    const row = rows[meta.key];
+    const rowEl = button.querySelector(`.sdt-row[data-row="${meta.key}"]`);
+    if (!rowEl || !row) return;
+    const done = Number(row.done) || 0;
+    const total = Number(row.total) || 0;
+    const valueEl = rowEl.querySelector('.sdt-value');
+    if (valueEl) valueEl.textContent = total > 0 ? `${shortBytes(done)} / ${shortBytes(total)}` : shortBytes(done);
+    const active = meta.key === activeKey;
+    rowEl.classList.toggle('is-active', active);
+    const speed = Number(row.bytesPerSec) || 0;
+    const speedEl = rowEl.querySelector('.sdt-speed');
+    if (speedEl) speedEl.textContent = active && speed > 0 ? `${shortBytes(speed)}/s` : '';
+  });
+  const labelEl = button.querySelector('.sdt-label');
+  if (labelEl) labelEl.textContent = task.label || '进行中…';
+  const statsEl = button.querySelector('.sdt-stats');
+  if (statsEl) {
+    if (task.stats) statsEl.textContent = task.stats;
+    else statsEl.remove();
+  }
+}
+
+/** 点面板：按任务类型叫出对应的详情窗口（不新做一套界面）。 */
+function openTaskDetail() {
+  const task = state.task;
+  if (!task) return;
+  const gameId = task.gameId || '';
+  try {
+    if (task.kind === 'link') {
+      if (typeof openLinkModal === 'function') openLinkModal(gameId);
+      return;
+    }
+    if (task.kind === 'download') {
+      if (typeof openGameDownloadModal === 'function') openGameDownloadModal(gameId);
+      return;
+    }
+    if (task.kind === 'sophon') {
+      if (typeof openSophonModal === 'function' && task.serverId) {
+        openSophonModal(gameId, task.serverId, task.mode || 'prepare', { focus: true });
+        return;
+      }
+    }
+    if (typeof openGameUpdateModal === 'function') openGameUpdateModal(gameId);
+  } catch (error) {
+    toast(humanError(error), 'error');
+  }
+}
+
+/** 启动页当前显示的那款游戏（进度事件没带 gameId 时用它兜底）。 */
+function currentDockGameId() {
+  if (state.startGameId) return state.startGameId;
+  const active = (state.games || []).find((game) => game.installed);
+  return active ? active.id : '';
+}
+
+/** 进度事件里没带 gameId 时，按服务器名反查是哪款游戏。 */
+function gameIdForServerName(serverName) {
+  if (!serverName) return '';
+  const game = (state.games || []).find(
+    (item) => Array.isArray(item.servers) && item.servers.some((server) => server && server.name === serverName)
+  );
+  return game ? game.id : '';
 }
 
 function relativeDate(iso) {
@@ -1302,25 +1581,99 @@ async function boot() {
       });
     }
     /*
-     * 「更新游戏」按钮的进度直显：dock 上那颗按钮的文案跟着进度走，
-     * 不整页重绘（重绘会把 <video> 背景重启，闪一下静态图）。
-     * 只在 gameUpdate 挂着且 jobId 对得上时才改，预下载面板自己的订阅不受影响。
+     * 「更新游戏」这条的进度：全部交给上方那块统一面板，按钮不再自己画进度。
+     *
+     * 原来这里会把百分比写进按钮的 --update-progress 变量、还会改按钮文案，
+     * 按钮上方有面板之后就是同一件事说两遍（用户 2026-11-11：「等会，简化掉那个」）。
+     * 这里只保留 state.gameUpdate 的状态同步，DOM 交给 updateTaskPanel 与 home.js。
      */
     if (typeof api.onPredownloadProgress === 'function') {
       api.onPredownloadProgress((event) => {
+        if (!event) return;
+        if (event.jobId) {
+          const gameId = event.gameId || (state.gameUpdate ? state.gameUpdate.gameId : '') || currentDockGameId();
+          setTaskState(taskFromEvent('update', event, { gameId }));
+        }
         const current = state.gameUpdate;
-        if (!current || !event || event.jobId !== current.jobId) return;
+        if (!current || event.jobId !== current.jobId) return;
         const next = dockUpdateText(event);
         current.label = next.label;
         current.percent = next.percent;
-        const el = document.querySelector('.start-dock-update-label');
-        if (!el) return;
-        el.textContent = next.label;
-        const button = el.closest('.start-dock-play');
-        if (!button) return;
-        // 具体在写哪个文件只放 tooltip：路径太长，塞进按钮会把胶囊撑破
-        if (next.detail) button.title = `正在更新：${next.detail}`;
-        button.style.setProperty('--update-progress', `${next.percent}%`);
+      });
+    }
+    /*
+     * 硬链接安装 / 渠道包 / 一键下载 / 启动器自更新都走 sophon:progress。
+     * 按 job.mode 归成三类：download（一键下载）、sophon（硬链接安装/渠道包）、
+     * update（启动器自更新），面板点开时按 kind 找对应详情窗口。
+     */
+    if (typeof api.onSophonProgress === 'function') {
+      api.onSophonProgress((event) => {
+        if (!event || !event.jobId) return;
+        // 结束帧：任务跑完就把面板收掉（用户要「没任务就不显示」），
+        // 结果由各自的弹窗/toast 交代，不留在启动页上。
+        if (event.phase === 'done') {
+          const current = state.task;
+          if (current && current.jobId === event.jobId) setTaskState(null);
+          return;
+        }
+        const job =
+          (typeof sophonJobs !== 'undefined' && sophonJobs ? sophonJobs.find((item) => item.id === event.jobId) : null) ||
+          null;
+        const mode = event.mode || (job && job.mode) || '';
+        const kind = mode === 'download' ? 'download' : mode === 'launcher' ? 'update' : mode === 'update' || mode === 'prepare' ? 'sophon' : 'sophon';
+        const gameId = (job && job.gameId) || event.gameId || currentDockGameId();
+        const serverId = (job && job.serverId) || event.serverId || '';
+        const game = (state.games || []).find((item) => item.id === gameId);
+        const server = game && Array.isArray(game.servers) ? game.servers.find((item) => item && item.id === serverId) : null;
+        setTaskState(
+          taskFromEvent(kind, event, {
+            gameId,
+            serverId,
+            mode: mode || '',
+            gameName: game ? game.name : '',
+            serverName: server ? server.name : event.serverName || '',
+          })
+        );
+      });
+    }
+    /*
+     * 硬链接生成（去重/合并）走 link:progress，跟 sophon 那条完全独立。
+     * 以前这条只有弹窗里能看到，启动页什么都不显示，用户点完以为没反应。
+     */
+    if (typeof api.onLinkProgress === 'function') {
+      api.onLinkProgress((payload) => {
+        if (!payload) return;
+        const gameId = payload.gameId || currentDockGameId();
+        if (payload.phase === 'done') {
+          setTaskState(null);
+          return;
+        }
+        setTaskState(
+          taskFromEvent('link', payload, {
+            gameId,
+            gameName: (state.games.find((item) => item.id === gameId) || {}).name || '',
+            serverName: payload.targetName || payload.sourceName || '',
+          })
+        );
+      });
+    }
+    /*
+     * 终末地/明日方舟的「更新游戏」走 endfield:progress，字段是
+     * current/processed/total/downloadedBytes（早期版本连 phase 都没有）。
+     */
+    if (typeof api.onEndfieldProgress === 'function') {
+      api.onEndfieldProgress((progress) => {
+        if (!progress) return;
+        // 这条频道没有 gameId，只有 serverName（终末地/方舟的服务器名各不相同），按名字反查
+        const gameId = progress.gameId || gameIdForServerName(progress.serverName) || currentDockGameId();
+        const game = state.games.find((item) => item.id === gameId);
+        setTaskState(
+          taskFromEvent('update', progress, {
+            gameId,
+            gameName: game ? game.name : '',
+            serverName: progress.serverName || '',
+          })
+        );
       });
     }
     api.onUpdateAvailable((info) => {
@@ -1414,11 +1767,11 @@ async function boot() {
         }
       }
       /*
-       * 同一条进度也写进左下角任务坞。
+       * 同一条进度也写进右下角那颗回弹胶囊（原来的任务坞已经撤掉了）。
        *
        * 弹窗只在你点「立即更新」的那一刻存在：切到别的页面、或者手滑关掉弹窗，
        * 200MB 的下载就完全没有任何可见反馈——用户的原话是「更新没进度条」。
-       * 坞是全局的，不依赖当前页面，所以这里和游戏预下载走同一套显示。
+       * 胶囊是全局的，不依赖当前页面，所以这里和游戏预下载走同一套显示。
        */
       const job = sophonJobs.find((item) => item.mode === 'launcher');
       if (job) {
@@ -1430,7 +1783,8 @@ async function boot() {
         }
         if (state.update.speed) parts.push(formatSpeed(state.update.speed));
         job.stats = parts.join(' · ');
-        if (!patchTaskDockJob(job)) renderTaskDock();
+        // patchTaskDockJob 已经是空壳（坞撤了），这里直接刷新胶囊
+        renderTaskDock();
       }
     });
     api.onGachaUpdated(() => {

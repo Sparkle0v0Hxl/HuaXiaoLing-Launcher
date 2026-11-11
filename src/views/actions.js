@@ -815,7 +815,35 @@ async function handleAction(action, id, element, event = null) {
       if (!server) break;
       const jobId = `dock-update-${game.id}-${Date.now()}`;
       state.gameUpdate = { gameId: game.id, jobId, label: '正在准备更新…' };
+      /*
+       * 统一面板也跟着起：从这一刻起，启动页「开始游戏」上方就有一块进度。
+       * 没这一句的话，下载真正开始前那段（校验清单、算差异）用户看到的还是空面板。
+       */
+      if (typeof setTaskState === 'function') {
+        setTaskState({
+          gameId: game.id,
+          kind: 'update',
+          jobId,
+          gameName: game.name || '',
+          serverName: server.name || '',
+          label: '正在准备更新…',
+          percent: 0,
+          stats: '',
+        });
+      }
       render({ preserveScroll: true });
+      /*
+       * 开正式进度面板。
+       *
+       * 以前这条只把进度打到启动页按钮的一行字上，用户点完只看到「正在更新…」，
+       * 既没有百分比也没有覆盖量（原话：「你倒是给我加个百分比和覆盖了多少吧」）。
+       * 面板自己订阅进度通道，actions 这边只管把任务跑完。
+       */
+      try {
+        if (typeof openGameUpdateModal === 'function') openGameUpdateModal(game.id);
+      } catch {
+        /* 面板打不开也不能挡住更新本身 */
+      }
       try {
         /*
          * 终末地的「更新游戏」必须走后端那条复合入口（有 Diffs 就用预下载包，没有就走
@@ -870,6 +898,8 @@ async function handleAction(action, id, element, event = null) {
         toast(`更新失败：${humanError(error)}`, 'error');
       } finally {
         state.gameUpdate = null;
+        // 面板跟着收：更新结束（成功/失败/取消）后启动页不该再挂着一条进度。
+        if (typeof setTaskState === 'function') setTaskState(null);
         render({ preserveScroll: true });
       }
       break;
@@ -1477,8 +1507,39 @@ async function handleAction(action, id, element, event = null) {
       refreshNtePanel();
       break;
     }
+    case 'focus-task': {
+      /*
+       * 启动页那块统一进度面板点开的动作。
+       *
+       * 面板本身就是按钮，点它等于「把正在跑的那件事的详情窗口叫出来」：
+       * 更新 → 更新面板、硬链接生成 → 硬链接弹窗、下载 → 下载弹窗。
+       * 判断逻辑全在 app.js 的 openTaskDetail() 里，这里只负责转发，
+       * 免得两边各写一套 kind→弹窗 的映射，以后加一种任务要改两处。
+       */
+      if (typeof openTaskDetail === 'function') {
+        openTaskDetail();
+      } else if (state.task && state.task.gameId) {
+        handleAction('start-update-game', state.task.gameId).catch((error) => toast(humanError(error), 'error'));
+      }
+      break;
+    }
     case 'focus-sophon': {
-      const jobId = element.dataset.id;
+      /*
+       * 保留下来的老动作（任务坞时代的入口）：带 data-id 时按任务找；
+       * 不带 id 时先看「更新游戏」那条（状态在 state.gameUpdate.minimized），
+       * 再看硬链接 / 下载那条（DOM 收在 hiddenTaskModal 里）。
+       */
+      const jobId = element.dataset.id || (activeSophonJob ? activeSophonJob.id : '');
+      if (!jobId) {
+        if (state.gameUpdate && state.gameUpdate.minimized) {
+          state.gameUpdate.minimized = false;
+          if (typeof openGameUpdateModal === 'function') openGameUpdateModal(state.gameUpdate.gameId);
+          break;
+        }
+        if (restoreTaskModal()) break;
+        if (sophonUi && typeof sophonUi.restore === 'function') sophonUi.restore();
+        break;
+      }
       const job = sophonJobs.find((item) => item.id === jobId);
       if (!job) break;
       // 启动器自更新：把「发现新版本」那个弹窗重新立起来，进度条就在里面
@@ -2228,58 +2289,6 @@ async function handleAction(action, id, element, event = null) {
         toast(`检查失败：${humanError(error)}`, 'error');
       }
       render();
-      break;
-    }
-    case 'save-mirrorchyan': {
-      const ridInput = document.querySelector('#mirrorchyan-rid');
-      const cdkInput = document.querySelector('#mirrorchyan-cdk');
-      const rid = (ridInput ? ridInput.value : '').trim();
-      const cdk = (cdkInput ? cdkInput.value : '').trim();
-      await api.updateSettings({ mirrorchyanRid: rid, mirrorchyanCdk: cdk });
-      state.settings.mirrorchyanRid = rid;
-      state.settings.mirrorchyanCdk = cdk;
-      toast(
-        rid ? 'Mirror酱 配置已保存' : '已清空 Mirror酱 配置，更新走内置源',
-        'success'
-      );
-      render();
-      break;
-    }
-    case 'test-mirrorchyan': {
-      const ridInput = document.querySelector('#mirrorchyan-rid');
-      const cdkInput = document.querySelector('#mirrorchyan-cdk');
-      const rid = (ridInput ? ridInput.value : '').trim();
-      const cdk = (cdkInput ? cdkInput.value : '').trim();
-      setMirrorchyanProbe({ state: 'running', ok: false, text: '' });
-      if (!rid) {
-        setMirrorchyanProbe({
-          state: 'done',
-          ok: false,
-          text: '还没填资源 ID（RID）——它由 Mirror酱 官方分配，要先向官方申请接入。',
-        });
-        break;
-      }
-      try {
-        const result = await api.testMirrorchyan({ rid, cdk });
-        if (result && result.ok) {
-          /*
-           * 测通了要说清楚「现在能不能真的用它下载」。没 CDK 时 url 一定是空的，
-           * 这时如果只说「连接成功」，用户会以为已经能用加速了。
-           */
-          const tail = result.url
-            ? `可以下载加速包（v${result.latest}）`
-            : `能查到版本 v${result.latest}，但没有 CDK 所以拿不到加速下载地址，下载仍走内置源`;
-          setMirrorchyanProbe({ state: 'done', ok: true, text: `连接成功：${tail}` });
-        } else {
-          setMirrorchyanProbe({
-            state: 'done',
-            ok: false,
-            text: `测试失败：${(result && result.error) || '未知原因'}`,
-          });
-        }
-      } catch (error) {
-        setMirrorchyanProbe({ state: 'done', ok: false, text: `测试失败：${humanError(error)}` });
-      }
       break;
     }
     case 'save-update-source': {

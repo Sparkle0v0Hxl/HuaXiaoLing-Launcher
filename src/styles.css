@@ -6542,6 +6542,43 @@ html[data-theme="light"] body {
   text-overflow: ellipsis;
 }
 /*
+ * 更新游戏面板的头部：大百分比 + 剩余时间。
+ *
+ * 用户的原话是「加个百分比和覆盖了多少」——百分比必须在最显眼的位置，
+ * 不能只是一行小字里的「第 3/5 步」。
+ */
+.gu-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.gu-percent {
+  color: var(--text);
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.gu-eta {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gu-current {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
  * 三行子任务（下载 / 安装 / 校验）—— 官方启动器那种「每一行各自完成量 + 速度」的形态。
  * 只在已知总量时才显示；未知时整块隐藏，避免出现「0 B / 0 B」这种看着像坏了的行。
  */
@@ -6713,114 +6750,6 @@ body.sidebar-collapsed .sidebar-toggle span {
   display: none;
 }
 /* minimized download task */
-.task-dock {
-  position: fixed;
-  right: 22px;
-  bottom: 22px;
-  z-index: 80;
-  display: flex;
-  align-items: stretch;
-  gap: 2px;
-  width: 320px;
-  padding: 6px;
-  border: 1px solid var(--gold-line);
-  border-radius: 13px;
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(16px);
-}
-.task-dock[hidden] {
-  display: none;
-}
-
-/* 启动页右下角是「开始游戏」面板（.start-dock），任务 / 硬链接队列列表原本也是
-   右下 fixed，会盖住开始按钮。这里在启动页把它挪到左下角避让；它仍在
-   .start-screen（isolation:isolate）之外，z-index:80 依旧压在底部游戏抽屉之上，
-   抽屉展开也不会被遮。 */
-body.start-mode .task-dock {
-  left: 22px;
-  right: auto;
-  bottom: 70px;
-}
-/* 点歌台底部有一条 82px 的播放条（song-bar），任务坞 fixed 右下 22px 正好压住它的
-   音量/列表按钮区；进点歌台时把坞抬到播放条上方。 */
-body.is-song-page .task-dock {
-  bottom: 98px;
-}
-.task-dock-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 6px 7px;
-  border-radius: 9px;
-  text-align: left;
-}
-.task-dock-main:hover {
-  background: var(--gold-soft);
-}
-.task-dock-icon {
-  width: 30px;
-  height: 30px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  color: var(--gold-text);
-  background: var(--gold-soft);
-}
-.task-dock-icon .icon {
-  width: 16px;
-  height: 16px;
-}
-.task-dock-copy {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.task-dock-copy strong {
-  font-size: 13.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.task-dock-copy small {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.task-dock-bar {
-  height: 3px;
-  margin-top: 3px;
-  border-radius: 3px;
-  overflow: hidden;
-  background: var(--surface-3);
-}
-.task-dock-bar span {
-  display: block;
-  height: 100%;
-  width: 0%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), var(--gold));
-  transition: width 0.2s ease;
-}
-.task-dock-stop {
-  width: 26px;
-  flex: none;
-  color: var(--muted);
-  border-radius: 7px;
-  font-size: 13.5px;
-}
-.task-dock-stop:hover {
-  color: #ff9a9a;
-  background: rgba(255, 100, 100, 0.12);
-}
 body.sophon-minimized .modal-backdrop {
   display: none !important;
 }
@@ -9050,91 +8979,176 @@ body.start-mode .view {
   }
 }
 
-/* multi-job hardlink queue dock */
-.task-dock {
-  display: block;
-  width: 344px;
-  padding: 8px;
+/*
+ * 启动页那一块统一的进度面板（任务坞与右下角胶囊都撤了，只留这一个）。
+ *
+ * 位置在「开始游戏」按钮正上方（home.js 的 startDock 把它拼在最前面），
+ * 它本身就是个按钮：点开就是原来那个详情过程窗口（更新/下载/硬链接各自的弹窗）。
+ * 没任务在跑的时候宿主是空节点，靠下面的 :empty 收成 0 高度，按钮位置不动。
+ */
+.start-dock-task-host:empty {
+  display: none;
 }
 
-.task-dock-list {
+.start-dock-task-host {
+  display: block;
+  width: min(420px, 100%);
+  margin-bottom: 10px;
+}
+
+.start-dock-task {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(8, 6, 11, 0.52);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.14s ease, transform 0.14s ease;
 }
 
-.task-dock-head {
+.start-dock-task:hover {
+  transform: translateY(-1px);
+  border-color: var(--gold-text);
+}
+
+.sdt-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px 7px 6px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.task-dock-head strong {
-  color: var(--text-2);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.task-dock-item {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
-  border-radius: 9px;
 }
 
-.task-dock-item + .task-dock-item {
-  border-top: 1px solid var(--line);
+.sdt-kind {
+  flex: none;
+  color: var(--gold-text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
-.task-dock-item .task-dock-main {
+.sdt-title {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.task-dock-queued {
-  padding: 0 2px 0 0;
-  opacity: 0.78;
+.sdt-percent {
+  flex: none;
+  color: var(--gold-text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
-.task-dock-queued .task-dock-copy {
-  padding-left: 1px;
-}
-
-.task-dock-queued .task-dock-icon {
-  width: 24px;
-  height: 24px;
+/* 顶行那个 ⏱ 01:11:03：照 Starward 的版式，剩余时间跟百分比同一行 */
+.sdt-eta {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 /*
- * 已结束的任务留在坞里，点一下能重新打开那个界面。
- * 视觉上必须一眼看出「这条已经不在跑了」，否则会和进行中的条目混成一堆。
+ * 三行子任务（下载 / 安装 / 校验）。
+ *
+ * 每行四列：图标、名字、完成量/总量、速度。速度列固定宽度，否则数字一变整行会左右跳。
+ * 只有正在走的那一行带 is-active 并显示速度 —— 三行都显示速度会让人以为三条链路在并发。
  */
-.task-dock-ended {
-  opacity: 0.9;
+.sdt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
-.task-dock-ended .task-dock-icon {
+.sdt-row {
+  display: grid;
+  grid-template-columns: 14px 34px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 7px;
   color: var(--muted);
-  background: var(--surface-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
-.task-dock-ended.is-done .task-dock-icon {
-  color: #7bd88f;
-  background: rgba(123, 216, 143, 0.13);
+.sdt-ico {
+  color: var(--muted);
+  text-align: center;
 }
 
-.task-dock-ended.is-error .task-dock-icon {
-  color: var(--danger, #ff7b8a);
-  background: rgba(255, 123, 138, 0.13);
+.sdt-rlabel {
+  flex: none;
 }
 
-.task-dock-ended .task-dock-copy strong {
-  color: var(--text-2);
-  font-weight: 500;
+.sdt-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sdt-speed {
+  min-width: 62px;
+  text-align: right;
+}
+
+.sdt-row.is-active {
+  color: var(--text);
+}
+
+.sdt-row.is-active .sdt-ico,
+.sdt-row.is-active .sdt-rlabel {
+  color: var(--gold-text);
+}
+
+.sdt-row.is-active .sdt-speed {
+  color: var(--gold-text);
+}
+
+.sdt-bar {
+  display: block;
+  height: 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.sdt-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gold-text);
+  transition: width 0.25s ease;
+}
+
+.sdt-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.sdt-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sdt-stats {
+  flex: none;
+  font-variant-numeric: tabular-nums;
 }
 
 /* start screen game notices */
@@ -11421,7 +11435,7 @@ select {
   bottom: clamp(96px, 13vh, 148px);
   /* 压在底部游戏抽屉（z-index:5）之上，并开始游戏按钮永远可点；
      注意 .start-screen 用了 isolation:isolate，所以这一层只和抽屉/遮罩比高低，
-     挡不住外部 fixed 的 .task-dock（那个靠 body.start-mode 平移避让处理）。 */
+     挡不住外部 fixed 的浮层（那种靠 body.start-mode 平移避让处理）。 */
   z-index: 90;
   display: flex;
   align-items: flex-end;
@@ -27962,18 +27976,10 @@ body.charms-on .page-deco-sprite { display: block; }
 /* ================================================================== */
 
 /* 抽屉 hover / 聚焦展开时 body 会挂 drawer-open（setupStartDrawerSync 联动）。
-   两个浮层都在抽屉（.start-screen isolate 内 z:5）之上：.task-dock 是外部
-   fixed z:80，.start-dock 是 start-screen 内 absolute z:90，层级压不过它们，
-   所以只能空间避让 —— 展开时整体沉下去淡出，收起后原样回来。 */
-body.start-mode .task-dock,
+   进度面板现在长在 .start-dock 里，跟着 start-dock 一起避让，
+   这里只剩 .start-dock 自身的位移规则。 */
 .start-screen .start-dock {
   transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
-}
-
-body.start-mode.drawer-open .task-dock {
-  transform: translateY(150%);
-  opacity: 0;
-  pointer-events: none;
 }
 
 body.drawer-open .start-dock {
@@ -34242,16 +34248,12 @@ body.sidebar-collapsed .sidebar::after {
   cursor: progress;
   opacity: 0.94;
 }
-/* 进度填充：从左往右涨的半透明白，压在红金渐变上浅色/深色主题都看得见 */
-.start-screen .start-dock .start-dock-play.is-updating .start-dock-update-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--update-progress, 0%);
-  background: rgba(255, 255, 255, 0.22);
-  transition: width 0.4s ease;
-  pointer-events: none;
-}
-/* 文案单行 + 省略号：长文案（以前是整条文件路径）不许换行撑破按钮 */
+/*
+ * 进度填充（.start-dock-update-fill）已随「按钮不再画进度」一起删掉：
+ * 进度现在全部在按钮正上方那块统一面板里，按钮只留一句禁用的「更新中…」。
+ * 旋转图标与单行省略文案保留 —— 它们是「正在忙」的提示，不是进度。
+ */
+/* 文案单行 + 省略号：长文案不许换行撑破按钮 */
 .start-screen .start-dock .start-dock-play.is-updating .start-dock-update-label {
   position: relative;
   min-width: 0;
@@ -36012,4 +36014,75 @@ body.is-idle .modal-backdrop {
   background: color-mix(in srgb, var(--accent-2) 30%, transparent);
   color: var(--hero-ink);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 46%, transparent);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 弹窗毛玻璃 v1（2026-11-11 用户反馈）
+ *  用户原话：「我们界面有很多这样的窗口，感觉不好看，能不能搞毛玻璃之类的」
+ *
+ *  原来 .modal 是纯实心 var(--surface)，只有它背后的 .modal-backdrop 在模糊，
+ *  所以看着就是一块实心深色板。这里让弹窗本体半透明、并自己带一层模糊，
+ *  页面内容透上来，才有玻璃质感。
+ *
+ *  为什么不用 var(--glass)：那个变量是给整窗材质用的（跟 --bg 混合），
+ *  弹窗压在页面内容上，要的是「页面透过弹窗」，不是「桌面透过窗口」，
+ *  所以这里用 color-mix 把当前主题的 --surface 调成半透明，跟着主题走。
+ *
+ *  性能：弹窗尺寸固定、里面不整页重绘，代价可接受；body.is-idle（最小化）
+ *  时统一摘掉模糊改近实底，和 .modal-backdrop 那条已有的规则一个思路，
+ *  避免最小化恢复时残影。
+ * ═══════════════════════════════════════════════════════════════════ */
+
+.modal {
+  background:
+    linear-gradient(165deg, rgba(255, 255, 255, 0.03), transparent 38%),
+    color-mix(in srgb, var(--surface) 74%, transparent);
+  backdrop-filter: blur(26px) saturate(1.45);
+  -webkit-backdrop-filter: blur(26px) saturate(1.45);
+  border-color: color-mix(in srgb, var(--line-strong) 72%, transparent);
+  box-shadow:
+    0 26px 80px rgba(0, 0, 0, 0.46),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+/* 底部按钮区：原来是实心 var(--surface-2)，在玻璃弹窗里会显出一条硬边 */
+.modal-foot {
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  border-top-color: color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+/* 头部只加了极淡的底，让标题区和正文有层次又不断开玻璃 */
+.modal-head {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent);
+}
+
+/* 最小化到任务栏时省 GPU，也避免恢复时那一瞬的残影 */
+body.is-idle .modal {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+body.is-idle .modal-foot {
+  background: color-mix(in srgb, var(--surface-2) 96%, transparent);
+}
+
+/* 系统关了透明效果 / 用户要求减少透明时回退实底，别糊成一片看不清 */
+@media (prefers-reduced-transparency: reduce) {
+  .modal {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--surface);
+  }
+  .modal-foot {
+    background: var(--surface-2);
+  }
+}
+
+/* 浅色主题：玻璃底会偏亮，把描边和阴影压深一点，文字对比度不掉 */
+:root[data-theme='light'] .modal {
+  border-color: color-mix(in srgb, var(--line-strong) 88%, transparent);
+  box-shadow:
+    0 26px 80px rgba(82, 40, 24, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }

@@ -19,8 +19,6 @@ contextBridge.exposeInMainWorld('launcher', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   applyUpdate: () => ipcRenderer.invoke('update:apply'),
   pickUpdateSource: () => ipcRenderer.invoke('update:pick-source'),
-  // Mirror酱：设置页那个「测试」按钮用，验一次 RID/CDK 通不通
-  testMirrorchyan: (payload) => ipcRenderer.invoke('update:mirrorchyan-test', payload),
   updateBackup: () => ipcRenderer.invoke('update:backup'),
   rollbackUpdate: () => ipcRenderer.invoke('update:rollback'),
   // 网络代理：一键读系统代理、实测一条规则能不能连出去

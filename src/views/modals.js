@@ -708,6 +708,183 @@ function defaultDownloadDir(game, channel = '') {
 }
 
 /**
+ * 「更新游戏」的进度面板。
+ *
+ * 这条入口以前只把进度打到启动页那颗按钮的一行字上（`dockUpdateText`），
+ * 用户点完就只看见「正在更新…」，既没有百分比也没有覆盖量——原话是
+ * 「这更新，你倒是给我加个百分比和覆盖了多少吧」。
+ *
+ * 现在开一个正式面板：顶部大百分比 + 剩余时间，中间三行子任务
+ * （下载 / 安装 / 校验，各自完成量 · 总量 · 速度），底部进度条与停止按钮。
+ * 面板只负责显示，任务本身还是 actions.js 里那条 `start-update-game` 在跑，
+ * 两边通过 `state.gameUpdate.jobId` 对上号。
+ */
+function openGameUpdateModal(gameId) {
+  const game = state.games.find((item) => item.id === gameId);
+  if (!game) return null;
+  const running = state.gameUpdate || null;
+  const jobId = running ? running.jobId : '';
+
+  const html = `
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>更新 ${esc(game.name)}</h2>
+            <p id="gu-sub">正在准备…</p>
+          </div>
+          <div class="modal-head-actions">
+            <button class="modal-close" id="gu-minimize" style="display:none" title="最小化，任务继续在后台跑">−</button>
+            <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="gu-head">
+            <strong class="gu-percent" id="gu-percent">0%</strong>
+            <span class="gu-eta" id="gu-eta"></span>
+          </div>
+          <div class="progress-bar"><span id="gu-bar" style="width:0%"></span></div>
+          <div class="progress-rows" id="gu-rows" hidden>
+            <div class="progress-row" data-row="download" hidden>
+              <span class="pr-icon">↓</span><span class="pr-label">下载</span>
+              <span class="pr-value"></span><span class="pr-speed"></span>
+            </div>
+            <div class="progress-row" data-row="install" hidden>
+              <span class="pr-icon">📦</span><span class="pr-label">安装</span>
+              <span class="pr-value"></span><span class="pr-speed"></span>
+            </div>
+            <div class="progress-row" data-row="verify" hidden>
+              <span class="pr-icon">✓</span><span class="pr-label">校验</span>
+              <span class="pr-value"></span><span class="pr-speed"></span>
+            </div>
+          </div>
+          <p class="gu-current" id="gu-current"></p>
+          <div class="field-error" id="gu-error"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" id="gu-stop" style="display:none">停止更新</button>
+          <button class="btn btn-primary" data-close id="gu-done">知道了</button>
+        </div>
+      </div>
+    </div>`;
+
+  let rowState = {};
+  let stopped = false;
+
+  openModal(html, {
+    onClose: () => {
+      // 关窗不等于停止：任务在后台继续，用胶囊点回来
+      if (state.gameUpdate && !stopped) {
+        state.gameUpdate.minimized = true;
+        renderTaskDock();
+      }
+    },
+  });
+
+  const percentEl = document.querySelector('#gu-percent');
+  const etaEl = document.querySelector('#gu-eta');
+  const barEl = document.querySelector('#gu-bar');
+  const subEl = document.querySelector('#gu-sub');
+  const currentEl = document.querySelector('#gu-current');
+  const errorEl = document.querySelector('#gu-error');
+  const stopEl = document.querySelector('#gu-stop');
+  const minimizeEl = document.querySelector('#gu-minimize');
+
+  const minimize = () => {
+    if (!state.gameUpdate) return;
+    state.gameUpdate.minimized = true;
+    renderTaskDock();
+    closeModal();
+  };
+  if (minimizeEl) minimizeEl.addEventListener('click', minimize);
+  const closeX = document.querySelector('.modal-head [data-close]');
+  if (closeX) {
+    closeX.addEventListener(
+      'click',
+      (event) => {
+        if (!state.gameUpdate) return;
+        event.preventDefault();
+        event.stopPropagation();
+        minimize();
+      },
+      true
+    );
+  }
+  if (stopEl) {
+    stopEl.addEventListener('click', () => {
+      stopped = true;
+      if (stopEl) stopEl.textContent = '正在停止…';
+      if (jobId) api.servers.cancelSophon(jobId).catch(() => {});
+    });
+  }
+
+  /** 主进程进度事件 → 面板。只有 jobId 对得上才认，避免串到别的任务。 */
+  const paint = (event) => {
+    if (!event) return;
+    if (event.jobId && jobId && event.jobId !== jobId) return;
+    const totalBytes = Number(event.totalBytes) || 0;
+    const bytesDone = Number(event.bytesDone) || 0;
+    const percent = Number.isFinite(Number(event.percent)) && Number(event.percent) >= 0
+      ? Math.max(0, Math.min(100, Number(event.percent)))
+      : totalBytes > 0
+        ? Math.max(0, Math.min(100, (bytesDone / totalBytes) * 100))
+        : 0;
+    if (percentEl) percentEl.textContent = `${Math.round(percent)}%`;
+    if (barEl) barEl.style.width = `${event.phase === 'done' ? 100 : percent}%`;
+    if (etaEl) {
+      const eta = formatEta(event.etaSeconds);
+      const speed = formatSpeedText(event.bytesPerSec);
+      etaEl.textContent = [speed ? `${speed}/s` : '', eta ? `剩 ${eta}` : ''].filter(Boolean).join(' · ');
+    }
+    const phaseText = DOCK_UPDATE_PHASES[event.phase] || event.phase || '处理中…';
+    if (subEl) subEl.textContent = event.phase === 'done' ? '更新完成' : phaseText;
+    if (currentEl) currentEl.textContent = event.current || '';
+    rowState = paintProgressRows('gu-rows', event, rowState);
+    // 弹窗开着时同步给胶囊，最小化后立刻就是最新进度
+    if (state.gameUpdate) {
+      state.gameUpdate.percent = percent;
+      state.gameUpdate.label = phaseText;
+      renderTaskDock();
+    }
+  };
+
+  /* 面板自己订阅：不依赖 actions.js 那条订阅还在不在 */
+  const off = typeof api.onPredownloadProgress === 'function' ? api.onPredownloadProgress(paint) : null;
+  const offSophon = typeof api.onSophonProgress === 'function' ? api.onSophonProgress(paint) : null;
+  const offEndfield = typeof api.onEndfieldProgress === 'function' ? api.onEndfieldProgress(paint) : null;
+
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    for (const fn of [off, offSophon, offEndfield]) {
+      if (typeof fn === 'function') {
+        try {
+          fn();
+        } catch {
+          /* 解绑失败不影响关窗 */
+        }
+      }
+    }
+  };
+  /* openModal 的 onClose 不支持叠加，这里用 MutationObserver 之外更简单的一条路：
+     关窗时由 closeModal 调用 modalOnClose，所以把清理挂到那上面。 */
+  const previousClose = modalOnClose;
+  modalOnClose = () => {
+    cleanup();
+    if (typeof previousClose === 'function') {
+      try {
+        previousClose();
+      } catch {
+        /* 前一个回调失败不阻塞关窗 */
+      }
+    }
+  };
+
+  return { paint, cleanup };
+}
+
+/**
  * 下载入口开不出「下载弹窗」时，也要开一个小窗把原因写清楚。
  *
  * 以前这几种情况只弹一条 toast 就 return：已有任务在跑、这个游戏没有可用渠道。
@@ -906,6 +1083,20 @@ function openGameDownloadModal(gameId) {
               <span id="dl-stats"></span>
               <span id="dl-current"></span>
             </div>
+            <div class="progress-rows" id="dl-rows" hidden>
+              <div class="progress-row" data-row="download" hidden>
+                <span class="pr-icon">↓</span><span class="pr-label">下载</span>
+                <span class="pr-value"></span><span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="install" hidden>
+                <span class="pr-icon">📦</span><span class="pr-label">安装</span>
+                <span class="pr-value"></span><span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="verify" hidden>
+                <span class="pr-icon">✓</span><span class="pr-label">校验</span>
+                <span class="pr-value"></span><span class="pr-speed"></span>
+              </div>
+            </div>
           </div>
           <div class="sw-result" id="dl-result" hidden>
             <strong class="sw-result-title">下载完成</strong>
@@ -979,6 +1170,8 @@ function openGameDownloadModal(gameId) {
   let cancelled = false;
   let finishedOk = false;
   let unsubscribe = null;
+  /* 三行子任务（下载 / 安装 / 校验）各自的累计记忆，阶段切换时不闪空 */
+  let dlRowState = {};
 
   const hideDock = () => {
     if (activeSophonJob === job) activeSophonJob = null;
@@ -1311,6 +1504,7 @@ function openGameDownloadModal(gameId) {
       const stats = sophonProgressStats(event);
       document.querySelector('#dl-stats').textContent = stats;
       document.querySelector('#dl-current').textContent = event.current || '';
+      dlRowState = paintProgressRows('dl-rows', event, dlRowState);
       updateDock(
         phases[event.phase] || '处理中…',
         event.phase === 'done' ? 100 : percent,
@@ -1408,8 +1602,14 @@ function formatSize(bytes) {
   return `${Math.max(0, Math.round(value / 1024))} KB`;
 }
 
-/** 速度：0 表示算不出来，返回空串（界面上整段不显示，绝不写「0 B/s」）。 */
-function formatSpeed(bytesPerSec) {
+/** 速度：0 表示算不出来，返回空串（界面上整段不显示，绝不写「0 B/s」）。
+ *
+ * 名字必须和 src/services/update.js 的 formatSpeed 区分开：那个是启动器自更新
+ * 进度条用的（保留 1 位小数、只到 MB），这个给任务面板三行子任务用。
+ * 视图脚本是普通 <script> 顺序加载、函数声明提升到全局，叫同一个名字时
+ * 后加载的 modals.js 会把 update.js 那份覆盖掉 —— 自更新的速度文案会跟着变。
+ */
+function formatSpeedText(bytesPerSec) {
   const value = Number(bytesPerSec) || 0;
   if (value <= 0) return '';
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB/s`;
@@ -1455,7 +1655,7 @@ function paintProgressRows(rootId, event, state = {}) {
     return a || (b ? `0 KB / ${b}` : '');
   };
   const current = {
-    speed: formatSpeed(event?.bytesPerSec),
+    speed: formatSpeedText(event?.bytesPerSec),
     eta: formatEta(event?.etaSeconds),
   };
   const values = {
@@ -1659,123 +1859,27 @@ function dropStashedTaskModal() {
 }
 
 function renderTaskDock() {
-  // 一键下载的任务也走这个坞：mode=download 显示「下载」，别混进「生成」
-  const dock = document.querySelector('#task-dock');
-  const list = document.querySelector('#task-dock-list');
-  if (!dock || !list) return;
   /*
-   * 坞里只放「还在跑 / 排队」的任务。
+   * 原来的「任务坞」已经撤掉（用户 2026-11-11：「以后别要任务坞了」），
+   * 中间那版右下角回弹胶囊（#task-pill）也按「都统一用面板」一起撤了。
    *
-   * 以前结束的任务会留两条在这儿，理由是「跑完想再看一眼」；实际用起来它就一直
-   * 赖在左下角，96% 的空间和时间都没人点它。结果那一屏本来就留在前台，关掉之后
-   * 也没必要再从坞里捡回来。
+   * 现在唯一的进度出口是启动页「开始游戏」按钮上方那一块（#start-dock-task-host），
+   * 由 app.js 的 updateTaskPanel() 负责画；它本身就是按钮，点开是原来的详情弹窗。
+   *
+   * 这个函数保留成转发，是因为调用点散布在几个视图文件里，一起删容易留漏网引用；
+   * 转发到 updateTaskPanel 就等同于「该刷新的地方还是刷新」，不会再有第二处 UI。
    */
-  const visible = sophonJobs.filter((job) => ['queued', 'starting', 'running'].includes(job.status));
-  if (!visible.length) {
-    dock.hidden = true;
-    document.body.classList.remove('sophon-minimized');
-    return;
-  }
-  dock.hidden = false;
-  // 渠道包下载也进这个坞（mode=pack），标题单独给一种说法
-  const jobTitle = (job) => {
-    // 启动器自更新：不挂在哪个游戏上，标题只写「启动器 + 版本号」
-    if (job.mode === 'launcher') return `启动器${job.gameName ? ` ${job.gameName}` : ''}`;
-    const modeText =
-      job.mode === 'update'
-        ? '更新'
-        : job.mode === 'download'
-          ? '下载'
-          : job.mode === 'pack'
-            ? '渠道包'
-            : '生成';
-    return `${modeText} ${job.serverName}`;
-  };
-  list.innerHTML = `
-    <div class="task-dock-head"><strong>进行中的任务</strong><span>${visible.length} 个</span></div>
-    ${visible
-      .map((job) => {
-        if (job.status === 'queued') {
-          return `
-            <div class="task-dock-item task-dock-queued">
-              <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="排队中，前面的任务结束后自动开始">
-                <span class="task-dock-icon">${icon('clock')}</span>
-                <span class="task-dock-copy"><strong>${esc(job.serverName)}</strong><small>排队中 · ${esc(job.gameName)}</small></span>
-              </button>
-              <button class="task-dock-stop" data-action="remove-sophon-queue" data-id="${esc(job.id)}" title="取消排队">✕</button>
-            </div>`;
-        }
-        if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
-          const label =
-            job.status === 'done' ? '已完成' : job.status === 'cancelled' ? '已停止' : '失败了';
-          const glyph = job.status === 'done' ? 'check' : job.status === 'cancelled' ? 'clock' : 'alert';
-          return `
-            <div class="task-dock-item task-dock-ended is-${job.status}">
-              <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="重新打开这个界面">
-                <span class="task-dock-icon">${icon(glyph)}</span>
-                <span class="task-dock-copy">
-                  <strong>${jobTitle(job)}</strong>
-                  <small>${label}${job.percent >= 100 && job.status === 'done' ? ' · 100%' : ''}${
-                    job.stats ? ` · ${esc(job.stats)}` : ''
-                  }</small>
-                </span>
-              </button>
-              <button class="task-dock-stop" data-action="dismiss-sophon-job" data-id="${esc(job.id)}" title="从列表里移除">✕</button>
-            </div>`;
-        }
-        // 阶段文案和弹窗里的阶段条同源，缩到任务坞里也不会换一套说法
-        const stepText = job.stage === undefined ? '' : `${sophonStageText(job.stage)}`;
-        // 有阶段文案就用阶段文案：100% 只代表「下完了」，后面还有校验 / 解压 / 覆盖
-        const phaseText = stepText || job.phase || (job.percent >= 100 ? '完成' : '准备中…');
-        return `
-          <div class="task-dock-item">
-            <button class="task-dock-main" data-action="focus-sophon" data-id="${esc(job.id)}" title="打开任务界面">
-              <span class="task-dock-icon">${icon('download')}</span>
-              <span class="task-dock-copy">
-                <strong>${jobTitle(job)}</strong>
-                <small>${esc(phaseText)}${job.stats ? ` · ${esc(job.stats)}` : ''}</small>
-                <span class="task-dock-bar"><span style="width:${Math.max(0, Math.min(100, job.percent || 0))}%"></span></span>
-              </span>
-            </button>
-            ${
-              // 启动器更新没法中途停下（下载完要覆盖程序再重启），给个 ✕ 只会误导
-              job.mode === 'launcher'
-                ? ''
-                : `<button class="task-dock-stop" data-action="cancel-sophon-dock" data-id="${esc(job.id)}" title="停止">✕</button>`
-            }
-          </div>`;
-      })
-      .join('')}`;
+  if (typeof updateTaskPanel === 'function') updateTaskPanel();
 }
 
 /**
- * 只刷新坞里某一条的进度文字与进度条，不重建 innerHTML。
+ * 只刷新某一条任务的进度文字与进度条，不重建结构。
  *
- * renderTaskDock 每次都会重写整个列表。下载 / 生成时进度每秒来几十次，用户按住
- * 某一条的那一刻节点正好被换掉：mousedown 落在旧节点、mouseup 落在新节点，
- * 浏览器就不会派发 click —— 表现就是「点了缩小，坞里那一条怎么点都点不回来」。
- * 所以任务跑着的时候只改文字，结构只在「新增 / 结束一条」时才重建。
+ * 坞没了之后没有列表可 patch，保留空壳是为了不动那些调用点。
  */
-function patchTaskDockJob(job) {
-  const list = document.querySelector('#task-dock-list');
-  if (!list) return false;
-  const button = list.querySelector(`[data-id="${job.id}"]`);
-  const row = button ? button.closest('.task-dock-item') : null;
-  // 找不到这一条、或它已经不是「进行中」那种带进度条的行：交给整表重绘
-  if (!row || !row.querySelector('.task-dock-bar')) return false;
-  const small = row.querySelector('.task-dock-copy small');
-  if (small) {
-    /*
-     * 阶段文案优先：「100%」不等于「完事」——启动器更新到 100% 之后还要校验、
-     * 解压、覆盖文件，那一段会推「正在校验更新包…」。以前这里一律写「完成」，
-     * 用户会以为已经装好了，然后看着启动器半天没动静。
-     */
-    const text = job.phase || (job.percent >= 100 ? '完成' : '准备中…');
-    small.textContent = job.stats ? `${text} · ${job.stats}` : text;
-  }
-  const fill = row.querySelector('.task-dock-bar > span');
-  if (fill) fill.style.width = `${Math.max(0, Math.min(100, job.percent || 0))}%`;
-  return true;
+function patchTaskDockJob() {
+  // 任务坞已移除（见 renderTaskDock 的注释），这里跟着变成空壳。
+  return false;
 }
 
 /** 结束态的历史只留最近两条，否则坞会越堆越长。 */function pruneSophonHistory() {
@@ -1994,7 +2098,6 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   let paused = false;
   let selectedRuntimeRoot = '';
   const backdrop = document.querySelector('.modal-backdrop');
-  const dock = document.querySelector('#task-dock');
 
   const hideDock = () => {
     if (activeSophonJob === job) activeSophonJob = null;
@@ -2637,6 +2740,16 @@ function openLinkModal(gameId) {
                     <span id="link-saved"></span>
                     <span id="link-current"></span>
                   </div>
+                  <div class="progress-rows" id="link-rows" hidden>
+                    <div class="progress-row" data-row="download" hidden>
+                      <span class="pr-icon">↓</span><span class="pr-label">比对</span>
+                      <span class="pr-value"></span><span class="pr-speed"></span>
+                    </div>
+                    <div class="progress-row" data-row="install" hidden>
+                      <span class="pr-icon">📦</span><span class="pr-label">链接</span>
+                      <span class="pr-value"></span><span class="pr-speed"></span>
+                    </div>
+                  </div>
                 </div>
                 <div class="field-error" id="link-error"></div>`
               : `<div class="empty" style="padding:38px 20px">
@@ -2833,6 +2946,49 @@ function openLinkModal(gameId) {
     paintStep1();
   });
 
+  /*
+   * 硬链接弹窗自己的三行子任务（比对 / 链接）。
+   *
+   * 这条链路的阶段只有 scan / compare / link / done，和更新弹窗那套
+   * （download / install / verify）不是一回事，所以单独算：
+   * - 比对阶段报「已比过的字节 / 候选总字节」
+   * - 链接阶段报「已链接的字节 / 候选总字节」，另一半是省下的空间
+   * 两个数都来自 electron/link.js 的 bytesDone / totalBytes，没有就整行藏起来。
+   */
+  function paintLinkRows(p) {
+    const root = document.querySelector('#link-rows');
+    if (!root) return;
+    const phase = String(p?.phase || '');
+    const totalBytes = Number(p?.totalBytes) || 0;
+    const bytesDone = Number(p?.bytesDone) || 0;
+    const speedText = formatSpeedText(p?.bytesPerSec);
+    const rows = root.querySelectorAll('.progress-row');
+    let any = false;
+    for (const row of rows) {
+      const key = row.dataset.row;
+      const isCompareRow = key === 'download';
+      const active =
+        (isCompareRow && (phase === 'compare' || phase === 'scan')) || (!isCompareRow && phase === 'link');
+      const value =
+        totalBytes > 0 && (phase === 'compare' || phase === 'scan' || phase === 'link')
+          ? `${fmtBytes(bytesDone)} / ${fmtBytes(totalBytes)}`
+          : '';
+      row.hidden = !value;
+      if (!value) continue;
+      any = true;
+      row.classList.toggle('is-active', active);
+      row.classList.toggle('is-idle', !active);
+      const valueEl = row.querySelector('.pr-value');
+      if (valueEl) valueEl.textContent = value;
+      const speedEl = row.querySelector('.pr-speed');
+      if (speedEl) {
+        const etaText = formatEta(p?.etaSeconds);
+        speedEl.textContent = active && speedText ? `${speedText}${etaText ? ` · 剩 ${etaText}` : ''}` : '';
+      }
+    }
+    root.hidden = !any;
+  }
+
   function setProgress(p) {
     progress.style.display = 'block';
     const percent = p.total > 0 ? Math.min(100, (p.processed / p.total) * 100) : 0;
@@ -2844,6 +3000,7 @@ function openLinkModal(gameId) {
     else if (p.phase === 'compare') phase.textContent = '正在比对文件内容…';
     else if (p.phase === 'link') phase.textContent = '正在建立硬链接…';
     else if (p.phase === 'done') phase.textContent = p.cancelled ? '已停止' : '正在收尾…';
+    paintLinkRows(p);
   }
 
   unsubProgress = api.onLinkProgress((payload) => {

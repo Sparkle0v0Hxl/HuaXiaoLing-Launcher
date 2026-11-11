@@ -134,9 +134,12 @@ const SETTINGS_TABS = [
   ['window', '窗口', 'image', '窗口材质、自定义背景与透明度'],
   ['sound', '音效', 'volume', '界面反馈音、试听与音乐行为'],
   ['behavior', '行为', 'settings', '托盘、开机自启与自动同步'],
-  ['storage', '存储', 'folder-open', '下载目录、运行时与终末地渠道包'],
+  ['games', '游戏', 'gamepad', '语音包、剧情资源、渠道包与运行时目录'],
+  ['download', '下载', 'download', '下载目录、速度上限与网络代理'],
+  ['data', '数据', 'database', '应用数据、设置备份与抽卡云备份'],
   ['files', '文件管理', 'trash', '分类查看占用，自己决定清掉哪些缓存'],
-  ['update', '更新', 'download', '更新源、自动检查与手动更新'],
+  ['update', '更新', 'refresh', '更新源、自动检查与手动更新'],
+  ['system', '系统', 'shield', '管理员权限与提权启动'],
   ['community', '社区', 'link', '项目主页、发布页与问题反馈'],
   ['about', '关于', 'info', '版本信息与相关链接'],
 ];
@@ -163,27 +166,6 @@ function setProxyProbe(next) {
   const node = document.querySelector('#proxy-test-result');
   if (!node) return;
   node.textContent = proxyTestText();
-  node.classList.toggle('is-ok', Boolean(next && next.state === 'done' && next.ok));
-  node.classList.toggle('is-bad', Boolean(next && next.state === 'done' && !next.ok));
-}
-
-/*
- * Mirror酱 测试结果。和代理测试分开存：用户在设置页来回切分组时，这两个结果
- * 不该互相覆盖，也不该因为重绘就消失。
- */
-let mirrorchyanProbe = null; // { state:'running'|'done', ok:boolean, text:string }
-
-function mirrorchyanTestText() {
-  if (!mirrorchyanProbe) return '';
-  if (mirrorchyanProbe.state === 'running') return '正在测试，最多等 8 秒…';
-  return mirrorchyanProbe.text || '';
-}
-
-function setMirrorchyanProbe(next) {
-  mirrorchyanProbe = next;
-  const node = document.querySelector('#mirrorchyan-test-result');
-  if (!node) return;
-  node.textContent = mirrorchyanTestText();
   node.classList.toggle('is-ok', Boolean(next && next.state === 'done' && next.ok));
   node.classList.toggle('is-bad', Boolean(next && next.state === 'done' && !next.ok));
 }
@@ -789,9 +771,9 @@ function settingsView() {
           </div>
         </section>
 
-        <section class="${group('storage', true)}" ${groupAttr('storage')}>
-          <h2>${icon('folder-open')}存储</h2>
-          <p class="desc">下载目录、渠道包与权限</p>
+        <section class="${group('games', true)}" ${groupAttr('games')}>
+          <h2>${icon('gamepad')}游戏与渠道包</h2>
+          <p class="desc">语音包、剧情资源、渠道包与运行时目录</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>语音包语言</strong><span>只下载勾中的配音，默认只要中文；改完下次更新或安装时生效，已经下好的不会立刻删。仅对原神 / 星穹铁道 / 绝区零 / 崩坏3 生效——终末地的语音藏在 Unity 资源包里，官方没有拆分粒度，只能跟着整包一起下。</span></div>
             <div class="setting-control">
@@ -818,61 +800,6 @@ function settingsView() {
               <span>只作用于「更新游戏」这一步，预下载不走它——预下载下多少，这个开关都不改变。开启后官方会给一份「从你当前版本到新版本」的差分补丁，先用它就地修补本地文件，剩下的才走分块下载，通常能省掉一半以上的下载量（具体看官方这次发了多少补丁）。代价是它会在更新过程中直接改写游戏文件，如果中途断网会留下「补了一半」的状态，重新更新一次能自动接上，也可以用「检查完整资源」修复。官方清单里 enable_ldiff 为 false 的渠道无论开关都不会生效：绝区零（全部渠道）、崩坏3。</span>
             </div>
             <div class="setting-control">${switchMarkup('enableLdiff', settings.enableLdiff !== false)}</div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>下载限速</strong>
-              <span>给所有下载加一个总带宽上限，免得更新游戏时把宽带全占了、同一条网下别的设备看视频都卡。启动器自更新、原神/星穹铁道/绝区零/崩坏3 的更新与预下载、终末地的渠道包和差异包，全都算在这一个额度里（不是每个游戏各给一份）。<strong>拉到最左边＝不限速</strong>。改完立刻生效，正在跑的下载不用重开。</span>
-            </div>
-            <div class="setting-control volume-control">
-              <input class="volume-range" id="download-limit" type="range" min="0" max="102400" step="1024" value="${(() => {
-                // 滑块 0~102400 KB/s（0~100 MB/s，每档 1 MB/s），与 main.js 的夹取上限一致。
-                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
-                return Math.min(102400, Math.max(0, kb));
-              })()}" aria-label="下载限速" />
-              <span class="volume-value" id="download-limit-value">${(() => {
-                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
-                if (kb <= 0) return '不限速';
-                return kb >= 1024 ? `${(kb / 1024).toFixed(kb % 1024 === 0 ? 0 : 1)} MB/s` : `${kb} KB/s`;
-              })()}</span>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
-            <div class="setting-control">
-              <button class="btn btn-ghost" data-action="change-download-dir">更改</button>
-              <button class="btn btn-icon btn-ghost" data-action="open-download-folder" title="打开下载文件夹">${icon('external')}</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>始终以管理员身份启动</strong><span>终末地 / 明日方舟创建游戏进程时必须提权（官方客户端的限制，实测非提权直接 740）。开启后启动器自己以管理员运行，再开游戏就不会额外弹 UAC；第一次点「开始游戏」时会问你一次，选过就不再问。UAC 被拒绝或新实例没起来时会自动退回普通权限，不会出现双击打不开的情况。</span></div>
-            <div class="setting-control">${switchMarkup('alwaysAdmin', settings.alwaysAdmin)}</div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>管理员权限</strong><span>终末地启动必须提权。启动器不是管理员时会单独弹 UAC；已经是管理员（比如开了上一项）就不会再弹，这是正常的。</span></div>
-            <div class="setting-control">
-              <button class="btn btn-ghost" data-action="relaunch-admin">以管理员身份重启</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>应用数据</strong>
-              <span class="path-text" title="${esc(state.app.userData || '')}">${esc(state.app.userData || '')}</span>
-              <span class="hint">${state.app.portable ? '便携模式：数据、缓存与下载都在启动器文件夹内，不占 C 盘用户目录；整个文件夹拷走即可搬家。' : '当前使用系统 AppData 目录。'}</span>
-            </div>
-            <div class="setting-control">
-              <button class="btn btn-icon btn-ghost" data-action="open-data-folder" title="打开数据目录">${icon('external')}</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>启动器设置备份</strong>
-              <span>把启动器设置导出成一个 JSON 文件（游戏配置、外观、云备份地址等），方便换电脑或重装前留一份；导入会按字段合并，不会覆盖本地已有的键。密码和加密口令存在另一个加密文件里，不在这份导出里。</span>
-            </div>
-            <div class="setting-control">
-              <button class="btn btn-ghost" data-action="export-settings">${icon('download')}导出</button>
-              <button class="btn btn-ghost" data-action="import-settings">${icon('upload')}导入</button>
-            </div>
           </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>运行时目录</strong><span>终末地各渠道的硬链接运行时目录。留空时使用「游戏盘:\\VelaRuntimes」，必须和游戏同盘。每个渠道在其中的 endfield\\&lt;渠道&gt; 各占一个独立目录，切服从官服本体整树重建后只铺该渠道差异文件，不会删掉游戏本体和已下载的语音包。</span></div>
@@ -912,16 +839,72 @@ function settingsView() {
               <button class="btn btn-ghost" data-action="repair-arknights-game">${icon('refresh')}修复游戏</button>
             </div>
           </div>
-
-          ${
-            demos
-              ? `<div class="setting-row">
-                  <div class="setting-copy"><strong>示例条目</strong><span>库中还有 ${demos} 个示例，只用于展示界面。</span></div>
-                  <div class="setting-control"><button class="btn btn-ghost" data-action="clear-demo">清空示例</button></div>
-                </div>`
-              : ''
-          }
-
+        </section>
+        <section class="${group('download', true)}" ${groupAttr('download')}>
+          <h2>${icon('download')}下载与网络</h2>
+          <p class="desc">下载目录、速度上限与网络代理</p>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>下载限速</strong>
+              <span>给所有下载加一个总带宽上限，免得更新游戏时把宽带全占了、同一条网下别的设备看视频都卡。启动器自更新、原神/星穹铁道/绝区零/崩坏3 的更新与预下载、终末地的渠道包和差异包，全都算在这一个额度里（不是每个游戏各给一份）。<strong>拉到最左边＝不限速</strong>。改完立刻生效，正在跑的下载不用重开。</span>
+            </div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="download-limit" type="range" min="0" max="102400" step="1024" value="${(() => {
+                // 滑块 0~102400 KB/s（0~100 MB/s，每档 1 MB/s），与 main.js 的夹取上限一致。
+                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
+                return Math.min(102400, Math.max(0, kb));
+              })()}" aria-label="下载限速" />
+              <span class="volume-value" id="download-limit-value">${(() => {
+                const kb = Number(settings.downloadLimitKBps ?? 0) || 0;
+                if (kb <= 0) return '不限速';
+                return kb >= 1024 ? `${(kb / 1024).toFixed(kb % 1024 === 0 ? 0 : 1)} MB/s` : `${kb} KB/s`;
+              })()}</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>下载文件夹</strong><span class="path-text" title="${esc(settings.downloadDir || '')}">${esc(settings.downloadDir || '')}</span></div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="change-download-dir">更改</button>
+              <button class="btn btn-icon btn-ghost" data-action="open-download-folder" title="打开下载文件夹">${icon('external')}</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>网络代理</strong>
+              <span>启动器自己发出去的请求（更新清单、更新包、封面、公告）走这个代理。只改程序内存里的配置，不写系统代理、不动注册表，关掉启动器对系统没有任何影响。填本地代理软件的地址即可：Clash 是 <code>http://127.0.0.1:7890</code>，v2rayN 是 <code>http://127.0.0.1:10809</code>，Socks5 写成 <code>socks5://127.0.0.1:1080</code>。<b>留空就是直连</b>——装了 Steam++ 这类工具的用户不用填，它靠改 hosts 生效，启动器会自动走。</span>
+            </div>
+            <div class="setting-control update-source-control">
+              <input class="text-input" id="proxy-rules" value="${esc(settings.proxyRules || '')}" placeholder="留空 = 直连，例：http://127.0.0.1:7890" spellcheck="false" />
+              <button class="btn btn-ghost" data-action="save-proxy-rules">保存</button>
+              <button class="btn btn-ghost" data-action="import-system-proxy" title="读系统里已经配好的代理（Clash、v2rayN 开着的那个），自动填进左边的输入框">${icon('link')}用系统代理</button>
+              <button class="btn btn-ghost" data-action="test-proxy" title="拿真实地址试一次，看这条代理到底通不通">${icon('refresh')}测试连接</button>
+              <span class="proxy-test-result" id="proxy-test-result">${esc(proxyTestText())}</span>
+            </div>
+          </div>
+        </section>
+        <section class="${group('data', true)}" ${groupAttr('data')}>
+          <h2>${icon('database')}数据与备份</h2>
+          <p class="desc">应用数据、设置备份与抽卡云备份</p>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>应用数据</strong>
+              <span class="path-text" title="${esc(state.app.userData || '')}">${esc(state.app.userData || '')}</span>
+              <span class="hint">${state.app.portable ? '便携模式：数据、缓存与下载都在启动器文件夹内，不占 C 盘用户目录；整个文件夹拷走即可搬家。' : '当前使用系统 AppData 目录。'}</span>
+            </div>
+            <div class="setting-control">
+              <button class="btn btn-icon btn-ghost" data-action="open-data-folder" title="打开数据目录">${icon('external')}</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>启动器设置备份</strong>
+              <span>把启动器设置导出成一个 JSON 文件（游戏配置、外观、云备份地址等），方便换电脑或重装前留一份；导入会按字段合并，不会覆盖本地已有的键。密码和加密口令存在另一个加密文件里，不在这份导出里。</span>
+            </div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="export-settings">${icon('download')}导出</button>
+              <button class="btn btn-ghost" data-action="import-settings">${icon('upload')}导入</button>
+            </div>
+          </div>
           <div class="setting-row">
             <div class="setting-copy">
               <strong>抽卡记录云备份</strong>
@@ -976,6 +959,20 @@ function settingsView() {
             </div>
           </div>
         </section>
+        <section class="${group('system', true)}" ${groupAttr('system')}>
+          <h2>${icon('shield')}系统与权限</h2>
+          <p class="desc">管理员权限与提权启动</p>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>始终以管理员身份启动</strong><span>终末地 / 明日方舟创建游戏进程时必须提权（官方客户端的限制，实测非提权直接 740）。开启后启动器自己以管理员运行，再开游戏就不会额外弹 UAC；第一次点「开始游戏」时会问你一次，选过就不再问。UAC 被拒绝或新实例没起来时会自动退回普通权限，不会出现双击打不开的情况。</span></div>
+            <div class="setting-control">${switchMarkup('alwaysAdmin', settings.alwaysAdmin)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>管理员权限</strong><span>终末地启动必须提权。启动器不是管理员时会单独弹 UAC；已经是管理员（比如开了上一项）就不会再弹，这是正常的。</span></div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="relaunch-admin">以管理员身份重启</button>
+            </div>
+          </div>
+        </section>
 
         <section class="${group('files', true)}" ${groupAttr('files')}>
           <h2>${icon('trash')}文件管理</h2>
@@ -988,17 +985,24 @@ function settingsView() {
                 })()
               : ''
           }
+          ${
+            demos
+              ? `<div class="setting-row">
+                  <div class="setting-copy"><strong>示例条目</strong><span>库中还有 ${demos} 个示例，只用于展示界面。</span></div>
+                  <div class="setting-control"><button class="btn btn-ghost" data-action="clear-demo">清空示例</button></div>
+                </div>`
+              : ''
+          }
         </section>
 
         <section class="${group('update', true)}" ${groupAttr('update')}>
           <h2>${icon('download')}软件更新</h2>
           <p class="desc">内置更新源，下载后做 sha256 校验</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>更新源</strong><span>决定「检查更新」和「下载更新包」走哪条路。<b>自动</b>适合绝大多数人：填了 Mirror酱 的 CDK 才去测它，没填就按 Gitee → jsDelivr → GitHub 的顺序挨个试，哪个通用哪个。国内网络一直卡在「检查更新」或下载不动时，可以在下面锁死某一个源试试。</span></div>
+            <div class="setting-copy"><strong>更新源</strong><span>决定「检查更新」和「下载更新包」走哪条路。<b>自动</b>适合绝大多数人：按 Gitee → jsDelivr → GitHub 的顺序挨个试，哪个通用哪个。国内网络一直卡在「检查更新」或下载不动时，可以在下面锁死某一个源试试。</span></div>
             <div class="setting-control update-source-control">
               <select class="select" id="update-source-mode">
                 <option value="auto"${esc(settings.updateSourceMode || 'auto') === 'auto' ? ' selected' : ''}>自动（推荐）</option>
-                <option value="mirrorchyan"${settings.updateSourceMode === 'mirrorchyan' ? ' selected' : ''}>Mirror酱（填了 CDK 才生效）</option>
                 <option value="gitee"${settings.updateSourceMode === 'gitee' ? ' selected' : ''}>Gitee 镜像</option>
                 <option value="jsdelivr"${settings.updateSourceMode === 'jsdelivr' ? ' selected' : ''}>jsDelivr</option>
                 <option value="github"${settings.updateSourceMode === 'github' ? ' selected' : ''}>GitHub 直连</option>
@@ -1014,32 +1018,6 @@ function settingsView() {
               <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="留空 = 内置官方源" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
               <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}填入 Gitee 镜像</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>Mirror酱 加速下载</strong>
-              <span>第三方更新分发服务，<b>接入免费</b>，用户自愿买 CDK 才能用它的加速线路。不填也能查版本号，只是下载仍走上面那些源。<b>资源 ID 由 Mirror酱 官方分配</b>（不等于项目名），拿到之后填在这里即可，不用改代码；<b>CDK 是你自己买的下载凭证</b>，填了才会在「自动」模式下自动测试。CDK 只存在本机、不会写进日志和诊断导出。<a href="#" data-action="open-external" data-url="https://mirrorchyan.com?source=hxl_settings">了解 Mirror酱</a></span>
-            </div>
-            <div class="setting-control update-source-control">
-              <input class="text-input" id="mirrorchyan-rid" value="${esc(settings.mirrorchyanRid || '')}" placeholder="资源 ID（RID）" spellcheck="false" />
-              <input class="text-input" id="mirrorchyan-cdk" value="${esc(settings.mirrorchyanCdk || '')}" placeholder="CDK（可留空）" spellcheck="false" />
-              <button class="btn btn-ghost" data-action="save-mirrorchyan">保存</button>
-              <button class="btn btn-ghost" data-action="test-mirrorchyan" title="用现在的 RID 和 CDK 试一次，看能不能连上">${icon('refresh')}测试</button>
-              <span class="proxy-test-result" id="mirrorchyan-test-result">${esc(mirrorchyanTestText())}</span>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy">
-              <strong>网络代理</strong>
-              <span>启动器自己发出去的请求（更新清单、更新包、封面、公告）走这个代理。只改程序内存里的配置，不写系统代理、不动注册表，关掉启动器对系统没有任何影响。填本地代理软件的地址即可：Clash 是 <code>http://127.0.0.1:7890</code>，v2rayN 是 <code>http://127.0.0.1:10809</code>，Socks5 写成 <code>socks5://127.0.0.1:1080</code>。<b>留空就是直连</b>——装了 Steam++ 这类工具的用户不用填，它靠改 hosts 生效，启动器会自动走。</span>
-            </div>
-            <div class="setting-control update-source-control">
-              <input class="text-input" id="proxy-rules" value="${esc(settings.proxyRules || '')}" placeholder="留空 = 直连，例：http://127.0.0.1:7890" spellcheck="false" />
-              <button class="btn btn-ghost" data-action="save-proxy-rules">保存</button>
-              <button class="btn btn-ghost" data-action="import-system-proxy" title="读系统里已经配好的代理（Clash、v2rayN 开着的那个），自动填进左边的输入框">${icon('link')}用系统代理</button>
-              <button class="btn btn-ghost" data-action="test-proxy" title="拿真实地址试一次，看这条代理到底通不通">${icon('refresh')}测试连接</button>
-              <span class="proxy-test-result" id="proxy-test-result">${esc(proxyTestText())}</span>
             </div>
           </div>
           <div class="setting-row">

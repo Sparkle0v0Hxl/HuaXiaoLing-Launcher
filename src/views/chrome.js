@@ -1132,4 +1132,9 @@ function render(options = {}) {
   updateSongChrome();
   renderQuickPanel();
   decorateCharacterMotifs();
+  /*
+   * 启动页那块统一进度面板刚被 innerHTML 换成了空宿主，
+   * 这里把 state.task 的内容补画回去，否则正在跑的任务会「消失」到下一次进度事件为止。
+   */
+  if (typeof updateTaskPanel === 'function') updateTaskPanel();
 }

@@ -212,17 +212,6 @@ const yostarPacks = require('./yostar-packs');
 // 进度计量器：给各条下载/更新链路补速度与剩余时间（纯计算，无 IO、无依赖）
 const progressMeter = require('./progress-meter');
 
-/*
- * Mirror酱（MirrorChyan）更新源。
- *
- * 它提供「版本查询 + CDN 加速下载」，接入不需要付费；用户侧自己买 CDK 才走
- * 它的加速，不填 CDK 仍能查到版本号、继续用我们原来的源下载。所以这里的定位是
- * 「可选加速 + 额外兜底」，绝不作为唯一更新源。
- *
- * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
- */
-const mirrorchyan = require('./mirrorchyan');
-
 app.setName('花筱灵启动器');
 /* AUMID 尾缀 .x1：Explorer 的任务栏图标缓存按 AUMID 键值存储，旧 ID
  * 'com.huaxiaoling.launcher' 上粘了一个坏结果（任务栏一直显示系统兜底
@@ -1048,27 +1037,13 @@ function defaultSettings() {
     updateManifest: '',
     /*
      * 更新源模式。界面上是个下拉：
-     *   auto        自动（默认）—— Mirror酱 的 RID 和 CDK 都填了才去测它，
-     *               否则按 gitee 那条顺序走我们自己的源。这是默认值，也是绝大多数
-     *               用户该用的模式：没配 Mirror酱 时行为和以前一模一样。
-     *   mirrorchyan 只用 Mirror酱（测不通会明说原因，不静默回退，方便排查配置）
+     *   auto       自动（默认）—— 按 Gitee → jsDelivr → GitHub 的顺序挨个试
      *   gitee / jsdelivr / github  锁定我们内置的某一条，便于用户绕开被卡的线路
-     *   custom      只用下面手填的地址（内网共享、自建静态站点）
-     * 不论哪种模式，Mirror酱 只在「能拿到带 sha256 的下载地址」时才真正接管下载，
-     * 拿不到就回到我们自己的源——它不该变成单点。
+     *   custom     只用下面手填的地址（内网共享、自建静态站点）
+     * 「锁定某一条」不会把其它源删掉，只是把它排到最前面，前面那条挂了仍会回落，
+     * 否则某一条镜像抖动一下所有人都会卡住。
      */
     updateSourceMode: 'auto',
-    /*
-     * Mirror酱 资源 ID（RID，API 里的 res_id）。由 Mirror酱 官方随接入方案分配，
-     * 不等于仓库名，所以留空＝没接入，整套逻辑直接跳过。拿到之后填在这里就行，
-     * 不用改代码。
-     */
-    mirrorchyanRid: '',
-    /*
-     * 用户的 Mirror酱 CDK：不填也能查版本（只是拿不到加速下载地址）。
-     * 是凭证所以只进主进程、不进日志、不进导出诊断；界面上按掩码显示。
-     */
-    mirrorchyanCdk: '',
     autoCheckUpdate: true,
     /*
      * 网络代理：只影响启动器自己发出的请求（更新清单、更新包、封面、公告），
@@ -4802,10 +4777,16 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
     String((marker && marker.channel) || '') !== channel ||
     String((marker && marker.pack) || '') !== packSignature;
 
+  /*
+   * 硬链接运行时生成也走计量器（sendProgress），否则启动页那块统一面板拿不到
+   * bytesPerSec / etaSeconds / rows，只会在「硬链接生成」时显示一行文字 —— 用户 2026-11-11
+   * 明确要求硬链接生成过程也要有和下载更新一样的小面板。
+   * 这条链路没有 jobId，用 server.id 当键：同一个服务器的多次生成共用一份采样，正合适。
+   */
   const emit =
     typeof options.onProgress === 'function'
       ? options.onProgress
-      : (progress) => send('endfield:progress', { ...progress, serverName: server.name });
+      : (progress) => sendProgress('endfield:progress', server.id, { ...progress, serverName: server.name });
 
   let result = { linked: 0, overlay: { processed: 0 } };
   let built = false;
@@ -6524,20 +6505,22 @@ function updateSourceList() {
     }
     return list;
   }
-  // mirrorchyan 模式下清单本身还是得从我们自己的源读：Mirror酱 只负责版本比对
-  // 和加速下载，它不产出 latest.json。所以这里和 auto 走同一套，差别在
-  // performUpdateCheck 里（那边会明说 Mirror酱 测不通的原因）。
+  // 锁定某一条内置源时，把它排到最前面；其余官方源仍排在后面兜底。
   if (mode === 'gitee' || mode === 'jsdelivr' || mode === 'github') {
     for (const url of OFFICIAL_UPDATE_MANIFESTS) {
       if (updateSourceKindOf(url) === mode) push(url);
     }
   }
-  if (configured && (mode === 'auto' || mode === 'mirrorchyan')) {
-    push(configured);
-    for (const candidate of updateSourceCandidates(configured)) push(candidate);
-  }
-  push(localUpdateManifest());
+  /*
+   * 自动模式：Gitee 镜像最先（国内裸连最稳、清单里的下载地址还带加速前缀），
+   * 其次 fastly / cdn 两个 jsDelivr 节点，最后 GitHub 源站。
+   * 手填地址在自动模式下不参与——设置页也是这样写的「只在选了自定义地址时生效」，
+   * 不然用户填过一个旧地址之后，明明选着「自动」却一直读那份旧的，很难看出来。
+   */
   for (const url of OFFICIAL_UPDATE_MANIFESTS) push(url);
+  // 启动器目录里自带的那份清单放最后兜底：内网 / 完全离线时它是唯一能读到的，
+  // 但不能排在网络源前面，否则刚更新完那版清单会让「检查更新」永远读到自己。
+  push(localUpdateManifest());
   return list;
 }
 
@@ -6592,50 +6575,6 @@ function resolveUpdateSource() {
 // 本会话内已经自动弹过「发现新版本」的版本号：同一个版本后台复查（每 6 小时）不再重复弹
 let autoNotifiedUpdateVersion = '';
 
-/** 这次检查要不要去问 Mirror酱，以及为什么去/不去。 */
-function mirrorchyanGate() {
-  const settings = store?.data?.settings || {};
-  const mode = String(settings.updateSourceMode || 'auto').trim() || 'auto';
-  const rid = String(settings.mirrorchyanRid || '').trim();
-  const cdk = String(settings.mirrorchyanCdk || '').trim();
-  // 没 RID 就等于还没接入，任何模式都不该去请求——请求必然 404，只会白等 8 秒。
-  if (!rid) return { ask: false, mode, rid, cdk, reason: 'no-rid' };
-  if (mode === 'custom') return { ask: false, mode, rid, cdk, reason: 'custom-mode' };
-  /*
-   * 「自动」模式的判定就这一句：CDK 填了才去测。
-   *
-   * 不填 CDK 时 Mirror酱 只能给版本号、给不出下载地址，查了也只是多一次请求，
-   * 而版本号从我们自己的清单就能拿到；更关键的是默认状态下不该让每个用户开机
-   * 都向第三方发一次请求。所以自动模式的门槛是「RID 和 CDK 都有」。
-   */
-  if (mode === 'auto' && !cdk) return { ask: false, mode, rid, cdk, reason: 'auto-no-cdk' };
-  return { ask: true, mode, rid, cdk, reason: '' };
-}
-
-/**
- * 问一次 Mirror酱 的最新版本，结果并进 updateStatus。
- *
- * 返回值只用来决定「下载走哪条路」，判断有没有更新仍然以我们自己签名的清单为准：
- * Mirror酱 的响应没有签名，不能作为「允许下载」的依据。
- */
-async function probeMirrorchyan(gate, options = {}) {
-  const result = await mirrorchyan.checkLatest({
-    rid: gate.rid,
-    cdk: gate.cdk,
-    currentVersion: APP_VERSION,
-    timeout: options.timeout,
-  });
-  if (!result.ok) {
-    // 失败只留档不起哄：用户选了自动模式、只是 CDK 过期或次数用完，不该弹红字打断。
-    writeLaunchLog(`mirrorchyan check failed: code=${result.code} ${result.error || ''}`);
-  } else {
-    writeLaunchLog(
-      `mirrorchyan latest=${result.latest} hasUrl=${result.url ? 'yes' : 'no'} type=${result.updateType || '-'}`
-    );
-  }
-  return result;
-}
-
 async function performUpdateCheck(options = {}) {
   const locations = resolveUpdateSource();
   if (!locations.length) {
@@ -6651,97 +6590,10 @@ async function performUpdateCheck(options = {}) {
     if (options.push !== false) pushState(true);
     return updateStatus;
   }
-  const gate = mirrorchyanGate();
-  let mirror = null;
-  if (gate.ask) {
-    // 并行问：两边的结果要合并，串行会让「检查更新」白等一个来回。
-    const [manifestResult, mcResult] = await Promise.all([
-      updater.checkForUpdate({ location: locations, currentVersion: APP_VERSION }),
-      probeMirrorchyan(gate),
-    ]);
-    mirror = mcResult;
-    return finishUpdateCheck(manifestResult, mirror, gate, options);
-  }
   const result = await updater.checkForUpdate({
     location: locations,
     currentVersion: APP_VERSION,
   });
-  return finishUpdateCheck(result, null, gate, options);
-}
-
-/**
- * 把「自有清单结果」和「Mirror酱 结果」合成一份 updateStatus。
- *
- * 合并规矩：
- *   版本号   取两边更高的那个 —— Mirror酱 通常同步更快，我们自己的镜像偶尔落后。
- *   下载地址 优先 Mirror酱（它有 CDK 才有 url，有 url 就说明用户能用加速）。
- *   签名     Mirror酱 的结果没有签名，所以「能不能装」永远按自有清单的结论走：
- *            自有清单说没更新、而 Mirror酱 说有，仍然提示有更新，但下载回落到原来的源。
- */
-function finishUpdateCheck(result, mirror, gate, options = {}) {
-  const localLatest = String((result && result.latest) || '').replace(/^v/i, '');
-  const localHasUpdate = Boolean(result && result.ok && result.hasUpdate);
-  if (mirror && mirror.ok) {
-    const mcLatest = String(mirror.latest || '').replace(/^v/i, '');
-    const mcNewer =
-      mcLatest && (!localLatest || updater.compareVersions(mcLatest, localLatest) > 0);
-    if (mcNewer) {
-      /*
-       * Mirror酱 比我们自己的清单新。这时只能「知道有新版本」，下载地址得看
-       * Mirror酱 有没有给：给了就能直接用加速地址，没给就只能等我们自己的
-       * 清单跟上——绝不能拿一个没校验过的地址去装。
-       */
-      result = {
-        ...result,
-        ok: true,
-        hasUpdate: true,
-        latest: mcLatest,
-        notes: mirror.notes || (result && result.notes) || '',
-        // 有这个字段就说明走 Mirror酱 下载，startUpdate 认它
-        mirrorUrl: mirror.url || '',
-        mirrorSha256: mirror.sha256 || '',
-        mirrorSize: mirror.size || 0,
-        mirrorType: mirror.updateType || '',
-        mirrorRef: gate.mode === 'mirrorchyan' ? 'mirrorchyan' : 'mirrorchyan-newer',
-      };
-    } else if (localHasUpdate && mirror.url && mirror.sha256) {
-      /*
-       * 版本一致、本地清单也说要更新，而 Mirror酱 又给了可用地址：这时把下载
-       * 换成 Mirror酱 的加速地址。sha256 用 Mirror酱 自己给的——它和自己那份
-       * url 是配套的，不能拿本地清单的 sha256 去校验 Mirror酱 的文件。
-       */
-      result = {
-        ...result,
-        mirrorUrl: mirror.url,
-        mirrorSha256: mirror.sha256,
-        mirrorSize: mirror.size || 0,
-        mirrorType: mirror.updateType || '',
-        mirrorRef: 'mirrorchyan',
-      };
-    }
-  }
-  if (gate.mode === 'mirrorchyan' && (!mirror || !mirror.ok)) {
-    /*
-     * 用户明确选了「只用 Mirror酱」却没测通：把原因写进 error，但不要 hasUpdate=false
-     * 之外再翻旧账——自有清单那边可能读得到，只是用户不想用它。
-     */
-    result = {
-      ...result,
-      mirrorRef: 'mirrorchyan-failed',
-      mirrorError: (mirror && mirror.error) || 'Mirror酱 没有响应',
-    };
-  }
-  /*
-   * Mirror酱 给了可用下载地址时，把它当作「用户自己配置的更新源」看待，
-   * 和手填 updateManifest 走同一条宽容政策：不强求我们自己的签名。
-   *
-   * 理由和自定义源一致——是用户主动填了 RID/CDK 把这条链路接进来的，包的可信度
-   * 由 Mirror酱 的 sha256 兜（下载时逐字节校验，对不上就丢弃重来）。而我们自己的
-   * 签名清单在这里起的是「版本权威」的作用：它说没有更新就绝不升级。
-   */
-  if (result && result.mirrorUrl && result.mirrorSha256) {
-    result = { ...result, sigState: 'mirrorchyan' };
-  }
   return finalizeUpdateStatus(result, options);
 }
 
@@ -7078,33 +6930,16 @@ async function startUpdate(options = {}) {
     if (!manifest.url) throw new Error('更新源没有给出下载地址');
     if (!manifest.sha256) throw new Error('更新源里没有写 update 包的 sha256，为安全起见不自动安装');
 
-    /*
-     * Mirror酱 的加速地址：只在它给的是**完整包**（update_type=full）时才用。
-     *
-     * 它也可能返回 incremental（一个 changes.json + 改动的文件），那是它自己的一套
-     * 增量格式，和 updater.stageDelta 认的补丁包完全不是一回事，硬套进去只会
-     * 装出半个客户端。所以增量包一律不用它的地址，让它走我们自己的差分包/完整包
-     * ——反正那份清单本来就是从我们自己的源读的，链路上没损失。
-     *
-     * 代价是买 CDK 的用户在「恰好只有增量包」的情况下享受不到加速。这个取舍是
-     * 有意的：加速是锦上添花，装坏客户端不是。
-     */
-    const mirrorReady =
-      updateStatus.mirrorUrl &&
-      updateStatus.mirrorSha256 &&
-      String(updateStatus.mirrorType || 'full').toLowerCase() !== 'incremental';
-    const downloadUrl = mirrorReady ? updateStatus.mirrorUrl : manifest.url;
-    const downloadSha = mirrorReady ? updateStatus.mirrorSha256 : manifest.sha256;
-    const downloadSize = mirrorReady ? updateStatus.mirrorSize || manifest.size : manifest.size;
+    const downloadUrl = manifest.url;
+    const downloadSha = manifest.sha256;
+    const downloadSize = manifest.size;
 
     const tempBase = updateTempBase();
     await fsp.mkdir(tempBase, { recursive: true }).catch(() => {});
 
     // 增量更新优先：清单里有「当前版本 -> 目标版本」的差分包时，只下变化的部分。
     // 任何一步不对都静默退回整包，绝不让「更快」变成「更新不了」。
-    // Mirror酱 接管完整包下载时跳过这一步：它给的是另一个版本自己的完整包，
-    // 我们的差分包基准对不上（也可能压根没有），硬试只会白等一轮失败。
-    const deltaInfo = mirrorReady ? null : updater.pickDelta(manifest, APP_VERSION, manifest.version);
+    const deltaInfo = updater.pickDelta(manifest, APP_VERSION, manifest.version);
     if (deltaInfo && deltaInfo.url && deltaInfo.sha256) {
       try {
         const staged = await downloadAndStageDelta({ delta: deltaInfo, manifest, tempBase });
@@ -10279,33 +10114,6 @@ function installIpc() {
   });
 
   ipcMain.handle('update:check', async () => performUpdateCheck({ push: true, manual: true }));
-  /*
-   * Mirror酱 手动测试：设置页那个「测试」按钮。
-   *
-   * 和自动检查的区别是它不看模式门槛——用户点测试就是明确想验一次配置，
-   * 哪怕现在是「自动」而 CDK 留空，也该如实告诉他「没 CDK 只能查版本」。
-   */
-  ipcMain.handle('update:mirrorchyan-test', async (_event, input) => {
-    const patch = input && typeof input === 'object' ? input : {};
-    const rid = String(patch.rid || store?.data?.settings?.mirrorchyanRid || '').trim();
-    const cdk = String(patch.cdk || store?.data?.settings?.mirrorchyanCdk || '').trim();
-    const result = await mirrorchyan.checkLatest({
-      rid,
-      cdk,
-      currentVersion: APP_VERSION,
-      sendPlatform: patch.sendPlatform !== false,
-    });
-    /*
-     * 只回结果、不存 CDK：测试用的是界面上的输入值，用户没点保存就不该被写进
-     * launcher-data.json。存盘由 settings:update 那条路负责。
-     */
-    return {
-      ...result,
-      // 回给界面的一律是打码 / 脱敏版本，免得渲染层日志或截图带出真实 CDK
-      cdkMasked: mirrorchyan.maskCdk(cdk),
-      rid,
-    };
-  });
   // 代理：从系统里读一条现成的规则，省得用户自己去翻 Clash 的端口
   ipcMain.handle('proxy:system', async () => readSystemProxy());
   // 代理：拿真实地址试一下通不通，比「保存了但不知道有没有用」强
@@ -10389,11 +10197,9 @@ function installIpc() {
       // 侧栏底部那张火花立绘：展开侧栏时会占掉一截高度，用户要能自己关掉
       'sidebarChar',
       'updateManifest',
-      // Mirror酱 接入三项：模式、RID、用户 CDK。不放进白名单的话，设置页写下去
-      // 会被快照回推抹掉，表现为「选了模式一刷新又变回自动」。
+      // 更新源模式：不放进白名单的话，设置页写下去会被快照回推抹掉，
+      // 表现为「选了模式一刷新又变回自动」。
       'updateSourceMode',
-      'mirrorchyanRid',
-      'mirrorchyanCdk',
       'autoCheckUpdate',
       'proxyRules',
       'notesSeenVersion',
@@ -10525,18 +10331,9 @@ function installIpc() {
       } else if (key === 'updateSourceMode') {
         // 只认这几种，别的值一律回到「自动」——多一个拼错的值就会让更新链变哑巴。
         const mode = String(patch.updateSourceMode || '').trim();
-        settings.updateSourceMode = ['auto', 'mirrorchyan', 'gitee', 'jsdelivr', 'github', 'custom'].includes(mode)
+        settings.updateSourceMode = ['auto', 'gitee', 'jsdelivr', 'github', 'custom'].includes(mode)
           ? mode
           : 'auto';
-      } else if (key === 'mirrorchyanRid') {
-        // RID 是官方分配的短标识（字母数字），顺手清掉空白和奇怪的字符
-        settings.mirrorchyanRid = String(patch.mirrorchyanRid || '').trim().replace(/[^0-9A-Za-z_-]/g, '').slice(0, 64);
-      } else if (key === 'mirrorchyanCdk') {
-        /*
-         * 用户 CDK。它是凭证：既不能进日志（查到 url 会被脱敏打印），也不能截断成
-         * 一半——截断后用户看到「填了但用不了」比不填更难受。这里只去首尾空白。
-         */
-        settings.mirrorchyanCdk = String(patch.mirrorchyanCdk || '').trim().slice(0, 128);
       } else if (key === 'proxyRules') {
         settings.proxyRules = normalizeProxyRules(patch.proxyRules);
       } else if (key === 'autoCheckUpdate') {
@@ -10660,11 +10457,31 @@ function installIpc() {
     if (!installRoot || !targetExists(server?.path)) {
       throw new Error('先配置这个游戏的客户端路径');
     }
-    return syncGacha({
-      game: game.builtinKey,
-      installRoot,
-      userData: app.getPath('userData'),
-    });
+    /*
+     * 手动同步的错误要带结构化字段回界面（Electron 的 invoke 会把自定义
+     * error.code / error.rateLimited 全丢掉，只剩 message），所以这里自己
+     * catch 一层：限流、正在同步、链接过期 三种给不同的可操作提示。
+     */
+    try {
+      return await syncGacha({
+        game: game.builtinKey,
+        installRoot,
+        userData: app.getPath('userData'),
+      });
+    } catch (error) {
+      if (error?.rateLimited) {
+        return {
+          ok: false,
+          rateLimited: true,
+          retryAfterMs: Number(error.cooldownMs) || 10 * 60 * 1000,
+          error: String(error.message || '抽卡接口被限流了，等十来分钟再试'),
+        };
+      }
+      if (error?.busy) {
+        return { ok: false, busy: true, error: String(error.message || '这个游戏的抽卡记录正在同步中') };
+      }
+      throw error;
+    }
   });
 
   ipcMain.handle('endfield:update-game', async (_event, options = {}) => {
@@ -14224,8 +14041,12 @@ function musicLoginWindow(target) {
         mode: input?.mode === 'fast' ? 'fast' : 'full',
         signal,
         onProgress: (progress) => {
-          send('link:progress', {
-            jobId,
+          /*
+           * 硬链接也走计量器（sendProgress）：这条链路以前只发 processed/total 文件数，
+           * 面板三行里的「下载」行就拿不到字节量，只会在硬链接生成时显示一行干巴巴的文字。
+           * link.js 现在已经按目标文件大小累加 bytesDone/totalBytes，这里补上速度与剩余时间。
+           */
+          sendProgress('link:progress', jobId, {
             gameId: game.id,
             ...progress,
             sourceName,
@@ -16682,7 +16503,6 @@ function musicLoginWindow(target) {
       const cfg = store?.data?.settings || {};
       const updateSourceModeText = {
         auto: '自动（内置镜像依次尝试）',
-        mirrorchyan: 'Mirror酱 优先',
         gitee: 'Gitee 镜像优先',
         jsdelivr: 'jsDelivr 优先',
         github: 'GitHub 直连优先',
@@ -16693,13 +16513,6 @@ function musicLoginWindow(target) {
         代理: cfg.proxyRules ? String(cfg.proxyRules) : '未设置（直连）',
         更新源模式: updateSourceModeText,
         更新源: cfg.updateManifest ? String(cfg.updateManifest) : '内置官方源',
-        /*
-         * Mirror酱 只报「配没配」和 RID，不报 CDK —— 诊断包是要发给别人的文本，
-         * CDK 是用户的付费凭证，写进去等于替他公开了。
-         */
-        Mirror酱: cfg.mirrorchyanRid
-          ? `RID ${String(cfg.mirrorchyanRid).slice(0, 64)} / CDK ${cfg.mirrorchyanCdk ? '已配置（不在诊断里显示）' : '未填（只能查版本，不能加速下载）'}`
-          : '未配置',
         自动检查更新: cfg.autoCheckUpdate === false ? '关闭' : '开启',
         清单签名: `已启用，公钥 ${minisign.KEY_ID}，最近验签版本 ${cfg.updateSignedVersion || '（还没验过）'}`,
         最近一次检查: updateStatus
@@ -18637,45 +18450,113 @@ function startEndfieldGachaWatcher() {
 
 let mihoyoGachaWatching = false;
 const mihoyoGachaSignatures = new Map();
+/*
+ * 失败签名与冷却时间。
+ *
+ * 去掉 running 那道闸之后，如果某条缓存里的链接已经过期（常见：绝区零的
+ * authkey 过期后接口回 auth key time out），20 秒一轮就会一直重试同一个
+ * 失败请求，白白发网络。这里记下「这份签名试过了、失败了」，冷却期内不再
+ * 试；用户重新打开一次抽卡记录页 → data_2 的 mtime 变 → 签名变 → 立刻重试。
+ */
+const mihoyoGachaFailures = new Map();
+const MIHOYO_GACHA_FAIL_COOLDOWN = 5 * 60 * 1000;
 function startMihoyoGachaWatcher() {
   const MIHOYO = ['genshin', 'starrail', 'zzz'];
+  /*
+   * 一台机器上同一款游戏可能有多个渠道各存一份客户端（原神官服/国际服、星铁
+   * 官服/B服/国际服），抽卡缓存是跟着「哪一份客户端跑过」走的。以前只看
+   * activeServer 那一份：用户用 A 渠道玩了、切到 B 渠道之后，缓存明明更新了
+   * 却看的是 B 的旧缓存 → 永远不同步。这里把该游戏所有配好路径的渠道都当候选。
+   */
+  const rootsOf = (game) => {
+    const roots = [];
+    const pushDir = (value) => {
+      if (!value) return;
+      let dir = value;
+      try {
+        if (fs.statSync(dir).isFile()) dir = path.dirname(dir);
+      } catch {
+        return;
+      }
+      if (!roots.includes(dir)) roots.push(dir);
+    };
+    for (const server of game.servers || []) {
+      pushDir(server.root); // 渠道根目录（独立运行时 / 本体目录）
+      pushDir(server.path); // exe 路径，取所在目录
+    }
+    pushDir(game.target); // 兜底：当前启动程序
+    return roots;
+  };
   const attempt = async () => {
     if (mihoyoGachaWatching || store.data.settings.autoGacha === false) return;
     for (const game of store.data.games) {
       if (!MIHOYO.includes(game.builtinKey)) continue;
-      if (!running.has(game.id)) continue;
-      const server = (game.servers || []).find((item) => item.id === game.activeServerId);
-      const root = server?.root || (game.target ? path.dirname(game.target) : '') || (server?.path ? path.dirname(server.path) : '');
-      if (!root) continue;
-      // 只看缓存目录里的文件名与 mtime（轻量 stat），不整读几十 MB 的 data_2。
-      // 用户新开一次抽卡记录页，data_2 的 mtime 就会变，签名随之变化 → 触发一次同步。
-      let signature;
-      try {
-        signature = gachaCacheFiles(root, game.builtinKey)
-          .map((item) => `${item.file}:${item.mtimeMs}`)
-          .join('|');
-      } catch {
-        continue;
-      }
-      if (signature === mihoyoGachaSignatures.get(game.id)) continue;
-      let api;
-      try {
-        api = extractUrlFromCache(root, game.builtinKey); // 抛错 = 还没缓存/链接未就绪
-      } catch {
-        continue; // 缓存还没就绪，不记签名，下个 tick 用同签名重试
-      }
-      mihoyoGachaWatching = true;
-      try {
-        const result = await syncGacha({ game: game.builtinKey, installRoot: root, userData: app.getPath('userData'), api });
-        mihoyoGachaSignatures.set(game.id, signature); // 只有真的同步成功，才把这份缓存记为已处理
-        if (result.imported > 0) {
-          send('gacha:updated', result);
-          send('toast', { type: 'success', message: `${game.name || game.builtinKey} 抽卡记录已自动同步 ${result.imported} 条` });
+      /*
+       * 这里以前有一句 `if (!running.has(game.id)) continue;`，是个真 bug：
+       * running 是纯内存 Map，启动器一重启就空了，而 alwaysAdmin 会在启动时
+       * 自己提权重启一次 —— 用户开游戏、再切回启动器，运行态就丢了，
+       * 后面无论怎么打开抽卡记录页都不会自动同步（2026-11-11 用户报的就是这个）。
+       * 更常见的情况是游戏根本就是绕过启动器直接开的，running 里当然没有。
+       * 判据改成只看缓存签名：data_2 的 mtime 一变就说明用户在游戏里点开过
+       * 抽卡记录页、链接已经刷新，跟「启动器认不认为游戏在跑」没有关系。
+       * 游戏没开时缓存不会自己变，所以这不会造成空转。
+       */
+      for (const root of rootsOf(game)) {
+        // 只看缓存目录里的文件名与 mtime（轻量 stat），不整读几十 MB 的 data_2。
+        // 用户新开一次抽卡记录页，data_2 的 mtime 就会变，签名随之变化 → 触发一次同步。
+        let signature;
+        try {
+          signature = gachaCacheFiles(root, game.builtinKey)
+            .map((item) => `${item.file}:${item.mtimeMs}`)
+            .join('|');
+        } catch {
+          continue;
         }
-      } catch {
-        /* 链接过期或暂未就绪，不记签名，下个 tick 重试（与优化前行为一致，不空转也不漏） */
-      } finally {
-        mihoyoGachaWatching = false;
+        if (!signature) continue; // 这个渠道没装/没有网页缓存
+        // 签名按「游戏 + 渠道目录」记，多渠道时互不干扰
+        const key = `${game.id}\u0000${root}`;
+        if (signature === mihoyoGachaSignatures.get(key)) continue;
+        // 这份缓存刚试过且失败了，冷却期内不再重复打网络；签名一变（用户重新
+        // 打开抽卡记录页）自然就走下一条，冷却带的是旧签名，不会误伤。
+        // 限流时冷却会更长（error.cooldownMs），所以这里按记录里存的时长判。
+        const failed = mihoyoGachaFailures.get(key);
+        if (
+          failed &&
+          failed.signature === signature &&
+          Date.now() - failed.at < (Number(failed.cooldownMs) || MIHOYO_GACHA_FAIL_COOLDOWN)
+        ) continue;
+        let api;
+        try {
+          api = extractUrlFromCache(root, game.builtinKey); // 抛错 = 还没缓存/链接未就绪
+        } catch {
+          continue; // 缓存还没就绪，不记签名，下个 tick 用同签名重试
+        }
+        mihoyoGachaWatching = true;
+        try {
+          const result = await syncGacha({ game: game.builtinKey, installRoot: root, userData: app.getPath('userData'), api });
+          mihoyoGachaSignatures.set(key, signature); // 只有真的同步成功，才把这份缓存记为已处理
+          mihoyoGachaFailures.delete(key);
+          if (result.imported > 0) {
+            send('gacha:updated', result);
+            send('toast', { type: 'success', message: `${game.name || game.builtinKey} 抽卡记录已自动同步 ${result.imported} 条` });
+          }
+        } catch (error) {
+          /*
+           * 链接过期（authkey time out / 10001 / -100 / -101）、被限流（2001 /
+           * visit too frequently）、或者另一条同步正在跑 —— 这三种都要记冷却，
+           * 免得 20 秒一轮反复打。限流冷却拉长到 10 分钟：米哈游那边的窗口
+           * 一般就是这个量级，5 分钟不够，会一进来就再撞一次。
+           * 不弹 toast：用户此刻多半还没意识到要重新打开抽卡页，等他下次点开
+           * 时签名一变就自动接上。
+           */
+          const cooldownMs = Number(error?.cooldownMs) || MIHOYO_GACHA_FAIL_COOLDOWN;
+          mihoyoGachaFailures.set(key, { signature, at: Date.now(), cooldownMs });
+          writeLaunchLog(
+            `gacha ${game.builtinKey}: 自动同步失败（${error?.message || error}），这份缓存 ${Math.round(cooldownMs / 60000)} 分钟内不再重试`
+          );
+        } finally {
+          mihoyoGachaWatching = false;
+        }
       }
     }
   };

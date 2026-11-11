@@ -464,6 +464,23 @@ function groupServersForDisplay(servers) {
   return groups;
 }
 
+/*
+ * 任务态的唯一入口：启动页 dock 最上面那一块内联进度面板。
+ *
+ * 用户 2026-11-11 的原话：「我的意思是，都统一用面板」「面板就不能做到在开始游戏的
+ * 按钮的上方吗？」「然后那个面板，也是个按钮，点开就是你本来就有的那个详情的过程窗口嘛」。
+ *
+ * 所以这里只留一个空的挂载点，内容由 app.js 的 updateTaskPanel() 写进来：
+ *   · 下载 / 硬链接生成 / 更新 / 渠道包 —— 各自有现成的详情弹窗，点这块就把它叫出来；
+ *   · 没任务在跑时这块是空的（CSS :empty 收成 0 高度），按钮位置不会因此往下挪。
+ *
+ * 为什么不在渲染时就算好内容：进度事件每秒几十次，整页重绘会把背景 <video> 重启，
+ * 表现为切界面闪一下静态图。留挂载点就只改这一个节点。
+ */
+function startDockTaskPanel(game) {
+  return `<div class="start-dock-task-host" id="start-dock-task-host" data-game="${esc(game.id)}"></div>`;
+}
+
 /**
  * 启动页 dock 的主按钮区。
  * 已安装：单个「开始游戏」，行为一字不变。
@@ -480,13 +497,17 @@ function startDockDownloadActions(game) {
     // 状态来自 server.predownload（后台自动检测落盘），update = 本地落后正式版。
     const updating = state.gameUpdate && state.gameUpdate.gameId === game.id;
     if (updating) {
-      // 进度条用按钮上的 CSS 变量驱动：重绘时能立刻还原到上一次的百分比，
-      // 不用等下一个进度事件（否则每次重绘进度条都会掉回 0）
-      const percent = Number(state.gameUpdate.percent) || 0;
-      return `<button class="start-dock-play is-updating" disabled style="--update-progress:${percent}%" title="正在更新，完成后自动变回开始游戏">
-          <span class="start-dock-update-fill" aria-hidden="true"></span>
+      /*
+       * 更新中：主按钮只留一句禁用状态的「更新中…」。
+       *
+       * 以前这里还有一根进度条（靠 --update-progress 变量驱动）+ 一行跟着进度变的
+       * 文字，那是在「上方还没有统一面板」的时候唯一的进度出口。现在进度已经完整
+       * 显示在按钮正上方那块面板里（百分比 / 覆盖率 / 速度 / 剩余时间都有），
+       * 按钮再画一遍就是同一件事说两遍，用户点名要简化掉。
+       */
+      return `<button class="start-dock-play is-updating" disabled title="正在更新，完成后自动变回开始游戏">
           ${icon('refresh', 'sm')}
-          <span class="start-dock-update-label">${esc(state.gameUpdate.label || '正在更新…')}</span>
+          <span class="start-dock-update-label">更新中…</span>
         </button>`;
     }
     const servers = game.servers || [];
@@ -703,7 +724,7 @@ function startServerPanel(game) {
               </span>
               <button class="start-dock-stop" data-action="stop-game" data-id="${esc(game.id)}" title="结束游戏进程" aria-label="结束游戏进程">${icon('stop')}</button>
             </div>`
-          : `${startDockPredownload(game)}${startDockDownloadActions(game)}${startDockRenderApi(game)}`
+          : `${startDockTaskPanel(game)}${startDockPredownload(game)}${startDockDownloadActions(game)}${startDockRenderApi(game)}`
       }
     </div>`;
 }

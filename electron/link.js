@@ -267,6 +267,16 @@ async function previewTrees({
   let differentBytes = 0;
   const errors = [];
   let lastEmit = 0;
+  /*
+   * 字节量单独算一份。
+   *
+   * 「比到第几万个文件」对用户没有意义 —— 一个 320MB 的 GameAssembly.dll 和
+   * 一个 4KB 的 txt 都只算 1。进度面板要显示「比了多少 / 一共多少」和速度，
+   * 只能按字节走。candidates 的 target.size 在 buildCandidates 里就有，
+   * 这里累加不额外读盘。
+   */
+  const totalBytes = candidates.reduce((sum, pair) => sum + (Number(pair.target.size) || 0), 0);
+  let bytesDone = 0;
 
   const emit = (current = '') => {
     const now = Date.now();
@@ -280,6 +290,8 @@ async function previewTrees({
       matchableBytes,
       alreadyLinked,
       different,
+      bytesDone,
+      totalBytes,
       current,
     });
   };
@@ -288,6 +300,8 @@ async function previewTrees({
     if (signal.cancelled) break;
     const { source, target } = pair;
     processed += 1;
+    // 比过就算过：不论结果相同/不同/出错，这个文件的字节都已经读过了
+    bytesDone += Number(target.size) || 0;
     try {
       if (await sameInode(source.full, target.full)) {
         alreadyLinked += 1;
@@ -318,6 +332,8 @@ async function previewTrees({
     cancelled: Boolean(signal.cancelled),
     total,
     processed,
+    totalBytes,
+    bytesDone,
     matchable,
     matchableBytes,
     alreadyLinked,
@@ -358,6 +374,9 @@ async function linkTrees({
   let skipped = 0;
   const errors = [];
   let lastEmit = 0;
+  // 与 previewTrees 同一个理由：进度面板按字节算速度和剩余量
+  const totalBytes = candidates.reduce((sum, pair) => sum + (Number(pair.target.size) || 0), 0);
+  let bytesDone = 0;
 
   const emit = (phase, current = '') => {
     const now = Date.now();
@@ -370,6 +389,8 @@ async function linkTrees({
       linked,
       savedBytes,
       skipped,
+      bytesDone,
+      totalBytes,
       current,
     });
   };
@@ -379,6 +400,7 @@ async function linkTrees({
     if (signal.cancelled) break;
     const { source, target } = pair;
     processed += 1;
+    bytesDone += Number(target.size) || 0;
     try {
       if (await sameInode(source.full, target.full)) {
         skipped += 1;
@@ -416,6 +438,8 @@ async function linkTrees({
     cancelled: Boolean(signal.cancelled),
     total,
     processed,
+    totalBytes,
+    bytesDone,
     linked,
     skipped,
     savedBytes,

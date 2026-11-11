@@ -1,7 +1,7 @@
-# 花筱灵启动器
+﻿# 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.10.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.10.2-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.10.1**（正式版）
+**当前版本：v2.10.2**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.10.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.10.2-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,22 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.10.1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.10.2 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.10.2</b></summary>
+
+- 进度面板：任务坞撤掉，改成「开始游戏」按钮正上方一块进度条，下载 / 更新 / 硬链接生成 / 预下载四类任务都走它；没任务时整块不出现。面板本身是按钮，点开是对应的详情窗口。
+- 面板版式：顶行阶段 + 百分比 + 预计剩余时间，下面三行是下载 / 安装 / 校验各自的完成量、总量与当前速度；速度只挂正在跑的那行，按 3 秒滑窗分阶段采样。
+- 新增 `electron/progress-meter.js`：按阶段分桶采样、下载行优先 `netBytes`、校验行单独吃 `verifiedBytes`（`sophon.js` 没有独立 verify 阶段）。
+- 硬链接生成接进面板：`hardlinkTree` / `overlayDirectory` 上报字节量与收尾满帧，`waitIfPausedLocal` 让暂停在硬链接阶段也真的会停。
+- 设置页：9 组拆成 12 组（外观 / 窗口 / 音效 / 行为 / 游戏与渠道包 / 下载与网络 / 数据与备份 / 文件管理 / 更新 / 系统 / 社区 / 关于），下载限速与网络代理归「下载与网络」，管理员权限归「系统与权限」，抽卡云备份归「数据与备份」。
+- 弹窗毛玻璃：半透明 + `blur(26px) saturate(1.45)`，最小化时关 blur 省 GPU，`prefers-reduced-transparency` 时退回不透明，浅色主题单独压深描边。
+- 抽卡自动同步：去掉「游戏必须由启动器启动且仍在跑」的内存准入（提权重启会丢状态），改成只看抽卡缓存签名并扫描所有渠道目录；请求间隔 400ms、并发锁、限流识别成独立错误并给 10 分钟冷却，已抓到的先入库（`partial`）。
+- 安装程序：Setup 换成自己的立绘、顶部小图、7 尺寸 ICO 与深紫配色（`MUI_BGCOLOR 1B1020`），欢迎 / 完成 / 卸载页文案重写。
+- 移除 Mirror酱：`electron/mirrorchyan.js`、`update:mirrorchyan-test` 通道、设置页两行配置、`ASAR_MUST_HAVE` 条目全部删除；更新链路回到 Gitee → jsDelivr → GitHub，自动模式不再读手填地址。
+
+</details>
 
 <details>
 <summary><b>v2.10.1</b></summary>

@@ -337,6 +337,11 @@
     </div>
 
     <div id="modal-root"></div>
+    <!--
+      任务坞与右下角回弹胶囊都已撤掉（用户 2026-11-11：都统一用面板）。
+      现在唯一的进度出口是启动页「开始游戏」按钮上方那一块（#start-dock-task-host），
+      它本身就是按钮，点开就是原来那个详情过程窗口。
+    -->
     <div class="toast-root" id="toast-root"></div>
 
     <audio id="song-audio" preload="metadata"></audio>
@@ -380,10 +385,6 @@
         </div>
         <span class="mini-progress"><i id="mini-progress-fill"></i></span>
       </div>
-    </div>
-
-    <div class="task-dock" id="task-dock" hidden>
-      <div class="task-dock-list" id="task-dock-list"></div>
     </div>
 
     <!-- 通用工具（拆分第三批）：esc / icon 被几百处模板调用，必须排在最前 -->
