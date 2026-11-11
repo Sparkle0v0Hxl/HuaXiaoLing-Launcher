@@ -10,6 +10,18 @@ function shouldSkipDir(name) {
   );
 }
 
+/**
+ * 暂停等待：硬链接这条路以前只支持「取消」，不支持「暂停」。
+ * 生成几十 GB 的运行时中途想停一下，只能整个取消重来。
+ * 这里按 300ms 轮询，signal.paused 为真就停住，取消则抛出。
+ */
+async function waitIfPausedLocal(signal) {
+  while (signal?.paused && !signal.cancelled) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
+}
+
 async function walkFiles(root, signal, onProgress) {
   const files = [];
   let lastScan = 0;
@@ -229,6 +241,13 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
   let copied = 0;
   let lastEmit = 0;
   /*
+   * 字节量：walkFiles 已经把每个文件的 size 存下来了，这里直接累加，零额外 IO。
+   * 之前只报文件个数，界面上「整理文件 4200/11300」用户根本判断不了还要多久
+   * （一个大 .chk 和一个小 .ini 在计数里长得一样）。
+   */
+  let bytesDone = 0;
+  const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  /*
    * copyDirs 统一成小写、正斜杠的无尾斜杠形式，支持「多段路径」。
    *
    * 以前只取 rel 的第一段（见下方 topDir），传 'Endfield_Data/Persistent' 永远匹配不上，
@@ -241,6 +260,15 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
   );
   for (const file of files) {
     if (signal && signal.cancelled) break;
+    // 暂停检查点：放在每个文件开头。fsp.link 是原子的，不会留半个文件，
+    // 所以暂停后从同一个文件继续是安全的。
+    if (signal && signal.paused) {
+      try {
+        await waitIfPausedLocal(signal);
+      } catch {
+        break;
+      }
+    }
     const destination = path.join(targetRoot, file.rel);
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     const slash = file.rel.indexOf('/');
@@ -277,6 +305,7 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
       }
     }
     processed += 1;
+    bytesDone += Number(file.size) || 0;
     const now = Date.now();
     if (now - lastEmit > 160) {
       lastEmit = now;
@@ -286,30 +315,74 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
         total: files.length,
         linked,
         copied,
+        bytesDone,
+        totalBytes,
         current: file.rel,
       });
     }
   }
-  return { total: files.length, processed, linked, copied };
+  // 收尾强推一帧满进度：别让界面停在最后一个节流点（比如 99%）
+  if (files.length) {
+    onProgress({
+      phase: 'link',
+      processed: files.length,
+      total: files.length,
+      linked,
+      copied,
+      bytesDone: totalBytes,
+      totalBytes,
+      current: '',
+    });
+  }
+  return { total: files.length, processed, linked, copied, totalBytes };
 }
 
 async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, signal }) {
   const files = await walkFiles(packRoot, signal);
   let processed = 0;
   let lastEmit = 0;
+  let bytesDone = 0;
+  const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
   for (const file of files) {
     if (signal && signal.cancelled) break;
     const destination = path.join(targetRoot, file.rel);
     await fsp.mkdir(path.dirname(destination), { recursive: true });
     // 目标可能是从基础客户端硬链接过来的同 inode 文件。直接 copyFile 会原地覆盖，
-    // 把基础客户端/别的渠道一起改掉；先删除链接，再写成独立文件。
-    await fsp.rm(destination, { force: true });
+    // 把基础客户端/别的渠道一起改掉；先断开链接，再写成独立文件。
+    //
+    // 断链用「改名挪开」而不是「删除」：官方安装器用管理员身份写的文件，ACL 上
+    // 普通用户没有 DELETE，rm 会 EPERM（Node 还把它和「被占用」混成一个错误），
+    // 而 rename 只需要目录写权限，实测可行。硬链接是按 inode 共享数据的，
+    // 改名之后目标路径已经指向「不存在」，下一句 copyFile 会新建独立文件，链接自然断掉。
+    const parked = `${destination}.hxl-old-${Date.now()}`;
+    let parkedOk = false;
+    try {
+      await fsp.rename(destination, parked);
+      parkedOk = true;
+    } catch {
+      // 目标不存在（第一次铺）或改名也失败：退回删除，删不掉就让 copyFile 报真错
+      await fsp.rm(destination, { force: true }).catch(() => {});
+    }
     try {
       await fsp.copyFile(file.full, destination);
     } catch (error) {
+      // 复制失败必须把原件搬回去：否则这个文件在目标路径上是空的（改名已把原件挪走），
+      // 用户的运行时会被我们弄缺一个文件。搬不回也不额外抛，保住原始错误信息。
+      if (parkedOk) {
+        try {
+          await fsp.rename(parked, destination);
+        } catch {
+          // 搬不回：至少把 parked 路径写进错误里，用户和我们都能找到原件
+          throw new Error(`无法写入渠道文件 ${file.rel}：${error.message}（原文件已改名保留在 ${parked}，未能自动恢复）`);
+        }
+      }
       throw new Error(`无法写入渠道文件 ${file.rel}：${error.message}`);
     }
+    // 挪开的旧文件尽量清掉；清不掉（ACL 挡着）也只是几十字节的垃圾，
+    // 绝不能因为清理失败就把整次切服中断
+    if (parkedOk) await fsp.rm(parked, { force: true }).catch(() => {});
     processed += 1;
+    bytesDone += Number(file.size) || 0;
     const now = Date.now();
     if (now - lastEmit > 160) {
       lastEmit = now;
@@ -317,11 +390,23 @@ async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, s
         phase: 'overlay',
         processed,
         total: files.length,
+        bytesDone,
+        totalBytes,
         current: file.rel,
       });
     }
   }
-  return { total: files.length, processed };
+  if (files.length) {
+    onProgress({
+      phase: 'overlay',
+      processed: files.length,
+      total: files.length,
+      bytesDone: totalBytes,
+      totalBytes,
+      current: '',
+    });
+  }
+  return { total: files.length, processed, totalBytes };
 }
 
 /**

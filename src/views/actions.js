@@ -825,12 +825,30 @@ async function handleAction(action, id, element, event = null) {
          */
         const result =
           game.builtinKey === 'arknights'
-            ? await api.endfield.updateArknightsGame()
+            ? await api.endfield.updateArknightsGame({ jobId })
             : game.builtinKey === 'endfield'
               ? await api.endfield.updateGame({ jobId })
               : await api.predownload.apply({ gameId: game.id, serverId: server.id, jobId });
         if (result && result.cancelled) toast('更新已取消', 'info');
-        else if (result && result.ok === false) toast('更新没有完成，部分文件校验失败', 'error');
+        else if (result && result.code === 'NEED_ELEVATION') {
+          /*
+           * 权限预检没过：这是「动不了文件」，不是「文件被占用」。下载还没开始，
+           * 这时候弹 UAC 是代价最小的时候。用户点了才重启，不点就什么都不做。
+           */
+          const go = await confirmDialog({
+            title: '需要管理员权限',
+            message: `${result.reason || '这个游戏目录当前不允许普通权限写入。'} 可以让启动器以管理员身份重新打开，然后接着更新吗？（会弹一次系统的用户账户控制提示）`,
+            confirmText: '以管理员身份重启',
+            danger: false,
+          });
+          if (go) {
+            state.gameUpdate = null;
+            render({ preserveScroll: true });
+            await api.relaunchAdmin({ updateGameId: game.id, updateServerId: server.id });
+            return;
+          }
+          toast('已取消更新：这个目录需要管理员权限才能写入', 'info');
+        } else if (result && result.ok === false) toast('更新没有完成，部分文件校验失败', 'error');
         else {
           const version = String(result?.tag || result?.version || '');
           /*
@@ -2191,6 +2209,79 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
 
+    case 'save-update-source-mode': {
+      const select = document.querySelector('#update-source-mode');
+      const mode = (select ? select.value : 'auto') || 'auto';
+      await api.updateSettings({ updateSourceMode: mode });
+      state.settings.updateSourceMode = mode;
+      /*
+       * 模式改了必须立刻验一次：用户选「Gitee 镜像」就是想确认这条路通不通，
+       * 保存完什么都不发生的话，他只能自己去点「检查更新」猜。
+       */
+      toast('更新源已保存，正在检查…', 'success');
+      try {
+        const result = await api.checkUpdate();
+        if (result && result.hasUpdate) openUpdateModal(result);
+        else if (result && result.ok) toast('已经是最新版本', 'success');
+        else toast((result && result.error) || '检查失败', 'error');
+      } catch (error) {
+        toast(`检查失败：${humanError(error)}`, 'error');
+      }
+      render();
+      break;
+    }
+    case 'save-mirrorchyan': {
+      const ridInput = document.querySelector('#mirrorchyan-rid');
+      const cdkInput = document.querySelector('#mirrorchyan-cdk');
+      const rid = (ridInput ? ridInput.value : '').trim();
+      const cdk = (cdkInput ? cdkInput.value : '').trim();
+      await api.updateSettings({ mirrorchyanRid: rid, mirrorchyanCdk: cdk });
+      state.settings.mirrorchyanRid = rid;
+      state.settings.mirrorchyanCdk = cdk;
+      toast(
+        rid ? 'Mirror酱 配置已保存' : '已清空 Mirror酱 配置，更新走内置源',
+        'success'
+      );
+      render();
+      break;
+    }
+    case 'test-mirrorchyan': {
+      const ridInput = document.querySelector('#mirrorchyan-rid');
+      const cdkInput = document.querySelector('#mirrorchyan-cdk');
+      const rid = (ridInput ? ridInput.value : '').trim();
+      const cdk = (cdkInput ? cdkInput.value : '').trim();
+      setMirrorchyanProbe({ state: 'running', ok: false, text: '' });
+      if (!rid) {
+        setMirrorchyanProbe({
+          state: 'done',
+          ok: false,
+          text: '还没填资源 ID（RID）——它由 Mirror酱 官方分配，要先向官方申请接入。',
+        });
+        break;
+      }
+      try {
+        const result = await api.testMirrorchyan({ rid, cdk });
+        if (result && result.ok) {
+          /*
+           * 测通了要说清楚「现在能不能真的用它下载」。没 CDK 时 url 一定是空的，
+           * 这时如果只说「连接成功」，用户会以为已经能用加速了。
+           */
+          const tail = result.url
+            ? `可以下载加速包（v${result.latest}）`
+            : `能查到版本 v${result.latest}，但没有 CDK 所以拿不到加速下载地址，下载仍走内置源`;
+          setMirrorchyanProbe({ state: 'done', ok: true, text: `连接成功：${tail}` });
+        } else {
+          setMirrorchyanProbe({
+            state: 'done',
+            ok: false,
+            text: `测试失败：${(result && result.error) || '未知原因'}`,
+          });
+        }
+      } catch (error) {
+        setMirrorchyanProbe({ state: 'done', ok: false, text: `测试失败：${humanError(error)}` });
+      }
+      break;
+    }
     case 'save-update-source': {
       const input = document.querySelector('#update-manifest');
       const value = (input ? input.value : '').trim();

@@ -167,6 +167,27 @@ function setProxyProbe(next) {
   node.classList.toggle('is-bad', Boolean(next && next.state === 'done' && !next.ok));
 }
 
+/*
+ * Mirror酱 测试结果。和代理测试分开存：用户在设置页来回切分组时，这两个结果
+ * 不该互相覆盖，也不该因为重绘就消失。
+ */
+let mirrorchyanProbe = null; // { state:'running'|'done', ok:boolean, text:string }
+
+function mirrorchyanTestText() {
+  if (!mirrorchyanProbe) return '';
+  if (mirrorchyanProbe.state === 'running') return '正在测试，最多等 8 秒…';
+  return mirrorchyanProbe.text || '';
+}
+
+function setMirrorchyanProbe(next) {
+  mirrorchyanProbe = next;
+  const node = document.querySelector('#mirrorchyan-test-result');
+  if (!node) return;
+  node.textContent = mirrorchyanTestText();
+  node.classList.toggle('is-ok', Boolean(next && next.state === 'done' && next.ok));
+  node.classList.toggle('is-bad', Boolean(next && next.state === 'done' && !next.ok));
+}
+
 /** 把 process.platform 翻成人看的名字，写进反馈用的那段环境信息里。 */
 function platformText() {
   const key = String((state.app && state.app.platform) || '').toLowerCase();
@@ -973,12 +994,39 @@ function settingsView() {
           <h2>${icon('download')}软件更新</h2>
           <p class="desc">内置更新源，下载后做 sha256 校验</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>更新源</strong><span>留空就用内置的官方源；也可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。一直卡在「检查更新」或下载不动时，点右边「用国内镜像源」换成 Gitee 上的清单试一次。</span></div>
+            <div class="setting-copy"><strong>更新源</strong><span>决定「检查更新」和「下载更新包」走哪条路。<b>自动</b>适合绝大多数人：填了 Mirror酱 的 CDK 才去测它，没填就按 Gitee → jsDelivr → GitHub 的顺序挨个试，哪个通用哪个。国内网络一直卡在「检查更新」或下载不动时，可以在下面锁死某一个源试试。</span></div>
+            <div class="setting-control update-source-control">
+              <select class="select" id="update-source-mode">
+                <option value="auto"${esc(settings.updateSourceMode || 'auto') === 'auto' ? ' selected' : ''}>自动（推荐）</option>
+                <option value="mirrorchyan"${settings.updateSourceMode === 'mirrorchyan' ? ' selected' : ''}>Mirror酱（填了 CDK 才生效）</option>
+                <option value="gitee"${settings.updateSourceMode === 'gitee' ? ' selected' : ''}>Gitee 镜像</option>
+                <option value="jsdelivr"${settings.updateSourceMode === 'jsdelivr' ? ' selected' : ''}>jsDelivr</option>
+                <option value="github"${settings.updateSourceMode === 'github' ? ' selected' : ''}>GitHub 直连</option>
+                <option value="custom"${settings.updateSourceMode === 'custom' ? ' selected' : ''}>自定义地址</option>
+              </select>
+              <button class="btn btn-ghost" data-action="save-update-source-mode">保存</button>
+              <button class="btn btn-ghost" data-action="pick-update-source">${icon('folder')}选择文件</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>自定义地址</strong><span>只在上面选了「自定义地址」时生效。可以填自己的 https 地址、局域网共享（\\NAS\share\latest.json）或本地路径。ZIP 地址写在清单里，相对路径以清单所在目录为准。</span></div>
             <div class="setting-control update-source-control">
               <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="留空 = 内置官方源" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
-              <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}用国内镜像源</button>
-              <button class="btn btn-ghost" data-action="pick-update-source">${icon('folder')}选择文件</button>
+              <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}填入 Gitee 镜像</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy">
+              <strong>Mirror酱 加速下载</strong>
+              <span>第三方更新分发服务，<b>接入免费</b>，用户自愿买 CDK 才能用它的加速线路。不填也能查版本号，只是下载仍走上面那些源。<b>资源 ID 由 Mirror酱 官方分配</b>（不等于项目名），拿到之后填在这里即可，不用改代码；<b>CDK 是你自己买的下载凭证</b>，填了才会在「自动」模式下自动测试。CDK 只存在本机、不会写进日志和诊断导出。<a href="#" data-action="open-external" data-url="https://mirrorchyan.com?source=hxl_settings">了解 Mirror酱</a></span>
+            </div>
+            <div class="setting-control update-source-control">
+              <input class="text-input" id="mirrorchyan-rid" value="${esc(settings.mirrorchyanRid || '')}" placeholder="资源 ID（RID）" spellcheck="false" />
+              <input class="text-input" id="mirrorchyan-cdk" value="${esc(settings.mirrorchyanCdk || '')}" placeholder="CDK（可留空）" spellcheck="false" />
+              <button class="btn btn-ghost" data-action="save-mirrorchyan">保存</button>
+              <button class="btn btn-ghost" data-action="test-mirrorchyan" title="用现在的 RID 和 CDK 试一次，看能不能连上">${icon('refresh')}测试</button>
+              <span class="proxy-test-result" id="mirrorchyan-test-result">${esc(mirrorchyanTestText())}</span>
             </div>
           </div>
           <div class="setting-row">

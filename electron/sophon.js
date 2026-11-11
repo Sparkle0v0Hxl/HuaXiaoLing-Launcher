@@ -1001,8 +1001,12 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
  * 直接 writeFile 会原地截断，把玩家的基础客户端也改掉。
  */
 async function writeFileIsolated(target, content) {
-  await fsp.rm(target, { force: true });
-  await fsp.writeFile(target, content, 'utf8');
+  const handle = await openForWrite(target);
+  try {
+    await handle.writeFile(content, 'utf8');
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 /**
@@ -1015,6 +1019,13 @@ async function writeFileIsolated(target, content) {
  *
  * 先 unlink 再新建：两边从此各持一份，谁更新都不影响对方。
  * 只读属性的包体（从压缩包解出来的）先去掉只读，否则 Windows 上 unlink 会 EPERM。
+ *
+ * 2026-11-11 补充：还有一种 unlink 不了的文件 —— 官方安装器用管理员身份写的文件，
+ * ACL 上普通用户没给 DELETE。这种 `chmod` 也没用（chmod 改的是只读属性，改不了 ACL），
+ * unlink 照样 EPERM，而 Node 在 Windows 上把「权限不足」和「被占用」都报成 EPERM，
+ * 用户看到的就是「文件被其它程序占用」（实际关掉所有程序也没用）。
+ * 实测：这种文件 rm/unlink → EPERM，但 `rename` 把它挪走 → 成功（只需要目录可写）。
+ * 所以 unlink 失败后再退一步：先把旧文件改名挪开（同样断开硬链接），再写新文件。
  */
 async function openForWrite(target) {
   try {
@@ -1022,7 +1033,23 @@ async function openForWrite(target) {
   } catch (error) {
     if (error && error.code !== 'ENOENT') {
       await fsp.chmod(target, 0o666).catch(() => {});
-      await fsp.unlink(target).catch(() => {});
+      try {
+        await fsp.unlink(target);
+      } catch {
+        /*
+         * 还是删不掉（ACL 缺 DELETE）。旧文件不能留在原地：它是硬链接的话，
+         * 直接 open('w') 会把基础客户端那一份一起改写。
+         * 改名挪开同样能断开链接，而且只需要目录写权限。
+         * 挪开的文件由调用方收尾时清掉；清不掉也只是占几十字节的垃圾，
+         * 比写穿基础客户端轻得多。
+         */
+        const parked = `${target}.hxl-old-${Date.now()}`;
+        try {
+          await fsp.rename(target, parked);
+        } catch {
+          /* 连改名都失败：只能尝试原地写，让随后的 open 报出真正的错误 */
+        }
+      }
     }
   }
   return fsp.open(target, 'w');
@@ -1262,6 +1289,14 @@ async function prepareSophon({
   let externalLinked = 0;
   let externalBytes = 0;
   let bytesDone = 0;
+  /*
+   * 已通过 md5 校验的字节量。
+   *
+   * 校验本来混在「写完这个文件」那一步里顺带做（md5File），界面上看不出来。
+   * 单独累一份发出去，三行子任务的「✓ 校验」那行才有数可显示 ——
+   * 只报 install 阶段的话，用户永远不知道还有一道校验在后面。
+   */
+  let verifiedBytes = 0;
   // 真正从网络下来的字节（压缩态）。bytesDone 是「已就位」，含跳过/硬链接/复用，
   // 两者对照才能看出「这次到底下了多少」，而不是只有一个看起来像全量的分母。
   let netBytes = 0;
@@ -1587,8 +1622,9 @@ async function prepareSophon({
       if (actual !== file.md5.toLowerCase()) {
         throw new Error(`文件校验失败：${file.file}`);
       }
+      verifiedBytes += file.size;
       downloaded += 1;
-      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, current: file.file });
+      onProgress?.({ phase: 'install', processed, total, linked, downloaded, skipped, bytesDone, totalBytes, verifiedBytes, current: file.file });
     } catch (error) {
       if (!fatalError) fatalError = error || new Error('组装失败');
       throw error;

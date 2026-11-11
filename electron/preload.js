@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('launcher', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   applyUpdate: () => ipcRenderer.invoke('update:apply'),
   pickUpdateSource: () => ipcRenderer.invoke('update:pick-source'),
+  // Mirror酱：设置页那个「测试」按钮用，验一次 RID/CDK 通不通
+  testMirrorchyan: (payload) => ipcRenderer.invoke('update:mirrorchyan-test', payload),
   updateBackup: () => ipcRenderer.invoke('update:backup'),
   rollbackUpdate: () => ipcRenderer.invoke('update:rollback'),
   // 网络代理：一键读系统代理、实测一条规则能不能连出去
@@ -142,6 +144,8 @@ contextBridge.exposeInMainWorld('launcher', {
   onGameExited: (callback) => subscribe('game:exited', callback),
   // 提权重启之后接着开刚才点的那款游戏（主进程在页面加载完后发）
   onGameAutolaunch: (callback) => subscribe('game:autolaunch', callback),
+  // 因为权限不足被中断的更新，在用户点了「以管理员身份重启」之后接着做
+  onUpdateResume: (callback) => subscribe('update:resume', callback),
   onLinkProgress: (callback) => subscribe('link:progress', callback),
   onLinkDone: (callback) => subscribe('link:done', callback),
   onLinkPreviewProgress: (callback) => subscribe('link:preview-progress', callback),
@@ -199,7 +203,7 @@ contextBridge.exposeInMainWorld('launcher', {
     packUsage: () => ipcRenderer.invoke('endfield:pack-usage'),
     deletePacks: (options) => ipcRenderer.invoke('endfield:delete-packs', options),
     updateArknights: () => ipcRenderer.invoke('arknights:update-packs'),
-    updateArknightsGame: () => ipcRenderer.invoke('arknights:update-game'),
+    updateArknightsGame: (options) => ipcRenderer.invoke('arknights:update-game', options),
     updateGame: (options) => ipcRenderer.invoke('endfield:update-game', options),
     // 渠道包按需下载（安装包不再内置）：查状态 → 用户确认 → 下载 → 可取消
     packStatus: (input) => ipcRenderer.invoke('endfield:channel-pack-status', input),

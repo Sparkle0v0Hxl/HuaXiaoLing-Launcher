@@ -1271,11 +1271,17 @@ function openGameDownloadModal(gameId) {
        * percent，直接用，只有老事件没带这个字段时才退回按个数算。
        */
       const explicitPercent = Number(event.percent);
-      const percent = Number.isFinite(explicitPercent)
-        ? Math.max(0, Math.min(100, explicitPercent))
-        : total
-          ? Math.min(100, (processed / total) * 100)
-          : 0;
+      /*
+       * percent 有个约定：-1 表示「总量还不知道」（progress-meter 在 totalBytes<=0 时就这么发）。
+       * 只判 Number.isFinite 会把 -1 当成合法值，clamp 成 0，进度条被硬按回起点，
+       * 下面按 processed/total 算的回落分支也永远走不到 —— 必须单独排除负数。
+       */
+      const percent =
+        Number.isFinite(explicitPercent) && explicitPercent >= 0
+          ? Math.max(0, Math.min(100, explicitPercent))
+          : total
+            ? Math.min(100, (processed / total) * 100)
+            : 0;
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
@@ -1401,6 +1407,100 @@ function formatSize(bytes) {
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(0)} MB`;
   return `${Math.max(0, Math.round(value / 1024))} KB`;
 }
+
+/** 速度：0 表示算不出来，返回空串（界面上整段不显示，绝不写「0 B/s」）。 */
+function formatSpeed(bytesPerSec) {
+  const value = Number(bytesPerSec) || 0;
+  if (value <= 0) return '';
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB/s`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)} KB/s`;
+  return `${Math.round(value)} B/s`;
+}
+
+/** 剩余时间：0 表示未知，返回空串。 */
+function formatEta(seconds) {
+  const value = Number(seconds) || 0;
+  if (value <= 0) return '';
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const secs = Math.round(value % 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(secs)}` : `${pad(minutes)}:${pad(secs)}`;
+}
+
+/*
+ * 三行子任务（下载 / 安装 / 校验）的渲染。
+ *
+ * 数据从主进程事件里读：bytesPerSec / etaSeconds 由 progress-meter 算好塞进来，
+ * 这里只负责显示，绝不在界面重复采样 —— 界面拿到事件的间隔不稳定，算出来的速度会跳。
+ *
+ * 每行的语义：
+ *   下载 ← download 阶段的 netBytes（真下网量；bytesDone 含复用/硬链接，会虚高）
+ *   安装 ← install 阶段的 bytesDone（已写入目标目录的字节）
+ *   校验 ← verify 阶段的 bytesDone（逐文件 md5 的已校验量）
+ * 该行这一轮没出现过就整行隐藏，不摆一行 0 B 占位。
+ */
+function paintProgressRows(rootId, event, state = {}) {
+  const root = document.querySelector(`#${rootId}`);
+  if (!root) return state;
+  const rows = root.querySelectorAll('.progress-row');
+  if (!rows.length) return state;
+  const seen = { ...(state.seen || {}) };
+  const phase = String(event?.phase || '');
+  const fmt = (bytes) => (Number(bytes) > 0 ? formatSize(bytes) : '');
+  const pair = (done, total) => {
+    const a = fmt(done);
+    const b = fmt(total);
+    if (a && b) return `${a} / ${b}`;
+    return a || (b ? `0 KB / ${b}` : '');
+  };
+  const current = {
+    speed: formatSpeed(event?.bytesPerSec),
+    eta: formatEta(event?.etaSeconds),
+  };
+  const values = {
+    // link 也算「取文件」：终末地渠道包命中同机另一份安装时走硬链接复用，
+    // 用户看到的语义就是「不用再下了」，归到下载那一行最不容易误解。
+    download:
+      phase === 'download' || phase === 'ldiff' || phase === 'link'
+        ? pair(Number(event?.netBytes) || Number(event?.bytesDone) || 0, event?.totalBytes)
+        : '',
+    install: phase === 'install' || phase === 'patch' ? pair(event?.bytesDone, event?.totalBytes) : '',
+    // 校验量优先读 verifiedBytes（sophon 随 install 事件一起发）；没有这个字段但
+    // 阶段本身就是 verify 的（终末地渠道包走 md5 比对），就退回用 bytesDone。
+    verify:
+      Number(event?.verifiedBytes) > 0
+        ? pair(event?.verifiedBytes, event?.totalBytes)
+        : phase === 'verify'
+          ? pair(event?.bytesDone, event?.totalBytes)
+          : '',
+  };
+  for (const [key, value] of Object.entries(values)) {
+    if (value) seen[key] = value;
+  }
+  const activeKey = phase === 'verify' ? 'verify' : phase === 'install' || phase === 'patch' ? 'install' : phase === 'download' || phase === 'ldiff' || phase === 'link' ? 'download' : '';
+  let any = false;
+  for (const row of rows) {
+    const key = row.dataset.row;
+    const value = seen[key] || '';
+    row.hidden = !value;
+    if (!value) continue;
+    any = true;
+    row.classList.toggle('is-active', key === activeKey);
+    row.classList.toggle('is-idle', key !== activeKey && !!activeKey);
+    const valueEl = row.querySelector('.pr-value');
+    if (valueEl) valueEl.textContent = value;
+    const speedEl = row.querySelector('.pr-speed');
+    if (speedEl) {
+      // 速度只挂在正在跑的那一行上：三行同时显示速度会让人以为是三个独立任务
+      const showSpeed = key === activeKey && current.speed;
+      speedEl.textContent = showSpeed ? `${current.speed}${current.eta ? ` · 剩 ${current.eta}` : ''}` : '';
+    }
+  }
+  root.hidden = !any;
+  return { ...state, seen };
+}
+
 
 /*
  * 硬链接安装 / 更新的阶段表。
@@ -1817,6 +1917,27 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
               <span id="sophon-count"></span>
             </div>
             <div class="progress-bar" id="sophon-bar-wrap"><span id="sophon-bar" style="width:0%"></span></div>
+            <!-- 三行子任务：下载 / 安装 / 校验 各自一行，和官方启动器的进度面板同形 -->
+            <div class="progress-rows" id="sophon-rows" hidden>
+              <div class="progress-row" data-row="download">
+                <span class="pr-icon">↓</span>
+                <span class="pr-label">下载</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="install">
+                <span class="pr-icon">📦</span>
+                <span class="pr-label">安装</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="verify">
+                <span class="pr-icon">✓</span>
+                <span class="pr-label">校验</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+            </div>
             <div class="link-progress-meta">
               <span id="sophon-stats"></span>
               <span id="sophon-current"></span>
@@ -1946,6 +2067,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
   const stagePhase = SOPHON_STAGES.map(() => '');
   let stageIndex = -1;
   let ldiffSeen = false;
+  // 三行子任务（下载 / 安装 / 校验）的「已经显示过」记忆，跨事件保持
+  let progressRowState = {};
 
   const paintStageBars = () => {
     stageNodes.forEach((node, i) => {
@@ -2209,11 +2332,17 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
        * percent，直接用，只有老事件没带这个字段时才退回按个数算。
        */
       const explicitPercent = Number(event.percent);
-      const percent = Number.isFinite(explicitPercent)
-        ? Math.max(0, Math.min(100, explicitPercent))
-        : total
-          ? Math.min(100, (processed / total) * 100)
-          : 0;
+      /*
+       * percent 有个约定：-1 表示「总量还不知道」（progress-meter 在 totalBytes<=0 时就这么发）。
+       * 只判 Number.isFinite 会把 -1 当成合法值，clamp 成 0，进度条被硬按回起点，
+       * 下面按 processed/total 算的回落分支也永远走不到 —— 必须单独排除负数。
+       */
+      const percent =
+        Number.isFinite(explicitPercent) && explicitPercent >= 0
+          ? Math.max(0, Math.min(100, explicitPercent))
+          : total
+            ? Math.min(100, (processed / total) * 100)
+            : 0;
       const stage = SOPHON_PHASE_STAGE[event.phase] ?? 2;
       const phases = {
         start: '读取官方清单',
@@ -2257,6 +2386,8 @@ function openSophonModal(gameId, serverId, mode = 'prepare', options = {}) {
       const stats = sophonProgressStats(event);
       document.querySelector('#sophon-stats').textContent = stats;
       document.querySelector('#sophon-current').textContent = event.current || '';
+      // 三行子任务：下载 / 安装 / 校验各自的完成量与速度
+      progressRowState = paintProgressRows('sophon-rows', event, progressRowState);
       updateDock(
         phases[event.phase] || '处理中…',
         event.phase === 'done' ? 100 : percent,

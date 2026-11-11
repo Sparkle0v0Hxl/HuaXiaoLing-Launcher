@@ -1028,6 +1028,12 @@ async function updateEndfieldGame({ root, channel, onProgress, force, linkSource
   }
   let updated = 0;
   let downloadedBytes = 0;
+  /*
+   * 「已就位」字节：md5 命中、跨渠道硬链接复用、真下载，三条路都要算进来。
+   * 以前只有 downloadedBytes（真下网的量），前两条路完全不增长，于是进度计量器
+   * 认为「这一趟根本没动」→ 速度恒为 0，界面像卡死。两个数含义不同，都要报。
+   */
+  let doneBytes = 0;
   let linkedFiles = 0;
   /*
    * 总量算一次就够。以前写在循环里的每次进度回调上，1688 个文件就是 1688 次
@@ -1062,10 +1068,13 @@ async function updateEndfieldGame({ root, channel, onProgress, force, linkSource
       current = false;
     }
     if (current) {
+      doneBytes += file.size || 0;
       onProgress?.({
+        phase: 'verify',
         current: file.path,
         processed: index + 1,
         total: remote.files.length,
+        bytesDone: doneBytes,
         downloadedBytes,
         totalBytes,
       });
@@ -1090,10 +1099,13 @@ async function updateEndfieldGame({ root, channel, onProgress, force, linkSource
       });
       if (reused.ok) {
         linkedFiles += 1;
+        doneBytes += file.size || 0;
         onProgress?.({
+          phase: 'link',
           current: file.path,
           processed: index + 1,
           total: remote.files.length,
+          bytesDone: doneBytes,
           downloadedBytes,
           totalBytes,
         });
@@ -1115,10 +1127,13 @@ async function updateEndfieldGame({ root, channel, onProgress, force, linkSource
     await fsp.rename(temporary, target);
     updated += 1;
     downloadedBytes += file.size;
+    doneBytes += file.size || 0;
     onProgress?.({
+      phase: 'download',
       current: file.path,
       processed: index + 1,
       total: remote.files.length,
+      bytesDone: doneBytes,
       downloadedBytes,
       totalBytes,
     });

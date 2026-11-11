@@ -209,6 +209,19 @@ const nevernessChannels = require('./neverness-channels');
  * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
  */
 const yostarPacks = require('./yostar-packs');
+// 进度计量器：给各条下载/更新链路补速度与剩余时间（纯计算，无 IO、无依赖）
+const progressMeter = require('./progress-meter');
+
+/*
+ * Mirror酱（MirrorChyan）更新源。
+ *
+ * 它提供「版本查询 + CDN 加速下载」，接入不需要付费；用户侧自己买 CDK 才走
+ * 它的加速，不填 CDK 仍能查到版本号、继续用我们原来的源下载。所以这里的定位是
+ * 「可选加速 + 额外兜底」，绝不作为唯一更新源。
+ *
+ * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ */
+const mirrorchyan = require('./mirrorchyan');
 
 app.setName('花筱灵启动器');
 /* AUMID 尾缀 .x1：Explorer 的任务栏图标缓存按 AUMID 键值存储，旧 ID
@@ -1033,6 +1046,29 @@ function defaultSettings() {
     downloadLimitKBps: 0,
     // 自更新：清单地址留空则不检查；支持 https / 局域网共享 / 本地路径
     updateManifest: '',
+    /*
+     * 更新源模式。界面上是个下拉：
+     *   auto        自动（默认）—— Mirror酱 的 RID 和 CDK 都填了才去测它，
+     *               否则按 gitee 那条顺序走我们自己的源。这是默认值，也是绝大多数
+     *               用户该用的模式：没配 Mirror酱 时行为和以前一模一样。
+     *   mirrorchyan 只用 Mirror酱（测不通会明说原因，不静默回退，方便排查配置）
+     *   gitee / jsdelivr / github  锁定我们内置的某一条，便于用户绕开被卡的线路
+     *   custom      只用下面手填的地址（内网共享、自建静态站点）
+     * 不论哪种模式，Mirror酱 只在「能拿到带 sha256 的下载地址」时才真正接管下载，
+     * 拿不到就回到我们自己的源——它不该变成单点。
+     */
+    updateSourceMode: 'auto',
+    /*
+     * Mirror酱 资源 ID（RID，API 里的 res_id）。由 Mirror酱 官方随接入方案分配，
+     * 不等于仓库名，所以留空＝没接入，整套逻辑直接跳过。拿到之后填在这里就行，
+     * 不用改代码。
+     */
+    mirrorchyanRid: '',
+    /*
+     * 用户的 Mirror酱 CDK：不填也能查版本（只是拿不到加速下载地址）。
+     * 是凭证所以只进主进程、不进日志、不进导出诊断；界面上按掩码显示。
+     */
+    mirrorchyanCdk: '',
     autoCheckUpdate: true,
     /*
      * 网络代理：只影响启动器自己发出的请求（更新清单、更新包、封面、公告），
@@ -5164,7 +5200,7 @@ async function ensureArknightsRuntime(game, server, options = {}) {
   return true;
 }
 
-async function prepareGenshinPackRuntime(game, server) {
+async function prepareGenshinPackRuntime(game, server, onProgress) {
   const packRoot = server.root;
   const packExe = path.join(packRoot, 'GenshinImpact.exe');
   const packData = path.join(packRoot, 'GenshinImpact_Data');
@@ -5186,16 +5222,35 @@ async function prepareGenshinPackRuntime(game, server) {
   const runtimeRoot = path.join(path.dirname(packRoot), '.vela-runtime', 'genshin-global');
   const runtimeExe = path.join(runtimeRoot, 'GenshinImpact.exe');
   if (!fs.existsSync(runtimeExe)) {
+    /*
+     * 这一整段可能要搬几十 GB 的文件，以前完全不给进度 —— 用户在切服界面上
+     * 看到的就是一个不动的转圈，几分钟没有任何反馈，很像卡死。
+     * 现在把 hardlinkTree 的逐帧进度原样往上报（阶段名用 link，界面按「硬链接复用文件」显示）。
+     */
+    onProgress?.({
+      phase: 'link',
+      processed: 0,
+      total: 0,
+      current: '正在为国际服生成独立运行时（硬链接基础客户端文件）…',
+    });
     await fsp.mkdir(runtimeRoot, { recursive: true });
-    await hardlinkTree({ sourceRoot: packRoot, targetRoot: runtimeRoot });
+    await hardlinkTree({ sourceRoot: packRoot, targetRoot: runtimeRoot, onProgress });
+    let carried = 0;
     for (const entry of await fsp.readdir(base.root, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
       if (/^(config\.ini|YuanShen\.exe|GenshinImpact\.exe)$/i.test(entry.name)) continue;
       const target = path.join(runtimeRoot, entry.name);
       if (!fs.existsSync(target)) {
         await fsp.copyFile(path.join(base.root, entry.name), target).catch(() => {});
+        carried += 1;
       }
     }
+    onProgress?.({
+      phase: 'link',
+      processed: 1,
+      total: 1,
+      current: carried ? `补齐基础客户端的 ${carried} 个文件，准备收尾` : '正在收尾…',
+    });
   }
   const version = String(game.version || '').replace(/^v/i, '') || '7.1.0';
   const configPath = path.join(runtimeRoot, 'config.ini');
@@ -6428,15 +6483,56 @@ const OFFICIAL_UPDATE_MANIFESTS = [
   'https://raw.githubusercontent.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/main/latest.json',
 ];
 
-/** 更新源候选：一次给全，挨个试，第一个读得通的算数。 */
+/** 按域名认出这一条属于哪个内置源，给「更新源」下拉做锁定用。 */
+function updateSourceKindOf(url) {
+  const text = String(url || '').toLowerCase();
+  if (!text) return '';
+  if (text.includes('gitee.com')) return 'gitee';
+  if (text.includes('jsdelivr.net')) return 'jsdelivr';
+  if (text.includes('github.com') || text.includes('githubusercontent.com')) return 'github';
+  return '';
+}
+
+/**
+ * 更新源候选：一次给全，挨个试，第一个读得通的算数。
+ *
+ * 这里按设置里的 updateSourceMode 分流。注意「锁定某一个源」不是「只给它一条」——
+ * 用户选中 Gitee 是因为别处走不通，真连 Gitee 也读不到时还是得往下试，否则
+ * 一次镜像抖动就会让所有人卡在「检查更新失败」。所以锁定＝把它提到最前，
+ * 其余官方源仍然排在后面兜底。
+ */
 function updateSourceList() {
   const configured = String(store?.data?.settings?.updateManifest || '').trim();
+  const mode = String(store?.data?.settings?.updateSourceMode || 'auto').trim() || 'auto';
   const list = [];
   const push = (value) => {
     const text = String(value || '').trim();
     if (text && !list.includes(text)) list.push(text);
   };
-  if (configured) {
+  /*
+   * custom 只认手填地址：用户明确说了「用我自己的」，再拿官方源去试会让
+   * 「明明填了却检查到官方版本」这种困惑出现。手填为空时退回自动，避免彻底没源。
+   */
+  if (mode === 'custom') {
+    if (configured) {
+      push(configured);
+      for (const candidate of updateSourceCandidates(configured)) push(candidate);
+    }
+    if (!list.length) {
+      push(localUpdateManifest());
+      for (const url of OFFICIAL_UPDATE_MANIFESTS) push(url);
+    }
+    return list;
+  }
+  // mirrorchyan 模式下清单本身还是得从我们自己的源读：Mirror酱 只负责版本比对
+  // 和加速下载，它不产出 latest.json。所以这里和 auto 走同一套，差别在
+  // performUpdateCheck 里（那边会明说 Mirror酱 测不通的原因）。
+  if (mode === 'gitee' || mode === 'jsdelivr' || mode === 'github') {
+    for (const url of OFFICIAL_UPDATE_MANIFESTS) {
+      if (updateSourceKindOf(url) === mode) push(url);
+    }
+  }
+  if (configured && (mode === 'auto' || mode === 'mirrorchyan')) {
     push(configured);
     for (const candidate of updateSourceCandidates(configured)) push(candidate);
   }
@@ -6496,6 +6592,50 @@ function resolveUpdateSource() {
 // 本会话内已经自动弹过「发现新版本」的版本号：同一个版本后台复查（每 6 小时）不再重复弹
 let autoNotifiedUpdateVersion = '';
 
+/** 这次检查要不要去问 Mirror酱，以及为什么去/不去。 */
+function mirrorchyanGate() {
+  const settings = store?.data?.settings || {};
+  const mode = String(settings.updateSourceMode || 'auto').trim() || 'auto';
+  const rid = String(settings.mirrorchyanRid || '').trim();
+  const cdk = String(settings.mirrorchyanCdk || '').trim();
+  // 没 RID 就等于还没接入，任何模式都不该去请求——请求必然 404，只会白等 8 秒。
+  if (!rid) return { ask: false, mode, rid, cdk, reason: 'no-rid' };
+  if (mode === 'custom') return { ask: false, mode, rid, cdk, reason: 'custom-mode' };
+  /*
+   * 「自动」模式的判定就这一句：CDK 填了才去测。
+   *
+   * 不填 CDK 时 Mirror酱 只能给版本号、给不出下载地址，查了也只是多一次请求，
+   * 而版本号从我们自己的清单就能拿到；更关键的是默认状态下不该让每个用户开机
+   * 都向第三方发一次请求。所以自动模式的门槛是「RID 和 CDK 都有」。
+   */
+  if (mode === 'auto' && !cdk) return { ask: false, mode, rid, cdk, reason: 'auto-no-cdk' };
+  return { ask: true, mode, rid, cdk, reason: '' };
+}
+
+/**
+ * 问一次 Mirror酱 的最新版本，结果并进 updateStatus。
+ *
+ * 返回值只用来决定「下载走哪条路」，判断有没有更新仍然以我们自己签名的清单为准：
+ * Mirror酱 的响应没有签名，不能作为「允许下载」的依据。
+ */
+async function probeMirrorchyan(gate, options = {}) {
+  const result = await mirrorchyan.checkLatest({
+    rid: gate.rid,
+    cdk: gate.cdk,
+    currentVersion: APP_VERSION,
+    timeout: options.timeout,
+  });
+  if (!result.ok) {
+    // 失败只留档不起哄：用户选了自动模式、只是 CDK 过期或次数用完，不该弹红字打断。
+    writeLaunchLog(`mirrorchyan check failed: code=${result.code} ${result.error || ''}`);
+  } else {
+    writeLaunchLog(
+      `mirrorchyan latest=${result.latest} hasUrl=${result.url ? 'yes' : 'no'} type=${result.updateType || '-'}`
+    );
+  }
+  return result;
+}
+
 async function performUpdateCheck(options = {}) {
   const locations = resolveUpdateSource();
   if (!locations.length) {
@@ -6511,10 +6651,101 @@ async function performUpdateCheck(options = {}) {
     if (options.push !== false) pushState(true);
     return updateStatus;
   }
+  const gate = mirrorchyanGate();
+  let mirror = null;
+  if (gate.ask) {
+    // 并行问：两边的结果要合并，串行会让「检查更新」白等一个来回。
+    const [manifestResult, mcResult] = await Promise.all([
+      updater.checkForUpdate({ location: locations, currentVersion: APP_VERSION }),
+      probeMirrorchyan(gate),
+    ]);
+    mirror = mcResult;
+    return finishUpdateCheck(manifestResult, mirror, gate, options);
+  }
   const result = await updater.checkForUpdate({
     location: locations,
     currentVersion: APP_VERSION,
   });
+  return finishUpdateCheck(result, null, gate, options);
+}
+
+/**
+ * 把「自有清单结果」和「Mirror酱 结果」合成一份 updateStatus。
+ *
+ * 合并规矩：
+ *   版本号   取两边更高的那个 —— Mirror酱 通常同步更快，我们自己的镜像偶尔落后。
+ *   下载地址 优先 Mirror酱（它有 CDK 才有 url，有 url 就说明用户能用加速）。
+ *   签名     Mirror酱 的结果没有签名，所以「能不能装」永远按自有清单的结论走：
+ *            自有清单说没更新、而 Mirror酱 说有，仍然提示有更新，但下载回落到原来的源。
+ */
+function finishUpdateCheck(result, mirror, gate, options = {}) {
+  const localLatest = String((result && result.latest) || '').replace(/^v/i, '');
+  const localHasUpdate = Boolean(result && result.ok && result.hasUpdate);
+  if (mirror && mirror.ok) {
+    const mcLatest = String(mirror.latest || '').replace(/^v/i, '');
+    const mcNewer =
+      mcLatest && (!localLatest || updater.compareVersions(mcLatest, localLatest) > 0);
+    if (mcNewer) {
+      /*
+       * Mirror酱 比我们自己的清单新。这时只能「知道有新版本」，下载地址得看
+       * Mirror酱 有没有给：给了就能直接用加速地址，没给就只能等我们自己的
+       * 清单跟上——绝不能拿一个没校验过的地址去装。
+       */
+      result = {
+        ...result,
+        ok: true,
+        hasUpdate: true,
+        latest: mcLatest,
+        notes: mirror.notes || (result && result.notes) || '',
+        // 有这个字段就说明走 Mirror酱 下载，startUpdate 认它
+        mirrorUrl: mirror.url || '',
+        mirrorSha256: mirror.sha256 || '',
+        mirrorSize: mirror.size || 0,
+        mirrorType: mirror.updateType || '',
+        mirrorRef: gate.mode === 'mirrorchyan' ? 'mirrorchyan' : 'mirrorchyan-newer',
+      };
+    } else if (localHasUpdate && mirror.url && mirror.sha256) {
+      /*
+       * 版本一致、本地清单也说要更新，而 Mirror酱 又给了可用地址：这时把下载
+       * 换成 Mirror酱 的加速地址。sha256 用 Mirror酱 自己给的——它和自己那份
+       * url 是配套的，不能拿本地清单的 sha256 去校验 Mirror酱 的文件。
+       */
+      result = {
+        ...result,
+        mirrorUrl: mirror.url,
+        mirrorSha256: mirror.sha256,
+        mirrorSize: mirror.size || 0,
+        mirrorType: mirror.updateType || '',
+        mirrorRef: 'mirrorchyan',
+      };
+    }
+  }
+  if (gate.mode === 'mirrorchyan' && (!mirror || !mirror.ok)) {
+    /*
+     * 用户明确选了「只用 Mirror酱」却没测通：把原因写进 error，但不要 hasUpdate=false
+     * 之外再翻旧账——自有清单那边可能读得到，只是用户不想用它。
+     */
+    result = {
+      ...result,
+      mirrorRef: 'mirrorchyan-failed',
+      mirrorError: (mirror && mirror.error) || 'Mirror酱 没有响应',
+    };
+  }
+  /*
+   * Mirror酱 给了可用下载地址时，把它当作「用户自己配置的更新源」看待，
+   * 和手填 updateManifest 走同一条宽容政策：不强求我们自己的签名。
+   *
+   * 理由和自定义源一致——是用户主动填了 RID/CDK 把这条链路接进来的，包的可信度
+   * 由 Mirror酱 的 sha256 兜（下载时逐字节校验，对不上就丢弃重来）。而我们自己的
+   * 签名清单在这里起的是「版本权威」的作用：它说没有更新就绝不升级。
+   */
+  if (result && result.mirrorUrl && result.mirrorSha256) {
+    result = { ...result, sigState: 'mirrorchyan' };
+  }
+  return finalizeUpdateStatus(result, options);
+}
+
+function finalizeUpdateStatus(result, options = {}) {
   /*
    * 签名策略（TOFU：第一次验签成功之后就锁死）。
    *
@@ -6847,12 +7078,33 @@ async function startUpdate(options = {}) {
     if (!manifest.url) throw new Error('更新源没有给出下载地址');
     if (!manifest.sha256) throw new Error('更新源里没有写 update 包的 sha256，为安全起见不自动安装');
 
+    /*
+     * Mirror酱 的加速地址：只在它给的是**完整包**（update_type=full）时才用。
+     *
+     * 它也可能返回 incremental（一个 changes.json + 改动的文件），那是它自己的一套
+     * 增量格式，和 updater.stageDelta 认的补丁包完全不是一回事，硬套进去只会
+     * 装出半个客户端。所以增量包一律不用它的地址，让它走我们自己的差分包/完整包
+     * ——反正那份清单本来就是从我们自己的源读的，链路上没损失。
+     *
+     * 代价是买 CDK 的用户在「恰好只有增量包」的情况下享受不到加速。这个取舍是
+     * 有意的：加速是锦上添花，装坏客户端不是。
+     */
+    const mirrorReady =
+      updateStatus.mirrorUrl &&
+      updateStatus.mirrorSha256 &&
+      String(updateStatus.mirrorType || 'full').toLowerCase() !== 'incremental';
+    const downloadUrl = mirrorReady ? updateStatus.mirrorUrl : manifest.url;
+    const downloadSha = mirrorReady ? updateStatus.mirrorSha256 : manifest.sha256;
+    const downloadSize = mirrorReady ? updateStatus.mirrorSize || manifest.size : manifest.size;
+
     const tempBase = updateTempBase();
     await fsp.mkdir(tempBase, { recursive: true }).catch(() => {});
 
     // 增量更新优先：清单里有「当前版本 -> 目标版本」的差分包时，只下变化的部分。
     // 任何一步不对都静默退回整包，绝不让「更快」变成「更新不了」。
-    const deltaInfo = updater.pickDelta(manifest, APP_VERSION, manifest.version);
+    // Mirror酱 接管完整包下载时跳过这一步：它给的是另一个版本自己的完整包，
+    // 我们的差分包基准对不上（也可能压根没有），硬试只会白等一轮失败。
+    const deltaInfo = mirrorReady ? null : updater.pickDelta(manifest, APP_VERSION, manifest.version);
     if (deltaInfo && deltaInfo.url && deltaInfo.sha256) {
       try {
         const staged = await downloadAndStageDelta({ delta: deltaInfo, manifest, tempBase });
@@ -6886,9 +7138,9 @@ async function startUpdate(options = {}) {
     let lastPushAt = 0;
     try {
       await updater.downloadToFile({
-        url: manifest.url,
+        url: downloadUrl,
         dest: zipPath,
-        expectedSize: manifest.size,
+        expectedSize: downloadSize,
         onProgress: (progress) => {
           const next = Math.round(progress.percent);
           const now = Date.now();
@@ -6920,7 +7172,7 @@ async function startUpdate(options = {}) {
     }
 
     const actual = await updater.sha256File(zipPath);
-    if (actual !== manifest.sha256) {
+    if (actual !== downloadSha) {
       await fsp.rm(zipPath, { force: true }).catch(() => {});
       throw new Error('更新包校验没通过（sha256 对不上），可能没下载完整，请重试');
     }
@@ -7426,6 +7678,35 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+/*
+ * 进度事件统一出口：补上速度、剩余时间、总百分比。
+ *
+ * 各个引擎（sophon / predownload / yostar / endfield-packs）自己报的字段只有
+ * 「干了多少、总共多少」，速度得靠按时间采样算 —— 放在这里算而不是界面算，
+ * 是因为节流点都在主进程，界面只能被动收事件，间隔一抖算出来的速度就乱跳。
+ *
+ * 每个 (频道, jobId) 一个计量器：不同任务的字节起点不同，混在一起会算出负数。
+ * 计量器只保存最近 3 秒的采样，很轻；顺手限制一下 Map 大小防止长跑任务越攒越多。
+ */
+const progressMeters = new Map();
+function sendProgress(channel, jobId, progress) {
+  const key = `${channel}\u0000${jobId}`;
+  let meter = progressMeters.get(key);
+  if (!meter) {
+    if (progressMeters.size > 32) {
+      // 只留最近的：老任务已经结束，采样没有任何后续用途
+      const oldest = progressMeters.keys().next();
+      if (!oldest.done) progressMeters.delete(oldest.value);
+    }
+    meter = progressMeter.createMeter((event) => send(channel, event));
+    progressMeters.set(key, meter);
+  }
+  meter({ jobId, ...progress });
+}
+function dropProgressMeter(channel, jobId) {
+  progressMeters.delete(`${channel}\u0000${jobId}`);
+}
+
 function applyLoginItem(settings) {
   if (!app.isPackaged) return;
   try {
@@ -7785,6 +8066,9 @@ function createWindow() {
     // 提权重启之后把刚才点的那款游戏接上：用户点「开始游戏」→ 弹一次 UAC →
     // 启动器以管理员重开 → 这里自动继续开，不用他再点第二次。
     setTimeout(() => resumePendingLaunch(), 1600);
+    // 同理，因为权限不足被打断的更新也接着做：重启回来如果还挡着，
+    // 预检会再报一次，至少不会出现「点了以管理员重启，回来什么都没有」。
+    setTimeout(() => resumePendingUpdate(), 2000);
   });
 
   // 原生全屏不触发 CSS :fullscreen 伪类，只能由主进程把状态推给渲染进程
@@ -8282,6 +8566,28 @@ async function resumePendingLaunch() {
    * 之前都会让「重启后自动续开游戏」悄悄失效。现在照发；列表未就绪时 1500ms 补发一次。
    */
   const fire = () => send('game:autolaunch', { gameId });
+  if ((store.data.games || []).some((item) => item.id === gameId)) {
+    fire();
+  } else {
+    setTimeout(fire, 1500);
+  }
+}
+
+/**
+ * 提权重启之后，把「刚才没做完的更新」接着做。
+ *
+ * 和 resumePendingLaunch 分开：那条是「开游戏」，这条是「继续更新」。
+ * 更新是长任务，被权限挡住时下载可能还没开始，重启回来直接重跑一次更新最省事；
+ * 已经下好的分块 / 补丁包会被 hasCache 命中，不会重下。
+ */
+async function resumePendingUpdate() {
+  const gameId = String(store?.data?.settings?.pendingUpdateGameId || '');
+  if (!gameId) return;
+  const serverId = String(store?.data?.settings?.pendingUpdateServerId || '');
+  store.data.settings.pendingUpdateGameId = '';
+  store.data.settings.pendingUpdateServerId = '';
+  await store.saveNow().catch(() => {});
+  const fire = () => send('update:resume', { gameId, serverId });
   if ((store.data.games || []).some((item) => item.id === gameId)) {
     fire();
   } else {
@@ -9973,6 +10279,33 @@ function installIpc() {
   });
 
   ipcMain.handle('update:check', async () => performUpdateCheck({ push: true, manual: true }));
+  /*
+   * Mirror酱 手动测试：设置页那个「测试」按钮。
+   *
+   * 和自动检查的区别是它不看模式门槛——用户点测试就是明确想验一次配置，
+   * 哪怕现在是「自动」而 CDK 留空，也该如实告诉他「没 CDK 只能查版本」。
+   */
+  ipcMain.handle('update:mirrorchyan-test', async (_event, input) => {
+    const patch = input && typeof input === 'object' ? input : {};
+    const rid = String(patch.rid || store?.data?.settings?.mirrorchyanRid || '').trim();
+    const cdk = String(patch.cdk || store?.data?.settings?.mirrorchyanCdk || '').trim();
+    const result = await mirrorchyan.checkLatest({
+      rid,
+      cdk,
+      currentVersion: APP_VERSION,
+      sendPlatform: patch.sendPlatform !== false,
+    });
+    /*
+     * 只回结果、不存 CDK：测试用的是界面上的输入值，用户没点保存就不该被写进
+     * launcher-data.json。存盘由 settings:update 那条路负责。
+     */
+    return {
+      ...result,
+      // 回给界面的一律是打码 / 脱敏版本，免得渲染层日志或截图带出真实 CDK
+      cdkMasked: mirrorchyan.maskCdk(cdk),
+      rid,
+    };
+  });
   // 代理：从系统里读一条现成的规则，省得用户自己去翻 Clash 的端口
   ipcMain.handle('proxy:system', async () => readSystemProxy());
   // 代理：拿真实地址试一下通不通，比「保存了但不知道有没有用」强
@@ -10056,6 +10389,11 @@ function installIpc() {
       // 侧栏底部那张火花立绘：展开侧栏时会占掉一截高度，用户要能自己关掉
       'sidebarChar',
       'updateManifest',
+      // Mirror酱 接入三项：模式、RID、用户 CDK。不放进白名单的话，设置页写下去
+      // 会被快照回推抹掉，表现为「选了模式一刷新又变回自动」。
+      'updateSourceMode',
+      'mirrorchyanRid',
+      'mirrorchyanCdk',
       'autoCheckUpdate',
       'proxyRules',
       'notesSeenVersion',
@@ -10184,6 +10522,21 @@ function installIpc() {
         clearMusicResolveCache();
       } else if (key === 'updateManifest') {
         settings.updateManifest = String(patch.updateManifest || '').trim().slice(0, 500);
+      } else if (key === 'updateSourceMode') {
+        // 只认这几种，别的值一律回到「自动」——多一个拼错的值就会让更新链变哑巴。
+        const mode = String(patch.updateSourceMode || '').trim();
+        settings.updateSourceMode = ['auto', 'mirrorchyan', 'gitee', 'jsdelivr', 'github', 'custom'].includes(mode)
+          ? mode
+          : 'auto';
+      } else if (key === 'mirrorchyanRid') {
+        // RID 是官方分配的短标识（字母数字），顺手清掉空白和奇怪的字符
+        settings.mirrorchyanRid = String(patch.mirrorchyanRid || '').trim().replace(/[^0-9A-Za-z_-]/g, '').slice(0, 64);
+      } else if (key === 'mirrorchyanCdk') {
+        /*
+         * 用户 CDK。它是凭证：既不能进日志（查到 url 会被脱敏打印），也不能截断成
+         * 一半——截断后用户看到「填了但用不了」比不填更难受。这里只去首尾空白。
+         */
+        settings.mirrorchyanCdk = String(patch.mirrorchyanCdk || '').trim().slice(0, 128);
       } else if (key === 'proxyRules') {
         settings.proxyRules = normalizeProxyRules(patch.proxyRules);
       } else if (key === 'autoCheckUpdate') {
@@ -10327,7 +10680,13 @@ function installIpc() {
      * （服务器面板里的按钮）走原来的 endfield:game-progress，行为不变。
      */
     const jobId = String(options?.jobId || '');
-    const emit = (progress) => {
+    /*
+     * 两个面板共用同一条出口：老入口只发 endfield:game-progress（服务器面板的 busy toast
+     * 在听），带 jobId 的再发一份 predownload:progress 给启动页那个进度面板。
+     * 补上 phase：endfield-packs 原来只发 current/processed/total/downloadedBytes，
+     * 没有 phase，界面拿到事件也拼不出「下载更新 42%」——只能落回「正在更新…」。
+     */
+    const meter = require('./progress-meter').createMeter((progress) => {
       send('endfield:game-progress', progress);
       if (!jobId) return;
       send('predownload:progress', {
@@ -10336,6 +10695,14 @@ function installIpc() {
         // 面板读的是 bytesDone，这里把下载字节映射过去，按钮才有百分比
         bytesDone: Number(progress?.bytesDone ?? progress?.downloadedBytes) || 0,
       });
+    });
+    const emit = (progress) => {
+      const withPhase = { ...progress };
+      if (!withPhase.phase) {
+        // 有 downloadedBytes 认为是真在下网，否则是在比对/复用已有文件
+        withPhase.phase = Number(progress?.downloadedBytes) > 0 ? 'download' : 'install';
+      }
+      meter(withPhase);
     };
     /*
      * 预下载过的 Diffs/ 里就是这次更新的 zip 分包，先走它：同名同 size 同 md5 直接命中，
@@ -10413,13 +10780,32 @@ function installIpc() {
     return result;
   });
 
-  ipcMain.handle('arknights:update-game', async () => {
+  ipcMain.handle('arknights:update-game', async (_event, options) => {
     const game = store.data.games.find((item) => item.builtinKey === 'arknights');
     const server = game?.servers.find((item) => item.id === game.activeServerId);
     if (!game || !server?.root || !targetExists(server.path)) {
       throw new Error('先配置明日方舟客户端路径');
     }
     if (running.has(game.id)) throw new Error('请先退出明日方舟再更新');
+    /*
+     * 进度双路输出：老入口只发 arknights:game-progress（原来全仓没人订阅，界面一直
+     * 停在「正在准备更新…」），从启动页那颗按钮进来时带 jobId，再发一份
+     * predownload:progress 给进度面板 —— 和终末地那条桥保持同一形状。
+     */
+    const jobId = String(options?.jobId || '');
+    const emit = require('./progress-meter').createMeter((progress) => {
+      const withPhase = { ...progress };
+      if (!withPhase.phase) {
+        withPhase.phase = Number(progress?.downloadedBytes) > 0 ? 'download' : 'install';
+      }
+      send('arknights:game-progress', withPhase);
+      if (!jobId) return;
+      send('predownload:progress', {
+        jobId,
+        ...withPhase,
+        bytesDone: Number(withPhase.bytesDone ?? withPhase.downloadedBytes) || 0,
+      });
+    });
     /*
      * 国际服（EN / JP / KR）走 Yostar 自己的那套清单，和国服的鹰角清单毫无关系：
      * 逐文件 CRC64 + 官方 game-launcher-config.json / manifest.json 元数据，
@@ -10430,7 +10816,7 @@ function installIpc() {
         profile: server.channel,
         installRoot: server.root,
         allowDelete: true,
-        onProgress: (progress) => send('arknights:game-progress', progress),
+        onProgress: (progress) => emit(progress),
       });
       if (result?.ok) {
         game.version = String(result.version || game.version || '');
@@ -10456,7 +10842,7 @@ function installIpc() {
       root: server.root,
       channel: 'arknights',
       linkSources: externalLinkSources(game, server, server.root),
-      onProgress: (progress) => send('arknights:game-progress', progress),
+      onProgress: (progress) => emit(progress),
     });
     if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
     return result;
@@ -13672,7 +14058,14 @@ function musicLoginWindow(target) {
       }
     }
     if (game.builtinKey === 'genshin' && server.channel === 'global') {
-      const prepared = await prepareGenshinPackRuntime(game, server);
+      /*
+       * 生成国际服运行时可能要搬几十 GB：以前这里不传 onProgress，用户点「切换」
+       * 只看到一个不动的转圈。现在照终末地那条路把进度发到同一个频道，
+       * 界面上现有的切换提示条就能显示「百分比 + 已处理/总量 + 速度」。
+       */
+      const prepared = await prepareGenshinPackRuntime(game, server, (progress) =>
+        send('endfield:progress', { ...progress, serverName: server.name })
+      );
       if (prepared) {
         server.path = prepared.executable;
         server.root = prepared.runtimeRoot;
@@ -13704,7 +14097,10 @@ function musicLoginWindow(target) {
     // 明日方舟（2.4.0 合并）：官服 / B服 在同一套安装目录里，按终末地那套运行时
     // 方案复制出独立目录，大文件硬链接、渠道 SDK 换成目标服的。缺 B服 载荷时直接抛错。
     if (game.builtinKey === 'arknights') {
-      await ensureArknightsRuntime(game, server);
+      // 同上：方舟硬链接运行时也要报进度，否则切服时界面一动不动
+      await ensureArknightsRuntime(game, server, {
+        onProgress: (progress) => send('endfield:progress', { ...progress, serverName: server.name }),
+      });
     }
     /*
      * 版本号跟着当前客户端走。以前它是「一个游戏一个」，官服更到 7.2 再切到还是 7.1
@@ -14140,7 +14536,7 @@ function musicLoginWindow(target) {
     sophonJobs.set(jobId, signal);
     beginBackgroundTask();
     try {
-      const emit = (progress) => send('sophon:progress', { jobId, ...progress });
+      const emit = (progress) => sendProgress('sophon:progress', jobId, progress);
       emit({ phase: 'start', processed: 0, total: 0, current: '正在准备运行时…' });
       const ok = await ensureArknightsRuntime(game, server, {
         runtimeRoot: input?.runtimeRoot,
@@ -14238,7 +14634,7 @@ function musicLoginWindow(target) {
               targetRoot,
               cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
               signal,
-              onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+              onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
             })
           : await prepareSophon({
               gameKey: game.builtinKey,
@@ -14252,7 +14648,7 @@ function musicLoginWindow(target) {
               // 绝区零那 111 份分类剧情资源（约 19.73GB）要不要一起装。默认不装。
               includeStoryResources: storyResourcesEnabled(game, server),
               signal,
-              onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+              onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
             });
       if (signal.cancelled) return { ok: false, cancelled: true };
       if (!result.executable) throw new Error('清单安装完成，但没有找到游戏启动程序');
@@ -14297,6 +14693,30 @@ function musicLoginWindow(target) {
     }
     if (game.builtinKey === 'bh3' && server.channel && server.channel !== 'official') {
       throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
+    }
+    /*
+     * 动手之前先探一下「这个目录到底让不让我们写」。
+     *
+     * 不探的话，权限问题会在下载完几十 GB、开始替换文件的那一刻才爆出来，报错还被
+     * Node 说成「文件被其它程序占用」，用户把所有程序都关掉也修不好（2026-11-11 报障）。
+     * 预检只做只读探测（试建临时文件 + 试改名已有可执行文件再改回来），不删用户任何东西。
+     *
+     * 这里不自动提权：UAC 弹在开始之前是最佳时机，但由界面决定要不要弹 —— 主进程只把
+     * 结论告诉界面，界面弹「以管理员身份重启并继续更新」，用户点了才走 app:relaunch-admin。
+     */
+    if (!currentElevation()) {
+      const probe = await probeUpdateWritable(server.root);
+      if (probe.blocked) {
+        writeLaunchLog(`update ${game.id}: 写权限预检未过 → ${probe.reason}`);
+        return {
+          ok: false,
+          code: 'NEED_ELEVATION',
+          reason: probe.reason,
+          root: server.root,
+          gameId: game.id,
+          serverId: server.id,
+        };
+      }
     }
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
@@ -14347,7 +14767,7 @@ function musicLoginWindow(target) {
           // 预下载产物 + 别的渠道客户端的同内容文件，两条路都能省掉下载
           linkSources,
           signal,
-          onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+          onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
         });
         if (signal.cancelled) return { ok: false, cancelled: true };
         if (appliedResult?.ok) {
@@ -14416,7 +14836,7 @@ function musicLoginWindow(target) {
             // 别的渠道已经更到目标版本时，这批文件直接硬链接，别去下增量补丁
             linkSources,
             signal,
-            onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+            onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
           });
           if (ldiff?.ok && (ldiff.applied > 0 || ldiff.linked > 0)) {
             writeLaunchLog(
@@ -14445,7 +14865,7 @@ function musicLoginWindow(target) {
         includeStoryResources: storyResourcesEnabled(game, server),
         linkSources,
         signal,
-        onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+        onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
       if (result.externalLinked) {
@@ -14579,6 +14999,69 @@ function musicLoginWindow(target) {
     await fsp.rm(probe, { force: true });
   }
 
+  /**
+   * 判断这次更新到底会不会被「权限」挡住，以及要不要建议以管理员身份重开。
+   *
+   * 为什么不只试目录：目录能建能删，不代表里面的文件能删。游戏目录里常有官方安装器
+   * 用管理员身份写的文件，ACL 上普通用户只给了「读取+执行」，连 DELETE 都没有；
+   * 这种文件 rm 会 EPERM，而目录本身完全可写 —— 光探目录会漏判（这就是 2026-11-11
+   * 那位用户明明目录正常却更新不了的原因）。
+   *
+   * 所以这里抽几类真正会被改写的东西各试一次：
+   *   1) 目录本身能不能建/删临时文件（最基础的一条）
+   *   2) 目录里已有的**可执行文件和 dll**：更新几乎必然要替换它们，最能代表真实情况
+   *   3) 已有文件数量太少（全新安装）就只看目录
+   *
+   * 只做「能不能删掉并原样重建」的探测，探测完立刻把内容原样写回去、权限不动 ——
+   * 探针文件用的是改名挪开再改名回原位，绝不删除用户的东西。
+   */
+  async function probeUpdateWritable(installDir) {
+    const report = { dir: installDir, dirWritable: false, filesProbed: 0, filesBlocked: [], blocked: false, reason: '' };
+    try {
+      await assertDirWritable(installDir);
+      report.dirWritable = true;
+    } catch (error) {
+      report.blocked = true;
+      report.reason = `安装目录本身不可写：${String(error?.message || error)}`;
+      return report;
+    }
+    // 目录可写，再看里面的文件能不能动。只抽少量代表件，别为了探测把几万个文件都 stat 一遍。
+    const probes = [];
+    try {
+      const entries = await fsp.readdir(installDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (probes.length >= 3) break;
+        if (!entry.isFile()) continue;
+        if (/\.(exe|dll)$/i.test(entry.name)) probes.push(path.join(installDir, entry.name));
+      }
+    } catch {
+      /* 读不到就只按目录结论走 */
+    }
+    for (const target of probes) {
+      report.filesProbed += 1;
+      const parked = `${target}.hxl-probe-${Date.now()}`;
+      let parkedOk = false;
+      try {
+        // 用改名探「能不能动这个文件」：ACL 缺 DELETE 时 rm 会 EPERM，但改名通常可以，
+        // 所以这里能改名的就认为「更新时我们有办法替换它」，不算被挡。
+        await fsp.rename(target, parked);
+        parkedOk = true;
+      } catch {
+        /* 改名也不行，那就是真动不了 */
+      }
+      if (parkedOk) {
+        await fsp.rename(parked, target).catch(() => {});
+      } else {
+        report.filesBlocked.push(path.basename(target));
+      }
+    }
+    if (report.filesBlocked.length) {
+      report.blocked = true;
+      report.reason = `安装目录里有文件动不了：${report.filesBlocked.join('、')}`;
+    }
+    return report;
+  }
+
   /** 目标盘剩余空间；读不到就返回 0（调用方自行决定是否放行）。 */
   async function driveFreeBytes(dir) {
     try {
@@ -14706,7 +15189,7 @@ function musicLoginWindow(target) {
           // 必须和安装 / 更新那条路径用同一个取值，否则口径不一致
           includeStoryResources: storyResourcesEnabled(game, server),
           signal,
-          onProgress: (progress) => send('sophon:progress', { jobId, ...progress }),
+          onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
         });
         executable = result.executable || '';
       } else if (engine === 'yostar') {
@@ -15087,7 +15570,7 @@ function musicLoginWindow(target) {
       const result = await predownloadSim.start({
         ...base,
         signal,
-        onProgress: (progress) => send('predownload:progress', { jobId, ...progress }),
+        onProgress: (progress) => sendProgress('predownload:progress', jobId, progress),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
       await savePredownloadState(server, await predownloadSim.check(base));
@@ -15131,7 +15614,7 @@ function musicLoginWindow(target) {
         ...base,
         linkSources,
         signal,
-        onProgress: (progress) => send('predownload:progress', { jobId, ...progress }),
+        onProgress: (progress) => sendProgress('predownload:progress', jobId, progress),
       });
       if (signal.cancelled) return { ok: false, cancelled: true };
       const tag = String(result?.tag || result?.version || '');
@@ -15495,7 +15978,10 @@ function musicLoginWindow(target) {
             return {
               ok: false,
               code: 'BUSY',
-              reason: `「${plan.root}」里的文件还被占用着：先把游戏和它的更新器完全退出（托盘里也退掉）再试一次`,
+              // 别断言「被占用」：Windows 上「ACL 没给 DELETE 权限」和「文件被别的进程打开」
+              // 在 Node 里都是 EPERM，靠错误码分不出来（2026-11-11 用户报障就是这个误判）。
+              // 这里只把两种可能都摆出来，让用户按顺序排查。
+              reason: `「${plan.root}」里的文件动不了：可能是游戏/更新器还开着（托盘里也退掉），也可能是这个目录的权限不够。完全退出后仍然不行，就用管理员身份重新打开启动器再试`,
               root: plan.root,
             };
           }
@@ -16194,10 +16680,26 @@ function musicLoginWindow(target) {
       }
 
       const cfg = store?.data?.settings || {};
+      const updateSourceModeText = {
+        auto: '自动（内置镜像依次尝试）',
+        mirrorchyan: 'Mirror酱 优先',
+        gitee: 'Gitee 镜像优先',
+        jsdelivr: 'jsDelivr 优先',
+        github: 'GitHub 直连优先',
+        custom: '只用手填地址',
+      }[cfg.updateSourceMode || 'auto'] || `未知（${cfg.updateSourceMode}）`;
       const settingsSummary = {
         主题: `${cfg.theme || '跟随系统'} / 强调色 ${cfg.accent || '默认'}`,
         代理: cfg.proxyRules ? String(cfg.proxyRules) : '未设置（直连）',
+        更新源模式: updateSourceModeText,
         更新源: cfg.updateManifest ? String(cfg.updateManifest) : '内置官方源',
+        /*
+         * Mirror酱 只报「配没配」和 RID，不报 CDK —— 诊断包是要发给别人的文本，
+         * CDK 是用户的付费凭证，写进去等于替他公开了。
+         */
+        Mirror酱: cfg.mirrorchyanRid
+          ? `RID ${String(cfg.mirrorchyanRid).slice(0, 64)} / CDK ${cfg.mirrorchyanCdk ? '已配置（不在诊断里显示）' : '未填（只能查版本，不能加速下载）'}`
+          : '未配置',
         自动检查更新: cfg.autoCheckUpdate === false ? '关闭' : '开启',
         清单签名: `已启用，公钥 ${minisign.KEY_ID}，最近验签版本 ${cfg.updateSignedVersion || '（还没验过）'}`,
         最近一次检查: updateStatus
@@ -16330,6 +16832,17 @@ function musicLoginWindow(target) {
     const gameId = String(input?.launchGameId || '');
     if (gameId) {
       store.data.settings.pendingLaunchGameId = gameId;
+      await store.saveNow().catch(() => {});
+    }
+    /*
+     * 「更新到一半被权限挡住 → 以管理员重启 → 接着更新」这条链。
+     * 和开游戏那条分开存：游戏目录权限不够和开游戏提权不是一回事，
+     * 用户可能只是想更新，不想一开机就把游戏拉起来。
+     */
+    const updateGameId = String(input?.updateGameId || '');
+    if (updateGameId) {
+      store.data.settings.pendingUpdateGameId = updateGameId;
+      store.data.settings.pendingUpdateServerId = String(input?.updateServerId || '');
       await store.saveNow().catch(() => {});
     }
     if (currentElevation()) return { ok: true, already: true };

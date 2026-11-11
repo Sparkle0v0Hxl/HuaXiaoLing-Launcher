@@ -6541,6 +6541,58 @@ html[data-theme="light"] body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/*
+ * 三行子任务（下载 / 安装 / 校验）—— 官方启动器那种「每一行各自完成量 + 速度」的形态。
+ * 只在已知总量时才显示；未知时整块隐藏，避免出现「0 B / 0 B」这种看着像坏了的行。
+ */
+.progress-rows {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.progress-rows[hidden] {
+  display: none;
+}
+.progress-row {
+  display: grid;
+  grid-template-columns: 16px 40px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 16px;
+}
+.progress-row[hidden] {
+  display: none;
+}
+.progress-row .pr-icon {
+  text-align: center;
+  color: var(--gold-text);
+  font-size: 11px;
+}
+.progress-row .pr-label {
+  color: var(--text, inherit);
+}
+.progress-row .pr-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.progress-row .pr-speed {
+  color: var(--muted);
+}
+/* 该行还没开始：整体压暗，但保留行位，避免行数跳动 */
+.progress-row.is-idle {
+  opacity: 0.4;
+}
+/* 当前正在跑的那一行高亮一点，用户一眼知道卡在哪个阶段 */
+.progress-row.is-active .pr-label {
+  color: var(--gold-text);
+  font-weight: 600;
+}
 
 :root[data-theme="light"] .hero-sparks {
   color: var(--gold-text);

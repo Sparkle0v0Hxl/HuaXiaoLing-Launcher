@@ -560,7 +560,33 @@ const DOCK_UPDATE_PHASES = {
   link: '整理文件',
   verify: '校验文件',
   apply: '应用更新',
+  // 下面这些是主进程一直在发、但这份白名单漏掉的阶段。漏了的表现是：事件到了、
+  // 字节数也有，就因为查不到短语而落回「正在更新…」，用户以为卡死了。
+  clean: '清理旧文件',
+  scan: '扫描文件',
+  pack: '下载更新包',
+  ldiff: '修补增量补丁',
+  overlay: '覆盖渠道文件',
+  predownload: '使用预下载内容',
+  delete: '清理多余文件',
+  done: '更新完成',
+  error: '出错',
 };
+
+/** 把字节数写成「1.2 GB」这种，按钮上要用短形式。 */
+function shortBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const digits = size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[index]}`;
+}
 
 function dockUpdateText(event) {
   const phase = String((event && event.phase) || '');
@@ -569,22 +595,31 @@ function dockUpdateText(event) {
   const bytesDone = Number(event && event.bytesDone) || 0;
   const totalBytes = Number(event && event.totalBytes) || 0;
   const detail = String((event && event.current) || '');
-  if (phase === 'done') return { label: '更新完成', percent: 100, detail };
+  if (phase === 'done') return { label: '更新完成', percent: 100, detail, stats: '' };
 
-  // 有字节总量就用百分比（比「37/500 个文件」直观），没有就退到文件计数
+  /*
+   * 有字节总量就用百分比（比「37/500 个文件」直观），没有就退到文件计数。
+   *
+   * 「覆盖了多少」按用户要求补在后面：进度条能看出比例，看不出绝对量 ——
+   * 1.2 GB / 2.9 GB 才让人知道还要等多久。总量不知道时（比如扫清单阶段）不显示，
+   * 绝不写成「0 B / 0 B」。
+   */
   const percent =
     totalBytes > 1 ? Math.max(0, Math.min(99, Math.floor((bytesDone / totalBytes) * 100))) : 0;
+  const scale = totalBytes > 1 ? `${shortBytes(bytesDone)} / ${shortBytes(totalBytes)}` : '';
   const verb = DOCK_UPDATE_PHASES[phase];
   let label = '';
   if (verb) {
     if (percent) label = `${verb} ${percent}%`;
     else if (total > 0 && processed > 0) label = `${verb} ${processed}/${total}`;
     else label = `${verb}…`;
+    // 百分比有了才在后面带字节量；纯计数阶段（整理文件）已经有「4200/11300」了
+    if (percent && scale) label = `${label} · ${scale}`;
   } else if (detail && detail.length <= 16 && !/[\\/]/.test(detail)) {
     // 不认识的阶段：只有短的、不像路径的文案才敢直接上按钮
     label = detail;
   }
-  return { label: label || '正在更新…', percent, detail };
+  return { label: label || '正在更新…', percent, detail, stats: scale };
 }
 
 function relativeDate(iso) {
@@ -709,8 +744,19 @@ function humanError(error) {
    * 用户看不懂，也不知道该关掉什么。这里翻成人话，顺带把路径带出来。
    */
   const at = (text.match(/'(?:[A-Za-z]:\\|\\\\)[^']+'/) || [])[0] || '';
+  /*
+   * EPERM / EBUSY 不再一律说成「被占用」。
+   *
+   * Windows 上「文件被别的进程打开」和「ACL 里没有 DELETE 权限」在 Node 里
+   * 报的都是 EPERM（errno -4048），错误码、syscall 都分不出来 —— 真正区分要靠
+   * 主进程主动探测。2026-11-11 就有用户因为这条文案，把所有程序都关掉了还是
+   * 更新不了（实际是游戏目录里的文件普通权限删不掉）。
+   *
+   * 所以这里把两种可能都摆出来，按「先关程序、再提权限」的顺序让用户试。
+   * 更新链路另外加了写权限预检，会在动手前就直接问要不要以管理员身份重开。
+   */
   if (/\bEPERM\b|\bEBUSY\b/.test(text)) {
-    return `文件被其它程序占用，删除或替换失败${at ? `：${at}` : ''}。请先关闭正在运行的游戏（杀毒软件在扫描的话也等它跑完），再试一次。`;
+    return `文件删不掉或改不动${at ? `：${at}` : ''}。 可能是游戏或更新器还开着（托盘里也退掉、杀毒软件在扫描的话也等它跑完），也可能是这个目录不让普通权限写入 —— 完全退出后还不行，就用管理员身份重新打开启动器再试一次。`;
   }
   if (/\bENOSPC\b/.test(text)) return '磁盘空间不足，清理一些空间后再试。';
   if (/\bEACCES\b/.test(text)) {
@@ -1236,6 +1282,23 @@ async function boot() {
         const gameId = payload && payload.gameId;
         if (!gameId) return;
         handleAction('launch-game', gameId).catch((error) => toast(humanError(error), 'error'));
+      });
+    }
+    /*
+     * 因为权限不足被打断的更新，在用户点了「以管理员身份重启」之后接着做。
+     * 走同一条 update-game 动作：已经把权限拿到的这次一定过得了预检，
+     * 之前下好的分块/补丁包会被缓存命中，不会重下。
+     */
+    if (typeof api.onUpdateResume === 'function') {
+      api.onUpdateResume((payload) => {
+        const gameId = payload && payload.gameId;
+        if (!gameId) return;
+        const game = state.games.find((item) => item.id === gameId);
+        if (!game) return;
+        // start-update-game 自己按当前选中的服务器走，这里只需要把游戏选中
+        state.startGameId = game.id;
+        toast('已获得管理员权限，正在接着更新…', 'info');
+        handleAction('start-update-game', game.id).catch((error) => toast(humanError(error), 'error'));
       });
     }
     /*

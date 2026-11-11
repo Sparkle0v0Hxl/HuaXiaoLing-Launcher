@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.10.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.10.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.10.0**（正式版）
+**当前版本：v2.10.1**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.10.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.10.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,21 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.10.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.10.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.10.1</b></summary>
+
+- 更新权限：修掉「点更新游戏提示文件被占用、要先开管理员权限」的误判——Windows 上「文件被别的进程打开」与「目录 / 文件不让普通权限删改」是同一个错误码，以前一律按占用处理。现在更新前先探目录能否写（只看不动、探完原样还回），文件缺删改权限的改用「改名覆盖」绕过去，多数情况不用管理员权限；真整目录不可写才提示提权，并给「以管理员身份重启并接着更新」按钮，重启后自动续做。
+- 报错分诊：`humanError` 与卸载路径的文案不再咬定「被占用」，同时说明也可能是权限不足。
+- 进度面板：更新 / 预下载弹窗改成三行式（下载 / 安装 / 校验各自完成量与速度）+ 总百分比 + 预计剩余时间；速度按 3 秒滑窗分阶段采样，总量未知时走不确定态而不是死卡 0%。校验以前混在写入里做，现在单列一行。
+- 覆盖量：启动器底部任务按钮直接写「已下载 X / Y」，`DOCK_UPDATE_PHASES` 从 12 个阶段名补到 21 个。
+- 硬链接生成：`hardlinkTree` / `overlayDirectory` 累加字节量并上报，切服时能看到扫多少 / 链多少 / 几个 G / 速度 / 剩余；新增暂停检查点，暂停真的会停（以前只有下载阶段能停）。原神国际服与明日方舟的硬链接调用点补上 `onProgress`。
+- 预下载：同款三行面板与速度 / 剩余时间。
+- 终末地渠道包与明日方舟更新以前没有 `phase`（界面永远停在「正在更新…」），现在补齐阶段与字节量；md5 命中、跨渠道硬链接复用、真下载三条路径都算进覆盖量，不再出现进度不动、速度恒 0。
+- 新增 `electron/progress-meter.js`（速度 / ETA 计量，已登记 `ASAR_MUST_HAVE`）。
+
+</details>
 
 <details>
 <summary><b>v2.10.0</b></summary>

@@ -318,11 +318,37 @@ function endfieldProgressText(progress) {
   const name = progress.serverName || '渠道';
   const total = Number(progress.total) || 0;
   const done = Number(progress.processed) || 0;
+  /*
+   * 有字节量就按字节报：硬链接的文件大小差几百倍（一个 300 MB 的 dll 和一个 4 KB 的 json），
+   * 按文件个数算的百分比会在 99% 上停很久，用户以为卡住了。
+   * 速度/剩余时间由主进程 progress-meter 算好，这里只负责显示。
+   */
+  const totalBytes = Number(progress.totalBytes) || 0;
+  const bytesDone = Number(progress.bytesDone) || 0;
+  const speed = Number(progress.bytesPerSec) || 0;
+  const eta = Number(progress.etaSeconds) || 0;
+  if (totalBytes > 0) {
+    const pct = Math.min(100, Math.round((bytesDone / totalBytes) * 100));
+    const size = `${fmtBytes(bytesDone)} / ${fmtBytes(totalBytes)}`;
+    const tail = speed > 0 ? ` · ${fmtBytes(speed)}/s${eta > 0 ? ` · 剩 ${formatEtaText(eta)}` : ''}` : '';
+    return `正在生成${name}的硬链接运行时… ${pct}%（${size}${tail}）`;
+  }
   if (total > 0) {
     const pct = Math.min(100, Math.round((done / total) * 100));
     return `正在生成${name}的硬链接运行时… ${pct}%（${done} / ${total} 个文件）`;
   }
   return progress.current || `正在生成${name}的硬链接运行时…`;
+}
+
+/** 剩余时间：`MM:SS` 或 `HH:MM:SS`，0 表示未知。 */
+function formatEtaText(seconds) {
+  const value = Number(seconds) || 0;
+  if (value <= 0) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const secs = Math.round(value % 60);
+  return hours > 0 ? `${pad(hours)}:${pad(minutes)}:${pad(secs)}` : `${pad(minutes)}:${pad(secs)}`;
 }
 
 /* ── 渠道包按需下载（2.5.0） ──────────────────────────────────────
@@ -1250,6 +1276,27 @@ function openPredownloadModal(gameId, serverId) {
               <span id="pd-count"></span>
             </div>
             <div class="progress-bar"><span id="pd-bar" style="width:0%"></span></div>
+            <!-- 和更新弹窗同一套三行子任务，预下载这边同样要看得出「下了多少、装了多少」 -->
+            <div class="progress-rows" id="pd-rows" hidden>
+              <div class="progress-row" data-row="download">
+                <span class="pr-icon">↓</span>
+                <span class="pr-label">下载</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="install">
+                <span class="pr-icon">📦</span>
+                <span class="pr-label">安装</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+              <div class="progress-row" data-row="verify">
+                <span class="pr-icon">✓</span>
+                <span class="pr-label">校验</span>
+                <span class="pr-value"></span>
+                <span class="pr-speed"></span>
+              </div>
+            </div>
             <div class="link-progress-meta">
               <span id="pd-stats"></span>
               <span id="pd-current"></span>
@@ -1311,6 +1358,8 @@ function openPredownloadModal(gameId, serverId) {
   let unsubscribe = null;
   let stashed = false; // 收进过任务坞没有
   let guardFired = false; // 关窗被守卫拦成最小化没有
+  // 三行子任务（下载 / 安装 / 校验）的「已显示过」记忆，跨事件保持
+  let pdRowState = {};
 
   const minimizeBtn = document.querySelector('#pd-minimize');
 
@@ -1506,6 +1555,8 @@ function openPredownloadModal(gameId, serverId) {
       if (parts.length) stats.textContent = parts.join(' · ');
     }
     if (current) current.textContent = String(event.current || '');
+    // 三行子任务（下载 / 安装 / 校验），与更新弹窗同一套渲染
+    pdRowState = paintProgressRows('pd-rows', event, pdRowState);
     syncDockJob(percent, base, processed, total, bytesDone, totalBytes, event);
   };
 

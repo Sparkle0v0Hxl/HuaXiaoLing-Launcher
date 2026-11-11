@@ -131,6 +131,42 @@ async function waitIfPaused(signal) {
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
 }
 
+/**
+ * 把临时文件就地换成正式文件。
+ *
+ * 为什么不是「先 rm 再 rename」——2026-11-11 用户报障查出来的坑：
+ * 游戏目录里有些文件是官方安装器用管理员身份写的，ACL 上普通用户只给了
+ * 读取+执行，连 DELETE 都没有。这种文件 `rm` 会直接 EPERM，而 Node 在
+ * Windows 上把「权限不足」和「文件被占用」都报成 EPERM，提示就成了
+ * 「文件被其它程序占用」——用户关掉所有程序也永远修不好。
+ *
+ * 实测（deny DELETE 的文件、目录本身可写）：`rm` → EPERM，但
+ * `rename` 直接覆盖 → 成功。Windows 的 fs.rename 底层是 MoveFileExW +
+ * MOVEFILE_REPLACE_EXISTING，覆盖已存在的目标不需要目标可删，只需要
+ * 目录可写。所以先试 rename，失败才退回「删了再改名」。
+ *
+ * 这也和 hdiff.js 里打补丁落地那段是同一套写法（那边注释早写了原因），
+ * 两条更新链路不该一个对一个错。
+ */
+async function replaceFileAtomic(tmp, target) {
+  try {
+    await fsp.rename(tmp, target);
+    return;
+  } catch (error) {
+    // rename 失败可能是跨卷、目标被独占、或真没有目录写权限。退回老办法再试一次，
+    // 这一次的报错才带有意义（大概率是真正的占用/权限问题）。
+    await fsp.rm(target, { force: true }).catch(() => {});
+    try {
+      await fsp.rename(tmp, target);
+    } catch (retryError) {
+      throw Object.assign(
+        new Error(`无法写入 ${path.basename(target)}：${retryError.message}`),
+        { code: retryError.code || error.code }
+      );
+    }
+  }
+}
+
 function throwIfCancelled(signal) {
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
 }
@@ -685,8 +721,7 @@ async function downloadChunkFile(url, target, expectedSize, expectedMd5, signal,
       if (expectedMd5 && (await md5File(tmp)) !== String(expectedMd5).toLowerCase()) {
         throw new Error('压缩数据校验失败');
       }
-      await fsp.rm(target, { force: true });
-      await fsp.rename(tmp, target);
+      await replaceFileAtomic(tmp, target);
       return;
     } catch (error) {
       clearTimeout(timer);
@@ -1274,8 +1309,7 @@ async function assembleFile(file, ctx) {
       throw new Error(`文件校验失败：${file.file}`);
     }
   }
-  await fsp.rm(target, { force: true });
-  await fsp.rename(tmp, target);
+  await replaceFileAtomic(tmp, target);
   return { applied: 1, skipped: 0, reused, bytes };
 }
 
