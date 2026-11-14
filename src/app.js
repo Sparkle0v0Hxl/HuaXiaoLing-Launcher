@@ -281,8 +281,6 @@ const state = {
    * 之所以按组合缓存而不是只存一份：用户会在「原神便笺 → 深渊 → 星铁便笺」
    * 之间来回点，每次都重新请求既慢又容易触发风控。
    */
-  /* 工具页左侧分组导航当前停在哪个分类（默认停在「按游戏查看」） */
-  toolsTab: 'games',
   /* 工具页右侧能力面板当前显示哪个游戏（key），空则用列表第一个 */
   toolsGame: '',
   /*
@@ -525,16 +523,6 @@ function fmtSpeed(bytes) {
   return `${fmtBytes(bytes)}/s`;
 }
 
-function fmtDuration(seconds) {
-  const total = Math.max(0, Math.round(Number(seconds) || 0));
-  if (total < 60) return '不到 1 分钟';
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.round((total % 3600) / 60);
-  if (hours <= 0) return `${minutes} 分钟`;
-  if (minutes <= 0) return `${hours} 小时`;
-  return `${hours} 小时 ${minutes} 分`;
-}
-
 function etaText(download) {
   if (!download.total || !download.speed || download.speed <= 0) return '';
   const left = Math.max(0, download.total - download.received);
@@ -605,6 +593,14 @@ function dockUpdateText(event) {
   const bytesDone = Number(event && event.bytesDone) || 0;
   const totalBytes = Number(event && event.totalBytes) || 0;
   const detail = String((event && event.current) || '');
+  // 硬链接生成阶段：写盘速度是链接落盘（1.3GB/s 级），不是真下载——用户实测时
+  // 以为「下完 103GB 还要去 WeGame 下载」，文案得说清楚这是「链接」不是「下载」。
+  if (phase === 'link') {
+    const scale = totalBytes > 1 ? `${shortBytes(bytesDone)} / ${shortBytes(totalBytes)}` : '';
+    const percent = totalBytes > 1 ? Math.max(0, Math.min(99, Math.floor((bytesDone / totalBytes) * 100))) : 0;
+    const label = percent ? `硬链接生成 ${percent}%` : '硬链接生成中';
+    return { label: scale ? `${label} · ${scale}` : label, percent, detail, stats: scale };
+  }
   if (phase === 'done') return { label: '更新完成', percent: 100, detail, stats: '' };
 
   /*
@@ -1091,14 +1087,6 @@ function filteredGames() {
   });
 }
 
-function featuredGame() {
-  if (!state.games.length) return null;
-  return [...state.games].sort((a, b) => {
-    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
-    return new Date(b.lastPlayed || b.createdAt || 0) - new Date(a.lastPlayed || a.createdAt || 0);
-  })[0];
-}
-
 /* chrome & routing（设置应用 / updateChrome / 启动页抽屉 / navigate /
  * 启动页动态背景 / render 主循环）已拆到 views/chrome.js（第 4 批）。 */
 /* home + 启动页（首页卡片 / 启动页背景 / 启动页服务器面板 / 切服引导 /
@@ -1406,8 +1394,12 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-/* 侧栏底部「头像 + 名字」还是回设置页；左上角品牌图标才进启动页（走 data-nav）。 */
-document.querySelector('#profile-btn').addEventListener('click', () => navigate('settings'));
+/* 侧栏底部「头像 + 名字」打开账号中心；左上角品牌图标才进启动页（走 data-nav）。 */
+document.querySelector('#profile-btn').addEventListener('click', () => {
+  if (typeof openAccountCenter === 'function') openAccountCenter();
+  else navigate('settings');
+});
+
 
 /* 左上角品牌那块是 <div>，键盘也要能触发，补一下回车 / 空格 */
 document.querySelector('.brand[data-nav]')?.addEventListener('keydown', (event) => {
@@ -1508,6 +1500,8 @@ async function boot() {
     applySongVolume();
     applyAudioFx();
     updateChrome();
+    /* 侧栏头像跟通行证账号走：先按缓存渲染（updateChrome 已经用了），再异步纠正 */
+    if (typeof refreshSidebarAccount === 'function') refreshSidebarAccount();
     resumeLastSong();
     render({ preserveScroll: false });
     if (state.route === 'gacha') loadGacha();
@@ -1789,6 +1783,15 @@ async function boot() {
     });
     api.onGachaUpdated(() => {
       state.gacha = null;
+      // 同步成功 = 链接还活着，过期提醒就该撤了
+      if (state.gachaLinkExpired) state.gachaLinkExpired = null;
+      if (state.route === 'gacha') loadGacha(true);
+    });
+    // 自动同步发现链接过期：抽卡记录页顶部挂常驻提醒（gacha.js 渲染），点「知道了」可手动关
+    api.onGachaLinkExpired?.((event) => {
+      if (!event?.game) return;
+      state.gachaLinkExpired = state.gachaLinkExpired || {};
+      state.gachaLinkExpired[event.game] = { message: event.message || '' };
       if (state.route === 'gacha') loadGacha(true);
     });
     api.onGameExited(() => {

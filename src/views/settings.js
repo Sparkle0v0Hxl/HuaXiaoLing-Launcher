@@ -769,7 +769,18 @@ function settingsView() {
             <div class="setting-copy"><strong>自动同步抽卡记录</strong><span>打开游戏内抽卡记录后自动读取并同步；覆盖原神、星穹铁道、绝区零与终末地。</span></div>
             <div class="setting-control">${switchMarkup('autoGacha', settings.autoGacha !== false)}</div>
           </div>
-        </section>
+          <!--
+            抽卡账号（SToken）入口。
+
+            放在设置里而不是只放在抽卡页，是因为「扫码」这件事和「看抽卡记录」是两件事：
+            用户常常是先想绑定账号、过几天才去看记录。以前只有抽卡页的同步弹窗里有这个按钮，
+            不在那个弹窗里就完全找不到入口，看起来像「绑定不了」。
+
+            openGachaTokenModal 定义在 src/views/gacha.js 里（全局函数），这里直接调。
+            它不在时（比如某个精简构建没带 gacha.js）按钮就不渲染，不会报错。
+          -->
+</section>
+
 
         <section class="${group('games', true)}" ${groupAttr('games')}>
           <h2>${icon('gamepad')}游戏与渠道包</h2>

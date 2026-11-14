@@ -68,8 +68,26 @@ const CATEGORY_BY_GAME = {
 };
 
 /**
+ * 从素材 URL 里提炼日期，用作「哪张更新」的排序键。
+ *
+ * 官方 getAllGameBasicInfo 的 background / video 对象里**没有 time 字段**，
+ * 按旧的 `item.video.time` 排序其实是拿空串互相比较，顺序等于接口返回顺序。
+ * 真正可靠的时间信息只在 URL 路径里：
+ *   https://launcher-webstatic.mihoyo.com/launcher-public/2026/09/24/xxx.webm
+ *                                                   ^^^^ ^^ ^^
+ * 返回 'YYYYMMDD'（便于字符串比较），提取不到返回 ''。
+ */
+function urlDateKey(url) {
+  const m = /\/launcher-public\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(String(url || ''));
+  if (m) return m[1] + m[2] + m[3];
+  const m2 = /\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(String(url || ''));
+  if (m2) return m2[1] + m2[2] + m2[3];
+  return '';
+}
+
+/**
  * 取某款游戏官方的背景素材。
- * 返回 { videos: [{id,url,time}], images: [{id,url,time}] }，按时间倒序。
+ * 返回 { videos: [{id,url,time}], images: [{id,url,time}] }，**最新的排在最前**。
  */
 async function officialBackgrounds(gameKey) {
   const categories = CATEGORY_BY_GAME[gameKey];
@@ -89,11 +107,20 @@ async function officialBackgrounds(gameKey) {
         const videos = [];
         const images = [];
         for (const item of backgrounds) {
+          // time 优先用接口给的，没有就从 URL 日期段补（官方现在不给 time）
           if (item.video?.url) {
-            videos.push({ id: item.id, url: item.video.url, time: String(item.video.time || '') });
+            videos.push({
+              id: item.id,
+              url: item.video.url,
+              time: String(item.video.time || '') || urlDateKey(item.video.url),
+            });
           }
           if (item.background?.url) {
-            images.push({ id: item.id, url: item.background.url, time: String(item.background.time || '') });
+            images.push({
+              id: item.id,
+              url: item.background.url,
+              time: String(item.background.time || '') || urlDateKey(item.background.url),
+            });
           }
         }
         if (videos.length || images.length) {
@@ -110,4 +137,4 @@ async function officialBackgrounds(gameKey) {
   return { videos: [], images: [] };
 }
 
-module.exports = { officialBackgrounds, CATEGORY_BY_GAME };
+module.exports = { officialBackgrounds, CATEGORY_BY_GAME, urlDateKey };

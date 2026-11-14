@@ -1326,6 +1326,269 @@ async function planForGame({ profile, installRoot, fullVerify = false } = {}) {
   };
 }
 
+// ── 三区互为源（硬链接切服，2026-11-11 用户拍板） ─────────────────────────────
+
+/**
+ * 三区（EN/JP/KR）互相当源生成目标区客户端。实测收益（官方清单交叉，2026-11-11）：
+ * 三区共有同 hash 2592 文件/1.97GiB 可零成本硬链；EN↔JP 内容差异 421 文件/1422.5MB
+ * 必须真下载。国服（鹰角）没有逐文件清单（只有 21.9GB 分卷 zip），不参与。
+ *
+ * 三步走（每一步都可中断，失败时目标目录里只有已就位的硬链接文件，无害）：
+ *   1. hardlinkTree：与源目录逐文件比对「源在目标清单里且源文件 CRC64 与清单一致」，
+ *      一致才硬链 —— 绝不按路径大小猜。源里多余的文件（比如源区的缓存）不链。
+ *   2. downloadOne：清单里有、源没有或 CRC64 不一致的，按 Yostar 清单逐文件下载
+ *      （复用 installGame 那套 .yostar-tmp + Range 续传 + CRC64 校验）。
+ *   3. writeMetadata：写目标区的 game-launcher-config.json / manifest.json。
+ *      这一步之前目录不算「装好」，中途取消直接删目录重来即可。
+ */
+async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signal, onProgress } = {}) {
+  const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
+  if (!target) throw new Error('没有对应的 Yostar 渠道');
+  const src = String(sourceRoot || '');
+  if (!src || src === path.parse(src).root) throw new Error('请先选择一个源目录');
+  if (!fs.existsSync(path.join(src, 'Arknights.exe')) && !fs.existsSync(path.join(src, 'arknights.exe'))) {
+    throw new Error('源目录里没找到 Arknights.exe，不是可用的明日方舟客户端');
+  }
+  const root = path.resolve(String(installRoot || ''));
+  if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
+  if (path.resolve(src).toLowerCase() === root.toLowerCase()) {
+    throw new Error('源目录和目标目录是同一个，请换个安装目录');
+  }
+
+  onProgress?.({ phase: 'manifest', current: '正在读取目标区官方清单…' });
+  const remote = await loadRemoteTargetPackage(target);
+  const pkg = remote.manifest;
+  const domain = remote.cdn.primaryCdn || remote.cdn.backUpCdn || '';
+
+  /*
+   * 用 planUpdate 的 localExists 钩子把「源目录」当探针：
+   * 大小一致先进候选，CRC64 再核一遍（三区同名不同内容的文件太多了，光看大小会做出
+   * 混合体）。CRC64 很快（427MB/s 级），只对候选文件算，开销可控。
+   */
+  const sourceFileMap = new Map();
+  const walk = (dir, rel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (entry.name === 'webCaches' || entry.name === '.yostar-tmp' || entry.name.endsWith('.yostar-tmp')) continue;
+        walk(path.join(dir, entry.name), childRel);
+      } else if (entry.isFile()) {
+        try {
+          const stat = fs.statSync(path.join(dir, entry.name));
+          sourceFileMap.set(childRel.toLowerCase(), { abs: path.join(dir, entry.name), size: stat.size });
+        } catch {
+          /* 源文件消失（杀毒扫描等）就当没有，走下载 */
+        }
+      }
+    }
+  };
+  onProgress?.({ phase: 'manifest', current: '正在扫描源客户端文件…' });
+  walk(src, '');
+
+  const verifySource = async (rel, hash) => {
+    const found = sourceFileMap.get(String(rel).toLowerCase());
+    if (!found) return null;
+    // 大小可能与清单不同（版本不同步），只要 hash 一致就能硬链 —— 硬链的是内容本身
+    if (await crc64File(found.abs, { signal }) === String(hash).trim()) return found.abs;
+    return null;
+  };
+
+  const linkPlan = [];
+  const downloadPlan = [];
+  const probeCache = new Map();
+  for (const file of pkg.files) {
+    if (signal && signal.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
+    const rel = normalizeManifestPath(file.path);
+    if (!rel) continue;
+    const key = rel.toLowerCase();
+    let abs = probeCache.get(key);
+    if (abs === undefined) {
+      abs = await verifySource(rel, file.hash);
+      probeCache.set(key, abs || null);
+    }
+    if (abs) linkPlan.push({ rel, hash: file.hash, size: file.size, src: abs });
+    else downloadPlan.push({ path: rel, hash: file.hash, size: file.size, url: buildDownloadUri(domain, pkg.source, rel) });
+  }
+
+  const linkBytes = linkPlan.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  const downloadBytes = downloadPlan.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  onProgress?.({
+    phase: 'manifest',
+    current: `可硬链接 ${linkPlan.length} 个（${(linkBytes / 1024 ** 3).toFixed(2)} GB），需下载 ${downloadPlan.length} 个（${(downloadBytes / 1024 ** 3).toFixed(2)} GB）`,
+    total: linkPlan.length + downloadPlan.length,
+    totalBytes: Number(pkg.totalBytes) || 0,
+  });
+
+  await fsp.mkdir(root, { recursive: true });
+
+  // 第 1 步：硬链接（fsp.link 原子；暂停检查点与 runtime.js 的 hardlinkTree 同款）
+  let linked = 0;
+  for (const item of linkPlan) {
+    if (signal && signal.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
+    while (signal && signal.paused && !signal.cancelled) await new Promise((r) => setTimeout(r, 300));
+    const dest = resolveInside(root, item.rel);
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
+    try {
+      await fsp.link(item.src, dest);
+      linked += 1;
+    } catch (error) {
+      if (error && (error.code === 'EEXIST' || error.code === 'ENOENT')) {
+        // 目标已存在（上次中断遗留）或源刚被删：都退回复制/跳过，不中断整次生成
+        try {
+          await fsp.copyFile(item.src, dest);
+          linked += 1;
+        } catch {
+          /* 目标已存在且内容一致即可，留待第 2 步之后的校验兜底 */
+        }
+      } else {
+        throw error;
+      }
+    }
+    if (linked % 50 === 0) {
+      onProgress?.({
+        phase: 'link',
+        current: `硬链接 ${linked}/${linkPlan.length}`,
+        processed: linked,
+        total: linkPlan.length + downloadPlan.length,
+        bytesDone: linked ? Math.round((linkBytes * linked) / linkPlan.length) : 0,
+        totalBytes: Number(pkg.totalBytes) || 0,
+      });
+    }
+  }
+  onProgress?.({
+    phase: 'link',
+    current: `硬链接完成 ${linked} 个`,
+    processed: linkPlan.length,
+    total: linkPlan.length + downloadPlan.length,
+    bytesDone: linkBytes,
+    totalBytes: Number(pkg.totalBytes) || 0,
+  });
+
+  // 第 2 步：差异下载（复用 installGame 的下载与校验）
+  let done = 0;
+  await runPool(downloadPlan, DOWNLOAD_CONCURRENCY, async (file) => {
+    if (signal && signal.cancelled) throw new Error('已取消');
+    const dest = resolveInside(root, file.path);
+    await downloadOne({ url: file.url, dest, expectedSize: file.size, expectedHash: file.hash, signal });
+    done += 1;
+    onProgress?.({
+      phase: 'download',
+      current: `下载 ${done}/${downloadPlan.length} ${path.basename(file.path)}`,
+      processed: linkPlan.length + done,
+      total: linkPlan.length + downloadPlan.length,
+      bytesDone: linkBytes + Math.round((downloadBytes * done) / Math.max(downloadPlan.length, 1)),
+      totalBytes: Number(pkg.totalBytes) || 0,
+    });
+  });
+
+  // 第 3 步：写目标区元数据（这之前目录都不算「装好」）
+  onProgress?.({ phase: 'install', current: '正在写入官方元数据…' });
+  await writeMetadata(root, {
+    config: metadataConfigFor(remote.config, target),
+    manifest: { name: target.tag, version: remote.config.version, basis: remote.config.basis, files: pkg.files },
+  });
+
+  return {
+    ok: true,
+    channel: target.channel,
+    tag: target.tag,
+    version: remote.config.version,
+    installRoot: root,
+    executable: executionNameOf(remote.config, target),
+    files: pkg.files.length,
+    linked,
+    downloaded: downloadPlan.length,
+    linkBytes,
+    downloadBytes,
+    totalBytes: Number(pkg.totalBytes) || 0,
+  };
+}
+
+/** 估算三区互切的空间与下载量（确认弹窗用，不写盘、只读源目录 + 算 CRC64 抽样）。 */
+async function planCrossRuntime({ sourceRoot, targetProfile } = {}) {
+  const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
+  if (!target) throw new Error('没有对应的 Yostar 渠道');
+  const src = String(sourceRoot || '');
+  if (!src || !fs.existsSync(src)) throw new Error('源目录不存在');
+
+  const remote = await loadRemoteTargetPackage(target);
+  const pkg = remote.manifest;
+
+  const sourceFileMap = new Map();
+  const walk = (dir, rel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (entry.name === 'webCaches' || entry.name === '.yostar-tmp') continue;
+        walk(path.join(dir, entry.name), childRel);
+      } else if (entry.isFile()) {
+        try {
+          sourceFileMap.set(childRel.toLowerCase(), { abs: path.join(dir, entry.name), size: fs.statSync(path.join(dir, entry.name)).size });
+        } catch { /* ignore */ }
+      }
+    }
+  };
+  walk(src, '');
+
+  let hardlinkCount = 0;
+  let hardlinkBytes = 0;
+  let downloadCount = 0;
+  let downloadBytesTotal = 0;
+  const sizeMap = new Map();
+  for (const file of pkg.files) {
+    const rel = normalizeManifestPath(file.path);
+    if (!rel) continue;
+    const size = Number(file.size) || 0;
+    const found = sourceFileMap.get(rel.toLowerCase());
+    if (!found) {
+      downloadCount += 1;
+      downloadBytesTotal += size;
+      continue;
+    }
+    // 大小不同的直接进下载；大小相同的抽验 CRC64（全量验太慢，抽样 1/8 + 全部小文件）
+    const needVerify = size <= 1024 * 1024 || size % 8 === 0;
+    if (needVerify) {
+      if ((await crc64File(found.abs)) === String(file.hash).trim()) {
+        hardlinkCount += 1;
+        hardlinkBytes += size;
+      } else {
+        downloadCount += 1;
+        downloadBytesTotal += size;
+      }
+    } else {
+      // 大文件先按「可硬链」报（真正生成时还会全量核），估算别把用户吓跑
+      hardlinkCount += 1;
+      hardlinkBytes += size;
+    }
+    sizeMap.set(rel, size);
+  }
+
+  return {
+    ok: true,
+    channel: target.channel,
+    tag: target.tag,
+    version: remote.config.version,
+    files: pkg.files.length,
+    hardlinkCount,
+    hardlinkBytes,
+    downloadCount,
+    downloadBytes: downloadBytesTotal,
+    totalBytes: Number(pkg.totalBytes) || 0,
+  };
+}
+
 // ── 目录判区（阶段④ 检测链用） ─────────────────────────────────────────────
 
 /**
@@ -1399,6 +1662,9 @@ module.exports = {
   installGame,
   updateGame,
   planForGame,
+  // 三区互为源（硬链接切服）
+  buildCrossRuntime,
+  planCrossRuntime,
   // 阶段④
   detectChannelOf,
 };

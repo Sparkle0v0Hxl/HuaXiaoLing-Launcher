@@ -33,6 +33,7 @@ const path = require('node:path');
 const hoyo = require('./predownload-hoyo');
 const endfield = require('./predownload-endfield');
 const neverness = require('./neverness-predownload');
+const kuroPredownload = require('./kuro-predownload');
 
 /** 各游戏的预下载能力表。 */
 const SUPPORT = {
@@ -43,6 +44,13 @@ const SUPPORT = {
   zzz: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   bh3: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（仅官服）' },
   endfield: { supported: true, kind: 'endfield', note: '鹰角 zip 分包预下载（Diffs/）' },
+  /*
+   * 鸣潮（库洛 G152 / G153）：3.0.1.0 起官方启动器改用 bundle 分包协议，
+   * 预下载槽挂在 index.json 顶层的 predownload，不在已弃用的 default 里。
+   * 实现见 electron/kuro-predownload.js（自实现 gzip GET + 逐文件 md5 + 事务式记账）。
+   * WeGame 渠道没有对应的 bundle 官方清单，界面那层会直接不给入口。
+   */
+  wutheringwaves: { supported: true, kind: 'kuro', note: '库洛 bundle 分包预下载（官服 / B服 / 国际服）' },
   /*
    * 明日方舟（Hypergryph）：当前不接预下载。
    * 与终末地同一套 batch_proxy 协议：get_latest_game_rsp 里同样带 patch / pre_patch
@@ -134,6 +142,10 @@ function stateFromReport(report) {
     'storedFiles',
     'storedBytes',
     'preReleaseBytes',
+    'requiredSpace',
+    'finalSize',
+    'currentSize',
+    'downloadSize',
   ]) {
     if (typeof report[key] === 'number') base[key] = report[key];
   }
@@ -148,6 +160,8 @@ function stateFromReport(report) {
     if (typeof report[key] === 'string' && report[key]) base[key] = report[key];
   }
   if (typeof report.includeCategory === 'boolean') base.includeCategory = report.includeCategory;
+  // 鸣潮：下到一半的暂存要能在界面上说「接着下，不会重来」
+  if (typeof report.partial === 'boolean') base.partial = report.partial;
   return base;
 }
 
@@ -197,6 +211,104 @@ function hoyoInstallRoot(server) {
   return server?.root || (server?.path ? path.dirname(server.path) : '');
 }
 
+/** 鸣潮预下载暂存目录（与 kuro-predownload.js 的 STAGE_DIR_NAME 保持一致）。 */
+function kuroStageDir(installRoot) {
+  return path.join(String(installRoot || ''), '_kuro_predownload');
+}
+
+/** 同步读暂存记录：给 hasCache 和界面用；读不到 / 损坏一律 null。 */
+function kuroStateSync(installRoot) {
+  try {
+    const raw = fs.readFileSync(path.join(kuroStageDir(installRoot), 'state.json'), 'utf8');
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 异步版：给「更新游戏」链路判断是否先把预下载包应用掉，省一次 CDN 重下。 */
+async function kuroPendingState(installRoot) {
+  try {
+    return await kuroPredownload.readState(installRoot);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把 kuro-predownload.checkPredownload 的返回值翻成界面这套状态机认得的 report。
+ *
+ * 底层只说「官方这次放了多少字节、能不能预下载」，界面认的是
+ * state / bytesGame / storedBytes / partial，所以在这里适配一次，不改底层模块
+ * （它有自己的 9 项自测和 12.08 / 13.48 / 82.32 / 80.52 GiB 实网数字闭环）。
+ *
+ *   available + 没下完          → available（可点「开始预下载」）
+ *   available + 已下完          → done（等官方正式开放，应用按钮先禁用）
+ *   官方撤掉预下载槽 + 已下完   → update（新版已上线，可点「应用更新」）
+ *   没放包 / 本地已是最新       → none（附中文 reason）
+ *   读不到本地客户端版本        → not-installed
+ */
+async function kuroReport({ channel, installRoot } = {}) {
+  const info = await kuroPredownload.checkPredownload({ channel, installRoot });
+  const state = kuroStateSync(installRoot);
+  const downloaded = Boolean(state && state.completed && !state.applied);
+  const storedBytes = Number(state && state.bytes) || 0;
+  const storedFiles = Number(state && state.downloadedFiles) || 0;
+  const targetVersion = String(info.targetVersion || (state && state.targetVersion) || '');
+  const localVersion = String((state && state.localVersion) || '');
+  const base = {
+    supported: true,
+    kind: 'kuro',
+    localVersion,
+    targetVersion,
+    latestVersion: '',
+    dir: kuroStageDir(installRoot),
+    completed: downloaded,
+    bytesGame: Number(info.downloadSize) || 0,
+    bytesTotal: Number(info.downloadSize) || 0,
+    requiredSpace: Number(info.requiredSpace) || 0,
+    finalSize: Number(info.finalSize) || 0,
+    currentSize: Number(info.currentSize) || 0,
+    storedBytes,
+    storedFiles,
+  };
+  const reason = String(info.reason || '');
+
+  if (/读不到本地游戏版本/.test(reason)) {
+    return { ...base, state: 'not-installed', reason };
+  }
+  // 官方已把新版本转正式（predownload 槽撤销）时，即使本机没下过预下载包，
+  // 也要把「更新游戏」点亮（对标 predownload-hoyo.js:526-528，用户 m28959）。
+  const liveVersion = String(info.liveVersion || '');
+  const currentVersion = String(info.localVersion || localVersion || '');
+  if (liveVersion && kuroPredownload.compareVersion(liveVersion, currentVersion) > 0) {
+    return {
+      ...base,
+      state: 'update',
+      latestVersion: liveVersion,
+      targetVersion: liveVersion,
+      localVersion: currentVersion,
+      reason: reason || `发现新版本 ${liveVersion}`,
+    };
+  }
+  if (downloaded) {
+    const stateTarget = String((state && state.targetVersion) || '');
+    // 官方把预下载槽撤了 = 正式版已上线，可以让「应用更新」亮起来
+    if (!info.available && stateTarget) {
+      return { ...base, state: 'update', latestVersion: stateTarget, targetVersion: stateTarget };
+    }
+    if (!info.available) {
+      return { ...base, state: 'none', reason: reason || '官方暂未开放预下载' };
+    }
+    return { ...base, state: 'done' };
+  }
+  if (info.available) {
+    return { ...base, state: 'available', partial: storedBytes > 0 };
+  }
+  return { ...base, state: 'none', reason: reason || '官方暂未开放预下载' };
+}
+
 async function check({
   gameKey,
   channel,
@@ -224,6 +336,9 @@ async function check({
   if (info.kind === 'endfield') {
     return endfield.checkEndfieldPredownload({ channel, installRoot, verify });
   }
+  if (info.kind === 'kuro') {
+    return kuroReport({ channel, installRoot });
+  }
   if (info.kind === 'nte') {
     return neverness.checkUpdate({ installRoot, channel, signal: null });
   }
@@ -236,8 +351,49 @@ async function start(options) {
   if (!info.supported) throw new Error(info.reason || '这个游戏不支持预下载');
   if (info.kind === 'hoyo') return hoyo.startHoyoPredownload(options);
   if (info.kind === 'endfield') return endfield.startEndfieldPredownload(options);
+  if (info.kind === 'kuro') {
+    const result = await kuroPredownload.downloadPredownload({
+      channel,
+      installRoot: options.installRoot,
+      signal: options.signal,
+      onProgress: options.onProgress,
+    });
+    // 底层把「没渠道 / 没放包 / 读不到版本」都收敛成 ok:false + 中文 reason；
+    // 不抛出去的话主进程会当成下载成功，界面直接显示「预下载完成」。
+    if (!result || !result.ok) throw new Error((result && result.reason) || '预下载失败');
+    return { ok: true, ...result, kind: 'kuro', gameKey };
+  }
   if (info.kind === 'nte') return neverness.updateLauncherFiles(options);
   throw new Error('这个游戏不支持预下载');
+}
+
+/**
+ * 鸣潮「真升级」：不依赖预下载暂存，直接按线上 bundle 全量清单逐文件刷到正式版。
+ * 这是 wutheringwaves:update-game / games:repair-game / dock「更新游戏」共用的入口，
+ * 返回统一带 tag/version，主进程可直接写回 game.version。
+ */
+async function updateKuroGame(options) {
+  const result = await kuroPredownload.updateGameFromBundle({
+    channel: options.channel,
+    installRoot: options.installRoot,
+    signal: options.signal,
+    onProgress: options.onProgress,
+  });
+  if (!result || !result.ok) throw new Error((result && result.reason) || '鸣潮更新失败');
+  // 只清掉「不比本次升级的目标版本更新」的暂存；用户可能已经预下载了更新的版本，
+  // 那种暂存不能被一次普通升级顺手删掉。
+  const staged = await kuroPredownload.readState(options.installRoot).catch(() => null);
+  const keep = staged && staged.targetVersion &&
+    kuroPredownload.compareVersion(String(staged.targetVersion), String(result.tag)) > 0;
+  if (!keep) await kuroPredownload.clearPredownload(options.installRoot).catch(() => {});
+  return {
+    ok: true,
+    ...result,
+    kind: 'kuro',
+    tag: result.tag,
+    version: result.tag,
+    applied: (Number(result.downloaded) || 0) + (Number(result.reused) || 0),
+  };
 }
 
 async function apply(options) {
@@ -246,6 +402,30 @@ async function apply(options) {
   if (!info.supported) throw new Error(info.reason || '这个游戏不支持预下载');
   if (info.kind === 'hoyo') return hoyo.applyHoyoPredownload(options);
   if (info.kind === 'endfield') return endfield.applyEndfieldPredownload(options);
+  if (info.kind === 'kuro') {
+    let before = null;
+    try { before = await kuroPredownload.readState(options.installRoot); } catch { before = null; }
+    if (before && before.completed && !before.applied) {
+      // 有完整暂存就先用掉：省掉一次 CDN 重下。applyPredownload 自己会核对线上
+      // 正式版本是否真到了目标版本、逐文件 md5、只在全部命中时清暂存。
+      const staged = await kuroPredownload.applyPredownload({
+        channel,
+        installRoot: options.installRoot,
+        signal: options.signal,
+        onProgress: options.onProgress,
+      });
+      if (staged && staged.ok && staged.applied && !staged.reason) {
+        const after = await kuroPredownload.readState(options.installRoot).catch(() => null);
+        if (!after) {
+          const tag = String(before.targetVersion || '');
+          return { ok: true, ...staged, kind: 'kuro', tag, version: tag, applied: staged.applied };
+        }
+      }
+      // 暂存没用掉（缺件 / 新版本还没正式开放 / 已过期）：不要卡住用户，
+      // 继续走 bundle 真升级把客户端收敛到线上正式版。
+    }
+    return updateKuroGame(options);
+  }
   // 异环没有「预下载缓存」这一层，检测到更新后直接把启动器侧资源补齐
   if (info.kind === 'nte') return neverness.updateLauncherFiles(options);
   throw new Error('这个游戏不支持预下载');
@@ -315,6 +495,10 @@ function hasCache({ gameKey, channel, installRoot }) {
       if (state.packFiles < Number(state.meta.packCount) * 0.9) return false;
       return true;
     }
+    if (info.kind === 'kuro') {
+      const kstate = kuroStateSync(installRoot);
+      return Boolean(kstate && kstate.completed && !kstate.applied);
+    }
   } catch {
     return false;
   }
@@ -365,6 +549,7 @@ async function clear({ gameKey, installRoot }) {
   const info = describe(gameKey);
   if (info.kind === 'hoyo') return hoyo.clearHoyoPredownload({ installRoot });
   if (info.kind === 'endfield') return endfield.clearEndfieldPredownload({ installRoot });
+  if (info.kind === 'kuro') return kuroPredownload.clearPredownload(installRoot);
   return { ok: true, installRoot, skipped: true };
 }
 
@@ -379,6 +564,8 @@ module.exports = {
   clear,
   hasCache,
   hasPatchCache,
+  kuroPendingState,
+  updateKuroGame,
   endfieldInstallRoot,
   hoyoInstallRoot,
   isRuntimeDir,

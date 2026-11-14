@@ -572,9 +572,10 @@ const RENDER_API_SHORT = { default: '默认', dx11: 'DX11', dx12: 'DX12' };
  * 原来这个开关只活在「编辑游戏」表单里，要找到它得先点游戏卡片进弹窗 ——
  * 用户实际根本不会去那儿翻。开关挪到主按钮下面，点一下就切，不必再进表单。
  *
- * 以 RENDER_API_SUPPORT 为唯一判据，表里有谁就给谁渲染：
- *   原神 / 星铁 / 绝区零 / 终末地 / 异环 五个，崩坏3 与明日方舟实测没有 D3D12 后端
- *   或压根不是 3D 渲染，表里没有就整行不出现，免得切了没反应还以为开关坏了。
+ * 以 RENDER_API_SUPPORT 为唯一判据，表里有谁就给谁渲染（表定义在 views/modals.js
+ * 的 RENDER_API_SUPPORT，这里只是读取）：原神 / 星铁 / 绝区零 / 终末地 / 异环 / 鸣潮
+ * 六款，崩坏3 与明日方舟实测没有 D3D12 后端或压根不是 3D 渲染，表里没有就整行不出现，
+ * 免得切了没反应还以为开关坏了。
  *
  * 另外两种情况也不显示：
  *   · 没装（这时候 dock 上是「下载游戏」那一排，参数改了也没对象可启动）；
@@ -791,10 +792,44 @@ function openServerSetupDialog(gameId, serverId) {
   // 能当硬链接源的：别的渠道、文件真的还在
   const bases = (game.servers || []).filter(
     (item) =>
-      item.id !== server.id && item.exists && !item.incomplete && item.channel !== server.channel
+      item.id !== server.id && item.exists && !item.incomplete && item.channel !== server.channel && item.channel !== 'global'
   );
   const canLink = bases.length > 0;
   const baseNames = bases.map((item) => item.name).join(' / ');
+  /* 硬链接切服不是所有游戏都支持：主进程 servers:activate 里只有
+   * 原神国际服 / 终末地全渠道 / 明日方舟全渠道三个分支会生成运行时，
+   * 其它（星铁、绝区零、崩3、异环…）点了「切换」只会走普通路径切换，
+   * 弹窗里就不该出现「硬链接生成一份」这一项，免得用户以为点了能用。
+   */
+  /* 硬链接切服：原神国际服 / 终末地 / 方舟，以及鸣潮官服↔B服（用户 m29016/m29018
+   * 「三个互相为源」）。鸣潮国际服差异约 98%、WeGame 版本身是完整客户端，都不在此列。 */
+  const canLinkByEngine =
+    (game.builtinKey === 'genshin' && server.channel === 'global') ||
+    game.builtinKey === 'endfield' ||
+    game.builtinKey === 'arknights' ||
+    (game.builtinKey === 'wutheringwaves' &&
+      ['official', 'bilibili'].includes(String(server.channel || ''))) ||
+    // 异环：官服 / B服能硬链接，国际服（global）不能（用户实测）
+    (game.builtinKey === 'neverness' &&
+      ['official', 'bilibili'].includes(String(server.channel || '')));
+  /* 只要引擎支持就显示「硬链接生成一份」，无源时置灰（canLink=false 走 disabled），
+   * 不再整个隐藏 —— 用户反馈「别的服没有硬链接可以切换，为啥全亮着」：亮着但点了
+   * 没用比置灰更迷惑，置灰并说明原因才对。 */
+  const showLink = canLinkByEngine;
+  /* 下载引擎表与 modals.js 的 DOWNLOAD_GAME_ENGINES 同源：
+   * 有引擎的游戏可以直接进一键下载弹窗（真下载，不是 UI 摆设）。 */
+  const DOWNLOAD_SETUP_ENGINES = {
+    genshin: 'sophon',
+    starrail: 'sophon',
+    zzz: 'sophon',
+    bh3: 'sophon',
+    endfield: 'endfield',
+    arknights: 'endfield',
+    // 鸣潮：库洛官方 bundle 清单引擎（三渠道都支持）。这里只判 truthy，
+    // 真正的引擎分发在 modals.js 的 DOWNLOAD_GAME_ENGINES 里。
+    wutheringwaves: 'kuro',
+  };
+  const canDownload = Boolean(DOWNLOAD_SETUP_ENGINES[game.builtinKey]);
   openModal(
     `<div class="modal-backdrop" data-backdrop>
       <div class="modal narrow modal-setup" role="dialog" aria-modal="true">
@@ -807,15 +842,37 @@ function openServerSetupDialog(gameId, serverId) {
         </div>
         <div class="modal-body">
           <ul class="setup-pick">
-            <li>
+            ${
+              showLink
+                ? `<li>
               <button class="setup-opt" data-setup="link" ${canLink ? '' : 'disabled'}>
                 <span class="setup-opt-icon">${icon('link')}</span>
                 <span class="setup-opt-copy">
                   <strong>硬链接生成一份</strong>
                   <small>${
                     canLink
-                      ? `以「${esc(baseNames)}」为源，一样的文件直接复用，只下差异部分`
+                      ? `以「${esc(baseNames)}」为源，一样的文件直接复用，只下差异部分${
+                          game.builtinKey === 'endfield' && server.channel === 'global'
+                            ? '；国际服语音包与官服不通用，首次切过去要重下语音（官方清单按渠道校验，官服的复用不了）'
+                            : ''
+                        }`
                       : '本机还没有别的渠道客户端可以当源'
+                  }</small>
+                </span>
+                <span class="setup-opt-go">${icon('chevron-right')}</span>
+              </button>
+            </li>`
+                : ''
+            }
+            <li>
+              <button class="setup-opt" data-setup="download" ${canDownload ? '' : 'disabled'}>
+                <span class="setup-opt-icon">${icon('download')}</span>
+                <span class="setup-opt-copy">
+                  <strong>下载游戏</strong>
+                  <small>${
+                    canDownload
+                      ? '直接从官方源下载这个服的完整客户端，进度在开始游戏上方那块面板里看'
+                      : '这个游戏还没有接入一键下载'
                   }</small>
                 </span>
                 <span class="setup-opt-go">${icon('chevron-right')}</span>
@@ -841,6 +898,21 @@ function openServerSetupDialog(gameId, serverId) {
                 <span class="setup-opt-go">${icon('chevron-right')}</span>
               </button>
             </li>
+            ${
+              // WeGame 转换：只对鸣潮显示（用户 m27841 要求把这个入口从服务器管理挪进这个弹窗）
+              game.builtinKey === 'wutheringwaves'
+                ? `<li>
+              <button class="setup-opt" data-setup="wegame">
+                <span class="setup-opt-icon">${icon('link')}</span>
+                <span class="setup-opt-copy">
+                  <strong>转换为 WeGame 版</strong>
+                  <small>把已装好的官方版硬链接进 WeGame 的下载目录，WeGame 里补齐渠道件就能启动（不用重下 80G）</small>
+                </span>
+                <span class="setup-opt-go">${icon('chevron-right')}</span>
+              </button>
+            </li>`
+                : ''
+            }
           </ul>
         </div>
       </div>
@@ -852,11 +924,39 @@ function openServerSetupDialog(gameId, serverId) {
       const choice = btn.dataset.setup;
       closeModal();
       if (choice === 'link') {
+        if (game.builtinKey === 'wutheringwaves') {
+          // 鸣潮：直接走 servers:activate 的生成链 —— 未配置的渠道会由
+          // ensureKuroRuntime 以「其它任意已装渠道」为源生成硬链接运行时并切过去
+          // （用户 m29016/m29017/m29018 三渠道互相为源）。
+          toast(`正在生成${server.name}的硬链接运行时…`, 'info');
+          try {
+            await api.servers.activate({ gameId, serverId });
+            toast(`${server.name} 已生成并切换完成`, 'success');
+          } catch (error) {
+            toast(String((error && error.message) || error), 'error');
+          }
+          return;
+        }
         openSophonModal(gameId, serverId, 'prepare');
+        return;
+      }
+      if (choice === 'download') {
+        // 真下载：复用一键下载弹窗（渠道选择 / 估算 / 进度 / 暂停全都在里面），
+        // 关掉本弹窗交给它接管；不支持引擎的游戏按钮本来就是灰的。
+        openGameDownloadModal(gameId);
         return;
       }
       if (choice === 'path') {
         openServerModal(gameId, serverId);
+        return;
+      }
+      if (choice === 'wegame') {
+        // WeGame 转换向导（检测 WeGame 目录 / 硬链接 / 教程提示都在这个弹窗里）
+        if (typeof openWeGameConvertModal === 'function') {
+          openWeGameConvertModal(gameId);
+        } else {
+          toast('WeGame 转换组件没有加载出来', 'error');
+        }
         return;
       }
       const result =
@@ -898,7 +998,7 @@ const SERVER_SWITCH_GUIDE_POINTS = [
   '各渠道的账号、存档、更新包互不相通，换过去要重新登录。',
   '同一个客户端文件夹别被两行同时占：删掉它，两边一起失效。',
   '终末地、明日方舟（官服 / B服）要渠道包：第一次切到那个服会先问你要下多少，点了才下（能取消、下次接着下）；删了也能玩，但更新本体前要先切一次服把包补回来——直接点「开始游戏」不会问你要包。',
-  '终末地国际服 / Play / Steam 是海外发行版，连游戏本体二进制都和国服不同，第一次切过去要下约 940 MB 的整个差异包（官服 9 MB、B服 194 MB 那些只是渠道 SDK）。',
+  '终末地国际服 / Play / Steam 是海外发行版，连游戏本体二进制都和国服不同，第一次切过去要把整个差异包下完（官服、B服那些只是渠道 SDK，小得多）。',
 ];
 
 function serverSwitchGuideSeen() {

@@ -262,7 +262,9 @@ function endfieldPackSummary(settings) {
     .filter((key) => !have.includes(ENDFIELD_PACK_LABEL[key]))
     .map((key) => ENDFIELD_PACK_LABEL[key]);
   if (!have.length) {
-    return '还没准备。切到哪个服会先问你要不要下那个渠道包（官服 9 MB、B服 194 MB、国际服 / Play 约 940 MB），下过一次就一直在。';
+    // 体积不要写死 —— 渠道包内容跟着官方清单走（比如国际服补了 5 颗渠道重
+    // 二进制后从约 940 MB 变成约 142 MB），数字一过时就和实际测量值对不上。
+    return '还没准备。切到哪个服会先问你要不要下那个渠道包，体积以弹窗里显示的下载大小为准，下过一次就一直在。';
   }
   if (!missing.length) return '五个渠道都已就绪，切服即用，官方更新时会自动同步。';
   return `已有 ${have.join('、')}；缺 ${missing.join('、')}，切到那个服时会先问你要不要下。`;
@@ -274,14 +276,15 @@ const ARKNIGHTS_PACK_LABEL = { official: '官服', bilibili: 'B服' };
  * 明日方舟渠道包这一行的说明。
  *
  * 方舟官服和 B服 共用同一个安装目录，切换要换的是渠道 SDK 那几样（B服 那份含
- * B站内嵌浏览器，约 195MB）。以前这一条完全没有，切方舟的人无从知道要下什么。
+ * B站内嵌浏览器，体积大一些）。体积不写死 —— 渠道包内容跟着官方清单走，以切服
+ * 弹窗里实时显示的「下载大小」为准。以前这一条完全没有，切方舟的人无从知道要下什么。
  */
 function arknightsPackSummary(settings) {
   const have = (settings.arknightsPackChannels || []).map((key) => ARKNIGHTS_PACK_LABEL[key] || key);
   const missing = Object.keys(ARKNIGHTS_PACK_LABEL)
     .filter((key) => !have.includes(ARKNIGHTS_PACK_LABEL[key]))
     .map((key) => ARKNIGHTS_PACK_LABEL[key]);
-  if (!have.length) return '还没准备。官服 / B服 共用一套安装目录，切到另一个服时会先问你要不要下对应渠道包（官服 9 MB、B服 194 MB）。';
+  if (!have.length) return '还没准备。官服 / B服 共用一套安装目录，切到另一个服时会先问你要不要下对应渠道包，体积以弹窗里显示的下载大小为准，下过一次就一直在。';
   if (!missing.length) return '官服与 B服 都已就绪，切服即用。';
   return `已有 ${have.join('、')}；缺 ${missing.join('、')}，切到那个服时会先问你要不要下。`;
 }
@@ -481,7 +484,7 @@ function channelPackDialog(plan) {
             </div>
             <p class="hint">${
               ['global', 'play', 'steam'].includes(String(plan.channel || ''))
-                ? '国际服 / Play / Steam 是 Gryphline 独立发行的版本，连游戏本体二进制都和国服不是同一份（约 940 MB，含 Endfield.exe、GameAssembly.dll、反作弊等），所以整个差异包要下完才能切。'
+                ? '国际服 / Play / Steam 是 Gryphline 独立发行的版本，连游戏本体二进制都和国服不是同一份（含 Endfield.exe、GameAssembly.dll、反作弊等），所以整个差异包要下完才能切。'
                 : '下载的是官方接口给的渠道 SDK 文件，放到本机渠道包目录，和以前随安装包分发的是同一份。'
             }下完会自动继续切换。</p>
             <div class="field-error" id="pack-error"></div>
@@ -905,7 +908,7 @@ function serverRow(game, server) {
  * 异环和终末地 Steam 是明确不支持的，但后端给的 reason 必须显示出来 ——
  * 藏起来只会让用户以为功能坏了。
  */
-const PREDOWNLOAD_GAMES = ['genshin', 'starrail', 'zzz', 'bh3', 'endfield', 'neverness'];
+const PREDOWNLOAD_GAMES = ['genshin', 'starrail', 'zzz', 'bh3', 'endfield', 'neverness', 'wutheringwaves'];
 
 /** state → 徽标文案与配色。没有查过就是 unknown，界面给「检查」按钮。 */
 const PREDOWNLOAD_STATES = {
@@ -921,6 +924,7 @@ const PREDOWNLOAD_STATES = {
 /** 进度事件里 phase 的人话翻译。 */
 const PREDOWNLOAD_PHASES = {
   start: '准备中',
+  check: '检查预下载内容',
   version: '版本信息',
   manifest: '读取官方清单',
   download: '下载预下载内容',
@@ -931,6 +935,7 @@ const PREDOWNLOAD_PHASES = {
   // 终末地的 apply 阶段会发 commit（把暂存内容真正写进游戏目录），
   // 漏了这一条会退化成「处理中…」，用户看不出到哪一步了。
   commit: '写入游戏目录',
+  apply: '应用预下载内容',
   done: '完成',
   error: '出错',
 };
@@ -962,6 +967,10 @@ function predownloadWired(game) {
 function predownloadChannelOk(game, server) {
   if (!game || !server) return false;
   if (game.builtinKey === 'bh3') return String(server.channel || '') === 'official';
+  // WeGame 版没有库洛 bundle 协议的官方清单，更新走 WeGame 自己
+  if (game.builtinKey === 'wutheringwaves') {
+    return ['official', 'bilibili', 'global'].includes(String(server.channel || ''));
+  }
   return true;
 }
 
@@ -1112,6 +1121,7 @@ function startDockPredownload(game) {
  * 目录里数会以为我们算错了。
  */
 function predownloadUnit(info) {
+  if (info && info.kind === 'kuro') return '个文件';
   return info && info.mode === 'ldiff' ? '个补丁包' : '个分块';
 }
 
@@ -1186,6 +1196,14 @@ function predownloadDetail(info, busy) {
   if (state === 'none' && Number(info.storedBytes)) {
     bits.push(`还剩 ${fmtBytes(info.storedBytes)} 预下载内容占着盘，不想要可以清除`);
   }
+  // 鸣潮「官方暂未开放 / 读不到本地版本」要把官方的中文原因说出来，别留一行空白
+  if (info.reason && (state === 'none' || state === 'not-installed') && !bits.includes(info.reason)) {
+    bits.push(info.reason);
+  }
+  if (String(info.kind || '') === 'kuro' && Number(info.requiredSpace)) {
+    bits.push('所需空间 ' + fmtBytes(info.requiredSpace));
+    if (Number(info.finalSize)) bits.push('新版本约 ' + fmtBytes(info.finalSize));
+  }
   return bits.join(' · ');
 }
 
@@ -1244,7 +1262,12 @@ function openPredownloadModal(gameId, serverId) {
     return;
   }
   if (!predownloadChannelOk(game, server)) {
-    toast('崩坏3 只有官服支持预下载，B服 / 国际服由官方启动器负责', 'info');
+    toast(
+      game?.builtinKey === 'bh3'
+        ? '崩坏3 只有官服支持预下载，B服 / 国际服由官方启动器负责'
+        : '这个渠道的更新由对应平台自己负责，启动器不做预下载',
+      'info'
+    );
     return;
   }
   const jobId = `pd-${Date.now()}-${Math.random().toString(16).slice(2)}`;

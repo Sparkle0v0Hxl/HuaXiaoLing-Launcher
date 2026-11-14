@@ -58,6 +58,12 @@ const SUPPORT = {
     modes: ['default', 'dx11', 'dx12'],
     hint: '异环是 UE5，默认就走 DX12；切 DX11 一般是给老显卡或驱动兼容问题用的。',
   },
+  wutheringwaves: {
+    label: '鸣潮',
+    engine: 'unreal',
+    modes: ['default', 'dx11', 'dx12'],
+    hint: '鸣潮是 UE4，默认按显卡自动挑；DX11 对老显卡更稳，DX12 在多核 CPU 上帧数通常更高。',
+  },
 };
 
 const MODE_LABELS = {

@@ -297,7 +297,7 @@
           <span>收起侧栏</span>
         </button>
 
-        <button class="profile" id="profile-btn" title="打开设置" aria-label="打开设置">
+        <button class="profile" id="profile-btn" title="账号中心" aria-label="账号中心">
           <span class="avatar" id="profile-avatar">大</span>
           <span class="profile-text">
             <span class="profile-name" id="profile-name">大小姐</span>
@@ -453,6 +453,10 @@
          顶层有 5 个纯字面量常量表 + 3 个 let 游标（初值 null），加载期无副作用，
          且这 8 个名字在 app.js 剩余部分零引用 -->
     <script src="views/modals.js"></script>
+<!-- 账号中心：点侧栏左下角头像打开的浮层 -->
+<script src="views/account-center.js"></script>
+<!-- 角色图鉴：工具页「角色图鉴」按钮打开的浮层 -->
+<script src="views/roster.js"></script>
     <!-- 提示条与状态回推（拆分第十七批）：toast / canPatchDownloads / patchDownloads / onState。
          顶层零声明、零立即执行，只注册函数；被全站上百处调用，所以必须早于 app.js -->
     <script src="views/toasts.js"></script>

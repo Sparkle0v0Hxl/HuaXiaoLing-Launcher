@@ -36,6 +36,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
@@ -972,7 +973,225 @@ async function readZipFileEntryCount(zipPath) {
   return fileCount;
 }
 
-async function extractZip(zipPath, extractRoot, label = '更新包') {
+/* ---------------------------------------------------------------- */
+/* 纯 Node 解压                                                        */
+/* ---------------------------------------------------------------- */
+
+/*
+ * 为什么要有这一套：2026-11-11 有用户报「ZIP 里有 79 个文件，实际只解出 0 个」。
+ * 现场环境里 PowerShell 解压整条链路都不干活 —— .NET 的 ExtractToDirectory 和
+ * Expand-Archive 都返回退出码 0，但一个文件都没写出来（安全软件/组策略把
+ * powershell.exe 拦成空壳时就是这个表现）。退出码 0 让上层完全看不出异常，
+ * 直到「解出 0 个」才炸，用户已经白等一轮下载。
+ *
+ * 所以解压不再依赖外部进程：用 node:zlib 自己读 ZIP 中央目录、逐条 inflateRaw。
+ * 好处是它跟启动器同权限、同进程，安全软件不会单独拦；坏处是得自己防路径穿越
+ * （见 safeRelative），以及要覆盖 ZIP64 —— 便携版以后可能超过 4 GB。
+ * PowerShell 那条路留作兜底，不再当主路径。
+ */
+
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+const ZIP_LOCAL_SIG = 0x04034b50;
+const ZIP_LOCAL_MIN = 30;
+const ZIP_MAX_ENTRIES = 200000;
+const ZIP_MAX_ENTRY_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * 把 ZIP 条目的名字转成安全的相对路径；不安全就抛错。
+ * 更新包是自己签发的，但解压器不能假设输入可信 —— 一个 `..\..\Windows\` 就能毁机器。
+ */
+function safeRelative(name) {
+  const raw = String(name || '').replace(/\\/g, '/');
+  if (!raw) throw new Error('ZIP 里有空文件名');
+  if (raw.startsWith('/')) throw new Error(`ZIP 里有绝对路径：${raw}`);
+  if (/^[A-Za-z]:/.test(raw)) throw new Error(`ZIP 里有盘符路径：${raw}`);
+  if (raw.startsWith('//')) throw new Error(`ZIP 里有 UNC 路径：${raw}`);
+  const parts = raw.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) throw new Error(`ZIP 里有向上穿越的路径：${raw}`);
+  if (!parts.length) throw new Error(`ZIP 里有无效文件名：${raw}`);
+  return parts.join('/');
+}
+
+/** 读 ZIP64 扩展字段里的 8 字节值（顺序：未压缩、压缩、本地头偏移、磁盘号）。 */
+function zip64Values(extra, needSizes, needOffset) {
+  let p = 0;
+  while (p + 4 <= extra.length) {
+    const id = extra.readUInt16LE(p);
+    const len = extra.readUInt16LE(p + 2);
+    if (p + 4 + len > extra.length) break;
+    if (id === 0x0001) {
+      const out = {};
+      let q = p + 4;
+      const end = p + 4 + len;
+      if (needSizes) {
+        if (q + 8 <= end) { out.uncompressedSize = Number(extra.readBigUInt64LE(q)); q += 8; } else break;
+        if (q + 8 <= end) { out.compressedSize = Number(extra.readBigUInt64LE(q)); q += 8; } else break;
+      }
+      if (needOffset && q + 8 <= end) out.localOffset = Number(extra.readBigUInt64LE(q));
+      return out;
+    }
+    p += 4 + len;
+  }
+  return {};
+}
+
+/**
+ * 解析 ZIP 中央目录，返回每个文件条目需要的全部信息。
+ * 只读文件末尾的一小段和中央目录本身，不把整个包读进内存。
+ */
+async function readZipEntries(zipPath) {
+  const size = (await fsp.stat(zipPath)).size;
+  if (size < EOCD_MIN) throw new Error('更新包太小，不像有效的 ZIP');
+  const tailLen = Math.min(size, EOCD_MIN + MAX_COMMENT);
+  const tail = Buffer.alloc(tailLen);
+  const fh = await fsp.open(zipPath, 'r');
+  try {
+    await fh.read(tail, 0, tailLen, size - tailLen);
+  } finally {
+    await fh.close();
+  }
+  let eocd = -1;
+  for (let i = tailLen - EOCD_MIN; i >= 0; i -= 1) {
+    if (tail.readUInt32LE(i) !== EOCD_SIG) continue;
+    if (i + EOCD_MIN + tail.readUInt16LE(i + 20) === tailLen) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('更新包里找不到 ZIP 结束标记（EOCD）');
+  let totalEntries = tail.readUInt16LE(eocd + 10);
+  let cdSize = tail.readUInt32LE(eocd + 12);
+  let cdOffset = tail.readUInt32LE(eocd + 16);
+  if (totalEntries === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+    const loc = eocd - 20;
+    if (loc < 0 || tail.readUInt32LE(loc) !== ZIP64_LOC_SIG) throw new Error('更新包的 ZIP64 定位信息损坏');
+    const z64 = Number(tail.readBigUInt64LE(loc + 8)) - (size - tailLen);
+    if (z64 < 0 || z64 + 56 > tailLen || tail.readUInt32LE(z64) !== ZIP64_EOCD_SIG) {
+      throw new Error('更新包的 ZIP64 结束标记损坏');
+    }
+    totalEntries = Number(tail.readBigUInt64LE(z64 + 32));
+    cdSize = Number(tail.readBigUInt64LE(z64 + 40));
+    cdOffset = Number(tail.readBigUInt64LE(z64 + 48));
+  }
+  if (totalEntries > ZIP_MAX_ENTRIES) throw new Error(`更新包条目过多（${totalEntries} 条）`);
+  if (cdOffset + cdSize > size) throw new Error('更新包的中央目录越界');
+
+  const cd = Buffer.alloc(cdSize);
+  const ch = await fsp.open(zipPath, 'r');
+  try {
+    await ch.read(cd, 0, cdSize, cdOffset);
+  } finally {
+    await ch.close();
+  }
+
+  const entries = [];
+  let p = 0;
+  for (let k = 0; k < totalEntries; k += 1) {
+    if (p + CD_MIN > cdSize || cd.readUInt32LE(p) !== CD_SIG) {
+      throw new Error(`更新包中央目录损坏（第 ${k + 1}/${totalEntries} 条）`);
+    }
+    const flags = cd.readUInt16LE(p + 8);
+    const method = cd.readUInt16LE(p + 10);
+    const crc = cd.readUInt32LE(p + 16);
+    let compressedSize = cd.readUInt32LE(p + 20);
+    let uncompressedSize = cd.readUInt32LE(p + 24);
+    const nameLen = cd.readUInt16LE(p + 28);
+    const extraLen = cd.readUInt16LE(p + 30);
+    const commentLen = cd.readUInt16LE(p + 32);
+    let localOffset = cd.readUInt32LE(p + 42);
+    const nameEnd = p + CD_MIN + nameLen;
+    const next = nameEnd + extraLen + commentLen;
+    if (next > cdSize) throw new Error(`更新包中央目录条目越界（第 ${k + 1}/${totalEntries} 条）`);
+    const name = cd.toString('utf8', p + CD_MIN, nameEnd);
+    if (uncompressedSize === 0xffffffff || compressedSize === 0xffffffff || localOffset === 0xffffffff) {
+      const z = zip64Values(cd.subarray(nameEnd, nameEnd + extraLen), uncompressedSize === 0xffffffff, localOffset === 0xffffffff);
+      if (z.uncompressedSize != null) uncompressedSize = z.uncompressedSize;
+      if (z.compressedSize != null) compressedSize = z.compressedSize;
+      if (z.localOffset != null) localOffset = z.localOffset;
+    }
+    if (flags & 0x1) throw new Error('更新包里有加密条目，暂时不支持');
+    if (uncompressedSize > ZIP_MAX_ENTRY_BYTES) {
+      throw new Error(`更新包里 ${name} 超过单文件上限，已中止`);
+    }
+    entries.push({ name, method, crc, compressedSize, uncompressedSize, localOffset });
+    p = next;
+  }
+  return entries;
+}
+
+/**
+ * 用 node:zlib 解压整个 ZIP。逐条校验 CRC32，任何一条不对就整体失败。
+ * @param {(info:{processed:number,total:number,current:string})=>void} [onProgress]
+ */
+async function extractZipNode(zipPath, extractRoot, onProgress) {
+  const entries = await readZipEntries(zipPath);
+  const files = entries.filter((entry) => !/[/\\]$/.test(entry.name));
+  const dirs = entries.filter((entry) => /[/\\]$/.test(entry.name));
+  const total = files.length;
+
+  /*
+   * 先验名、后解压。路径穿越必须在写盘和 inflate 之前就挡掉 ——
+   * 放在 CRC 之后的话，恶意条目会先被读进内存、被 inflate 一遍，
+   * 万一哪天 CRC 那段被改动放过，穿越就直接落到写盘上了。
+   */
+  for (const entry of [...dirs, ...files]) safeRelative(entry.name);
+
+  await fsp.mkdir(extractRoot, { recursive: true });
+  for (const dir of dirs) {
+    const rel = safeRelative(dir.name);
+    await fsp.mkdir(path.join(extractRoot, ...rel.split('/')), { recursive: true });
+  }
+
+  const fh = await fsp.open(zipPath, 'r');
+  let processed = 0;
+  try {
+    const header = Buffer.alloc(ZIP_LOCAL_MIN);
+    for (const entry of files) {
+      await fh.read(header, 0, ZIP_LOCAL_MIN, entry.localOffset);
+      if (header.readUInt32LE(0) !== ZIP_LOCAL_SIG) {
+        throw new Error(`更新包里 ${entry.name} 的本地头损坏`);
+      }
+      const dataStart = entry.localOffset + ZIP_LOCAL_MIN + header.readUInt16LE(26) + header.readUInt16LE(28);
+      const raw = Buffer.alloc(entry.compressedSize);
+      if (entry.compressedSize > 0) {
+        await fh.read(raw, 0, entry.compressedSize, dataStart);
+      }
+      let data;
+      if (entry.method === 0) data = raw;
+      else if (entry.method === 8) data = zlib.inflateRawSync(raw);
+      else throw new Error(`更新包里 ${entry.name} 用了不支持的压缩方式（${entry.method}）`);
+      if (data.length !== entry.uncompressedSize) {
+        throw new Error(`更新包里 ${entry.name} 解压后大小不符（${data.length} / ${entry.uncompressedSize}）`);
+      }
+      if (crc32(data) !== entry.crc) {
+        throw new Error(`更新包里 ${entry.name} 校验不通过（CRC32 不符）`);
+      }
+      const rel = safeRelative(entry.name);
+      const target = path.join(extractRoot, ...rel.split('/'));
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(target, data);
+      processed += 1;
+      if (onProgress) onProgress({ processed, total, current: rel });
+    }
+  } finally {
+    await fh.close();
+  }
+  return { files: processed, total };
+}
+
+async function extractZip(zipPath, extractRoot, label = '更新包', onProgress = null) {
   await fsp.mkdir(extractRoot, { recursive: true });
   // 先从 ZIP 本身读出「应该解出多少个文件」。ZIP 已经过清单 sha256 校验，
   // 这个期望值可信；解完拿它和真实落盘文件数比对，半截解压就瞒不过去了。
@@ -985,34 +1204,55 @@ async function extractZip(zipPath, extractRoot, label = '更新包') {
     entryCountReadable = false;
     console.warn(`[update] 读不出 ZIP 条目数，跳过解压复核：${error && error.message}`);
   }
-  // 优先用 .NET 的 ZipFile 解压：实测部分机器 / 旧版 PowerShell 的 Expand-Archive
-  // 在解压大体积 ZIP（>100MB）时会中途静默退出（exit 0 但只抽出半截），导致覆盖后
-  // 启动器缺文件打不开。.NET 的 ZipFile 更稳，Expand-Archive 作为兜底。
-  const dotNet = `[System.IO.Compression.ZipFile]::ExtractToDirectory(${JSON.stringify(zipPath)}, ${JSON.stringify(extractRoot)})`;
+  // 优先用自带的 node:zlib 解压（extractZipNode）。这条路不经过任何外部进程，
+  // 安全软件不会把它当脚本拦掉，也不吃 PowerShell 的组策略；解不出来会明确抛错，
+  // 不会像以前那样「退出码 0 但 0 个文件」。PowerShell 只留作兜底，反过来用。
+  const expected = await readZipFileEntryCount(zipPath).catch(() => 0);
+  let usedNode = false;
+  let nodeError = null;
   try {
-    await runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; ${dotNet}`);
-  } catch (err) {
-    // 清掉 .NET 可能留下的半截产物，再跑兜底，避免 -Force 覆盖到残留目录污染计数
+    await extractZipNode(zipPath, extractRoot, onProgress);
+    usedNode = true;
+  } catch (error) {
+    nodeError = error;
+    // 自带的也会失败（极罕见的压缩方式/加密包），退回老路
     await fsp.rm(extractRoot, { recursive: true, force: true }).catch(() => {});
     await fsp.mkdir(extractRoot, { recursive: true });
+    const dotNet = `[System.IO.Compression.ZipFile]::ExtractToDirectory(${JSON.stringify(zipPath)}, ${JSON.stringify(extractRoot)})`;
     try {
-      await runPowerShell(
-        `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
-      );
-    } catch (err2) {
-      throw new Error(`解压${label}失败：${err2 && err2.message ? err2.message : err2}`);
+      await runPowerShell(`Add-Type -AssemblyName System.IO.Compression.FileSystem; ${dotNet}`);
+    } catch (err) {
+      await fsp.rm(extractRoot, { recursive: true, force: true }).catch(() => {});
+      await fsp.mkdir(extractRoot, { recursive: true });
+      try {
+        await runPowerShell(
+          `Expand-Archive -LiteralPath ${JSON.stringify(zipPath)} -DestinationPath ${JSON.stringify(extractRoot)} -Force`
+        );
+      } catch (err2) {
+        throw new Error(
+          `解压${label}失败：内置解压报「${nodeError && nodeError.message ? nodeError.message : nodeError}」，` +
+            `PowerShell 那条也没成（${err2 && err2.message ? err2.message : err2}）。` +
+            `可以把安装目录加进杀毒软件排除项后重试，或删掉 data/tmp 下 vela-update-* 再来一次。`
+        );
+      }
     }
   }
-  // 两条路径都不提前 return：统一在这里做「解出的文件数 == ZIP 里的文件数」复核。
-  // 读不出条目数时跳过复核，保持旧行为（绝不让新校验把本来能用的更新搞挂）。
-  const actualFiles = entryCountReadable ? (await listFiles(extractRoot)).length : 0;
-  if (entryCountReadable && actualFiles !== expectedFiles) {
-    throw new Error(
-      `解压${label}不完整：ZIP 里有 ${expectedFiles} 个文件，实际只解出 ${actualFiles} 个（差 ${expectedFiles - actualFiles} 个）。` +
-        `目录 ${extractRoot}。多半是安全软件/Defender 拦截或旧版 Expand-Archive 抽半截：` +
-        `请把程序目录和该临时目录加入杀毒软件排除项后重试，或删除 data/tmp 下 vela-update-* / vela-delta-* 残留，` +
-        `也可用 7-Zip 手动完整解压覆盖。`
-    );
+
+  // 统一复核：解出的文件数必须等于 ZIP 里声明的文件数。
+  // 这是「退出码 0 但什么都没写出来」唯一能兜住的检查，两种解压路径都要过。
+  if (expected > 0) {
+    const actualFiles = (await listFiles(extractRoot)).length;
+    if (actualFiles !== expected) {
+      throw new Error(
+        `解压${label}不完整：ZIP 里有 ${expected} 个文件，实际只解出 ${actualFiles} 个（差 ${expected - actualFiles} 个）。` +
+          `目录 ${extractRoot}。` +
+          (usedNode
+            ? '内置解压器已经跑完但落盘数量对不上，多半是安全软件在写入时拦截了文件：' +
+              '请把启动器目录和 data/tmp 加进杀毒软件排除项后重试。'
+            : '内置解压没成功、退回 PowerShell 也没解全，多半是安全软件拦了 powershell.exe 写文件：' +
+              '请把启动器目录和 data/tmp 加进排除项，或删掉 data/tmp 下 vela-update-* 后重试。')
+      );
+    }
   }
 }
 

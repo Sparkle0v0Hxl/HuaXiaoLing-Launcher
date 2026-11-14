@@ -371,10 +371,6 @@ function shotThumbMarkup(item) {
   return `<div class="shot-placeholder${failed ? ' is-failed' : ''}">${failed ? icon('image') : icon('image', 'xs')}<span>${failed ? '无法预览' : '载入中'}</span></div>`;
 }
 
-function shotUrl(filePath) {
-  return `hxl-shot://local/?p=${encodeURIComponent(filePath)}`;
-}
-
 function formatBytes(value) {
   const size = Number(value) || 0;
   if (size < 1024) return `${size} B`;
@@ -1483,6 +1479,7 @@ function graphicsView() {
 
     body = `
       ${cards ? `<div class="gfx-grid">${cards}</div>` : `<p class="page-desc">这个游戏的画质配置还没有可读字段。</p>`}
+      ${starrailFpsCard()}
       <p class="shots-note">
         每一项都直接改游戏写进注册表里的画质设置，改完启动游戏即可生效；每次写入前都会把旧值备份到
         userData/registry-backup.json。数值项可以直接填数字，带下拉的项选一个档位就会立刻写入。
@@ -1531,12 +1528,6 @@ function toolsCategoryHint(key) {
     system: '读写游戏配置文件，改动前会备份',
     info: '游戏公告与更新提醒',
   }[key] || '';
-}
-
-function toolsSupportedMark(supported) {
-  return supported
-    ? `<span class="tools-badge ok">${icon('check', 'xs')}可用</span>`
-    : `<span class="tools-badge">未支持</span>`;
 }
 
 /* ── 2.4.0 合并自对方分支：工具页 · 游戏 Wiki ────────────────────────── */
@@ -1673,11 +1664,6 @@ function toolsSupportOf(data) {
   };
 }
 
-function toolsFeatureName(data, key) {
-  const feature = (data.features || []).find((item) => item.key === key);
-  return feature ? feature.name : key;
-}
-
 /* ------------------------------------------------------------------ */
 /* 侧栏「工具」分组                                                     */
 /* ------------------------------------------------------------------ */
@@ -1770,43 +1756,6 @@ function sidebarScroller() {
   if (scroller) return scroller;
   const nav = document.querySelector('#nav');
   return nav && nav.scrollHeight > nav.clientHeight + 1 ? nav : null;
-}
-
-/**
- * 让侧栏里的某个元素滚进视野。
- *
- * 「工具」子项展开后会把下面的「应用 / 设置」推出可视区，
- * 这里把父项和它的子项一起收进窗口，用户不会看到「设置」突然消失。
- * 已经完整在视野里的元素不动，免得只是点了个本来就看得见的菜单项、侧栏却自己跳一下。
- *
- * 注意判方向：矮窗口里「工具」组本身就在视口下方（还没滚到），
- * 这时必须往下滚把它拉上来；只按 box.top 判断会算出一个负的位移，
- * 被 clamp 到 0 之后看起来就是「点了没反应」。
- */
-function revealInSidebar(element, { smooth = true } = {}) {
-  const scroller = sidebarScroller();
-  if (!scroller || !element) return;
-  const scrollerBox = scroller.getBoundingClientRect();
-  const box = element.getBoundingClientRect();
-  const pad = 8;
-  const top = scrollerBox.top + pad;
-  const bottom = scrollerBox.bottom - pad;
-  let delta = 0;
-  if (box.top >= bottom) {
-    // 整个在视口下方：把它的底部拉齐到视口底部
-    delta = box.bottom - bottom;
-  } else if (box.bottom <= top) {
-    // 整个在视口上方：把它的顶部拉到视口顶部
-    delta = box.top - top;
-  } else if (box.top < top) {
-    delta = box.top - top;
-  } else if (box.bottom > bottom) {
-    // 比视口还高时优先露头，别为了对齐底部把标题顶出去
-    delta = Math.min(box.bottom - bottom, box.top - top);
-  }
-  if (!delta) return;
-  const target = Math.max(0, Math.min(scroller.scrollTop + delta, scroller.scrollHeight - scroller.clientHeight));
-  scrollSidebarTo(scroller, target, smooth);
 }
 
 /**
@@ -1993,25 +1942,6 @@ function toolsPanel(game, supportOf) {
     <div class="tg-panel-groups">${toolsGameBody(game, supportOf)}</div>`;
 }
 
-/**
- * 工具页里「需要登录」的提示。
- *
- * 以前这里是写死的一句「需要先登录账号」，登录成功后也不变，
- * 看起来像「明明登录了却说我未登录」。
- * 现在按真实的米游社登录态分三种显示：读取中 / 已登录 / 未登录。
- */
-function miyouLoginNote() {
-  const status = state.hoyolab?.['hoyolab-miyoushe'];
-  if (!status || status.loading) {
-    return `<p class="tools-feature-note">${icon('login', 'xs')}正在读取米游社登录状态…</p>`;
-  }
-  if (status.loggedIn) {
-    const count = Array.isArray(status.roles) ? status.roles.length : 0;
-    return `<p class="tools-feature-note is-on">${icon('check', 'xs')}已登录米游社${count ? `（${count} 个角色）` : ''}</p>`;
-  }
-  return `<p class="tools-feature-note">${icon('login', 'xs')}需要先登录账号</p>`;
-}
-
 const TOOLS_CATEGORY_ICONS = {
   record: 'star',
   gacha: 'sparkle',
@@ -2022,31 +1952,6 @@ const TOOLS_CATEGORY_ICONS = {
   games: 'gamepad',
   plugins: 'sparkle',
 };
-
-/** 工具页左侧的分组顺序：按游戏查看排第一（也是默认选中的），功能分类随后，账号登录收尾。 */
-function toolsTabs(groups) {
-  return [
-    ['games', '按游戏查看', 'gamepad', '每个游戏支持哪些能力，点开就能直接进对应的战绩页'],
-    ...groups.map((group) => [
-      group.category,
-      toolsCategoryLabel(group.category),
-      TOOLS_CATEGORY_ICONS[group.category] || 'wrench',
-      toolsCategoryHint(group.category),
-    ]),
-    ['account', '账号登录', 'login', '战绩类功能要先登录；抽卡记录走各自游戏的独立通道'],
-    /*
-     * 插件是独立页面，不在 game-features 的能力矩阵里，所以由这里手工挂一项。
-     * 没有这一项的话，插件页就只剩代码里的 navigate('plugins') 能进，
-     * 用户根本找不到入口（侧栏「工具」现在直接跳工具页，不再展开子项）。
-     */
-    ['plugins', '自定义插件', 'sparkle', '单个 .hxl 文件，在隔离的 Worker 里运行'],
-  ];
-}
-
-function toolsTab(tabs) {
-  const key = state.toolsTab;
-  return tabs.some((tab) => tab[0] === key) ? key : tabs[0][0];
-}
 
 function toolsView() {
   const data = state.features;
@@ -2117,7 +2022,9 @@ function toolsView() {
         <p class="page-desc">${totalGames} 个游戏 · ${totalFeatures} 项能力，左边选游戏，右边直接进对应功能</p>
       </div>
       <div class="tools-head-actions">
-        <button class="btn ghost" data-action="tools-accounts">${icon('login', 'xs')}账号登录</button>
+        <button class="btn ghost" data-action="roster-open" data-value="${esc(activeGame ? activeGame.key : '')}">
+          ${icon('gacha', 'xs')}角色图鉴
+        </button>
         <button class="btn ghost" data-action="nav-plugins">${icon('sparkle', 'xs')}自定义插件</button>
         <button class="btn ghost" data-action="tools-refresh">${icon('refresh', 'xs')}重新读取</button>
       </div>
@@ -2132,38 +2039,6 @@ function toolsView() {
       </section>
     </div>
   </div>`;
-}
-
-/* 工具页右上角「账号登录」弹窗：米游社一套号带四款米家游戏，其余发行方各自一卡。 */
-async function openToolsAccountsModal() {
-  const games = (state.features && state.features.games) || [];
-  /*
-   * 森空岛的状态是异步来的，弹窗一打开就定格了，之后再重绘主页面也刷不到弹窗里。
-   * 所以先把状态读好再开窗 —— 读的是本地加密存储，不发网络请求，很快。
-   */
-  await refreshSklandStatus();
-  openModal(`
-    <div class="modal-backdrop" data-backdrop>
-      <div class="modal tools-accounts-modal" role="dialog" aria-modal="true" aria-labelledby="tools-accounts-title">
-        <div class="modal-head">
-          <div>
-            <h2 id="tools-accounts-title">账号登录</h2>
-            <p>战绩类功能要先登录；抽卡记录走各自游戏的独立通道。登录态只保存在本机，不会上传。</p>
-          </div>
-          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
-        </div>
-        <div class="modal-body">
-          <div class="tools-accounts-body">
-            ${hoyolabLoginCard()}
-            ${otherLoginCards(games)}
-          </div>
-        </div>
-        <div class="modal-foot">
-          <span style="flex:1"></span>
-          <button class="btn ghost" data-close>关闭</button>
-        </div>
-      </div>
-    </div>`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2247,15 +2122,6 @@ function recordCacheKey(game, feature, schedule) {
   const account =
     state.record.account || state.hoyolab?.['hoyolab-miyoushe']?.activeId || 'active';
   return `${account}/${game}/${feature}/${Number(schedule) === 2 ? 2 : 1}`;
-}
-
-/** 只取路径部分显示在角色行末尾，方便核对打的是哪个接口；URL 非法就留空。 */
-function recordUrlPath(url) {
-  try {
-    return new URL(String(url)).pathname;
-  } catch {
-    return '';
-  }
 }
 
 /** 米游社那个账号在指定游戏下的角色；优先用户手动选过的那个。 */
@@ -3234,95 +3100,6 @@ async function doSklandSign() {
   }
 }
 
-function passportLoginCard(providerId, games) {
-  const provider = state.features?.providers?.[providerId] || {};
-  const status = state.passport?.[providerId];
-  const label = provider.label || providerId;
-  const gameNames = games
-    .filter((game) => game.login && game.login.provider === providerId)
-    .map((game) => game.name);
-  const methodLabels = provider.methodLabels || [];
-  const methodChips = methodLabels.map((text) => `<span>${esc(text)}</span>`).join('');
-
-  /*
-   * 卡片自己负责触发一次状态读取。
-   * 之前靠在 enterRoute 里预先取，但首屏 state.features 还没回来后取不到 id 列表，
-   * 结果卡片永远停在「读取中」。放在渲染路径里由卡片自己兜底就没有这个竞态。
-   */
-  if (!status) {
-    refreshPassportStatus(providerId).then(() => {
-      if (state.route === 'tools') render({ preserveScroll: true });
-    });
-  }
-  const view = status || { loading: true };
-
-  const stateChip = view.loading
-    ? `<span class="miyo-state">读取中</span>`
-    : view.loggedIn
-      ? `<span class="miyo-state is-on">${icon('check', 'xs')}已登录</span>`
-      : `<span class="miyo-state">未登录</span>`;
-
-  const actions = view.loggedIn
-    ? `<button class="btn ghost" data-action="passport-login" data-value="${esc(providerId)}">${icon('refresh', 'xs')}重新登录</button>
-       <button class="btn ghost" data-action="passport-logout" data-value="${esc(providerId)}">退出</button>`
-    : `<button class="btn accent" data-action="passport-login" data-value="${esc(providerId)}">${icon('link', 'xs')}打开${esc(label)}登录</button>`;
-
-  /* 用实际支持的登录方式写描述，别给扫码没有的渠道吹「扫码」 */
-  const mention = methodLabels.length ? methodLabels.join('、').replace(/登录/g, '') : '账号';
-  const howTo = `在弹出窗口里用${mention}登录，登录完成会自动关闭并把凭据保存到本机。`;
-
-  return `<div class="page glass-panel miyo-card miyo-alt">
-    <div class="miyo-head">
-      <div>
-        <div class="eyebrow">${esc(String(providerId).toUpperCase())}</div>
-        <h2>${esc(label)}</h2>
-        ${gameNames.length ? `<p class="miyo-games">${gameNames.map((name) => `<span>${esc(name)}</span>`).join('')}</p>` : ''}
-        <p class="page-desc">${esc(howTo)}</p>
-      </div>
-      <div class="miyo-actions">${stateChip}${actions}</div>
-    </div>
-    <div class="miyo-methods">
-      ${methodChips}
-      <em>登录态只保存在本机，不会上传</em>
-    </div>
-    ${
-      view.loggedIn
-        ? `<p class="miyo-hint">已保存登录凭据（${new Date(view.savedAt || Date.now()).toLocaleString('zh-CN')}）。${
-            providerId === 'hypergryph'
-              ? '这个凭据只用于启动器识别账号；终末地的战绩与便笺请用上面的森空岛登录。'
-              : `${esc(label)}目前没有开放战绩查询接口，凭据会留给之后新增的功能使用。`
-          }</p>`
-        : ''
-    }
-    ${view.error ? `<p class="miyo-hint">${esc(view.error)}</p>` : ''}
-  </div>`;
-}
-
-function otherLoginCards(games) {
-  const providerIds = [
-    ...new Set(
-      games
-        .filter((game) => game.login && game.login.provider !== 'miyoushe')
-        .map((game) => game.login.provider)
-    ),
-  ].filter((id) => id !== 'hoyolab');
-  if (!providerIds.length) return '';
-  return providerIds
-    .map((id) => {
-      /*
-       * 鹰角只留森空岛一张卡。
-       *
-       * 通行证登录的用处只有「启动游戏时复用登录态」，而战绩、便笺、抽卡 token
-       * 全都要经过森空岛那条链路 —— 两个入口摆在一起，用户反而不知道该点哪个。
-       * 用户提过「森空岛和鹰角通行证一样的话就把通行证取消」，这里照此执行：
-       * 鹰角渠道只出森空岛卡片，通行证分区仍然保留（森空岛登录会接管里面的凭证）。
-       */
-      if (id === 'hypergryph') return sklandLoginCard();
-      return passportLoginCard(id, games);
-    })
-    .join('');
-}
-
 /** 当前选中渠道 + 上次选过的渠道；登录面板需要知道登完显示谁。 */
 async function refreshPassportStatus(providerId, force = false) {
   state.passport = state.passport || {};
@@ -3533,20 +3310,57 @@ function newsPinnedSkeletonList() {
 }
 
 /**
- * 大框轮换池：最新 8 条里按「公告 > 活动 > 资讯」排（同类型按时间新→旧）。
- * 只在最近 8 条里挑，不全文扫 —— 池子稳定，翻页键的位置不会因为
- * 远处一条旧公告突然插队而跳。
+ * 从时间倒序的公告里挑一批，但不许某一家游戏包场。
+ *
+ * 以前是「全局最新 8 条」再按类型排。鸣潮 3.8 当天一口气发了 8 条公告，
+ * 最新 8 条全是它，别的游戏的版本更新根本挤不进来（用户反馈「咋都给鸣潮独占了」）。
+ * 现在按游戏轮流取：每轮每家最多出 1 条，一轮取不满再进第二轮，同一条不会重复。
+ * 各家内部先按「公告 > 活动 > 资讯」再按时间，保证每家先出自己最重要的那条。
+ *
+ * 只在最近 2 轮能覆盖到的范围里挑（最多 gameCount*2 条），不全文扫 ——
+ * 池子稳定，翻页键的位置不会因为远处一条旧公告突然插队而跳。
  */
-function noticeFeaturePool(entries) {
+function diversifyNotices(entries, limit, rounds = 2) {
   const priority = { 公告: 0, 活动: 1, 资讯: 2 };
-  return entries
-    .slice(0, 8)
-    .sort((a, b) => {
-      const pa = priority[noticeTypeLabel(a.notice)] ?? 3;
-      const pb = priority[noticeTypeLabel(b.notice)] ?? 3;
-      if (pa !== pb) return pa - pb;
+  const rankOf = (entry) => priority[noticeTypeLabel(entry.notice)] ?? 3;
+
+  const buckets = new Map();
+  for (const entry of entries) {
+    const key = entry.game?.builtinKey || entry.game?.name || '';
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(entry);
+  }
+  for (const list of buckets.values()) {
+    list.sort((a, b) => {
+      if (rankOf(a) !== rankOf(b)) return rankOf(a) - rankOf(b);
       return noticeSortTime(b.notice) - noticeSortTime(a.notice);
     });
+  }
+
+  // 刚发公告的那家排第一顺位，这样大框首屏仍是"最新动态"。
+  const order = [...buckets.keys()].sort(
+    (a, b) => noticeSortTime(buckets.get(b)[0].notice) - noticeSortTime(buckets.get(a)[0].notice)
+  );
+
+  const picked = [];
+  for (let round = 0; round < rounds && picked.length < limit; round += 1) {
+    for (const key of order) {
+      if (picked.length >= limit) break;
+      const list = buckets.get(key);
+      if (list.length) picked.push(list.shift());
+    }
+  }
+
+  // 展示顺序仍按「公告 > 活动 > 资讯」，同类型按时间新→旧。
+  picked.sort((a, b) => {
+    if (rankOf(a) !== rankOf(b)) return rankOf(a) - rankOf(b);
+    return noticeSortTime(b.notice) - noticeSortTime(a.notice);
+  });
+  return picked;
+}
+
+function noticeFeaturePool(entries) {
+  return diversifyNotices(entries, 8);
 }
 
 /** 置顶区：最新官方动态大框 + 置顶动态行列表。 */
@@ -3564,8 +3378,10 @@ function newsPinnedMarkup(entries) {
   const { notice, game } = head;
   const typeLabel = noticeTypeLabel(notice);
   const cover = game.startCoverUrl || game.coverUrl || '';
-  // 动态页做减法：置顶行列表只留 3 条，再往下都是折叠区，避免"滑不停"
-  const rest = entries.filter((entry) => entry !== head).slice(0, 3);
+  // 动态页做减法：置顶行列表只留 3 条，再往下都是折叠区，避免"滑不停"。
+  // 这 3 行也从去重后的池子里挑 —— 直接用 entries 的话，一家游戏发一批公告
+  // 就会把置顶区整片占满（和上面大框同一个问题）。
+  const rest = pool.filter((entry) => entry !== head).slice(0, 3);
   const nav =
     total > 1
       ? `<span class="news-feature-nav">

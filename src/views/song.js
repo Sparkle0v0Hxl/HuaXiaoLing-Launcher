@@ -63,11 +63,6 @@ const QUALITY_LEVELS = [
   ['hires', 'Hi-Res'],
 ];
 
-function qualityLabel(level) {
-  const hit = QUALITY_LEVELS.find(([key]) => key === level);
-  return hit ? hit[1] : QUALITY_LEVELS[0][1];
-}
-
 /**
  * 底部工具条上的小下拉。
  *
@@ -578,113 +573,6 @@ function playCurrentSong(toggle = false) {
      */
   });
   updateSongChrome();
-}
-
-function openNeteaseLoginModal() {
-  const defaultApi = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
-  let timer = null;
-  let key = '';
-  openModal(
-    `
-    <div class="modal-head"><div><h2>网易云扫码登录</h2><p>连接你本机运行的 NeteaseCloudMusicApi 服务，扫码后只在本机内存保存登录态。</p></div><button class="icon-btn" data-close>${icon('x')}</button></div>
-    <div class="modal-body">
-      <label class="field"><span>本地 API 地址</span><input class="text-input" id="netease-login-api" value="${esc(defaultApi)}" placeholder="http://127.0.0.1:3100" /></label>
-      <div class="netease-qr-box">
-        <div class="netease-qr-image" id="netease-qr-image">${icon('music')}</div>
-        <div class="netease-qr-copy"><strong id="netease-login-status">等待获取二维码</strong><span id="netease-login-hint">先确认本地 API 已启动，再点获取二维码。</span></div>
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-ghost" data-close>关闭</button>
-        <button class="btn btn-ghost" id="netease-service-start">${icon('play')}自动启动服务</button>
-        <button class="btn btn-primary" id="netease-login-refresh">${icon('refresh')}获取二维码</button>
-      </div>
-    </div>
-  `,
-    { onClose: () => timer && clearInterval(timer) }
-  );
-  const apiInput = document.querySelector('#netease-login-api');
-  const status = document.querySelector('#netease-login-status');
-  const hint = document.querySelector('#netease-login-hint');
-  const image = document.querySelector('#netease-qr-image');
-  const refresh = document.querySelector('#netease-login-refresh');
-  if (!apiInput || !refresh) return;
-  api.netease
-    .startService(apiInput.value.trim())
-    .then((result) => {
-      if (result?.apiBase) apiInput.value = result.apiBase;
-      status.textContent = result?.started ? '本地服务已自动启动' : '本地服务已经在运行';
-      hint.textContent = '正在获取登录二维码…';
-      refresh.click();
-    })
-    .catch(() => {});
-  const check = async () => {
-    if (!key) return;
-    try {
-      const result = await api.netease.qrCheck({ apiBase: apiInput.value.trim(), key });
-      if (result.loggedIn) {
-        if (timer) clearInterval(timer);
-        status.textContent = '登录成功';
-        hint.textContent = '登录态已保存在本次运行中，可以直接导入歌单。';
-        toast('网易云登录成功', 'success');
-        setTimeout(() => closeModal(), 900);
-      } else if (result.code === 802) {
-        status.textContent = '已扫码，请在手机上确认';
-        hint.textContent = result.message || '确认后会自动完成登录。';
-      } else if (result.code === 800) {
-        status.textContent = '二维码已过期';
-        hint.textContent = '重新获取二维码。';
-        if (timer) clearInterval(timer);
-      } else {
-        hint.textContent = result.message || '等待扫码…';
-      }
-    } catch (error) {
-      if (timer) clearInterval(timer);
-      status.textContent = '登录检查失败';
-      hint.textContent = error.message;
-    }
-  };
-  refresh.addEventListener('click', async () => {
-    if (timer) clearInterval(timer);
-    key = '';
-    refresh.disabled = true;
-    status.textContent = '正在获取二维码…';
-    hint.textContent = '连接本地 API';
-    try {
-      const apiBase = apiInput.value.trim();
-      localStorage.setItem('vela:netease-api', apiBase);
-      const result = await api.netease.qrCreate({ apiBase });
-      key = result.key;
-      image.innerHTML = result.qrimg
-        ? `<img src="${esc(result.qrimg)}" alt="网易云登录二维码" />`
-        : icon('music');
-      status.textContent = '请使用网易云音乐扫码';
-      hint.textContent = '扫码后在手机上确认登录。';
-      timer = setInterval(check, 2000);
-    } catch (error) {
-      status.textContent = '获取二维码失败';
-      hint.textContent = error.message;
-    } finally {
-      refresh.disabled = false;
-    }
-  });
-  const serviceStart = document.querySelector('#netease-service-start');
-  serviceStart?.addEventListener('click', async () => {
-    serviceStart.disabled = true;
-    status.textContent = '正在启动本地服务…';
-    hint.textContent = '查找 NeteaseCloudMusicApi 并启动，需要几秒钟。';
-    try {
-      const result = await api.netease.startService(apiInput.value.trim());
-      if (result?.apiBase) apiInput.value = result.apiBase;
-      status.textContent = result?.started ? '本地服务已启动' : '本地服务已经在运行';
-      hint.textContent = '现在正在获取登录二维码…';
-      refresh.click();
-    } catch (error) {
-      status.textContent = '自动启动服务失败';
-      hint.textContent = error.message;
-    } finally {
-      serviceStart.disabled = false;
-    }
-  });
 }
 
 function parseLrc(text) {

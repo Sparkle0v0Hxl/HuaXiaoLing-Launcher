@@ -186,7 +186,12 @@ async function fetchPage(api, game, type, page, endId) {
 }
 
 
-async function syncGacha({ game, installRoot, userData, onProgress, api: providedApi }) {
+/*
+ * uid 是给 SToken 路线用的：账号绑了 SToken 之后 UID 本来就知道，
+ * 不必再从返回里猜 —— 没有抽卡记录的新账号第一条返回永远是空，
+ * 靠猜会直接被判成「链接过期」，用户于是白跑一趟游戏。
+ */
+async function syncGacha({ game, installRoot, userData, onProgress, api: providedApi, uid: knownUid, manualUrl = '', full = false }) {
   if (!GAMES[game]) throw new Error('不支持这个游戏的抽卡同步');
   if (runningSyncs.has(game)) {
     const error = new Error(
@@ -197,17 +202,17 @@ async function syncGacha({ game, installRoot, userData, onProgress, api: provide
   }
   runningSyncs.set(game, Date.now());
   try {
-    return await syncGachaLocked({ game, installRoot, userData, onProgress, providedApi });
+    return await syncGachaLocked({ game, installRoot, userData, onProgress, providedApi, knownUid, manualUrl, full });
   } finally {
     runningSyncs.delete(game);
   }
 }
 
-async function syncGachaLocked({ game, installRoot, userData, onProgress, providedApi }) {
-  const api = providedApi || extractUrlFromCache(installRoot, game);
+async function syncGachaLocked({ game, installRoot, userData, onProgress, providedApi, knownUid, manualUrl, full }) {
+  const api = providedApi || (manualUrl ? cleanApiUrl(manualUrl).toString() : extractUrlFromCache(installRoot, game));
   const clean = cleanApiUrl(api);
   const first = await fetchPage(clean.toString(), game, GAMES[game].types[0], 1, 0);
-  const uid = first[0]?.uid;
+  const uid = first[0]?.uid || knownUid;
   if (!uid) throw new Error('最近六个月内没有抽卡记录，或抽卡链接已过期');
   const existing = readImportGroups(importsPath(userData)).find(
     (group) => group.game === game && String(group.uid) === String(uid)
@@ -239,7 +244,7 @@ async function syncGachaLocked({ game, installRoot, userData, onProgress, provid
       let seededAdded = 0;
       for (const item of seeded) {
         const id = String(item.id);
-        if (known.has(id)) continue;
+        if (!full && known.has(id)) continue;
         known.add(id);
         records.push({
           Uid: String(item.uid || uid),
@@ -280,7 +285,7 @@ async function syncGachaLocked({ game, installRoot, userData, onProgress, provid
       let added = 0;
       for (const item of list) {
         const id = String(item.id);
-        if (known.has(id)) continue;
+        if (!full && known.has(id)) continue;
         known.add(id);
         records.push({
           Uid: String(item.uid || uid),
@@ -299,12 +304,14 @@ async function syncGachaLocked({ game, installRoot, userData, onProgress, provid
       if (list.length < 20) break;
       if (!lastId) break;
       endId = String(lastId);
-      try {
-        if (BigInt(endId) <= maxKnown) break;
-      } catch {
-        /* ignore malformed id */
+      if (!full) {
+        try {
+          if (BigInt(endId) <= maxKnown) break;
+        } catch {
+          /* ignore malformed id */
+        }
+        if (!added && page > 1) break;
       }
-      if (!added && page > 1) break;
     }
     if (rateLimited) break; // 被限流了就别再去打剩下的类型，越打冷却越长
   }

@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -8,7 +8,9 @@ const { app } = require('electron');
 
 // 2.4.0 合并：新增明日方舟 / 崩坏3 两个内置游戏，种子版本随之升到 7，
 // 老存档会在下一次 ensureSeedData 时补齐这两个条目和它们的渠道行。
-const SEED_VERSION = 7;
+// v8：新增鸣潮（官服/B服/国际服三渠道）。老存档升级后由 ensureSeedData 补齐。
+// v9：鸣潮渠道表加 WeGame 行（转换功能的渠道目标）。老存档补渠道行走 :858 的缺失渠道逻辑。
+const SEED_VERSION = 9;
 
 const GENSHIN = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
   <defs>
@@ -496,6 +498,33 @@ const BUILTIN_GAMES = [
     launchCount: 0,
     playSeconds: 0,
   },
+  {
+    /*
+     * 鸣潮（2026-11-11 接入库洛官方协议）：官服 / B服 / 国际服三渠道。
+     * 官服 ↔ B服 内容 99.24% 相同，硬链接切服只下约 1.3GiB 差异件；
+     * 国际服与国服内容几乎完全不同，只支持直接下载，不做硬链接互切。
+     */
+    id: 'builtin-wutheringwaves',
+    builtinKey: 'wutheringwaves',
+    builtin: true,
+    name: '鸣潮',
+    subtitle: 'Wuthering Waves',
+    description: '在荒芜与机械共存的末世世界醒来，用声骸与共鸣的力量夺回失落的记忆。启动器会自动寻找已经安装的游戏。',
+    version: '',
+    tags: ['动作', '开放世界', '剧情'],
+    target: '',
+    args: '',
+    workDir: '',
+    cover: 'covers/builtin-wutheringwaves.svg',
+    accent: '#9fd8ff',
+    favorite: false,
+    demo: false,
+    siteUrl: 'https://www.kurogames.com/',
+    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 6).toISOString(),
+    lastPlayed: null,
+    launchCount: 0,
+    playSeconds: 0,
+  },
 ];
 
 const SERVER_CHANNELS = [
@@ -519,6 +548,20 @@ const NTE_CHANNELS = [
 ];
 
 /**
+ * 鸣潮的服务器谱系（2026-11-11 接入库洛官方协议）：
+ *   - 国服：官服（库洛）/ B服（B站）—— 两者内容 99.24% 相同，支持硬链接互切
+ *   - 国际服：库洛自发行，与国服内容几乎完全不同，只支持直接下载
+ */
+const KURO_CHANNELS = [
+  ['official', '官服'],
+  ['bilibili', 'B服'],
+  ['global', '国际服'],
+  // WeGame 版：同为「切换服务器」语境下的一个渠道目标（用户 m27642「wegame直接做到国际服下面」）。
+  // 它没有独立的下载链路（转换走 wegame-convert），但作为渠道行参与排序与状态展示。
+  ['wegame', 'WeGame'],
+];
+
+/**
  * 明日方舟的服务器谱系（2.4.0 合并自对方分支）：
  *   - 国服：官服（鹰角）/ B服（B站）
  *   - 国际服（Yostar 发行）：EN / JP / KR 三个区域服，数据互不相通
@@ -538,6 +581,7 @@ function channelsFor(game) {
   if (game.builtinKey === 'endfield') return ENDFIELD_CHANNELS;
   if (game.builtinKey === 'arknights') return ARKNIGHTS_CHANNELS;
   if (game.builtinKey === 'neverness') return NTE_CHANNELS;
+  if (game.builtinKey === 'wutheringwaves') return KURO_CHANNELS;
   return SERVER_CHANNELS;
 }
 

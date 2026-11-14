@@ -4,7 +4,16 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const GAMES = new Set(['genshin', 'starrail', 'zzz', 'endfield', 'neverness']);
+/*
+ * 能导入的游戏。
+ *
+ * 明日方舟没有公开的抽卡接口，只能靠第三方工具导出 ——
+ * 所以这里必须认它，否则导入时会被 GAMES.has 挡掉，用户看到的是
+ * 「无法判断这是哪个游戏的抽卡记录」，而其实他只是选了明日方舟。
+ *
+ * 崩坏3 已整块移除（官方从未开放补给记录接口，公共 API 域名都不存在）。
+ */
+const GAMES = new Set(['genshin', 'starrail', 'zzz', 'endfield', 'arknights', 'neverness']);
 
 function importsPath(userData) {
   return path.join(userData, 'gacha-imports.json');
@@ -33,6 +42,7 @@ function unwrapDocument(data) {
     ['hkrpg', 'starrail'],
     ['nap', 'zzz'],
     ['endfield', 'endfield'],
+    ['arknights', 'arknights'],
     ['nte', 'neverness'],
   ]) {
     if (Array.isArray(data?.[key])) return { list: data[key], info: data.info || {}, game };
@@ -67,6 +77,11 @@ function detectGame(document, fileName = '') {
     if (ranks.length && Math.max(...ranks) <= 4) return 'zzz';
   }
   if ([100, 200, 301, 302, 400, 500].some((type) => types.has(type))) return 'genshin';
+  /*
+   * 崩坏3 的抽卡类型是 1-5 / 20，和星铁的 1/2/11/12 有重叠，
+   * 所以只能靠文件名和道具名区分 —— 上面那几条内容判定要保持在前面。
+   */
+  if (/明日方舟|arknights|prts/i.test(fileName)) return 'arknights';
   if (/星铁|starrail|hkrpg/i.test(fileName)) return 'starrail';
   if (/绝区零|zenless|zzz|nap/i.test(fileName)) return 'zzz';
   if (/原神|genshin|hk4e/i.test(fileName)) return 'genshin';
@@ -94,6 +109,12 @@ function mapGachaType(game, item) {
   if (game === 'neverness') {
     if (pool.includes('arc')) return 3;
     if (pool.includes('standard')) return 2;
+    return 1;
+  }
+  /* 明日方舟的导出文件不一定带 gacha_type，按池子名归到 1-3 即可。 */
+  if (game === 'arknights') {
+    if (pool.includes('limited') || pool.includes('limit')) return 2;
+    if (pool.includes('link')) return 3;
     return 1;
   }
   return 0;
@@ -138,6 +159,19 @@ function normalizeRecords(document, game, options = {}) {
   return [...groups.entries()].map(([uid, records]) => ({ game, uid, records }));
 }
 
+/*
+ * 一次十连的 10 条记录 gachaTs 完全相同，接口是按 pos 降序（9→0）返回的，
+ * 而真实抽卡顺序是 pos 升序。只按 Time 排会保留这个倒序，
+ * 导致同一十连里「第几抽出货」全部算错（明日方舟的垫数就是这么错的）。
+ * Id 形如 ak-<gachaTs>-<pos>-<charId>，从里面把 pos 抠出来。
+ */
+function recordPos(record) {
+  const direct = Number(record && record.pos);
+  if (Number.isFinite(direct)) return direct;
+  const matched = /^ak-\d+-(\d+)-/.exec(String((record && record.Id) || ''));
+  return matched ? Number(matched[1]) : NaN;
+}
+
 function mergeGroups(existing, incoming) {
   const map = new Map();
   for (const group of [...existing, ...incoming]) {
@@ -145,17 +179,38 @@ function mergeGroups(existing, incoming) {
     const key = `${group.game}:${group.uid}`;
     if (!map.has(key)) map.set(key, { game: group.game, uid: String(group.uid), records: [] });
     const target = map.get(key);
-    const seen = new Set(target.records.map((record) => String(record.Id)));
+    /*
+     * 同一 Id 以后到的为准，而不是「已存在就跳过」。
+     * 原来的跳过逻辑有个隐性 bug：同一批记录先以旧字段落过盘，
+     * 之后代码升级给记录加了新字段（比如明日方舟的 up / isNew），
+     * 重新同步时这些记录因为 Id 已存在被丢掉，字段永远补不上。
+     */
+    const index = new Map();
+    for (let i = 0; i < target.records.length; i += 1) {
+      index.set(String(target.records[i].Id || ''), i);
+    }
     for (const record of group.records || []) {
       const id = String(record.Id || '');
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
+      if (!id) continue;
+      if (index.has(id)) {
+        target.records[index.get(id)] = record;
+        continue;
+      }
+      index.set(id, target.records.length);
       target.records.push(record);
     }
   }
   const groups = [...map.values()];
   for (const group of groups) {
-    group.records.sort((a, b) => String(a.Time).localeCompare(String(b.Time)));
+    group.records.sort((a, b) => {
+      const byTime = String(a.Time).localeCompare(String(b.Time));
+      if (byTime !== 0) return byTime;
+      /* 同一秒内按 pos 升序还原真实抽卡顺序，见 recordPos 注释 */
+      const pa = recordPos(a);
+      const pb = recordPos(b);
+      if (Number.isFinite(pa) && Number.isFinite(pb) && pa !== pb) return pa - pb;
+      return 0;
+    });
     group.count = group.records.length;
   }
   return groups;

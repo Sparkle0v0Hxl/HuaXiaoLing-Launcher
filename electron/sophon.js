@@ -1028,31 +1028,48 @@ async function writeFileIsolated(target, content) {
  * 所以 unlink 失败后再退一步：先把旧文件改名挪开（同样断开硬链接），再写新文件。
  */
 async function openForWrite(target) {
+  let parked = '';
   try {
-    await fsp.unlink(target);
-  } catch (error) {
-    if (error && error.code !== 'ENOENT') {
-      await fsp.chmod(target, 0o666).catch(() => {});
-      try {
-        await fsp.unlink(target);
-      } catch {
-        /*
-         * 还是删不掉（ACL 缺 DELETE）。旧文件不能留在原地：它是硬链接的话，
-         * 直接 open('w') 会把基础客户端那一份一起改写。
-         * 改名挪开同样能断开链接，而且只需要目录写权限。
-         * 挪开的文件由调用方收尾时清掉；清不掉也只是占几十字节的垃圾，
-         * 比写穿基础客户端轻得多。
-         */
-        const parked = `${target}.hxl-old-${Date.now()}`;
+    try {
+      await fsp.unlink(target);
+    } catch (error) {
+      if (error && error.code !== 'ENOENT') {
+        await fsp.chmod(target, 0o666).catch(() => {});
         try {
-          await fsp.rename(target, parked);
+          await fsp.unlink(target);
         } catch {
-          /* 连改名都失败：只能尝试原地写，让随后的 open 报出真正的错误 */
+          /*
+           * 还是删不掉（ACL 缺 DELETE）。旧文件不能留在原地：它是硬链接的话，
+           * 直接 open('w') 会把基础客户端那一份一起改写。
+           * 改名挪开同样能断开链接，而且只需要目录写权限。
+           */
+          parked = `${target}.hxl-old-${Date.now()}`;
+          try {
+            await fsp.rename(target, parked);
+          } catch {
+            /* 连改名都失败：只能尝试原地写，让随后的 open 报出真正的错误 */
+            parked = '';
+          }
         }
       }
     }
+    return await fsp.open(target, 'w');
+  } finally {
+    /*
+     * 收尾清掉挪开的旧文件。以前这里写「挪开的文件由调用方收尾时清掉」，
+     * 但全仓没有任何调用方真的清（prepareSophon 每个待写文件都可能留一份旧文件，
+     * 可能是大 .dll/.chk，不是「几十字节」）。现在由本函数自己在 finally 里收尾：
+     * 成功路径上旧文件只是被 rename 挪走、仍存在就 rm；不再存在（或根本没挪过）则无事可做。
+     * 清不掉（ACL 挡着）记日志但不抛，不能把写文件的主流程炸掉。
+     */
+    if (parked) {
+      try {
+        await fsp.rm(parked, { force: true });
+      } catch (error) {
+        console.warn(`[sophon] 旧文件清理失败，残留 ${parked}：${String(error?.message || error)}`);
+      }
+    }
   }
-  return fsp.open(target, 'w');
 }
 
 function channelConfig(gameKey, channel, tag, sdkVersion = '') {

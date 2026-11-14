@@ -683,11 +683,6 @@ function songQueueSegments() {
   }));
 }
 
-/** 队列的过滤词：会话内状态，切页 / 重启都不保留。 */
-function queueFilterActive() {
-  return Boolean(String(state.queueFilter || '').trim());
-}
-
 /**
  * 队列行渲染主体（不含外壳）。
  *

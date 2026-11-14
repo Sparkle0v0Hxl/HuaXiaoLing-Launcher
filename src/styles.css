@@ -1,4 +1,4 @@
-/* 花筱灵启动器 — 原创界面样式 */
+��筱灵启动器 — 原创界面样式 */
 :root {
   /* 强调色当文字用时走这一组：深色主题＝原色，浅色主题会在下面加深。
      背景 / 边框 / 阴影仍然用 --accent，不跟着变。 */
@@ -7175,6 +7175,29 @@ body.sophon-minimized .modal-backdrop {
 }
 
 /* simplified gacha view */
+/* 抽卡链接过期常驻提醒：黄底横幅，跟随页宽，不被滚动裁切 */
+.gacha-expired-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--gold-text, #d8a048) 38%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--gold-text, #d8a048) 12%, transparent);
+  font-size: 13px;
+  color: var(--text, inherit);
+}
+.gacha-expired-banner span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.gacha-expired-banner .link-btn {
+  flex: none;
+}
 .gacha-account-bar {
   display: flex;
   align-items: center;
@@ -25110,18 +25133,6 @@ body.charms-on .page-deco-sprite { display: block; }
   gap: 16px;
 }
 
-/* 账号登录弹窗：里面直接复用 .miyo-card / 通行证玻璃卡 */
-.tools-accounts-modal { max-width: 720px; }
-.tools-accounts-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.tools-accounts-body .miyo-card,
-.tools-accounts-body .page.glass-panel {
-  margin: 0;
-}
-
 /* ------------------------------------------------------------------ */
 /* 2.4.0 合并自对方分支：工具页 · 游戏 Wiki                              */
 /* 卡片本身就是一条外链，所以比别的面板矮、也不用展开态。                 */
@@ -26596,6 +26607,43 @@ body.charms-on .page-deco-sprite { display: block; }
   border-left: 2px solid rgba(var(--accent-rgb), 0.45);
   border-radius: 0 8px 8px 0;
   background: var(--surface-2);
+}
+
+/* WeGame 转换弹窗：三步教程与探针区块 */
+.wegame-tutorial {
+  margin: 8px 0 0;
+  padding: 9px 11px 9px 26px;
+  border-left: 2px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.wegame-tutorial li + li {
+  margin-top: 6px;
+}
+.wegame-tutorial b {
+  color: var(--text-2);
+}
+.wegame-tutorial-note {
+  margin: 8px 0 0;
+  padding: 8px 11px;
+  border-left: 2px solid var(--gold-text);
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.wegame-tutorial-note b {
+  color: var(--text-2);
+}
+.wegame-probe p {
+  margin: 6px 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  word-break: break-all;
 }
 
 /* ---- B2. 结论卡：装哪个版本 / 能复用多少 / 盘够不够 ---- */
@@ -35947,6 +35995,1475 @@ body.is-idle .modal-backdrop {
   }
 }
 
+/* ---- 抽卡 SToken 面板 ---- */
+.gacha-token {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2, var(--surface));
+}
+
+.gacha-token-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gacha-token-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.gacha-token-who {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-name {
+  font-weight: 600;
+}
+
+.gacha-token-who small {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.gacha-token-roles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-role {
+  display: grid;
+  gap: 2px;
+  min-width: 132px;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gacha-token-role small {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.gacha-token-role:hover {
+  border-color: var(--accent);
+}
+
+.gacha-token-role.active {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(120, 160, 255, 0.12));
+}
+
+.gacha-token-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.gacha-token-feedback {
+  color: var(--danger, #e5534b);
+}
+
+.gacha-token-accounts {
+  display: grid;
+  gap: 8px;
+}
+
+.gacha-token-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.gacha-token-account.active {
+  border-color: var(--accent);
+}
+
+.gacha-token-account-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gacha-token-account-info small {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gacha-token-account-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---- 抽卡：用已登录的米游社账号 ---- */
+.gacha-token-login {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.gacha-token-login-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-login-row select {
+  flex: 1 1 150px;
+  min-width: 120px;
+}
+
+.gacha-token-manual {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.gacha-token-manual > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  user-select: none;
+}
+
+.gacha-token-manual[open] > summary {
+  margin-bottom: 10px;
+}
+
+/* 智能粘贴框：整段 cookie 一行放不下，给个可调高的多行框 */
+.gacha-token-manual .field textarea {
+  width: 100%;
+  min-height: 96px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  word-break: break-all;
+}
+.gacha-token-manual .field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.gacha-token-manual .field {
+  margin-bottom: 8px;
+}
+
+/* ---- 抽卡：手机米游社扫码 ---- */
+.gacha-token-scan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--accent-border, var(--border));
+  border-radius: var(--radius);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.gacha-token-scan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gacha-token-scan-row select {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.gacha-token-scan-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(255, 255, 255, 0.04));
+}
+
+.gacha-token-scan-qr img {
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.gacha-token-scan-qr .form-hint {
+  margin: 0;
+  text-align: center;
+}
+
+/* ==== gacha token picker（多账号切换）==== */
+/*
+ * 同步弹窗里那个「用哪个账号」下拉。
+ * 沿用 .field 的排版，只把上边距压一压 —— 它紧贴在标题栏下面，
+ * 留太多空白会把角色卡片挤到看不见的地方。
+ */
+.gacha-token .gacha-token-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 10px;
+}
+
+.gacha-token .gacha-token-pick > span {
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.gacha-token .gacha-token-pick select {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input, rgba(255, 255, 255, 0.04));
+  color: var(--text);
+  font-size: 13px;
+}
+
+.gacha-token .gacha-token-pick select:disabled {
+  opacity: 0.6;
+}
+
+/* ==== gacha sync groups ==== */
+/*
+ * 同步弹窗里「这款游戏靠什么拿数据」那一行。
+ * 用浅底 + 图标，和下面那段 form-note 区分开：这行是说明机制，
+ * form-note 是提醒注意事项，两个叠在一起容易读混。
+ */
+.gacha-sync-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: -4px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.gacha-sync-mode svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  opacity: 0.75;
+}
+
+.gacha-sync-mode span {
+  min-width: 0;
+}
+
+/* optgroup 的标题在暗色主题里默认可读性很差，单独提一下颜色 */
+.modal select optgroup {
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.modal select option {
+  color: var(--text);
+  font-weight: 400;
+}
+
+/* ==== 账号中心（侧栏左下角头像打开的浮层）==========================
+ * 结构：
+ *   .modal.acct-modal
+ *     .acct-nav         左侧 220px：品牌区 + 分区菜单 + 底部小字
+ *     .acct-body        右侧内容区，自己滚动
+ *     .acct-close       右上角 ✕（绝对定位）
+ * 左侧菜单用 --accent 系的强调条标当前分区；右侧账号卡片是横条 + 细高亮条，
+ * 跟胡桃那个账号面板的观感对齐。
+ */
+.modal.acct-modal {
+  position: relative;
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  width: min(880px, 94vw);
+  height: min(620px, 84vh);
+  max-height: calc(100vh - 52px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.acct-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+}
+
+/* —— 左栏 —— */
+.acct-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 12px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.acct-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 12px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.acct-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.acct-brand-text strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-brand-text small {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 头像：圆图 + 底下的文字兜底。图裂了 <i> 就露出来，不会是一块破图 */
+.acct-avatar {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-3));
+  color: var(--accent-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.acct-avatar.is-sm {
+  width: 36px;
+  height: 36px;
+  font-size: 13px;
+}
+
+.acct-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.acct-avatar i {
+  font-style: normal;
+}
+
+.acct-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.acct-tabs::-webkit-scrollbar {
+  width: 5px;
+}
+.acct-tabs::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.acct-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.acct-tab .icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  opacity: 0.8;
+}
+
+.acct-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-2);
+}
+
+.acct-tab.is-active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.acct-tab.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.acct-tab.is-active .icon {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.acct-tab em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--muted);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.acct-tab.is-busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.acct-sep {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--line);
+}
+
+.acct-foot {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* —— 右栏 —— */
+.acct-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 24px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.acct-body::-webkit-scrollbar {
+  width: 6px;
+}
+.acct-body::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.acct-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 34px;
+}
+
+.acct-head h2 {
+  margin: 0 0 5px;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.acct-head p {
+  margin: 0;
+  max-width: 520px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.acct-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+}
+
+/* —— 账号卡片 —— */
+.acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.acct-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.acct-account:hover {
+  border-color: var(--line-strong);
+}
+
+.acct-account.is-active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+}
+
+.acct-account-bar {
+  position: absolute;
+  left: -1px;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.acct-account.is-active .acct-account-bar {
+  background: var(--accent);
+}
+
+.acct-account-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.acct-account-main strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-account-main small {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-account-roles {
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.acct-badge {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.acct-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.acct-icon-btn .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.acct-icon-btn:hover {
+  border-color: color-mix(in srgb, #e0707a 40%, transparent);
+  background: color-mix(in srgb, #e0707a 12%, transparent);
+  color: #e0707a;
+}
+
+/* —— 角色胶囊 —— */
+.acct-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.acct-section h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.acct-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.acct-role {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.acct-role strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.acct-role span {
+  color: var(--text-2);
+}
+
+.acct-role em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 空态 / 加载 —— */
+.acct-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 44px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  text-align: center;
+  color: var(--muted);
+}
+
+.acct-empty .icon {
+  width: 30px;
+  height: 30px;
+  opacity: 0.5;
+}
+
+.acct-empty strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.acct-empty p {
+  margin: 0;
+  max-width: 380px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.acct-empty .btn {
+  margin-top: 4px;
+}
+
+.acct-empty-line {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.acct-warn {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, #e8b862 36%, transparent);
+  background: color-mix(in srgb, #e8b862 10%, transparent);
+  color: #e8b862;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.acct-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 52px 0;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.acct-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: acct-spin 0.7s linear infinite;
+}
+
+@keyframes acct-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ==== 同步四项菜单（胡桃风格）==== */
+.sync-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.sync-menu-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.12s;
+}
+
+.sync-menu-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.sync-menu-item:active:not(:disabled) {
+  transform: scale(0.995);
+}
+
+.sync-menu-item:disabled,
+.sync-menu-item.is-disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.sync-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent-text);
+}
+
+.sync-menu-icon .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.sync-menu-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sync-menu-copy strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.sync-menu-copy small {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.sync-menu-arrow {
+  color: var(--muted);
+  display: inline-flex;
+}
+
+.sync-menu-arrow .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.modal.narrow .form-hint {
+  margin: 2px 0 0;
+}
+
+#gacha-manual-url {
+  width: 100%;
+  min-height: 88px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  line-height: 1.55;
+  resize: vertical;
+}
+
+#gacha-manual-url:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  background: rgba(255, 255, 255, 0.05);
+}
+/* ==== 鹰角账号（明日方舟）==== */
+/*
+ * 方舟的 token 比 SToken 长得多（是 base64 一整串），
+ * 用单行 input 会被截断成看不见尾巴，所以这里用 textarea 并允许换行折行。
+ */
+#gacha-ak-input {
+  width: 100%;
+  min-height: 76px;
+  max-height: 160px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input, rgba(255,255,255,0.04));
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  word-break: break-all;
+}
+
+#gacha-ak-input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+
+/* ==== 抽卡欧非 / 首次获得标签（明日方舟）==== */
+.gacha-badge {
+  font-style: normal;
+  flex: none;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+/* 命中当期 UP：跟主题同色，最显眼 */
+.gacha-badge.is-up {
+  color: var(--accent-text);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+/* 歪了：用冷色，别用红的 —— 红的看起来像报错 */
+.gacha-badge.is-off {
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.08);
+}
+/* NEW：金色，跟「新角色」的直觉一致 */
+.gacha-badge.is-new {
+  color: #241a0e;
+  background: linear-gradient(180deg, #ffd77a, #f0b95f);
+}
+
+/* ==== 同步菜单：整款都不支持的说明块（崩坏3 / 异环）==== */
+.sync-menu-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.sync-menu-note .icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--accent-text);
+  opacity: 0.8;
+}
+
+.sync-menu-note span {
+  min-width: 0;
+}
+/* ==== 账号中心抽屉（通行证 → 游戏卡片）==== */
+.acct-drawer {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.acct-drawer + .acct-drawer {
+  margin-top: 9px;
+}
+
+.acct-drawer[open] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+
+/* summary 去掉默认三角，改用自己那枚可旋转的箭头 */
+.acct-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.acct-drawer-head::-webkit-details-marker {
+  display: none;
+}
+
+.acct-drawer-head:hover {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.acct-drawer-caret {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+
+.acct-drawer-caret svg {
+  width: 14px;
+  height: 14px;
+}
+
+.acct-drawer[open] .acct-drawer-caret {
+  transform: rotate(90deg);
+}
+
+.acct-drawer-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.acct-drawer-title strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-drawer-title small {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-drawer-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.acct-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 13px 13px;
+  border-top: 1px solid var(--line);
+}
+
+/* —— 游戏卡片 —— */
+.acct-game {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--surface);
+}
+
+.acct-game.is-muted {
+  opacity: 0.62;
+}
+
+.acct-game-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.acct-game-top strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-game-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent-text);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.acct-game.is-muted .acct-game-tag {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+
+.acct-game-uid {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-game-lines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.acct-game-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.acct-game-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+/* ==== 角色图鉴 ==== */
+/* 弹窗比常规 modal 宽：左边网格、右边详情，两栏才放得下 */
+.modal.roster-modal {
+  /* 96 个角色要塞下，窗口给足：原来 1040x700 只能看到 3 行卡片，
+     右侧详情也挤。宽度上到 1240 之后网格能排 4 列。 */
+  width: min(1240px, 96vw);
+  height: min(880px, 92vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.roster-modal .modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 顶部三个游戏切换 */
+.roster-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.roster-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.roster-tab:hover { border-color: var(--rc); color: var(--text); }
+.roster-tab.is-active {
+  border-color: var(--rc);
+  color: var(--text);
+  background: color-mix(in srgb, var(--rc) 14%, transparent);
+}
+.roster-tab em {
+  font-style: normal;
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 主体：左网格 + 右详情 */
+.roster-main { flex: 1; min-height: 0; display: flex; }
+/* 筛选栏：元素 / 星级 / 排序 */
+.roster-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+}
+.roster-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.roster-filter-group + .roster-filter-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+.roster-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.roster-chip:hover { border-color: var(--line-strong); color: var(--text); }
+.roster-chip.is-on {
+  border-color: var(--rc, var(--accent));
+  color: var(--text);
+  background: color-mix(in srgb, var(--rc, var(--accent)) 16%, transparent);
+}
+.roster-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.roster-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+}
+.roster-grid {
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+  /* 行高必须按内容走：只写 align-content: start 时，行数一多会被容器高度
+     平摊成十几像素，卡片就全被压扁成细条（96 个角色必现）。 */
+  grid-auto-rows: max-content;
+  gap: 8px;
+  padding-right: 4px;
+  align-content: start;
+}
+
+/* 一张角色卡 */
+.roster-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s, background 0.15s;
+}
+/* 左边一条元素色光带，一眼能扫出队伍构成 */
+.roster-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--rc);
+  opacity: 0.85;
+}
+.roster-card:hover { border-color: var(--line-strong); }
+.roster-card.is-picked {
+  border-color: var(--rc);
+  background: color-mix(in srgb, var(--rc) 10%, var(--surface-2, rgba(255, 255, 255, 0.03)));
+}
+
+/* 头像：img 盖在首字上面，图挂了自然露出文字兜底 */
+.roster-avatar {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--surface-3, rgba(255, 255, 255, 0.06));
+  flex: none;
+}
+.roster-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+.roster-avatar i {
+  font-style: normal;
+  font-size: 16px;
+  color: var(--text-soft);
+}
+
+.roster-card-copy { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.roster-card-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.roster-card-copy small {
+  font-size: 11px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.roster-card-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+}
+.roster-card-meta em { font-style: normal; font-size: 11.5px; color: var(--text-soft); }
+.roster-star { font-size: 9.5px; color: #f0c674; letter-spacing: -0.5px; }
+.roster-rank { font-size: 9.5px; color: var(--accent-text); }
+
+/* 右侧详情 */
+.roster-side {
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 2px);
+  padding: 13px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.roster-detail-head { display: flex; align-items: center; gap: 10px; }
+.roster-detail-head strong { display: block; font-size: 14px; }
+.roster-detail-head small { font-size: 11px; color: var(--text-soft); }
+
+.roster-weapon {
+  display: flex;
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 6px);
+  background: rgba(255, 255, 255, 0.02);
+}
+.roster-weapon img { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; flex: none; }
+.roster-weapon-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.roster-weapon-copy strong { font-size: 12.5px; }
+.roster-weapon-copy small { font-size: 10.5px; color: var(--text-soft); }
+
+.roster-relics { display: flex; flex-direction: column; gap: 6px; }
+.roster-relic {
+  display: flex;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 6px);
+}
+.roster-relic img, .roster-relic-blank {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex: none;
+  background: rgba(255, 255, 255, 0.04);
+}
+.roster-relic-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.roster-relic-copy strong { font-size: 12px; }
+.roster-relic-copy strong em { font-style: normal; font-size: 10.5px; color: var(--text-soft); }
+.roster-relic-copy small { font-size: 10.5px; color: var(--text-soft); }
+.roster-main {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-2, var(--text-soft));
+  font-variant-numeric: tabular-nums;
+}
+.roster-subs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.roster-sub {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.roster-props { display: flex; flex-wrap: wrap; gap: 5px; }
+.roster-props span {
+  display: inline-flex;
+  gap: 4px;
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  font-variant-numeric: tabular-nums;
+}
+.roster-props em { font-style: normal; color: var(--text-soft); }
+
+.roster-note { font-size: 10.5px; color: var(--text-soft); line-height: 1.5; margin: 0; }
+.roster-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--text-soft);
+  font-size: 12px;
+  padding: 26px;
+  text-align: center;
+}
+.roster-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+.roster-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: roster-spin 0.7s linear infinite;
+}
+@keyframes roster-spin { to { transform: rotate(360deg); } }
+
+/* 窄屏：详情收到下面，别把网格挤成一条 */
+@media (max-width: 900px) {
+  .roster-body { grid-template-columns: minmax(0, 1fr); }
+  .roster-side { max-height: 260px; }
+}
+/* ---- 以下来自上游 2.10.2 主线 ---- */
+
 /* ═══════════════════════════════════════════════════════════════
  * 渲染后端快捷开关（DX11 / DX12 / 默认）
  *
@@ -36085,4 +37602,1075 @@ body.is-idle .modal-foot {
   box-shadow:
     0 26px 80px rgba(82, 40, 24, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   SToken 同步面板（2026-11-13）—— 抽卡页底部的折叠面板，纯增量
+   ════════════════════════════════════════════════════════════════════ */
+
+.gacha-token-panel {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  overflow: hidden;
+}
+
+/* [hidden] 优先：下面这些节点都有 display 规则，不能盖掉 hidden */
+.gacha-token-body[hidden],
+.gacha-token-qr[hidden],
+.gacha-token-cookie[hidden] {
+  display: none;
+}
+
+/* 折叠头：整行可点，展开 / 收起 */
+.gacha-token-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.gacha-token-header:hover {
+  background: var(--surface-2);
+}
+
+.gacha-token-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-text);
+}
+
+.gacha-token-hint {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.gacha-token-caret {
+  display: inline-flex;
+  transition: transform 0.18s ease;
+}
+
+.gacha-token-panel.is-open .gacha-token-caret {
+  transform: rotate(180deg);
+}
+
+.gacha-token-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.gacha-token-desc {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.gacha-token-desc .icon {
+  flex: none;
+  margin-top: 3px;
+}
+
+/* ---- 账号列表 ---- */
+
+.gacha-token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gacha-token-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.gacha-token-item:hover {
+  border-color: var(--line-strong);
+}
+
+.gacha-token-item.is-selected {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.gacha-token-item.is-empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gacha-token-item-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.gacha-token-item-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gacha-token-tag {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gacha-token-tag.is-active {
+  border-color: var(--gold-text);
+  color: var(--gold-text);
+}
+
+.gacha-token-roles {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gacha-token-item-btns {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.gacha-token-item-btns .link-btn.is-danger {
+  color: var(--danger, #ff7b8a);
+}
+
+/* ---- 按钮组 / 表单 ---- */
+
+.gacha-token-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.gacha-token-region {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gacha-token-region select {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.gacha-token-cookie {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gacha-token-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.gacha-token-input::placeholder {
+  color: var(--muted);
+}
+
+/* ---- 二维码区 ---- */
+
+.gacha-token-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: calc(var(--radius) - 2px);
+  background: var(--surface);
+}
+
+.gacha-token-qr-img {
+  width: 176px;
+  height: 176px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 2px);
+  background: #fff;
+}
+
+.gacha-token-qr-wait {
+  padding: 24px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---- 状态文字：成功绿 / 失败红 / 等待灰 ---- */
+
+.gacha-token-status {
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+
+.gacha-token-status.is-ok {
+  color: #6fd6b0;
+}
+
+.gacha-token-status.is-fail {
+  color: var(--danger, #ff7b8a);
+}
+
+.gacha-token-status.is-wait {
+  color: var(--muted);
+}
+
+/* ---- 已登录账号选择器（弹窗里）---- */
+
+.gacha-token-provider {
+  margin-bottom: 12px;
+}
+
+.gacha-token-provider h4 {
+  margin: 0 0 8px;
+  color: var(--accent-text);
+  font-size: 13px;
+}
+
+.gacha-token-pick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 6px;
+  text-align: left;
+}
+
+.gacha-token-pick em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.gacha-token-pick-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+
+/* ==== 账号中心 + SToken 登录弹窗（并入伙伴版并按本项目主题优化）==== */
+/* ---- 抽卡 SToken 面板 ---- */
+.gacha-token-modal .gacha-token {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2, var(--surface));
+}
+
+.gacha-token-modal .gacha-token-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gacha-token-modal .gacha-token-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.gacha-token-modal .gacha-token-who {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-modal .gacha-token-name {
+  font-weight: 600;
+}
+
+.gacha-token-modal .gacha-token-who small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gacha-token-modal .gacha-token-roles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-modal .gacha-token-role {
+  display: grid;
+  gap: 2px;
+  min-width: 132px;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.gacha-token-modal .gacha-token-role small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.gacha-token-modal .gacha-token-role:hover {
+  border-color: var(--accent);
+}
+
+.gacha-token-modal .gacha-token-role.active {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(120, 160, 255, 0.12));
+}
+
+.gacha-token-modal {
+  display: grid;
+  gap: 12px;
+}
+
+.gacha-token-modal .gacha-token-feedback {
+  color: var(--danger, #ff7b8a);
+}
+
+.gacha-token-modal .gacha-token-accounts {
+  display: grid;
+  gap: 8px;
+}
+
+.gacha-token-modal .gacha-token-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.gacha-token-modal .gacha-token-account.active {
+  border-color: var(--accent);
+}
+
+.gacha-token-modal .gacha-token-account-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gacha-token-modal .gacha-token-account-info small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gacha-token-modal .gacha-token-account-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ---- 抽卡：用已登录的米游社账号 ---- */
+.gacha-token-modal .gacha-token-login {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.gacha-token-modal .gacha-token-login-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gacha-token-modal .gacha-token-login-row select {
+  flex: 1 1 150px;
+  min-width: 120px;
+}
+
+.gacha-token-modal .gacha-token-manual {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.gacha-token-modal .gacha-token-manual > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  user-select: none;
+}
+
+.gacha-token-modal .gacha-token-manual[open] > summary {
+  margin-bottom: 10px;
+}
+
+/* 智能粘贴框：整段 cookie 一行放不下，给个可调高的多行框 */
+.gacha-token-modal .gacha-token-manual .field textarea {
+  width: 100%;
+  min-height: 96px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  word-break: break-all;
+}
+.gacha-token-modal .gacha-token-manual .field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.gacha-token-modal .gacha-token-manual .field {
+  margin-bottom: 8px;
+}
+
+/* ---- 抽卡：手机米游社扫码 ---- */
+.gacha-token-modal .gacha-token-scan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--accent-border, var(--line));
+  border-radius: var(--radius);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.gacha-token-modal .gacha-token-scan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gacha-token-modal .gacha-token-scan-row select {
+  flex: 1 1 140px;
+  min-width: 120px;
+}
+
+.gacha-token-modal .gacha-token-scan-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(255, 255, 255, 0.04));
+}
+
+.gacha-token-modal .gacha-token-scan-qr img {
+  width: 200px;
+  height: 200px;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.gacha-token-modal .gacha-token-scan-qr .form-hint {
+  margin: 0;
+  text-align: center;
+}
+
+
+/* ==== 账号中心（侧栏左下角头像打开的浮层）==========================
+ * 结构：
+ *   .modal.acct-modal
+ *     .acct-nav         左侧 220px：品牌区 + 分区菜单 + 底部小字
+ *     .acct-body        右侧内容区，自己滚动
+ *     .acct-close       右上角 ✕（绝对定位）
+ * 左侧菜单用 --accent 系的强调条标当前分区；右侧账号卡片是横条 + 细高亮条，
+ * 跟胡桃那个账号面板的观感对齐。
+ */
+.modal.acct-modal {
+  position: relative;
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  width: min(880px, 94vw);
+  height: min(620px, 84vh);
+  max-height: calc(100vh - 52px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.acct-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+}
+
+/* —— 左栏 —— */
+.acct-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 12px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.acct-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 12px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.acct-brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.acct-brand-text strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-brand-text small {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 头像：圆图 + 底下的文字兜底。图裂了 <i> 就露出来，不会是一块破图 */
+.acct-avatar {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-3));
+  color: var(--accent-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.acct-avatar.is-sm {
+  width: 36px;
+  height: 36px;
+  font-size: 13px;
+}
+
+.acct-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.acct-avatar i {
+  font-style: normal;
+}
+
+.acct-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.acct-tabs::-webkit-scrollbar {
+  width: 5px;
+}
+.acct-tabs::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.acct-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.acct-tab .icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  opacity: 0.8;
+}
+
+.acct-tab:hover {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.acct-tab.is-active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.acct-tab.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.acct-tab.is-active .icon {
+  opacity: 1;
+  color: var(--accent-text);
+}
+
+.acct-tab em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--muted);
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.acct-tab.is-busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.acct-sep {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--line);
+}
+
+.acct-foot {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* —— 右栏 —— */
+.acct-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 24px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.acct-body::-webkit-scrollbar {
+  width: 6px;
+}
+.acct-body::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.acct-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-right: 34px;
+}
+
+.acct-head h2 {
+  margin: 0 0 5px;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.acct-head p {
+  margin: 0;
+  max-width: 520px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.acct-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+}
+
+/* —— 账号卡片 —— */
+.acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.acct-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.acct-account:hover {
+  border-color: var(--line-strong);
+}
+
+.acct-account.is-active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+}
+
+.acct-account-bar {
+  position: absolute;
+  left: -1px;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.acct-account.is-active .acct-account-bar {
+  background: var(--accent);
+}
+
+.acct-account-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.acct-account-main strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-account-main small {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-account-roles {
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acct-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.acct-badge {
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.acct-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.acct-icon-btn .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.acct-icon-btn:hover {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+/* —— 角色胶囊 —— */
+.acct-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.acct-section h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.acct-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.acct-role {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.acct-role strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.acct-role span {
+  color: var(--text-2);
+}
+
+.acct-role em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 空态 / 加载 —— */
+.acct-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 44px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  text-align: center;
+  color: var(--muted);
+}
+
+.acct-empty .icon {
+  width: 30px;
+  height: 30px;
+  opacity: 0.5;
+}
+
+.acct-empty strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.acct-empty p {
+  margin: 0;
+  max-width: 380px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.acct-empty .btn {
+  margin-top: 4px;
+}
+
+.acct-empty-line {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.acct-warn {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--gold-line);
+  background: var(--gold-soft);
+  color: var(--gold-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.acct-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 52px 0;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.acct-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: acct-spin 0.7s linear infinite;
+}
+
+@keyframes acct-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- 并入时的 UI 优化（本项目补充，伙伴版没这些） ---- */
+/* 伙伴样式里用 btn-mini，但本项目原来没有这个类，按钮会撑成 44px 把弹窗挤爆 */
+.btn.btn-mini {
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  gap: 6px;
+}
+.btn.btn-mini .icon { width: 14px; height: 14px; }
+
+/* 角色胶囊多了别把账号卡片撑破 */
+.acct-account-roles,
+.acct-roles {
+  max-width: 100%;
+  overflow: hidden;
+}
+.acct-avatar img { box-shadow: inset 0 0 0 1px var(--line); }
+
+/* 窄窗口 / 125% 缩放：两栏挤爆时转成上排横向 tab + 下方单列内容 */
+@media (max-width: 720px) {
+  .modal.acct-modal {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    width: min(560px, 94vw);
+    height: min(620px, 84vh);
+  }
+  .acct-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .acct-brand,
+  .acct-sep,
+  .acct-foot { display: none; }
+  .acct-tabs {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .acct-tab { width: auto; flex: none; padding: 7px 10px; }
+  .acct-tab em { display: none; }
+  .acct-tab.is-active::before {
+    top: auto; bottom: 0; left: 8px; right: 8px;
+    width: auto; height: 3px;
+  }
 }

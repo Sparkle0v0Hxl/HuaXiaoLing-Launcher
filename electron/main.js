@@ -47,6 +47,11 @@ const {
   protocol,
   screen,
 } = require('electron');
+const { loadSecret, saveSecret } = require('./secret-store');
+const { installRosterIpc } = require('./roster-ipc');
+const { installPassportIpc } = require('./passport-ipc');
+const { installPostartIpc } = require('./postart-ipc');
+const { installHoyolabIpc } = require('./hoyolab-ipc');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -92,6 +97,7 @@ const diagnostics = require('./diagnostics');
 const minisign = require('./minisign');
 const { describeStorage, cleanGroup, cleanSafe } = require('./file-manager');
 const { resolveLiveRoom } = require('./live-rooms');
+const { installLiveIpc } = require('./live-ipc');
 const { startDanmaku, pollDanmaku, stopDanmaku } = require('./live-danmaku');
 const {
   musicCharts,
@@ -118,13 +124,50 @@ const pluginHost = require('./plugin-host');
 const postArt = require('./post-art');
 const passport = require('./passport-login');
 const skland = require('./skland');
+const { installSklandIpc } = require('./skland-ipc');
+const { installGachaIpc } = require('./gacha-ipc');
+const { installServersIpc } = require('./servers-ipc');
+const { installGamesIpc } = require('./games-ipc');
+const { installEndfieldIpc } = require('./endfield-ipc');
+const { installPredownloadIpc } = require('./predownload-ipc');
+const { installWindowIpc } = require('./window-ipc');
+const { installAppIpc } = require('./app-ipc');
+const { installSettingsIpc } = require('./settings-ipc');
+const { installDownloadsIpc } = require('./downloads-ipc');
+const { installPluginIpc } = require('./plugin-ipc');
+const { installUpdateIpc } = require('./update-ipc');
+const { installDialogIpc } = require('./dialog-ipc');
+const { installBackgroundIpc } = require('./background-ipc');
+const { installInstallIpc } = require('./install-ipc');
+const { installArknightsIpc } = require('./arknights-ipc');
+const { installWuwaIpc } = require('./wuwa-ipc');
+const { installNevernessIpc } = require('./neverness-ipc');
+const { installScreenshotsIpc } = require('./screenshots-ipc');
+const { installMiscIpc } = require('./misc-ipc');
 const screenshotLib = require('./screenshots');
 const graphicsConfig = require('./graphics-config');
 const graphicsSchema = require('./graphics-schema');
 const graphicsDetect = require('./graphics-detect');
 const installManager = require('./install-manager');
 const windowMaterial = require('./window-material');
+const { installMusicIpc } = require('./music-ipc');
 const { resolvePlayableUrl, sameSongEnough } = require('./music-resolve');
+const {
+  normalizeNeteaseBase,
+  neteaseGet,
+  looksLikeNeteaseApi,
+  probeNeteaseApi,
+  startNeteaseService,
+  currentMusicSourceFlags,
+  crossSourceFallbackUrl,
+  neteaseMatchUrl,
+  fetchNeteaseSongUrl,
+  NETEASE_URL_BATCH,
+  getNeteaseSession,
+  setNeteaseSession,
+  killNeteaseService,
+  setStoreRef: setNeteaseStoreRef,
+} = require('./netease-client');
 const {
   resolveSourceUrl,
   fetchLyric: fetchSourceLyric,
@@ -160,7 +203,18 @@ const { importUigf, importsPath } = require('./gacha-import');
 // 抽卡记录云备份：纯逻辑模块（WebDAV 客户端 + 加密 + 合并），主进程只管配置与调度
 const gachaBackup = require('./gacha-backup');
 const { syncGacha, extractUrlFromCache, cacheFiles: gachaCacheFiles } = require('./gacha-sync');
+const kuroGacha = require('./kuro-gacha');
+/* 明日方舟：鹰角账号 token → 寻访记录（官网只留最近 30 天） */
+const arknightsGacha = require('./arknights-gacha');
+const roster = require('./roster');
 const { syncEndfieldGacha } = require('./endfield-gacha');
+// SToken 抽卡同步：用它就不必每次开游戏去刷那条 24 小时过期的链接。
+// 米哈游的 authkey 只能拿真 SToken 换，ltoken / ltoken_v2 一律 -100。
+const stokenSync = require('./stoken-sync');
+const accountProfile = require('./account-profile');
+const gachaIcons = require('./gacha-icons');
+// 扫码登录：genAuthKey 只认真 SToken，而内嵌网页登录拿不到，只能让用户扫一次码
+const qrLogin = require('./qr-login');
 const { getStarRailFps, setStarRailFps } = require('./starrail-fps');
 const {
   updateEndfieldPacks,
@@ -209,6 +263,15 @@ const nevernessChannels = require('./neverness-channels');
  * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
  */
 const yostarPacks = require('./yostar-packs');
+/*
+ * 鸣潮（库洛官方协议：官服 10003 / B服 10004 / 国际服 50004）。
+ * 接口是公开 CDN（index.json → 逐文件 md5 清单 → 直接下载），无需鉴权；
+ * 官服↔B服内容 99.24% 相同（847/816 个文件 md5 一致），硬链接切服收益 98.8%；
+ * 国际服与国服 pak 全部不同（0.4%），只做检测/下载/更新，不做硬链接互切。
+ *
+ * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ */
+const kuroPacks = require('./kuro-packs');
 // 进度计量器：给各条下载/更新链路补速度与剩余时间（纯计算，无 IO、无依赖）
 const progressMeter = require('./progress-meter');
 
@@ -612,6 +675,8 @@ let splashWindow = null;
 let splashShownAt = 0;
 let tray = null;
 let store = null;
+/* netease-client 里读音源开关要拿 store，但不该由它自己 require main.js（会成环） */
+setNeteaseStoreRef(() => store);
 let downloads = null;
 let quitting = false;
 /*
@@ -619,7 +684,6 @@ let quitting = false;
  * 这个标志防止用户连点关闭时叠出第二个询问框（回答 / 取消后都会复位）。
  */
 let closeAskPending = false;
-let neteaseServiceProcess = null;
 let pushTimer = null;
 
 /** @type {Map<string, {pid:number, startedAt:number}>} */
@@ -669,39 +733,11 @@ function dataFile() {
   return path.join(app.getPath('userData'), 'launcher-data.json');
 }
 
-function secretFile() {
-  return path.join(app.getPath('userData'), 'sessions.enc.json');
-}
-
-async function readSecrets() {
-  try {
-    return JSON.parse(await fsp.readFile(secretFile(), 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-async function loadSecret(name) {
-  if (!safeStorage.isEncryptionAvailable()) return '';
-  const secrets = await readSecrets();
-  const encoded = secrets[name];
-  if (!encoded) return '';
-  try {
-    return safeStorage.decryptString(Buffer.from(encoded, 'base64'));
-  } catch {
-    return '';
-  }
-}
-
-async function saveSecret(name, value) {
-  if (!safeStorage.isEncryptionAvailable()) return false;
-  const secrets = await readSecrets();
-  if (value) secrets[name] = safeStorage.encryptString(String(value)).toString('base64');
-  else delete secrets[name];
-  await fsp.mkdir(path.dirname(secretFile()), { recursive: true });
-  await fsp.writeFile(secretFile(), JSON.stringify(secrets), 'utf8');
-  return true;
-}
+/*
+ * 加密凭据存取（loadSecret / saveSecret / secretFile）已抽到 electron/secret-store.js。
+ * 那个模块被森空岛、米游社、鹰角、网易云、音乐登录等多处共用，
+ * 定义在这里的话每拆一块都要通过 ctx 传一次，容易漏。
+ */
 
 /* ---------------- 米游社多账号存储 ---------------- */
 
@@ -1323,7 +1359,16 @@ function serverExistsForView(game, server, endfieldHasBase) {
     (endfieldHasBase &&
       game.builtinKey === 'endfield' &&
       server.channel !== 'official' &&
-      ENDFIELD_PACK_NAMES[server.channel] != null)
+      ENDFIELD_PACK_NAMES[server.channel] != null) ||
+    /*
+     * 鸣潮：记账路径失效但真实客户端还装在 rootDir / originalRoot 指向的原地。
+     * discoverBuiltinServers 的启动自愈会把 path 收回去，但「自愈后、界面重取之前」
+     * 那一次渲染仍会读到旧 path —— 这里再兜一道，别让用户瞥见一闪而过的「变灰」。
+     * 判据比自愈更严：只认鸣潮官方体系渠道，且目标目录必须真能启动。
+     */
+    (game.builtinKey === 'wutheringwaves' &&
+      ['official', 'bilibili'].includes(String(server.channel || '')) &&
+      Boolean(wuwaExeAt(server.rootDir || server.originalRoot)))
   );
 }
 
@@ -1475,6 +1520,36 @@ const GAME_DETECTION = {  genshin: {
     // PlatformProcess.exe 只在鹰角启动器的子目录里出现，不能当作游戏入口
     relative: ['Arknights.exe', 'games\\Arknights Game\\Arknights.exe'],
   },
+  // 鸣潮（库洛）：主程序是 UE 的 Client-Win64-Shipping.exe，根目录另有启动壳 Wuthering Waves.exe。
+  // 渠道判据（kuroPacks.detectChannelOfSync）：KRSDKRes/Bilibili/ 目录 = B服；
+  // ThirdParty/KrPcSdk_Global = 国际服；都没有 = 官服。
+  wutheringwaves: {
+    exe: 'Client-Win64-Shipping.exe',
+    registry: [
+      'HKCU\\Software\\KuroGames\\Wuthering Waves',
+      'HKLM\\SOFTWARE\\KuroGames\\Wuthering Waves',
+      'HKLM\\SOFTWARE\\WOW6432Node\\KuroGames\\Wuthering Waves',
+    ],
+    paths: [
+      'Wuthering Waves Game\\Client-Win64-Shipping.exe',
+      'Wuthering Waves\\Client-Win64-Shipping.exe',
+      'KuroGames\\Wuthering Waves Game\\Client-Win64-Shipping.exe',
+      'Games\\Wuthering Waves Game\\Client-Win64-Shipping.exe',
+      'HuaXiaoLingGames\\wutheringwaves-official\\Client-Win64-Shipping.exe',
+      'HuaXiaoLingGames\\wutheringwaves-bilibili\\Client-Win64-Shipping.exe',
+      'HuaXiaoLingGames\\wutheringwaves-global\\Client-Win64-Shipping.exe',
+      // WeGame 版：下载中在 downloading\2002137，装好后 WeGame 会把整个目录搬到
+      // rail_apps\Wuthering Waves(2002137)。写目录而非 exe 路径，checkPath 会按
+      // relative 两层探测主程序（UE 的可执行文件在 Client\Binaries\Win64 下）。
+      'WeGameApps\\downloading\\2002137',
+      'WeGameApps\\rail_apps\\Wuthering Waves(2002137)',
+    ],
+    relative: [
+      'Client-Win64-Shipping.exe',
+      'Client\\Binaries\\Win64\\Client-Win64-Shipping.exe',
+      'Wuthering Waves.exe',
+    ],
+  },
 };
 
 function expandEnv(value) {
@@ -1489,6 +1564,8 @@ const OFFICIAL_SITES = {
   // 2.4.0 合并：明日方舟官网（封面同步 / 公告都用它）
   arknights: 'https://ak.hypergryph.com/',
   neverness: 'https://nte.perfectworld.com/en/',
+  // 鸣潮官网（库洛）
+  wutheringwaves: 'https://www.kurogames.com/',
 };
 
 const BROWSER_UA =
@@ -1517,7 +1594,10 @@ const BASIC_GAME_IDS = {
 // 2.4.0 合并：明日方舟接入官网公告（ak.hypergryph.com）
 // 2.4.x 增量：崩坏3 接入 HoYoPlay 官方启动器内容接口（hyp-api.mihoyo.com），
 // getGameContent 的 posts 就是启动器里的公告，banners 是轮播大图。
-const NOTICE_GAME_KEYS = ['genshin', 'starrail', 'zzz', 'endfield', 'neverness', 'arknights', 'bh3'];
+// 2.10.x 增量：鸣潮（库洛），公告来自 kurobbs + 国际服 ArticleMenu。
+// 缺表时下面用 store.data.games 的 builtinKey 动态兜底，但显式列上更稳：
+// 游戏记录还没建（新用户首次启动）时也要能拿到公告。
+const NOTICE_GAME_KEYS = ['genshin', 'starrail', 'zzz', 'endfield', 'neverness', 'arknights', 'bh3', 'wutheringwaves'];
 const NOTICE_CACHE_TTL = 5 * 60 * 1000;
 const noticeCache = new Map();
 
@@ -1817,19 +1897,44 @@ async function pickBh3Cover(banners) {
    降为第二兜底——banner 是带标题字的活动图，压当启动页背景很难看。 */
 async function ensureBh3StartCover(game) {
   if (!game || !store) return;
-  const expected = 'covers/official-bh3-clean2.png';
-  if (game.startCover === expected) {
-    const existing = path.join(app.getPath('userData'), expected);
-    if (fs.existsSync(existing) && fs.statSync(existing).size > 4096) return;
-  }
-  let imageUrl = '';
+
+  /*
+   * 官方背景图会随版本换（URL 里带 2026/09/17、2026/09/24 这种日期目录），
+   * 但落盘文件名是固定的。原来这里只判断「startCover 等于那个固定名
+   * 且文件存在」就直接 return，等于第一次抓下来之后再也不会检查官方换没换图
+   * —— 这就是「崩坏3 静态背景永远是旧的那张」。
+   *
+   * 现在记一个 startCoverSource 保存上次用的官方 URL：
+   *   - 和官方当前给的不同 → 重新下
+   *   - 相同 → 才走快路径
+   *   - 老数据没有这个字段 → 当作过期重下一次，下完就有了
+   *
+   * 另外官方现在给的是 .webp，所以落盘名按真实格式决定（见下面的 sniffImageExtension），
+   * 判定时不能再拿 .png 写死。
+   */
+  let officialUrl = '';
   try {
     const art = await officialBackgrounds('bh3');
-    imageUrl = art.images[0]?.url || '';
+    officialUrl = art.images[0]?.url || '';
   } catch {
-    /* 走 banner 兜底 */
+    /* 接口挂了就什么都别改，保持现有文件 */
   }
+
+  // startCover 可能是 .png 也可能是 .webp（按真实格式落盘），所以按前缀判
+  const coverMatches = /^covers\/official-bh3-clean2\.(png|webp|jpg|gif)$/i.test(String(game.startCover || ''));
+  if (coverMatches && officialUrl && game.startCoverSource === officialUrl) {
+    const existing = path.join(app.getPath('userData'), game.startCover);
+    if (fs.existsSync(existing) && fs.statSync(existing).size > 4096) return;
+  }
+
+  let imageUrl = officialUrl;
   if (!imageUrl) {
+    // 官方接口没给图时才退回活动 banner（banner 带标题字，只作兜底）
+    if (coverMatches) {
+      const existing = path.join(app.getPath('userData'), game.startCover);
+      // 已有的官方图还能用，就别为了 banner 覆盖它
+      if (fs.existsSync(existing) && fs.statSync(existing).size > 4096) return;
+    }
     const content = await fetchBh3Content();
     imageUrl = await pickBh3Cover(content?.banners);
   }
@@ -1845,8 +1950,21 @@ async function ensureBh3StartCover(game) {
     if (!buffer.length || buffer.length > 24 * 1024 * 1024) throw new Error('图片大小异常');
     const dir = path.join(app.getPath('userData'), 'covers');
     await fsp.mkdir(dir, { recursive: true });
-    await fsp.writeFile(path.join(dir, 'official-bh3-clean2.png'), buffer);
-    game.startCover = expected;
+    /*
+     * 按真实格式落盘。官方现在给的是 .webp，历史代码把名字写死成 .png，
+     * 于是磁盘上出现「叫 .png 其实是 webp」的文件 —— nativeImage 与
+     * 系统看图都按扩展名解码，直接打不开；下游去字流程也会误判成 png 而跳过转码。
+     */
+    const realExt = sniffImageExtension(buffer) || 'png';
+    const fileName = `official-bh3-clean2.${realExt}`;
+    if (fileName !== 'official-bh3-clean2.png') {
+      // 清掉历史上那个扩展名不符的旧文件，避免两份并存
+      await fsp.rm(path.join(dir, 'official-bh3-clean2.png'), { force: true }).catch(() => {});
+    }
+    await fsp.writeFile(path.join(dir, fileName), buffer);
+    game.startCover = `covers/${fileName}`;
+    // 记下这次用的是哪张官方图，下次拿它和接口返回值比对，判断要不要重下
+    game.startCoverSource = officialUrl || imageUrl;
     await store.saveNow();
     // 顺手把卡片封面也从占位 SVG 换成这张官方主视觉
     if (promoteBh3Cover()) await store.saveNow();
@@ -1895,6 +2013,142 @@ async function ensureArknightsStartCover(game) {
   }
 }
 
+/*
+ * 鸣潮卡片封面：官网 MainMenu.json → pcTopPicture.coverImage（1920x1080 PNG，实测 3.75MB）。
+ * 报告 `_wuwa-art-report.md`：URL 随版本时间戳换图，启动器缓存机制按 URL 变化重新落盘。
+ */
+async function pickKuroCover() {
+  for (const url of [
+    'https://media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/MainMenu.json',
+    'https://hw-media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/MainMenu.json',
+  ]) {
+    try {
+      const response = await fetch(url, {
+        headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!response.ok) continue;
+      const json = await response.json();
+      const image = json?.pcTopPicture?.coverImage || json?.topPicture?.coverImage || '';
+      if (image && /^https?:\/\//.test(image)) return String(image);
+    } catch {
+      /* try next mirror */
+    }
+  }
+  return '';
+}
+
+/*
+ * 鸣潮启动页动态背景：官网 MainMenu.json → pcTopPicture.backgroundVideo（mp4，
+ * 实测 29.4MB / 200）。与卡片封面 coverImage 同源，但官网 og:image 不是它，
+ * 必须单独取。走 ensureAnimatedStartBackgrounds → cacheStartVideo 落到 backgrounds/。
+ */
+async function pickKuroStartVideo() {
+  for (const url of [
+    'https://media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/MainMenu.json',
+    'https://hw-media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/MainMenu.json',
+  ]) {
+    try {
+      const response = await fetch(url, {
+        headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!response.ok) continue;
+      const json = await response.json();
+      const video = json?.pcTopPicture?.backgroundVideo || json?.topPicture?.backgroundVideo || '';
+      if (video && /^https?:\/\//.test(video)) return String(video);
+    } catch {
+      /* try next mirror */
+    }
+  }
+  return '';
+}
+
+/*
+ * 鸣潮公告（2026-11-12）：两条源，都实测可用（接口研究见工作区 _wuwa-art-report.md）。
+ *   · 国服/B服：库街区 companyEvent/findEventList（表单 gameId=3=鸣潮，无需登录 token）
+ *   · 国际服：官网静态 CDN ArticleMenu.json（zh 走 media-cdn 域、en 走 hw-media-cdn 域，域名严格绑定）
+ * 字段映射到启动器统一模型 {title, link, date, type}。
+ */
+async function fetchKuroNotices() {
+  const items = [];
+  // ① 国服：库街区活动公告列表
+  try {
+    const devCode = crypto.randomBytes(16).toString('hex');
+    const body = new URLSearchParams({ gameId: '3', page: '1', pageSize: '30' }).toString();
+    const response = await fetch('https://api.kurobbs.com/forum/companyEvent/findEventList', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+        source: 'h5',
+        version: '1.0.0',
+        devCode,
+        distinct_id: devCode,
+        'User-Agent': BROWSER_UA,
+      },
+      body,
+      signal: AbortSignal.timeout(15000),
+    });
+    if (response.ok) {
+      const json = await response.json();
+      const list = json?.data?.list || [];
+      const typeNames = { 1: '活动', 2: '资讯', 3: '公告' };
+      for (const entry of list) {
+        if (!entry?.postTitle || !entry?.postId) continue;
+        items.push({
+          title: String(entry.postTitle),
+          link: `https://www.kurobbs.com/mc/post/${entry.postId}`,
+          date: entry.publishTime ? new Date(Number(entry.publishTime)).toISOString().slice(0, 10) : '',
+          type: typeNames[entry.eventType] || '公告',
+          image: entry.coverUrl ? String(entry.coverUrl) : '',
+        });
+      }
+    }
+  } catch (error) {
+    console.warn('鸣潮国服公告（库街区）读取失败：', error.message);
+  }
+  // ② 国际服：官网 ArticleMenu（zh 源当补充；en 用户量少，暂只接 zh 的 CDN）
+  if (items.length < 8) {
+    try {
+      const response = await fetch(
+        'https://media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/ArticleMenu.json',
+        { headers: { 'User-Agent': BROWSER_UA, accept: 'application/json' }, signal: AbortSignal.timeout(15000) }
+      );
+      if (response.ok) {
+        const json = await response.json();
+        const flat = Array.isArray(json) ? json : (json?.list || json?.data || []);
+        const typeNames = { 52: '公告', 51: '新闻', 53: '活动' };
+        for (const entry of flat) {
+          if (!entry?.articleTitle || !entry?.articleId) continue;
+          items.push({
+            title: String(entry.articleTitle),
+            link: `https://wutheringwaves.kurogames.com/zh/main/news/detail/${entry.articleId}`,
+            date: entry.startTime ? new Date(Number(entry.startTime)).toISOString().slice(0, 10) : '',
+            type: typeNames[entry.articleType] || '公告',
+            /* 这条源本来就没封面图：2026-11-12 实网核对，199 条里 suggestCover 非空的 0 条，
+             * 只有 articleContent/articleDesc/articleId/articleTitle/articleType/createTime/
+             * sortingMark/startTime/suggestCover/top 这十个键。所以这里恒空是事实，不是漏字段；
+             * 封面图由 pickKuroCover（MainMenu.json 的 pcTopPicture.coverImage）另外提供。 */
+            image: '',
+          });
+        }
+      }
+    } catch (error) {
+      console.warn('鸣潮国际服公告（官网 CDN）读取失败：', error.message);
+    }
+  }
+  // 去重（两个源可能报同一件事）+ 取前 8
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items) {
+    if (seen.has(item.title)) continue;
+    seen.add(item.title);
+    deduped.push(item);
+    if (deduped.length >= 8) break;
+  }
+  return deduped;
+}
+
 async function fetchGameNotices(gameKey, force = false) {
   const cached = noticeCache.get(gameKey);
   if (!force && cached && Date.now() - cached.at < NOTICE_CACHE_TTL) return cached.items;
@@ -1907,6 +2161,8 @@ async function fetchGameNotices(gameKey, force = false) {
     else if (gameKey === 'arknights') items = await fetchArknightsNotices();
     // 2.4.x 增量：崩坏3 公告（HoYoPlay 官方启动器内容接口，米游社文章直链）
     else if (gameKey === 'bh3') items = await fetchBh3Notices();
+    // 鸣潮：库街区 + 官网 CDN（2026-11-12）
+    else if (gameKey === 'wutheringwaves') items = await fetchKuroNotices();
   } catch (error) {
     console.warn(`官方公告读取失败（${gameKey}）：`, error.message);
     items = [];
@@ -2279,6 +2535,36 @@ function sniffVideoExtension(buffer) {
   return '';
 }
 
+/**
+ * 按魔数判断图片真实格式，返回扩展名（png / webp / jpg），认不出返回 ''。
+ *
+ * 米家 CDN 的官方背景图现在是 .webp，而历史上落盘名写死成 .png，
+ * 结果文件内容与扩展名不符 —— 按扩展名解码的路径（nativeImage、系统看图、
+ * 去字流程里的 png 判定）会全部失效。
+ */
+function sniffImageExtension(buffer) {
+  if (!buffer || buffer.length < 12) return '';
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47 &&
+    buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a
+  ) {
+    return 'png';
+  }
+  // WebP: "RIFF" .... "WEBP"
+  if (
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'webp';
+  }
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'jpg';
+  // GIF
+  if (buffer.toString('ascii', 0, 3) === 'GIF') return 'gif';
+  return '';
+}
+
 async function cacheStartVideo(source, relativePath, local = false) {
   const destination = path.join(app.getPath('userData'), relativePath);
   await fsp.mkdir(path.dirname(destination), { recursive: true });
@@ -2377,7 +2663,29 @@ async function cacheStartVideo(source, relativePath, local = false) {
 // official-bh3-clean2）本来就是真图，直接把它当卡片封面用，并一起钉住不让同步覆盖。
 const PINNED_BUILTIN_COVERS = /^covers\/(?:builtin-bh3\.(?:jpg|jpeg|png|webp|svg)|official-bh3-clean2\.(?:png|jpg|jpeg|webp))$/i;
 // 崩坏3 卡片的官方主视觉（与启动页背景同一张，本地已有就用，没有才退回内置 SVG）
-const BH3_CARD_COVER = 'covers/official-bh3-clean2.png';
+/*
+ * 崩坏3 卡片封面的候选名。
+ *
+ * 官方背景图现在是 .webp，历史落盘名叫 .png，两种都可能存在，
+ * 所以不能写死一个 —— 按这个顺序到磁盘上找实际存在的那个。
+ */
+const BH3_CARD_COVER_CANDIDATES = [
+  'covers/official-bh3-clean2.webp',
+  'covers/official-bh3-clean2.png',
+  'covers/official-bh3-clean2.jpg',
+];
+function findBh3CardCover() {
+  for (const relative of BH3_CARD_COVER_CANDIDATES) {
+    try {
+      const absolute = path.join(app.getPath('userData'), relative);
+      const stat = fs.statSync(absolute);
+      if (stat.isFile() && stat.size >= 8192) return relative;
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  return '';
+}
 const BH3_PLACEHOLDER_COVER = 'covers/builtin-bh3.svg';
 function isCustomCover(game) {
   const cover = (game && game.cover) || '';
@@ -2398,14 +2706,19 @@ function promoteBh3Cover() {
   for (const game of store.data.games || []) {
     if (game.builtinKey !== 'bh3') continue;
     const cover = String(game.cover || '');
-    if (cover && cover !== BH3_PLACEHOLDER_COVER) continue;
-    const absolute = path.join(app.getPath('userData'), BH3_CARD_COVER);
-    try {
-      if (!fs.statSync(absolute).isFile() || fs.statSync(absolute).size < 8192) continue;
-    } catch {
-      continue;
-    }
-    game.cover = BH3_CARD_COVER;
+    /*
+     * 占位 SVG 要换成官方主视觉；另外 cover 指向的「official-bh3-clean2.xxx」
+     * 如果实际文件不在（比如扩展名从 .png 改成 .webp 之后），也要重新指向。
+     */
+    const isPlaceholder = !cover || cover === BH3_PLACEHOLDER_COVER;
+    const isStaleOfficial =
+      /^covers\/official-bh3-clean2\./i.test(cover) &&
+      !fs.existsSync(path.join(app.getPath('userData'), cover));
+    if (!isPlaceholder && !isStaleOfficial) continue;
+
+    const found = findBh3CardCover();
+    if (!found) continue;
+    game.cover = found;
     changed = true;
   }
   return changed;
@@ -2591,6 +2904,41 @@ function existingStartVideo(key) {
   }
   return '';
 }
+/**
+ * 米哈游系（原神 / 星铁 / 绝区零 / 崩坏3）的动图缓存新鲜度核对。
+ *
+ * existingStartVideo 是「有缓存就用」，这在官方换背景时会让启动页永远停在旧版。
+ * 官方 getAllGameBasicInfo 给的 video.url 带版本日期（2026/09/17 这种），
+ * 所以用「上次记录的源 URL」和「当前官方 URL」比对：
+ *   - 不同 → 删掉旧缓存返回 ''，让上层重新下载
+ *   - 相同 → 返回原缓存路径（省一次几十兆的下载）
+ *   - 拿不到官方 URL（接口挂了）→ 保持现状，别把能用的缓存删了
+ *
+ * 返回应当使用的缓存相对路径（'' 表示需要重新下载）。
+ */
+async function refreshMihoyoStartVideo(game, cachedRelative) {
+  const key = game.builtinKey;
+  if (!['genshin', 'starrail', 'zzz', 'bh3'].includes(key)) return cachedRelative;
+  let officialUrl = '';
+  try {
+    const art = await officialBackgrounds(key);
+    officialUrl = art.videos[0]?.url || '';
+  } catch {
+    return cachedRelative; // 接口抖动不折腾缓存
+  }
+  if (!officialUrl) return cachedRelative;
+  if (game.startVideoSource === officialUrl) return cachedRelative;
+
+  // 官方换了背景（或老数据没记录来源）→ 作废旧缓存
+  try {
+    fs.rmSync(path.join(app.getPath('userData'), cachedRelative), { force: true });
+  } catch {
+    /* 删不掉就让后面的写入覆盖 */
+  }
+  game.startVideoSource = officialUrl;
+  return '';
+}
+
 function ensureAnimatedStartBackgrounds(options = {}) {
   // only：只处理某款内置游戏。手动「重新获取动态背景」时用，别顺带把
   // 星铁 / 绝区零那几十兆 webm 全部重下一遍。
@@ -2650,6 +2998,35 @@ function ensureAnimatedStartBackgrounds(options = {}) {
         }
       }
 
+      /*
+       * 崩坏3 的静态兜底图独立维护。
+       *
+       * 它以前只在「视频拿不到」的分支里生成，可崩坏3 只要有 backgrounds/bh3.webm
+       * 就永远走不到那里 —— 静态图于是从来没更新过（甚至压根没生成）。
+       * 这里提到前面无条件核对一次：内部靠 startCoverSource 判断官方换没换图，
+       * 没换会快速返回，代价只是多一次 getAllGameBasicInfo。
+       */
+      if (key === 'bh3') {
+        try {
+          await ensureBh3StartCover(game);
+        } catch (error) {
+          console.warn('崩坏3 静态背景核对异常：', error.message);
+        }
+      }
+
+      /*
+       * 米家四款：官方换背景时要能感知到（否则启动页永远停在第一次下载的那版）。
+       * 这里只在已有缓存时才多问一次接口；没缓存会走下面正常下载流程。
+       */
+      if (cachedVideo) {
+        const fresh = await refreshMihoyoStartVideo(game, cachedVideo);
+        if (!fresh) {
+          cachedVideo = '';
+          videoRelative = `backgrounds/${key}.mp4`;
+          changed = true;
+        }
+      }
+
       if (cachedVideo) {
         if (game.backgroundVideo !== videoRelative || game.startMotion !== 'video') {
           game.backgroundVideo = videoRelative;
@@ -2679,6 +3056,10 @@ function ensureAnimatedStartBackgrounds(options = {}) {
       } else if (key === 'arknights') {
         // 2.4.0 合并：明日方舟 PV（web.hycdn.cn），用我方 cacheStartVideo 落盘
         source = await fetchArknightsStartVideo();
+      } else if (key === 'wutheringwaves') {
+        // 官网 MainMenu.json 的 pcTopPicture.backgroundVideo（29.4MB mp4），
+        // 与卡片封面 coverImage 同源；走 cacheStartVideo 落到 backgrounds/。
+        source = await pickKuroStartVideo();
       }
 
       // 没有官方视频（原神）：静态图 + 前端缓动镜头
@@ -2691,12 +3072,8 @@ function ensureAnimatedStartBackgrounds(options = {}) {
         // 用官方启动器背景图（Starward 同款）兜底静态背景；再失败维持钉住
         // 封面，启动页不白屏也不造假。失败不拖死整个预取。
         if (key === 'bh3') {
+          // 静态图已在循环开头核对过，这里只标记「这轮没拿到动图」用于重试
           officialMiss = true;
-          try {
-            await ensureBh3StartCover(game);
-          } catch (error) {
-            console.warn('崩坏3 静态背景兜底异常：', error.message);
-          }
         } else if (key === 'arknights') {
           // 2.4.x 增量：明日方舟 PV 拉不到时用官网 KV 大图兜底静态背景
           officialMiss = true;
@@ -2715,6 +3092,8 @@ function ensureAnimatedStartBackgrounds(options = {}) {
         game.backgroundVideo = writtenRelative;
         game.startMotion = 'video';
         game.backgroundVideoSyncedAt = new Date().toISOString();
+        // 记下这份动图来自哪个官方 URL，下次拿它判断有没有换过
+        if (/^https?:/i.test(source)) game.startVideoSource = source;
         changed = true;
       } catch (error) {
         console.warn(`${game.name} 启动页动图缓存失败：`, error.message);
@@ -2838,9 +3217,18 @@ async function syncOfficialGame(game, backgrounds) {
           }
         }
       }
+      // 鸣潮封面移到下面 try/catch 之外无条件取（官网 fetch 可能整个失败）。
     }
   } catch (error) {
     result.error = error.message;
+  }
+
+  // 鸣潮卡片封面（用户 m28925「抽屉的卡片封面和主页的卡片封面没换」）：
+  // 官网 og:image 是 /favicon.ico（模糊 logo 大图），且官网 fetch 可能整个失败，
+  // 所以必须在 try/catch 之外无条件取 MainMenu.json 的 pcTopPicture.coverImage。
+  if (game.builtinKey === 'wutheringwaves') {
+    const kuroImage = await pickKuroCover().catch(() => '');
+    if (kuroImage) ogImage = kuroImage;
   }
 
   const background = latestBackground(backgrounds, game.builtinKey);
@@ -2850,7 +3238,12 @@ async function syncOfficialGame(game, backgrounds) {
   const customCover = isCustomCover(game);
   const versionArtwork = customCover ? { image: '', video: '' } : await fetchVersionArtwork(game.builtinKey);
   const fromVersionArt = Boolean(versionArtwork.image);
-  const imageUrl = versionArtwork.image || (background && background.url) || ogImage;
+  // 鸣潮强制用 MainMenu 的 pcTopPicture.coverImage：官网 og:image 是 favicon、
+  // latestBackground 也可能塞官网图，都会盖掉正确封面（用户 m28925）。
+  const imageUrl =
+    game.builtinKey === 'wutheringwaves' && ogImage
+      ? ogImage
+      : versionArtwork.image || (background && background.url) || ogImage;
   if (customCover) {
     game.backgroundVideo = '';
     game.startCover = '';
@@ -3123,6 +3516,119 @@ function pathsOverlap(left, right) {
   if (!a || !b) return false;
   if (a === b) return true;
   return a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
+}
+
+/*
+ * 鸣潮 WeGame 版目录定位（2026-11-12）：WeGame 下载中是
+ * `<盘>:\WeGameApps\downloading\2002137`，装好之后会把整个目录搬到
+ * `<盘>:\WeGameApps\rail_apps\Wuthering Waves(2002137)`（实测装完 downloading
+ * 目录直接消失）。用户要求两个路径都能识别到（m28189/m28195/m28196）。
+ *
+ * 这里必须在模块级：ensureKuroRuntime 是模块级函数，之前把 helper 写在
+ * installIpc() 里，它一调用就 ReferenceError —— 切服直接崩。probe / convert /
+ * 识别 / 启动全部共用这一份，绝不重复定义（内层同名会遮蔽本版本）。
+ */
+const WEGAME_WUWA_ID = '2002137';
+const WEGAME_WUWA_DIRNAME = 'Wuthering Waves(2002137)';
+/** WeGame 只能靠 URI 拉起（直 spawn 主程序缺 Rail 票据会进不去，见 _wegame-launch-research.md）。 */
+const WEGAME_LAUNCH_URI = 'wegame://action=StartFor&game_id=2002137';
+
+/** UE 主程序在 Client\Binaries\Win64 下，根目录只有启动转发器；两层都认，兼容老存档 root 指到 Binaries 的情况。 */
+function wuwaExeAt(root) {
+  if (!root) return '';
+  for (const candidate of [
+    path.join(root, 'Client', 'Binaries', 'Win64', 'Client-Win64-Shipping.exe'),
+    path.join(root, 'Client-Win64-Shipping.exe'),
+  ]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
+/**
+ * 鸣潮客户端的「本体」判据：库洛官方客户端的安装根目录一定有
+ * `launcherDownloadConfig.json`（它自己的下载器版本记账），而主程序在三层深的
+ * `Client\Binaries\Win64` 下。
+ *
+ * 米哈游那套「根目录有 config.ini 才是完整客户端」的约定对鸣潮完全不成立 ——
+ * 真实官服本体 `G:\Wuthering Waves Game` 根本没有 config.ini。于是老判据
+ * 会把好好的客户端当成「资源替换包（增量包）」标成需要重建，官服行整行变灰、
+ * 还要求用户重新选路径（用户 m29419「官服一点到 WeGame，官服选项就灰掉了」/
+ * m29420「要重新选路径」）。传 exe 或它所在目录都行，返回找到的本体根目录。
+ */
+function wuwaClientRootOf(dirOrExe) {
+  let dir = String(dirOrExe || '').trim();
+  if (!dir) return '';
+  if (path.extname(dir).toLowerCase() === '.exe') dir = path.dirname(dir);
+  // normalize 一次：调用方可能传 "G:/xxx"（正斜杠）或带尾斜杠，返回给 server.root
+  // 的必须是 Windows 形式，否则下次比较 !== 又把这一行当失效。
+  dir = path.normalize(dir);
+  for (let depth = 0; depth < 5 && dir; depth += 1) {
+    if (fs.existsSync(path.join(dir, 'launcherDownloadConfig.json'))) return dir;
+    const next = path.dirname(dir);
+    if (next === dir) break;
+    dir = next;
+  }
+  return '';
+}
+
+/** 下载中目录的根（WeGameApps\downloading），转换功能的目标目录用。 */
+function findWeGameDownloadRoots() {
+  const roots = [];
+  const seen = new Set();
+  const push = (dir) => {
+    if (!dir) return;
+    const key = path.resolve(dir).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push(path.resolve(dir));
+  };
+  for (const drive of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
+    push(`${drive}:\\WeGameApps\\downloading`);
+  }
+  try {
+    for (const key of [
+      'HKLM\\SOFTWARE\\WOW6432Node\\Tencent\\WeGame',
+      'HKCU\\Software\\Tencent\\WeGame',
+    ]) {
+      try {
+        const out = require('node:child_process').execSync(
+          `reg query "${key}" /v InstallPath`,
+          { encoding: 'utf8', timeout: 4000 }
+        );
+        const m = String(out).match(/InstallPath\s+REG_SZ\s+(\S+)/i);
+        if (m) {
+          const install = m[1];
+          push(path.join(install, 'WeGameApps', 'downloading'));
+          push(path.join(path.dirname(install), 'WeGameApps', 'downloading'));
+        }
+      } catch {}
+    }
+  } catch {}
+  return roots.filter((dir) => fs.existsSync(dir));
+}
+
+/** 所有「装好/下载中」的 WeGame 鸣潮目录，按「下载中 → 已安装」顺序去重。 */
+function findWeGameWuwaRoots() {
+  const out = [];
+  const seen = new Set();
+  const push = (dir) => {
+    if (!dir || !wuwaExeAt(dir)) return;
+    const key = path.resolve(dir).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(path.resolve(dir));
+  };
+  for (const root of findWeGameDownloadRoots()) push(path.join(root, WEGAME_WUWA_ID));
+  for (const drive of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
+    push(`${drive}:\\WeGameApps\\rail_apps\\${WEGAME_WUWA_DIRNAME}`);
+  }
+  return out;
+}
+
+/** 切服当源时取第一个可用的 WeGame 目录（含已安装版）。 */
+function findWeGameWuwaRoot() {
+  return findWeGameWuwaRoots()[0] || '';
 }
 
 /**
@@ -3469,6 +3975,11 @@ function discoverServerRoots() {
       'YostarGames\\Arknights_JP',
       'YostarGames\\Arknights_KR',
       'HuaXiaoLingGames',
+      // 鸣潮 WeGame 版：下载中与已安装（装完 WeGame 会把目录从 downloading
+      // 搬到 rail_apps），都纳入 exe 扫描根。walkExecutables 按当前游戏的
+      // exe 名过滤，别的游戏不会误匹配。
+      'WeGameApps\\downloading\\2002137',
+      'WeGameApps\\rail_apps\\Wuthering Waves(2002137)',
       // 米哈游四款切服生成的独立硬链接运行时在这里。只列这四款精确子目录，
       // 绝不列 'VelaRuntimes' 整棵 —— 终末地运行时也在那棵树下，扫进去会把
       // 它的渠道专属 .exe/.dll 当候选，正是之前弄坏官服的配方。
@@ -4317,6 +4828,7 @@ async function buildEndfieldChannelRuntime({
   runtimeRoot,
   onProgress,
   signal,
+  channel = '',
   copyDirs = ENDFIELD_RUNTIME_COPY_DIRS,
 }) {
   const stagingRoot = `${runtimeRoot}.staging-${Date.now()}`;
@@ -4376,6 +4888,21 @@ async function buildEndfieldChannelRuntime({
       }
       staleRoot = stale;
     }
+    // ★ 语音包自愈：没有旧运行时可搬时，看备份里有没有 Persistent（用户以前下载过的语音包）。
+    if (!carried) {
+      const backupPersistent = path.join(app.getPath('userData'), 'endfield-persistent-backup', path.basename(runtimeRoot), 'Persistent');
+      if (fs.existsSync(backupPersistent)) {
+        try {
+          await fsp.rm(stagingPersistent, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
+          await fsp.mkdir(path.dirname(stagingPersistent), { recursive: true });
+          await fsp.cp(backupPersistent, stagingPersistent, { recursive: true });
+          carried = true;
+          writeLaunchLog('[endfield] 重建运行时：从备份恢复 Endfield_Data\\Persistent（语音包等已下载内容）');
+        } catch (error) {
+          writeLaunchLog('[endfield] 重建运行时：恢复 Persistent 备份失败，游戏会重新下载语音包：' + (error && error.message));
+        }
+      }
+    }
     try {
       await fsp.rename(stagingRoot, runtimeRoot);
     } catch (error) {
@@ -4399,6 +4926,60 @@ async function buildEndfieldChannelRuntime({
       throw error;
     }
     placed = true;
+    /*
+     * ★ 语音包误弹修复（2026-11-13）：
+     * 官服版 Persistent 的 4 个索引 json（index_initial/index_main/pref_initial/pref_main）
+     * 记录的是官服渠道的「已下载语音包」状态。国际服/Play/Steam 渠道全新重建时
+     * （无旧运行时可搬、也无该渠道备份），这份官服索引会被原样灌进国际服运行时，
+     * 国际服客户端按它自己渠道的清单逐条核对对不上 → 弹「下载中文/日文语音包 3.9G」。
+     * 处理：这三种渠道落位后，检测 Persistent 4 json 是否与官服基线一致（一致=官服
+     * 灌来的），是就把索引删掉、保留 VFS chk —— 客户端回到「初始态自扫」判定，
+     * 与早期 142MB 小包时代「硬链接过去不弹下载」的行为一致。
+     * 注意只在「没有搬旧运行时、也没有该渠道备份」这个全新场景动手：carried=true
+     * 说明搬的是用户自己的国际服态，绝不能动。官服/B服渠道不进这个分支。
+     */
+    if (!carried && channel && !['official', 'bilibili'].includes(channel)) {
+      try {
+        const runtimePersistent = path.join(runtimeRoot, 'Endfield_Data', 'Persistent');
+        const indexes = [
+          ['index_initial.json', '4b3530e7cb455b9b23cdf373a9135226'],
+          ['index_main.json', '7a7f47fef9c9eee3169f13b9396a8485'],
+          ['pref_initial.json', '67816d833950ddb25308d0aabd3d50d9'],
+          ['pref_main.json', 'd9e3eff101f8ed51888b381f90a4692f'],
+        ];
+        let removed = 0;
+        for (const [name, officialMd5] of indexes) {
+          const file = path.join(runtimePersistent, name);
+          if (!fs.existsSync(file)) continue;
+          const actual = crypto.createHash('md5')
+            .update(await fsp.readFile(file))
+            .digest('hex');
+          if (actual === officialMd5) {
+            await fsp.rm(file, { force: true });
+            removed += 1;
+          }
+        }
+        if (removed > 0) {
+          writeLaunchLog(`[endfield] 国际服渠道全新重建：已重置 ${removed} 个官服版语音索引 json（保留 VFS chk，客户端首启自扫，避免误弹下载语音包）`);
+        }
+      } catch (error) {
+        writeLaunchLog('[endfield] 重置国际服语音索引失败（不影响本次运行）：' + (error && error.message));
+      }
+    }
+    // ★ 语音包备份：运行时就位后把 Persistent 备份到 userData，
+    // 下次删了重建时能恢复语音包（用户反馈的「每切一次服重下一次语音包」问题）。
+    try {
+      const runtimePersistent = path.join(runtimeRoot, 'Endfield_Data', 'Persistent');
+      if (fs.existsSync(runtimePersistent)) {
+        const backupDir = path.join(app.getPath('userData'), 'endfield-persistent-backup', path.basename(runtimeRoot));
+        await fsp.mkdir(backupDir, { recursive: true });
+        await fsp.rm(path.join(backupDir, 'Persistent'), { recursive: true, force: true }).catch(() => {});
+        await fsp.cp(runtimePersistent, path.join(backupDir, 'Persistent'), { recursive: true });
+        writeLaunchLog('[endfield] 已备份 Endfield_Data\\Persistent 到 ' + backupDir);
+      }
+    } catch (error) {
+      writeLaunchLog('[endfield] 备份 Persistent 失败（不影响本次运行）：' + (error && error.message));
+    }
     // 旧目录改名成功后才敢删：硬链接居多、删了不额外回空间，但目录项会堆着，
     // 而且 walkFiles 之类遍历会扫到它。删失败不影响本次启动，下次重建再顺手清一遍。
     if (staleRoot) {
@@ -4798,6 +5379,7 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
       runtimeRoot,
       onProgress: emit,
       signal: options.signal,
+      channel,
       // 以运行时为源时，渠道专属的 .exe/.dll 必须真拷贝：
       // 它们不在渠道包的 overlay 覆盖范围内时，硬链会让两个渠道永远共用
       // 同一个 inode，等于把「切服只铺不还原」的老事故换个入口重演。
@@ -5075,14 +5657,111 @@ async function placeArknightsChannelFile(runtime, sourceDir, name) {
   return true;
 }
 
+/**
+ * 明日方舟 Yostar 三区互为源的硬链接运行时：
+ *   目标渠道的「安装目录」如果还不存在，就从**另一个区**的现有安装目录生成；
+ *   如果用户已经自己装了目标区（目录存在且元数据可信），什么都不做、直接沿用。
+ *
+ * 源的优先级：先找「元数据可信且 tag 是别的区」的目录；多个可用时挑清单版本最接近
+ * 的（版本越近差异件越少）。生成的目录就是一套完整 Yostar 客户端（buildCrossRuntime
+ * 最后会写目标区自己的元数据），后续「更新本体 / 修复游戏」全部走既有 Yostar 链路。
+ */
+async function ensureArknightsYostarRuntime(game, server, options = {}) {
+  const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  const targetRoot = server.root ? path.resolve(server.root) : '';
+  const targetExe = targetRoot ? path.join(targetRoot, 'Arknights.exe') : '';
+
+  // 用户已经把目标区装好了：直接沿用，不做任何写盘动作
+  if (targetRoot && fs.existsSync(targetRoot) && fs.existsSync(targetExe)) {
+    const meta = await yostarPacks.detectChannelOf(targetRoot).catch(() => '');
+    if (meta && meta !== server.channel) {
+      // 目录是别的区的（用户把 root 指错了），不能拿它当目标区启动，继续走生成流程
+    } else {
+      return false; // false = 没有生成运行时，但目录本身可直接启动
+    }
+  }
+  if (!targetRoot) return false;
+
+  // 找源：另一个区的现有安装目录（root 存在 + Arknights.exe 在 + 元数据 tag 是别的 Yostar 区）
+  const candidates = [];
+  for (const item of game.servers || []) {
+    if (item.id === server.id) continue;
+    if (!yostarPacks.isYostarChannel(item.channel) || item.channel === server.channel) continue;
+    const root = item.root ? path.resolve(item.root) : '';
+    if (!root || !fs.existsSync(root) || !fs.existsSync(path.join(root, 'Arknights.exe'))) continue;
+    if (path.resolve(root).toLowerCase() === path.resolve(targetRoot).toLowerCase()) continue;
+    const meta = await yostarPacks.detectChannelOf(root).catch(() => '');
+    if (meta && meta !== item.channel) continue; // 元数据对不上（指错目录），不安全
+    candidates.push({ channel: item.channel, root });
+  }
+  if (!candidates.length) {
+    emit({
+      phase: 'error',
+      current: `还没有别的国际服安装目录可以当源：先用「下载游戏」装出 ${server.channel} 之外的任意一个区，之后就能互切`,
+    });
+    return false;
+  }
+  // 多个源时挑「本地清单版本与目标清单最近」的没太大意义（三区版本本来就不齐），直接取第一个
+  const source = candidates[0];
+
+  const runtime = runtimePaths(source.root, 'arknights', server.channel, options.runtimeRoot || '');
+  if (!runtime.sameDrive) {
+    throw new Error(
+      `运行时目录必须和源客户端（${source.root}）在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`
+    );
+  }
+  if (path.resolve(source.root).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
+    throw new Error('运行时目录不能和源客户端是同一个目录，请换个“运行时目录”再试');
+  }
+
+  // 目标运行时已经存在且元数据可信：不管标记直接校验（防止旧标记骗过）
+  const existingMeta = await yostarPacks.detectChannelOf(runtime.target).catch(() => '');
+  if (existingMeta === server.channel && fs.existsSync(path.join(runtime.target, 'Arknights.exe'))) {
+    server.path = path.join(runtime.target, 'Arknights.exe');
+    server.rootDir = server.root || runtime.target;
+    server.root = runtime.target;
+    server.runtimeLinked = true;
+    server.legacyRuntime = false;
+    return true;
+  }
+
+  emit({ phase: 'start', processed: 0, total: 0, current: `正在从 ${source.channel} 生成 ${server.channel} 运行时…` });
+  const result = await yostarPacks.buildCrossRuntime({
+    sourceRoot: source.root,
+    targetProfile: server.channel,
+    installRoot: runtime.target,
+    signal: options.signal,
+    onProgress: (progress) => emit({ ...progress, current: progress.current || '' }),
+  });
+  if (!result?.ok) return false;
+
+  server.path = path.join(runtime.target, result.executable || 'Arknights.exe');
+  server.rootDir = server.root || runtime.target;
+  server.root = runtime.target;
+  server.runtimeLinked = true;
+  server.legacyRuntime = false;
+  emit({
+    phase: 'done',
+    processed: 1,
+    total: 1,
+    current: `完成：硬链接 ${result.linked} 个、下载 ${result.downloaded} 个。确认能正常进游戏后，另一个渠道的安装目录可以卸载（两边互为硬链接，互不影响）。`,
+  });
+  return true;
+}
+
 async function ensureArknightsRuntime(game, server, options = {}) {
   if (game.builtinKey !== 'arknights') return false;
   if (!server.root || server.root.includes('VelaRuntimes')) return false;
-  // 国际服（EN / JP / KR）和台服由另外的发行商发行，主程序和国服不是一份，
-  // 没法从国服目录硬链接拼出来，只能用它们自己的安装目录。
-  // Yostar 三区各自就是一套完整客户端（含 game-launcher-config.json 元数据），
-  // 不需要也不能再生成国服式硬链接运行时 —— 直接沿用它的目录启动即可。
-  if (yostarPacks.isYostarChannel(server.channel)) return false;
+  /*
+   * Yostar 三区（EN / JP / KR）互为源：拿另一个区的安装目录当源，相同 CRC64 的文件
+   * 硬链接复用（实测三区共有 1.97GiB），差异件（EN↔JP 约 1.4GB）按 Yostar 清单下载。
+   * 国服 / B服 和三区是两套发行商的客户端（国服只有 21.9GB 分卷 zip、没有逐文件清单），
+   * 与三区之间不做互切。没有另一个区的目录可用时，三区渠道就维持原样 —— 用户先用
+   * 「下载游戏」或官方启动器装出第一个区，之后才有源可链。
+   */
+  if (yostarPacks.isYostarChannel(server.channel)) {
+    return ensureArknightsYostarRuntime(game, server, options);
+  }
   if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) return false;
   const runtime = runtimePaths(server.root, 'arknights', server.channel, options.runtimeRoot || '');
   if (!runtime.sameDrive) return false;
@@ -5181,6 +5860,114 @@ async function ensureArknightsRuntime(game, server, options = {}) {
   return true;
 }
 
+/**
+ * 鸣潮官服 ↔ B服 硬链接切服（2026-11-11 用户拍板，参考 Xel/三服切换器思路但用官方清单）。
+ *
+ * 实测收益（v3.7.1 官方 index.json 交叉）：same 847 文件/79.91GiB（99.24%），
+ * 差异 68 + 仅B服 71 ≈ 切服只下 1.3GiB。国际服与国服 pak 全部不同（0.4%），
+ * **不做互切**——global 渠道在这里原样返回（用户用「下载游戏」直接装国际服）。
+ *
+ * 与方舟/终末地那套「官服目录 + 渠道包覆盖」不同：鸣潮没有渠道包概念，差异件直接
+ * 从库洛官方 CDN 按 md5 清单下载（kuroPacks.buildCrossRuntime 三步走）。
+ */
+async function ensureKuroRuntime(game, server, options = {}) {
+  if (game.builtinKey !== 'wutheringwaves') return false;
+  const channel = String(server.channel || '');
+  // 国际服与其它渠道差异约 98%，不做硬链接互切（用户 m28992）；WeGame 版自己就是
+  // 一份完整客户端、启动走 wegame:// URI，也不需要生成运行时。
+  if (channel === 'global' || channel === 'wegame') return false;
+  if (!['official', 'bilibili'].includes(channel)) return false;
+
+  const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+
+  /*
+   * 用户 m29011 / m28992：已经装好的渠道客户端（官服、B服都一样）点「切换」就该
+   * 直接切，不该再跑一遍硬链接生成；官服也不是什么「权威源」，只是恰好装好了而已。
+   * 只有「这个渠道还没有能启动的客户端」时才生成运行时，入口是设置弹窗里的
+   * 「硬链接生成一份」（会走到 servers:activate，守卫已在那里放宽）。
+   */
+  const alreadyInstalled =
+    Boolean(server.path) &&
+    targetExists(server.path) &&
+    !server.runtimeLinked &&
+    Boolean(server.root) &&
+    !String(server.root).includes('VelaRuntimes');
+  if (alreadyInstalled) return false;
+
+  // 先找「另一个渠道」的完整客户端当源：官服 / B服 / WeGame 任意互相为源
+  // （用户 m27540 / m29016 / m29017 / m29018），国际服差异太大排除。
+  const candidates = (game.servers || []).filter(
+    (item) =>
+      ['official', 'bilibili'].includes(String(item.channel || '')) &&
+      item.channel !== channel &&
+      item.root &&
+      !String(item.root).includes('VelaRuntimes') &&
+      wuwaExeAt(item.root)
+  );
+  const wegameRoot = findWeGameWuwaRoot();
+  if (wegameRoot && wuwaExeAt(wegameRoot)) {
+    candidates.push({ channel: 'wegame', root: wegameRoot, name: 'WeGame 版', isWeGame: true });
+  }
+  if (!candidates.length) {
+    emit({
+      phase: 'error',
+      current: `还没有另一个鸣潮渠道的安装目录可以当源（需要官服、B服 或 WeGame 的完整客户端）。请先用「下载游戏」或官方启动器装一个，再回来生成${channel === 'bilibili' ? 'B服' : '官服'}运行时。`,
+    });
+    return false;
+  }
+  // WeGame 版排在最后：优先用官方体系内的源（渠道件差异最小），WeGame 兜底
+  candidates.sort((a, b) => (a.isWeGame ? 1 : 0) - (b.isWeGame ? 1 : 0));
+
+  // 未配置的渠道没有自己的 root，就拿「源」的盘算运行时目录（runtimePaths 只关心同盘）。
+  const baseRoot =
+    server.root && !String(server.root).includes('VelaRuntimes') ? server.root : candidates[0].root;
+  const runtime = runtimePaths(baseRoot, 'wutheringwaves', channel, options.runtimeRoot || '');
+  if (!runtime.sameDrive) return false;
+  await fsp.mkdir(runtime.target, { recursive: true });
+
+  // 目标运行时已经是目标渠道的完整客户端（我方元数据可信）→ 直接沿用
+  const existingChannel = await kuroPacks.detectChannelOf(runtime.target).catch(() => '');
+  const runtimeExe = wuwaExeAt(runtime.target);
+  if (existingChannel === channel && runtimeExe) {
+    server.path = runtimeExe;
+    server.rootDir = server.root;
+    server.root = runtime.target;
+    server.runtimeLinked = true;
+    server.legacyRuntime = false;
+    return true;
+  }
+  // 现有运行时若是别的渠道，也是一份完整客户端，可以当源（避免又去动别的安装目录）
+  if (existingChannel && existingChannel !== channel && runtimeExe) {
+    candidates.push({ channel: existingChannel, root: runtime.target, name: `现有运行时（${existingChannel}）` });
+  }
+  const source = candidates[0];
+
+  emit({ phase: 'link', processed: 0, total: 0, current: `正在以${source.name || source.channel}为源生成${channel === 'bilibili' ? 'B服' : '官服'}运行时…` });
+  const result = await kuroPacks.buildCrossRuntime({
+    sourceRoot: source.root,
+    targetProfile: channel,
+    installRoot: runtime.target,
+    signal: options.signal,
+    onProgress: emit,
+  });
+
+  // 主程序在 Client\Binaries\Win64\ 下；写回必须用真实路径，否则下次启动会因
+  // server.path 不存在把这一行标成「需要重建」（用户 m28898 / m28935）。
+  server.path =
+    wuwaExeAt(runtime.target) ||
+    path.join(runtime.target, 'Client', 'Binaries', 'Win64', result.executable || 'Client-Win64-Shipping.exe');
+  server.rootDir = server.root;
+  server.root = runtime.target;
+  server.runtimeLinked = true;
+  server.legacyRuntime = false;
+  emit({
+    phase: 'done',
+    processed: 1,
+    total: 1,
+    current: `完成：硬链接 ${result.linked} 个、下载 ${result.downloaded} 个（${((result.downloadBytes || 0) / 1024 ** 3).toFixed(2)} GB）。确认能正常进游戏后，另一个渠道的安装目录可以卸载（两边互为硬链接，互不影响）。`,
+  });
+  return true;
+}
 async function prepareGenshinPackRuntime(game, server, onProgress) {
   const packRoot = server.root;
   const packExe = path.join(packRoot, 'GenshinImpact.exe');
@@ -5567,6 +6354,21 @@ async function detectionChannel(game, exePath) {
     const fromExe = await exeCompanyChannel(exePath);
     return fromExe === 'global' ? 'global-en' : fromExe || 'official';
   }
+  /*
+   * 鸣潮的渠道写在文件特征上（我方下载会写 kuro-launcher-config.json 元数据；
+   * 官方客户端按渠道判据：KRSDKRes/Bilibili/ 目录 = B服、ThirdParty/KrPcSdk_Global
+   * = 国际服、都没有 = 官服）。detectChannelOfSync 先查元数据再看目录特征，
+   * 都认不出来才回落到路径提示 / 官服。
+   */
+  if (key === 'wutheringwaves') {
+    // WeGame 版（downloading\2002137 或已安装的 rail_apps\Wuthering Waves(2002137)）
+    // 是独立渠道行，绝不落进官服：否则扫描到的 WeGame 客户端会被写进官服行，
+    // 「WeGame」那一行永远点不亮（用户 m28159/m28196）。kuro-packs 的
+    // detectChannelOfSync 只认 bilibili/global，不认 wegame，所以在这里先判。
+    if (/WeGameApps/i.test(exePath)) return 'wegame';
+    const kuro = kuroPacks.detectChannelOfSync(path.dirname(exePath));
+    if (kuro) return kuro;
+  }
   if (fromPath) return fromPath;
   const fromExe = await exeCompanyChannel(exePath);
   if (fromExe) return fromExe;
@@ -5594,6 +6396,15 @@ async function discoverBuiltinServers() {
     // 2.4.0 合并：崩坏3 / 明日方舟的自动检测入口
     bh3: ['BH3.exe'],
     arknights: ['Arknights.exe'],
+    // 鸣潮（含 WeGame 版）必须进这张表：discoverBuiltinServers 开头
+    // 「!execNames[game.builtinKey] → continue」会把整个游戏跳过，自动扫描
+    // 永远找不到 WeGame 已安装目录。
+    wutheringwaves: ['Client-Win64-Shipping.exe', 'Wuthering Waves.exe'],
+    // 异环：之前这张表没有它，自动扫描在下面
+    // 「!execNames[game.builtinKey] → continue」处把整个游戏跳过了 ——
+    // 装了异环的用户点「自动检测」永远扫不出来（审计 P1）。
+    // 主程序名与 GAME_DETECTION.neverness.exe 一致。
+    neverness: ['HTGame.exe'],
   };
   const roots = discoverServerRoots();
   let changed = 0;
@@ -5661,6 +6472,56 @@ async function discoverBuiltinServers() {
       }
       if (!server.path) continue;
       if (!targetExists(server.path)) {
+        /*
+         * 鸣潮自愈（用户 m29419 / m29420「官服一点到 WeGame，官服的选项就灰掉了」
+         * 「要重新选路径」）：
+         *
+         * 官服 / B服 行曾被「硬链接生成一份」指到 VelaRuntimes 里的独立运行时，
+         * 那个运行时目录后来被清理/搬家后，server.path 就悬在一条已经不存在的路径上，
+         * 而真实客户端还好好装在 rootDir / originalRoot 记着的原地。这是纯记账失效，
+         * 不是用户删了游戏 —— 直接按记账把 path/root 收回去，别让用户重新选路径。
+         *
+         * 只处理「指向运行时目录且已失效」的行；渠道必须由目标目录自证一致
+         * （官服行绝不能收回到 B服 / 国际服的客户端上）。多用户产品级代码自愈，
+         * 不手改 launcher-data.json。
+         */
+        if (game.builtinKey === 'wutheringwaves') {
+          const stalePath = String(server.path || '');
+          const pointsIntoRuntime = /[\\/]velaruntimes[\\/]/i.test(stalePath);
+          if (pointsIntoRuntime && ['official', 'bilibili'].includes(String(server.channel || ''))) {
+            const remembered = String(server.rootDir || server.originalRoot || '').trim();
+            // 回填目标必须是一个「真安装目录」：它自己再指向 VelaRuntimes 就是同一类
+            // 记账失效（运行时搬家前的旧记录），回填过去只是把一个坏路径换成另一个，没意义。
+            const rememberedUsable =
+              remembered && !/[\\/]velaruntimes[\\/]/i.test(remembered);
+            const healedExe = rememberedUsable ? wuwaExeAt(remembered) : '';
+            const healedChannel = healedExe ? kuroPacks.detectChannelOfSync(remembered) : '';
+            // healedChannel 为空表示「没有任何 B服 / 国际服 特征」＝官服，这是正常结果。
+            const channelOk =
+              !healedChannel ||
+              healedChannel === server.channel ||
+              (server.channel === 'official' && healedChannel === 'official');
+            if (healedExe && channelOk) {
+              server.path = healedExe;
+              server.root = path.normalize(remembered);
+              server.rootDir = '';
+              server.runtimeLinked = false;
+              server.legacyRuntime = false;
+              server.incomplete = false;
+              server.packPath = '';
+              server.unavailable = false;
+              changed += 1;
+              writeLaunchLog(
+                `wutheringwaves stale runtime path healed: ${server.name}(${server.channel}) → ${server.root}`
+              );
+              if (game.activeServerId === server.id) {
+                game.target = healedExe;
+                game.workDir = server.root;
+              }
+              continue;
+            }
+          }
+        }
         // 启动程序暂时不在（外接盘未挂载、盘符变化）：
         // 用户手动保存过的路径原样保留，只标记为「暂时不可用」。
         if (server.confirmed) {
@@ -5699,11 +6560,26 @@ async function discoverBuiltinServers() {
         (clientChannel.configChannelFromPath(server.path) === server.channel ||
           clientChannel.pathChannelHint(server.path) === server.channel) &&
         targetExists(server.path);
+      // 鸣潮 WeGame 版（rail_apps\Wuthering Waves(2002137)）没有 config.ini，
+      // 它自己的身份文件是 rail_files\rail_game_identify.json + WeGameLauncher\。
+      // 不认它的话每次启动都被标成「需要重建」，用户明明装好了却点不亮 WeGame 行。
+      const isWeGameWuwa =
+        game.builtinKey === 'wutheringwaves' &&
+        server.channel === 'wegame' &&
+        (fs.existsSync(path.join(dir, 'rail_files', 'rail_game_identify.json')) ||
+          /[\\/]wegameapps[\\/]/i.test(dir));
+      // 鸣潮官方体系的客户端（官服 / B服 / 国际服）根本没有 config.ini，它的本体
+      // 判据是根目录里的 launcherDownloadConfig.json。不认这条，每次启动都会把
+      // 装好的客户端标成「需要重建」—— 官服行变灰、还要求重新选路径。
+      const isKuroClient =
+        game.builtinKey === 'wutheringwaves' && Boolean(wuwaClientRootOf(dir));
       const hasConfig =
         fs.existsSync(path.join(dir, 'config.ini')) ||
         isEndfieldRuntime ||
         isYostarClient ||
-        isMihoyoLinkedRuntime;
+        isMihoyoLinkedRuntime ||
+        isWeGameWuwa ||
+        isKuroClient;
       if (!hasConfig) {
         // 没有 config.ini：通常是资源替换包（B服 / 国际服增量包），标记为需要重建。
         // 但不要清空 path / root，否则用户手动配好的客户端会直接消失。
@@ -5769,7 +6645,14 @@ async function discoverBuiltinServers() {
         (isMihoyoRuntimeDir(exeDir, game.builtinKey) &&
           (clientChannel.configChannelFromPath(exePath) === channel ||
             clientChannel.pathChannelHint(exePath) === channel) &&
-          targetExists(exePath));
+          targetExists(exePath)) ||
+        (game.builtinKey === 'wutheringwaves' &&
+          channel === 'wegame' &&
+          /[\\/]wegameapps[\\/]/i.test(exeDir)) ||
+        // 鸣潮官方体系（官服 / B服 / 国际服）的客户端没有 config.ini，本体判据是
+        // 根目录里的 launcherDownloadConfig.json。少了这条，真实官服本体扫到了也
+        // 会被当成「资源替换包」跳过，server.path 永远写不回去 —— 官服行一直是灰的。
+        (game.builtinKey === 'wutheringwaves' && Boolean(wuwaClientRootOf(exeDir)));
       if (!isCompleteClient) {
         if (!server.path || !targetExists(server.path)) {
           server.incomplete = true;
@@ -8518,18 +9401,6 @@ function installShotProtocol() {
 }
 
 function installIpc() {
-  ipcMain.handle('app:info', () => snapshot().app);
-
-  /* ---------------- 文件管理：分类统计 + 按类清理 ---------------- */
-
-  /*
-   * 只统计 userData 里明确列出的目录（见 file-manager.js 的 GROUPS），
-   * 不扫游戏本体、不碰存档。bundleCovers 传给清理逻辑，是为了让「随包内置的封面」
-   * 永远进不了待删列表。
-   */
-  const storageOptions = () => ({
-    bundleCovers: path.join(app.getAppPath(), 'data', 'covers'),
-  });
 
   /*
    * 清掉动态背景缓存之后，游戏里存的 backgroundVideo 还指着已经不存在的文件。
@@ -8551,30 +9422,6 @@ function installIpc() {
     return changed;
   };
 
-  ipcMain.handle('fs:usage', () =>
-    describeStorage(app.getPath('userData'), store?.data?.games || [], storageOptions())
-  );
-  ipcMain.handle('fs:clean', async (_event, input = {}) => {
-    const id = String(input.id || '');
-    const userData = app.getPath('userData');
-    const games = store?.data?.games || [];
-    if (id === 'all') {
-      const result = await cleanSafe(userData, games, storageOptions());
-      console.log(`[文件管理] 一键清理释放 ${(result.freed / 1048576).toFixed(1)}MB`);
-      if (repairMissingBackgrounds(games)) {
-        await store.saveNow();
-        pushState(true);
-      }
-      return result;
-    }
-    const result = await cleanGroup(userData, games, id, storageOptions());
-    console.log(`[文件管理] ${id} 释放 ${(result.freed / 1048576).toFixed(1)}MB`);
-    if (id === 'backgrounds' && repairMissingBackgrounds(games)) {
-      await store.saveNow();
-      pushState(true);
-    }
-    return result;
-  });
 
   /* ---------------- 米游社 / HoYoLAB 登录 ---------------- */
 
@@ -8583,496 +9430,7 @@ function installIpc() {
    * 这里刻意不把 cookie 暴露给渲染层的任意代码：
    * 只有登录窗口自己会读到 cookie，渲染层拿到的只是角色列表。
    */
-  ipcMain.handle('hoyolab:login', async (_event, input = {}) => {
-    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const provider = miyoushe.PROVIDERS[providerId];
-    const targetGame = gameFeatures.normalizeKey(input.game || 'genshin');
-    const url = provider.site?.[targetGame] || provider.home;
-
-    const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
-
-    /*
-     * 「添加账号」时先把登录窗口的会话清干净。
-     *
-     * 登录窗口和已保存的账号是两个东西：已登录的 cookie 存在 safeStorage 里，
-     * 而窗口这个 persist 分区里还留着上一次的登录态。不清的话，点「添加账号」
-     * 打开米游社就直接是已登录的旧账号，轮询立刻把同一个账号再存一遍 ——
-     * 用户永远加不上第二个通行证。
-     */
-    if (input.addAccount) {
-      try {
-        await ses.clearStorageData({
-          storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'],
-        });
-      } catch {}
-    }
-
-    return new Promise((resolve) => {
-      let settled = false;
-      /** 是否已经注过「自动点头像」脚本（只注一次，见下面的注释）。 */
-      let dialogInjected = false;
-      /** 上次注入的时间，用于挡住站点自己在 1 秒内重复刷新。 */
-      let dialogInjectedAt = 0;
-      /** 最近一次 cookie 校验失败的原因，超时后一起报给用户。 */
-      let lastVerifyReason = '';
-      const DIALOG_INJECT_COOLDOWN = 1200;
-      const finish = (payload) => {
-        if (settled) return;
-        settled = true;
-        clearInterval(poll);
-        clearTimeout(timeout);
-        try {
-          if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
-        } catch {}
-        resolve(payload);
-      };
-
-      const loginWindow = new BrowserWindow({
-        width: 1080,
-        height: 800,
-        parent: win && !win.isDestroyed() ? win : undefined,
-        modal: false,
-        show: true,
-        title: `登录${provider.label}`,
-        autoHideMenuBar: true,
-        webPreferences: {
-          session: ses,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      });
-      loginWindow.setMenuBarVisibility(false);
-      loginWindow.webContents.setUserAgent(miyoushe.UA);
-
-      /*
-       * 只注一次，而且只认主文档加载完成。
-       *
-       * 这里踩过的坑：以前每收到 did-finish-load / did-navigate 就注一次，
-       * 而米游社是 SPA——首屏就会触发两次 did-navigate-in-page，登录框本身又是跨域 iframe，
-       * 它每次重建都会再带回一个加载事件 → 再注一次 → 再点头像 → iframe 再重建。
-       * 实测 18 秒里 iframe 被重建了 100 多次，页面上永远是转圈，
-       * 用户既输入不了也扫不了码（就是「登录框一直弹出」那个症状）。
-       *
-       * 现在的约束：
-       * - 只挂 did-frame-finish-load（只认主框架）和 did-stop-loading，且注入幂等；
-       * - 注入的脚本自己带幂等锁，同一个文档里最多点一次头像；
-       * - 1.2 秒内的重复完成加载不再注入，避免站点自己刷新时把弹窗关掉重开。
-       */
-      const injectDialog = (why) => {
-        if (!provider.openDialogScript) return;
-        if (dialogInjected) return;
-        if (dialogInjectedAt && Date.now() - dialogInjectedAt < DIALOG_INJECT_COOLDOWN) return;
-        dialogInjected = true;
-        dialogInjectedAt = Date.now();
-        loginWindow.webContents.executeJavaScript(provider.openDialogScript, true).catch(() => {});
-        if (process.env.HXL_LOGIN_DEBUG) console.log(`[login] inject openDialogScript via ${why}`);
-      };
-
-      /*
-       * 只认主框架完成加载，子框架（比如登录框那个跨域 iframe）的加载一律不理。
-       * 这是上面那段死循环的真正入口：以前 iframe 每重建一次就会重新注入一次脚本。
-       */
-      loginWindow.webContents.on('did-frame-finish-load', (_event, isMainFrame) => {
-        if (isMainFrame) injectDialog('did-frame-finish-load');
-      });
-      loginWindow.webContents.on('did-stop-loading', () => injectDialog('did-stop-loading'));
-
-      /*
-       * 主框架换页（登录成功后往回跳、或站点自己刷新）时解锁一次，
-       * 这样新文档里还能再点一次头像；子框架导航不触发这条。
-       */
-      loginWindow.webContents.on('did-navigate', () => {
-        dialogInjected = false;
-      });
-
-      loginWindow.on('closed', () => {
-        finish({ ok: false, cancelled: true, reason: '已取消登录' });
-      });
-
-      loginWindow.loadURL(url).catch(() => {});
-
-      /*
-       * 轮询 cookie：用户一登录成功，米游社就会种下登录 cookie，
-       * 我们这边立刻收工，不需要用户手动点「完成」。
-       *
-       * 注意 get({}) 拿到的 cookie 是全站点的，米游社会把 cookie_token_v2 等
-       * 同时写在 user.miyoushe.com / passport.miyoushe.com 多个子域上，
-       * filterCookies 会按「域名 + 名字」保留，拼请求头时这些都带上。
-       */
-      const poll = setInterval(async () => {
-        if (settled || !loginWindow || loginWindow.isDestroyed()) return;
-        try {
-          const all = await ses.cookies.get({});
-          const picked = miyoushe.filterCookies(all, provider.cookieDomains);
-          if (!miyoushe.hasLoginCookie(picked)) return;
-          const cookieStr = miyoushe.cookieHeader(picked);
-          const result = await miyoushe.verifyCookie(cookieStr, providerId);
-          if (!result.ok) {
-            /*
-             * 有 cookie 但接口说无效：这通常是站点还没把 cookie 写全
-             * （扫码刚完成的那一两秒），或者账号确实已失效。
-             * 不要立刻放弃，记住原因继续轮询，超时后再报给用户。
-             */
-            lastVerifyReason = result.reason || '';
-            return;
-          }
-          /*
-           * 存成账号列表：同一个通行证账号重新登录就覆盖那一条，
-           * 不同账号则新增，并把新登录的这个设为当前账号。
-           */
-          const store = await readHoyolabStore(providerId);
-          const accountId = hoyolabAccountId(cookieStr) || `a${Date.now().toString(36)}`;
-          const account = {
-            id: accountId,
-            cookie: cookieStr,
-            savedAt: Date.now(),
-            roles: result.roles || [],
-            label: '',
-          };
-          const index = store.accounts.findIndex((item) => item.id === accountId);
-          if (index >= 0) store.accounts[index] = account;
-          else store.accounts.push(account);
-          store.activeId = accountId;
-          await writeHoyolabStore(providerId, store);
-          finish({
-            ok: true,
-            provider: providerId,
-            roles: result.roles,
-            accountId,
-            activeId: accountId,
-            accounts: store.accounts.map(publicHoyolabAccount),
-          });
-        } catch (error) {
-          lastVerifyReason = String(error?.message || error);
-          // 网络抖动就下一轮再试
-        }
-      }, 1200);
-
-      const timeout = setTimeout(() => {
-        finish({
-          ok: false,
-          cancelled: true,
-          reason: lastVerifyReason
-            ? `登录超时（5 分钟）：${lastVerifyReason}`
-            : '登录超时（5 分钟）：没有读到米游社的登录 cookie，请确认扫码后页面显示已登录',
-        });
-      }, 5 * 60 * 1000);
-    });
-  });
-
-  /*
-   * 登录状态查询。
-   *
-   * 多账号之后这里返回的是「账号列表 + 当前账号的角色」：
-   * 只验证当前激活的那一个账号（verifyCookie 一轮就是四个 gameBiz 请求，
-   * 账号一多会明显拖慢启动），其它账号直接用上次缓存的角色列表。
-   */
-  ipcMain.handle('hoyolab:status', async (_event, input = {}) => {
-    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    let store;
-    try {
-      store = await readHoyolabStore(providerId);
-    } catch (error) {
-      return { ok: true, loggedIn: false, roles: [], accounts: [], activeId: '', reason: '登录状态损坏，请重新登录' };
-    }
-    const accounts = store.accounts.map(publicHoyolabAccount);
-    if (!store.accounts.length) {
-      return { ok: true, loggedIn: false, roles: [], accounts: [], activeId: '' };
-    }
-
-    const account = pickHoyolabAccount(store, input.accountId) || store.accounts[0];
-    const verify = await verifyHoyolabAccount(account, providerId);
-    if (verify.ok) {
-      // 角色列表刷新过就顺手写回去，下次启动不用再查
-      try {
-        await writeHoyolabStore(providerId, store);
-      } catch {}
-    }
-    return {
-      ok: true,
-      loggedIn: verify.ok,
-      roles: verify.ok ? verify.roles : account.roles || [],
-      accounts: store.accounts.map(publicHoyolabAccount),
-      activeId: account.id,
-      savedAt: account.savedAt || 0,
-      reason: verify.ok ? '' : verify.reason || '',
-    };
-  });
-
-  /*
-   * 切换当前账号。
-   * 只改 activeId，不重新登录；角色列表跟着新账号走。
-   */
-  ipcMain.handle('hoyolab:switch', async (_event, input = {}) => {
-    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const store = await readHoyolabStore(providerId);
-    const account = pickHoyolabAccount(store, input.accountId);
-    if (!account) return { ok: false, reason: '还没有登录米游社', accounts: [], activeId: '', roles: [] };
-    store.activeId = account.id;
-    const verify = await verifyHoyolabAccount(account, providerId);
-    try {
-      await writeHoyolabStore(providerId, store);
-    } catch {}
-    return {
-      ok: true,
-      loggedIn: verify.ok,
-      roles: verify.ok ? verify.roles : account.roles || [],
-      accounts: store.accounts.map(publicHoyolabAccount),
-      activeId: account.id,
-      reason: verify.ok ? '' : verify.reason || '',
-    };
-  });
-
-  /*
-   * 退出登录。
-   *   { provider, id } —— 只移除这一个账号（删的是当前账号就自动切到第一个）
-   *   { provider }     —— 移除全部账号并清掉登录窗口的 cookie
-   */
-  ipcMain.handle('hoyolab:logout', async (_event, input = {}) => {
-    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const removeId = String(input.id || '');
-    const store = await readHoyolabStore(providerId);
-
-    if (removeId && store.accounts.some((account) => account.id === removeId)) {
-      store.accounts = store.accounts.filter((account) => account.id !== removeId);
-      if (store.activeId === removeId) store.activeId = store.accounts[0]?.id || '';
-      await writeHoyolabStore(providerId, store);
-      // 只有全删光了才清 cookie 分区，否则会顺手把别的账号也一起踢掉
-      if (!store.accounts.length) {
-        try {
-          const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
-          await ses.clearStorageData({ storages: ['cookies'] });
-        } catch {}
-      }
-      return {
-        ok: true,
-        removedId: removeId,
-        accounts: store.accounts.map(publicHoyolabAccount),
-        activeId: store.activeId,
-      };
-    }
-
-    await saveSecret(`hoyolab-${providerId}`, '');
-    try {
-      const ses = session.fromPartition(`persist:hoyolab-${providerId}`);
-      await ses.clearStorageData({ storages: ['cookies'] });
-    } catch {}
-    return { ok: true, accounts: [], activeId: '' };
-  });
-
-  /*
-   * 战绩数据（每日便笺 / 深渊 / 剧场…）。
-   * 接口路径由能力注册表（game-features.js 的 TRAITS）给出，这里只负责：
-   * 补 cookie、拼查询参数、补 DS2、选对宿主与 Referer。
-   *
-   * 两种入参，都保留：
-   *   { provider, api }                        —— 旧用法：直接给相对路径
-   *   { provider, game, feature, uid, region } —— 新用法：路径和参数都从 TRAITS 来
-   *
-   * 新用法里 uid/region 由渲染层从角色列表带过来。放在渲染层是因为
-   * hoyolab:status 本来就会把角色列表返回给前端，前端已经在展示它；
-   * 如果这里再查一遍 passport，每点一次卡片就多四次网络请求。
-   */
-  ipcMain.handle('hoyolab:record', async (_event, input = {}) => {
-    const providerId = input.provider === 'hoyolab' ? 'hoyolab' : 'miyoushe';
-    const store = await readHoyolabStore(providerId);
-    if (!store.accounts.length) {
-      return { ok: false, error: '还没有登录米游社，请先在工具页点「登录」', retcode: null, url: '', debug: null };
-    }
-    /*
-     * 战绩归属于某个具体的通行证账号：按 accountId 取，没指定就用当前激活的那个。
-     * 这一步必须在拼接口之前定下来 —— 不同账号的 uid 不能混着查。
-     */
-    const account = pickHoyolabAccount(store, input.accountId);
-    if (!account) {
-      return { ok: false, error: '没有找到这个米游社账号，请重新登录', retcode: null, url: '', debug: null };
-    }
-    const saved = account;
-
-    const provider = gameFeatures.LOGIN_PROVIDERS[providerId] || gameFeatures.LOGIN_PROVIDERS.miyoushe;
-    let api = String(input.api || '');
-    let referer = '';
-    let withDs = true;
-
-    if (input.game && input.feature) {
-      const trait = gameFeatures.traitOf(input.game, input.feature);
-      if (!trait || trait.kind !== 'game-record') {
-        throw new Error('这个功能不在战绩接口的支持范围内');
-      }
-      /*
-       * 留一个「接口已下线」的出口：trait 上写了 unavailable 就直接回一句人话。
-       * 这里 return 而不是 throw —— throw 穿过 IPC 会变
-       * 「Error invoking remote method ...」，界面上就是一句没法读的错误。
-       * （原来绝区零的临界推演走的是这条，后来整条功能被删掉了，出口留着备用。）
-       */
-      if (trait.unavailable) {
-        return { ok: false, error: String(trait.unavailable), retcode: null, url: '', debug: null };
-      }
-      const uid = String(input.uid || '').trim();
-      const region = String(input.region || '').trim();
-      if (!uid || !region) {
-        throw new Error('没有读到这个游戏的角色，请先在工具页重新登录一次');
-      }
-      // schedule_type：1 当期，2 上期。只有深渊类接口模板里带 {schedule}
-      const schedule = Number(input.schedule) === 2 ? 2 : 1;
-      api = String(trait.api)
-        .replace(/\{server\}/g, encodeURIComponent(region))
-        .replace(/\{role_id\}/g, encodeURIComponent(uid))
-        .replace(/\{region\}/g, encodeURIComponent(region))
-        .replace(/\{uid\}/g, encodeURIComponent(uid))
-        .replace(/\{schedule\}/g, String(schedule));
-      if (/\{[a-z_]+\}/.test(api)) {
-        throw new Error(`接口模板里还有没替换的参数：${api}`);
-      }
-      const baseKey = trait.host === 'act' ? 'act' : 'record';
-      const base = provider.api && provider.api[baseKey];
-      if (!base) {
-        throw new Error('当前登录通道没有接入这个功能（国际服暂未接入战绩查询）');
-      }
-      api = `${base}${api}`;
-      referer = trait.referer === 'act' ? provider.api.refererAct : provider.api.refererRecord;
-      withDs = trait.ds !== false;
-    } else {
-      if (!api.startsWith('/')) throw new Error('接口路径不合法');
-      referer = input.referer === 'act' ? provider.api.refererAct : provider.api.refererRecord;
-    }
-
-    /*
-     * 排查用的请求头矩阵：同一个地址依次换几种头组合打一遍，
-     * 把每个组合的 retcode 一起带回去。5003 这类风控错误光看一句话
-     * 根本判断不出是哪个头被拒，只能这样 A/B。
-     */
-    if (input.probe) {
-      const variants = [
-        { name: 'A 现状（全部头 + DS2）', opts: {} },
-        { name: 'B 全部头、不带 DS2', opts: { ds: false } },
-        { name: 'C 去掉 X-Requested-With + DS2', opts: { withXrw: false } },
-        { name: 'D 去掉 X-Requested-With、不带 DS2', opts: { withXrw: false, ds: false } },
-        { name: 'E 去掉 XRW + Origin + DS2', opts: { withXrw: false, origin: 'https://webstatic.mihoyo.com' } },
-        { name: 'F 固定指纹 0000000000000 + DS2', opts: { deviceFp: '0000000000000' } },
-        { name: 'G client_type=2 + DS2', opts: { clientType: '2' } },
-        { name: 'H 桌面 UA + DS2', opts: { ua: miyoushe.UA } },
-      ];
-      const results = [];
-      for (const variant of variants) {
-        try {
-          const data = await miyoushe.fetchRecord(api, saved.cookie, providerId, {
-            referer,
-            ds: withDs && variant.opts.ds !== false,
-            ...variant.opts,
-          });
-          results.push({
-            name: variant.name,
-            ok: true,
-            keys: data && typeof data === 'object' ? Object.keys(data).slice(0, 6) : [],
-          });
-        } catch (error) {
-          results.push({
-            name: variant.name,
-            ok: false,
-            retcode: error.retcode === undefined ? null : error.retcode,
-            message: error.message || String(error),
-          });
-        }
-      }
-      return { ok: true, probe: results, url: api, deviceFp: await miyoushe.ensureDeviceFp(saved.cookie) };
-    }
-
-    try {
-      const data = await miyoushe.fetchRecord(api, saved.cookie, providerId, { referer, ds: withDs });
-      // url 一起带回去，出问题时能直接在控制台看到实际请求了什么
-      return { ok: true, data, url: api };
-    } catch (error) {
-      /*
-       * 以前这里两个条件都写成 10001，等于「参数错误就清登录态」，
-       * 一次拼错参数的请求就会把好好的登录态删掉。
-       * 真正代表凭据失效的是 -100（未登录）和 -101（登录过期）。
-       */
-      if (error.retcode === -100 || error.retcode === -101) {
-        /*
-         * 只摘掉这一个账号，别把其它通行证一起清了 ——
-         * 多账号下某个小号过期是很正常的事，连坐会让人莫名其妙地重新登录。
-         */
-        const fresh = await readHoyolabStore(providerId);
-        fresh.accounts = fresh.accounts.filter((item) => item.id !== account.id);
-        if (fresh.activeId === account.id) fresh.activeId = fresh.accounts[0]?.id || '';
-        await writeHoyolabStore(providerId, fresh);
-      }
-      /*
-       * 不 throw：ipcMain.handle 抛错时 Electron 只把 message 传回渲染进程，
-       * retcode 和实际请求地址都会丢，用户和排查的人都只能看到一句话。
-       * 当成返回值带回去，前端就能把「打的是哪个地址、服务端回了什么码」显示出来。
-       */
-      /*
-       * 诊断信息：只带 cookie 的字段名，不带值。
-       * 5003 这类风控/参数错误，常见原因是 cookie 里缺 ltoken 或 cookie_token 中的某一项，
-       * 但这层信息用户在界面上完全看不到，出问题时只能干瞪眼。
-       */
-      const cookieKeys = String(saved.cookie || '')
-        .split(';')
-        .map((part) => part.split('=')[0].trim())
-        .filter(Boolean);
-      return {
-        ok: false,
-        error: error.message || String(error),
-        retcode: typeof error.retcode === 'number' ? error.retcode : null,
-        url: error.url || api,
-        debug: { cookieKeys },
-      };
-    }
-  });
-  ipcMain.handle('app:ui-scale', (_event, value) => {
-    const scale = normalizeUiScale(value);
-    store.data.settings.uiScale = scale;
-    applyUiScale(scale);
-    store.saveNow().catch(() => {});
-    return scale;
-  });
-  ipcMain.handle('game:notices', async (_event, gameId) => {
-    const game = store.data.games.find((item) => item.id === gameId);
-    if (!game?.builtinKey) return [];
-    return fetchGameNotices(game.builtinKey);
-  });
-  ipcMain.handle('games:notices', async (_event, force = false) => fetchAllGameNotices(Boolean(force)));
-  /*
-   * 更新弹窗的配图：读缓存，需要时刷新。
-   * 登录态和战绩共用一份，没登录米游社就返回空表，前端退回官网美术图。
-   */
-  ipcMain.handle('postart:list', async (_event, force = false) => {
-    const cached = postArt.readCache(app.getPath('userData'));
-    const fresh = cached && Date.now() - Number(cached.updatedAt || 0) < 7 * 24 * 60 * 60 * 1000;
-    if (!force && fresh) return { ok: true, cached: true, items: cached.items, updatedAt: cached.updatedAt };
-    let cookie = '';
-    try {
-      const store2 = await readHoyolabStore('miyoushe');
-      const account = pickHoyolabAccount(store2, '') || (store2.accounts && store2.accounts[0]);
-      cookie = (account && account.cookie) || '';
-    } catch {
-      cookie = '';
-    }
-    try {
-      return await postArt.refresh({ userDataDir: app.getPath('userData'), cookie, force: Boolean(force) });
-    } catch (error) {
-      return {
-        ok: false,
-        items: (cached && cached.items) || {},
-        error: (error && error.message) || String(error),
-      };
-    }
-  });
-  ipcMain.handle('window:minimize', () => {
-    if (win && !win.isDestroyed()) win.minimize();
-  });
-  ipcMain.handle('window:toggle-maximize', () => {
-    if (!win || win.isDestroyed()) return false;
-    if (win.isMaximized()) win.unmaximize();
-    else win.maximize();
-    return win.isMaximized();
-  });
-  ipcMain.handle('window:close', () => {
-    if (win && !win.isDestroyed()) win.close();
-  });
+  installHoyolabIpc({ store, win, pushState, readHoyolabStore, writeHoyolabStore, pickHoyolabAccount, verifyHoyolabAccount, hoyolabAccountId, publicHoyolabAccount });
 
   /*
    * 首次点关闭时那个询问框的结果：执行选择，记住了以后就都按它走。
@@ -9080,50 +9438,14 @@ function installIpc() {
    * 下次点 ✕ 还会问。
    * closeToTray 一起写，设置页的开关才不会和真实行为打架。
    */
-  ipcMain.handle('window:close-choice', async (_event, payload) => {
-    const choice = typeof payload === 'string' ? payload : payload?.action;
-    const remember = typeof payload === 'object' && payload !== null ? payload.remember !== false : true;
-    const action = choice === 'tray' || choice === 'quit' ? choice : null;
-    if (!action || !store) return { ok: false };
-    closeAskPending = false;
-    if (remember) {
-      store.data.settings.closeAction = action;
-      store.data.settings.closeToTray = action === 'tray';
-      await store.saveNow().catch(() => {});
-      pushState(true);
-    }
-    if (!win || win.isDestroyed()) return { ok: true, action };
-    if (action === 'tray' && tray) {
-      win.hide();
-      return { ok: true, action };
-    }
-    // 托盘图标没装上：不能 hide（否则再也叫不回来），按用户选「退出」处理
-    quitting = true;
-    app.quit();
-    return { ok: true, action: action === 'tray' ? 'quit' : action };
-  });
 
   /* 用户把询问框关掉了（没选）：允许下次点关闭再问一次 */
-  ipcMain.handle('window:close-cancel', () => {
-    closeAskPending = false;
-    return true;
-  });
 
   /*
    * 侧栏品牌图标既是设置页入口，也要能拖动窗口。
    * 它原本靠 -webkit-app-region: drag 拖，但拖拽区会吞掉鼠标事件，
    * 点不了；改成 no-drag + 这里按位移移动窗口，两种行为就能共存。
    */
-  ipcMain.handle('window:move-by', (event, payload = {}) => {
-    if (!win || win.isDestroyed()) return false;
-    if (win.isMaximized() || win.isFullScreen()) return false;
-    const dx = Math.round(Number(payload.dx) || 0);
-    const dy = Math.round(Number(payload.dy) || 0);
-    if (!dx && !dy) return false;
-    const [x, y] = win.getPosition();
-    win.setPosition(x + dx, y + dy);
-    return true;
-  });
 
   /*
    * 启动页唤出侧栏 = 窗口向左「长」出去，抽屉钉在窗口左边缘被一点点露出来。
@@ -9177,87 +9499,8 @@ function installIpc() {
     return 1;
   };
 
-  ipcMain.handle('window:start-nav-room', () => startNavRoom());
 
-  // 渲染层每帧调一次，只做事不回话（回话要排一趟请求-响应，纯浪费）
-  ipcMain.on('window:start-nav-resize', (_event, payload = {}) =>
-    applyStartNav(payload.delta)
-  );
 
-  ipcMain.handle('window:start-nav-collapse', () => collapseStartNav());
-
-  ipcMain.handle('starrail:fps:get', async () => {
-    const game = store.data.games.find((item) => item.builtinKey === 'starrail');
-    const server = (game?.servers || []).find((item) => item.id === game.activeServerId);
-    return getStarRailFps(server?.channel || '');
-  });
-
-  ipcMain.handle('starrail:fps:set', async (_event, fps) => {
-    const game = store.data.games.find((item) => item.builtinKey === 'starrail');
-    const server = (game?.servers || []).find((item) => item.id === game.activeServerId);
-    return setStarRailFps(fps, server?.channel || '');
-  });
-
-  ipcMain.handle('endfield:login-token', async () => {
-    return new Promise((resolve, reject) => {
-      const loginWindow = new BrowserWindow({
-        width: 520,
-        height: 720,
-        parent: win || undefined,
-        modal: false,
-        show: true,
-        title: '终末地网页登录',
-        webPreferences: {
-          partition: 'persist:endfield-gacha-login',
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      });
-      let settled = false;
-      const finish = async (auth) => {
-        if (settled) return;
-        settled = true;
-        await saveSecret('endfield', JSON.stringify(auth)).catch(() => {});
-        try {
-          loginWindow.close();
-        } catch {
-          /* ignore */
-        }
-        resolve(auth);
-      };
-      const checkUrl = (url) => {
-        try {
-          const parsed = new URL(url);
-          if (!/ef-webview\.(?:hypergryph|gryphline)\.com$/.test(parsed.hostname)) return;
-          const token = parsed.searchParams.get('u8_token');
-          if (!token) return;
-          finish({
-            token,
-            provider: parsed.hostname.includes('gryphline') ? 'gryphline' : 'hypergryph',
-            serverId: parsed.searchParams.get('server') || parsed.searchParams.get('server_id') || '1',
-          });
-        } catch {
-          /* ignore */
-        }
-      };
-      loginWindow.webContents.on('will-navigate', (_event, url) => checkUrl(url));
-      loginWindow.webContents.on('will-redirect', (_event, url) => checkUrl(url));
-      loginWindow.webContents.on('did-navigate', (_event, url) => checkUrl(url));
-      loginWindow.webContents.on('did-navigate-in-page', (_event, url) => checkUrl(url));
-      loginWindow.webContents.setWindowOpenHandler(({ url }) => {
-        checkUrl(url);
-        return { action: 'deny' };
-      });
-      loginWindow.on('closed', () => {
-        if (!settled) {
-          settled = true;
-          reject(new Error('已取消网页登录'));
-        }
-      });
-      loginWindow.loadURL('https://ef-webview.hypergryph.com/page/gacha_char');
-    });
-  });
 
   /*
    * 通用通行证登录（鹰角 / 完美世界 / 库街区）。
@@ -9269,1843 +9512,252 @@ function installIpc() {
    * 返回 { ok, cancelled?, provider, cookie?, roles? }；
    * roles 为 null 表示该渠道官方没有角色列表接口。
    */
-  ipcMain.handle('passport:login', async (_event, input = {}) => {
-    const providerId = String(input.provider || '');
-    const provider = passport.PROVIDERS[providerId];
-    if (!provider) return { ok: false, reason: `未知的通行证渠道：${providerId}` };
+  installPassportIpc({ store, win });
 
-    const ses = session.fromPartition(`persist:passport-${providerId}`);
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let poll = null;
-      let timeout = null;
-
-      const finish = (payload) => {
-        if (settled) return;
-        settled = true;
-        if (poll) clearInterval(poll);
-        if (timeout) clearTimeout(timeout);
-        try {
-          if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
-        } catch {
-          /* ignore */
-        }
-        resolve(payload);
-      };
-
-      const loginWindow = new BrowserWindow({
-        width: 520,
-        height: 720,
-        parent: win && !win.isDestroyed() ? win : undefined,
-        modal: false,
-        show: true,
-        title: `登录${provider.label}`,
-        autoHideMenuBar: true,
-        webPreferences: {
-          session: ses,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      });
-      loginWindow.setMenuBarVisibility(false);
-      loginWindow.webContents.setUserAgent(passport.UA);
-
-      /*
-       * 和米游社那条路一样：只认主框架加载完成，子框架（通行证页自己嵌的登录 iframe）
-       * 的加载不再触发注入，否则同样会把已经打开的登录框关掉重开。
-       */
-      const inject = () => {
-        if (!provider.openDialogScript) return;
-        loginWindow.webContents.executeJavaScript(provider.openDialogScript, true).catch(() => {});
-      };
-      loginWindow.webContents.on('did-frame-finish-load', (_event, isMainFrame) => {
-        if (isMainFrame) inject();
-      });
-
-      loginWindow.on('closed', () => {
-        finish({ ok: false, cancelled: true, reason: '已取消登录' });
-      });
-
-      loginWindow.loadURL(provider.home).catch(() => {});
-
-      /*
-       * 轮询 cookie。不用「用户点完成」按钮，是因为各家的登录完成页
-       * 五花八门，而且有的会直接跳回站点首页；盯着 cookie 变最可靠。
-       */
-      poll = setInterval(async () => {
-        if (settled || !loginWindow || loginWindow.isDestroyed()) return;
-        try {
-          const all = await ses.cookies.get({});
-          const picked = passport.filterCookies(all, provider.cookieDomains);
-          if (!passport.hasLoginCookie(picked, provider.loginKeys)) return;
-          const cookieStr = passport.cookieHeader(picked);
-          const roles = await passport.fetchRoles(providerId, cookieStr);
-          await saveSecret(
-            `passport-${providerId}`,
-            JSON.stringify({ cookie: cookieStr, savedAt: Date.now(), provider: providerId })
-          );
-          finish({ ok: true, provider: providerId, cookie: cookieStr, roles });
-        } catch {
-          // 网络抖动就下一轮再试
-        }
-      }, 1200);
-
-      timeout = setTimeout(() => {
-        finish({ ok: false, cancelled: true, reason: '登录超时（5 分钟）' });
-      }, 5 * 60 * 1000);
-    });
+  installSklandIpc({
+    passport,
+    skland,
+    win,
   });
 
-  ipcMain.handle('passport:status', async (_event, input = {}) => {
-    const providerId = String(input.provider || '');
-    const provider = passport.PROVIDERS[providerId];
-    if (!provider) return { ok: false, loggedIn: false, roles: null, reason: `未知的通行证渠道：${providerId}` };
-    const raw = await loadSecret(`passport-${providerId}`);
-    if (!raw) return { ok: true, loggedIn: false, roles: null };
-    try {
-      const saved = JSON.parse(raw);
-      /*
-       * 鹰角 / 完美的 cookie 没有能直接验证有效性的公开接口，
-       * 所以这里只报告「存过凭据」，真正的失效会在下次调用业务接口时暴露。
-       * 米家那套有 roleList 可以验，所以走的是 miyoushe 分支。
-       */
-      return {
-        ok: true,
-        loggedIn: Boolean(saved.cookie),
-        roles: null,
-        savedAt: saved.savedAt || 0,
-        verified: false,
-      };
-    } catch (error) {
-      return { ok: true, loggedIn: false, roles: null, reason: String(error.message || error) };
-    }
+  installGachaIpc({
+    getStore: () => store,
+    gachaBackupSnapshot,
+    gachaBackupCredentials,
+    pushState,
+    readHoyolabStore,
+    pickHoyolabAccount,
+    win,
+    send,
+    // 重构拆分时漏掉的依赖
+    targetExists,
+    publicGame,
+    running,
+    refreshGachaSecretFlags,
+    scheduleGachaBackup,
+    runGachaBackup,
+    detectStarwardDbPath,
+    nteGachaDir,
+    refreshNteAccount,
+    scanNteGachaDrops,
+    hoyolabAccountLabel,
+    verifyHoyolabAccount,
+    stopScanSession,
+    qrLog,
+    getNteToolAbort: () => nteToolAbort,
+    setNteToolAbortCtx: (value) => { nteToolAbort = value; },
+    setScanSessionCtx: (value) => { scanSession = value; },
+    setGachaBackupFailStreakCtx: (value) => { gachaBackupFailStreak = value; },
+    setGachaBackupRetryAtCtx: (value) => { gachaBackupRetryAt = value; },
   });
 
-  ipcMain.handle('passport:logout', async (_event, input = {}) => {
-    const providerId = String(input.provider || '');
-    await saveSecret(`passport-${providerId}`, '');
-    try {
-      const ses = session.fromPartition(`persist:passport-${providerId}`);
-      await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'cachestorage'] });
-    } catch {
-      /* ignore */
-    }
-    return { ok: true };
+  installServersIpc({
+    getStore: () => store,
+    getRunning: () => running,
+    getLaunching: () => launching,
+    getLinkJobs: () => linkJobs,
+    getLinkTrees: () => linkTrees,
+    ENDFIELD_PACK_NAMES,
+    applyHdiffPrepass,
+    beginBackgroundTask,
+    endBackgroundTask,
+    buildEndfieldChannelRuntime,
+    ensureEndfieldChannelRuntime,
+    ensureArknightsRuntime,
+    ensureKuroRuntime,
+    channelPackNeededFor,
+    channelPackStatus,
+    clientChannel,
+    currentElevation,
+    detectGame,
+    externalLinkSources,
+    isEndfieldLegacyWorkRoot,
+    pushState,
+    send,
+    sendProgress,
+    targetExists,
+    writeLaunchLog,
+    storyResourcesEnabled,
+    syncOfficialGame,
+    fsp,
+    ensureServers,
+    publicGame,
+    pruneStaleRunning,
+    runtimePaths,
+    sophonJobs,
+    prepareSophon,
+    prepareBilibiliRuntime,
+    prepareGenshinPackRuntime,
+    yostarPacks,
+    kuroPacks,
+    linkTrees,
+    previewTrees,
+    findSevenZip,
+    downloadAndExtractSplit,
+    updateEndfieldGame,
+    // 重构拆分时漏掉的依赖
+    resetServerState,
+    refreshPredownloadAfterSwitch,
+    resolveLinkRoots,
+    prepareEndfieldRuntimeJob,
+    prepareArknightsRuntimeJob,
+    estimateRuntimeSpace,
+    probeUpdateWritable,
+    invalidateRuntimesAfterUpdate,
+    // DOWNLOADABLE_KEYS / uninstallPlan 声明在本函数后面，按值传会踩 TDZ，必须走 getter
+    getDownloadableKeys: () => DOWNLOADABLE_KEYS,
+    getUninstallPlan: () => uninstallPlan,
+    serverForDownload,
+    engineFor,
+    estimateDownloadBytes,
+    driveFreeBytes,
+    assertDirWritable,
+    downloadPackProfile,
+    launching,
   });
 
-  /* ------------------------------------------------------------------ */
-  /* 森空岛（鹰角社区）—— 终末地 / 明日方舟的官方数据源                    */
-  /* ------------------------------------------------------------------ */
+  installGamesIpc({
+    getStore: () => store,
+    getRunning: () => running,
+    getLaunching: () => launching,
+    pushState,
+    send,
+    detectServerExecutable,
+    fetchAllGameNotices,
+    syncAllOfficial,
+    writeLaunchLog,
+    targetExists,
+    launchWithSignedParent,
+    finishGame,
+    killGame,
+    markLaunched,
+    updater,
+    ensureServers,
+    detectBuiltins,
+    detectGame,
+    // 重构拆分时漏掉的依赖
+    fetchGameNotices,
+    updateEndfieldGame,
+    externalLinkSources,
+    invalidateRuntimesAfterUpdate,
+    yostarPacks,
+    ARKNIGHTS_CN_CHANNELS,
+    predownload,
+    prepareSophon,
+    storyResourcesEnabled,
+    nevernessChannels,
+    normalizeGame,
+    publicGame,
+    repairServerChannels,
+    detectionChannel,
+    serverForDetected,
+    pruneStaleRunning,
+    isEndfieldLegacyWorkRoot,
+    WEGAME_LAUNCH_URI,
+    ensureEndfieldChannelRuntime,
+    launchPreflightNotice,
+    findNteGame,
+    findNteLauncher,
+    listRunningImages,
+    activateWindowByImage,
+    clearNteLingeringLauncher,
+    splitArgs,
+    startWithShellExecute,
+    spawn,
+    trackGameProcess,
+    autoClickNtePredownload,
+    autoClickNteStart,
+  });
 
+  installEndfieldIpc({ BrowserWindow, win, targetExists, send, pushState, writeLaunchLog, updateEndfieldGame, externalLinkSources, endfieldPackWritableRoot, ENDFIELD_PACK_NAMES, updateEndfieldPacks, refreshPackChannels, describePackUsage, ARKNIGHTS_PACK_DIRS, ENDFIELD_PACK_DIRS, builtinPackRoot, dirSize, refreshArknightsPackChannels, channelPackStatus, downloadChannelPack, cancelChannelPack, ARKNIGHTS_PACK_CHANNELS, channelPackSpec, endfieldPackCandidateRoots, channelPackReady, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
+  installPredownloadIpc({
+    beginBackgroundTask,
+    send,
+    sendProgress,
+    endBackgroundTask,
+    writeLaunchLog,
+    externalLinkSources,
+    pushState,
+    syncOfficialGame,
+    storyResourcesEnabled,
+    getStore: () => store,
+    getRunning: () => running,
+    getPredownloadJobs: () => predownloadJobs,
+    // 重构拆分时漏掉的依赖
+    resolvePredownload,
+    savePredownloadState,
+    invalidateRuntimesAfterUpdate,
+  });
   /*
-   * 凭据分三层，缺一层就换不出数据：
-   *   accountToken —— 账号级 token（网页登录后 cookie 里的那个），长期有效，用来重换 cred
-   *   cred         —— 每次请求都带在头上的身份串，会过期
-   *   credToken    —— 参与签名计算的密钥，和 cred 一起换
-   * 这三样都是账号凭据，只走 safeStorage，不写进任何明文配置。
+   * closeAskPending / quitting 是模块级 let，`win.on('close')` 也在这里读写。
+   * 必须传 getter/setter：按值传过去的是启动那一刻的快照，而且到了模块里成了 const，
+   * 一赋值就抛 TypeError —— 点关闭既弹不出询问框，也退不出去。
    */
-  const SKLAND_STORE_KEY = 'skland-store';
-  /**
-   * 存储版本 2 的来由：v1 时期 `roles` 里存的是 bindingList 的 uid（森空岛的绑定编号），
-   * 而终末地的接口要的是 `roles[].roleId`，两者差一个数量级之外还完全不同。
-   * 旧数据留着只会让便笺/战争回响/签到一直 403·10001，所以升版本时把缓存角色清空一次，
-   * 下次刷新自动按新解析方式重读。accountToken 不动，用户不需要重新登录。
-   */
-  const SKLAND_STORE_VERSION = 2;
-
-  async function readSklandStore() {
-    const empty = { version: SKLAND_STORE_VERSION, accounts: [], activeId: '' };
-    const raw = await loadSecret(SKLAND_STORE_KEY);
-    if (!raw) return empty;
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return empty;
-    }
-    if (!parsed || typeof parsed !== 'object') return empty;
-    const stale = Number(parsed.version) !== SKLAND_STORE_VERSION;
-    const accounts = (Array.isArray(parsed.accounts) ? parsed.accounts : [])
-      .filter((item) => item && item.accountToken)
-      .map((item) => ({
-        id: String(item.id || `sk${Math.random().toString(36).slice(2, 8)}`),
-        accountToken: String(item.accountToken),
-        cred: String(item.cred || ''),
-        credToken: String(item.credToken || ''),
-        userId: String(item.userId || ''),
-        roles: !stale && Array.isArray(item.roles) ? item.roles : [],
-        savedAt: Number(item.savedAt) || 0,
-      }));
-    const activeId = accounts.some((item) => item.id === parsed.activeId)
-      ? parsed.activeId
-      : accounts[0]?.id || '';
-    return { version: SKLAND_STORE_VERSION, accounts, activeId };
-  }
-
-  async function writeSklandStore(store) {
-    await saveSecret(SKLAND_STORE_KEY, JSON.stringify(store));
-  }
-
-  function publicSklandAccount(account) {
-    /*
-     * 账号得有个能认人的名字。
-     * 森空岛只给 userId（一串数字），列表里全是数字谁也分不清哪个是哪个，
-     * 所以优先用这个账号下终末地角色的昵称，没有角色才退回 userId 尾号。
-     */
-    const roles = skland.endfieldRolesOf(account.roles || []);
-    const nickname = String(roles[0]?.nickname || '');
-    return {
-      id: account.id,
-      userId: account.userId,
-      label: nickname || (account.userId ? `鹰角 ${String(account.userId).slice(-6)}` : '森空岛账号'),
-      nickname,
-      savedAt: account.savedAt || 0,
-      roles: account.roles || [],
-    };
-  }
-
-  function pickSklandAccount(store, accountId) {
-    const wanted = String(accountId || '');
-    if (wanted) {
-      const found = store.accounts.find((item) => item.id === wanted);
-      if (found) return found;
-    }
-    return store.accounts.find((item) => item.id === store.activeId) || store.accounts[0] || null;
-  }
-
-  /**
-   * 候选 token 的判定：形状像不像一段令牌。
-   *
-   * 换 cred 的接口本身就是校验器，所以这里只管「值看起来像不像」，
-   * 不追求认得出是哪个字段。太短的（语言、主题、AB 分组）直接排掉，
-   * 免得拿一堆垃圾值去撞接口。
-   */
-  function looksLikeToken(value) {
-    const text = String(value || '').trim();
-    if (text.length < 16 || text.length > 4096) return false;
-    if (!/^[A-Za-z0-9+/=_.\-:]+$/.test(text)) return false;
-    // 纯数字、纯日期这类不算令牌
-    if (/^\d+$/.test(text)) return false;
-    return true;
-  }
-
-  /**
-   * 从 cookie 里抠出所有「可能是账号 token」的值。
-   *
-   * 森空岛网页把登录态种在 ACCOUNT 上，鹰角通行证自己用 HG_TOKEN，
-   * 老版本 SDK 还丢过一个 u8_token；三者历史上有过混用。
-   * 更要紧的是：**站点改过 cookie 名**，只认这三个名字的话，
-   * 用户明明登录成功了也会一直「识别不到账号」。
-   * 所以分两轮：名字像 token 的排前面，其余 cookie 兜底排后面。
-   */
-  function sklandTokenCandidates(items) {
-    const list = [];
-    const push = (raw) => {
-      const value = String(raw || '').trim();
-      if (!value) return;
-      /*
-       * 先解码再判断。
-       * 森空岛把 ACCOUNT 的值做过 URL 编码，原文带 % 号，而 looksLikeToken 的字符集
-       * 白名单里没有 % —— 先前是先校验原文、不过就 return，等于把所有 URL 编码过的
-       * token 直接扔了。用户明明登着，这边永远「识别不到账号」，就是这一步卡掉的。
-       */
-      let decoded = '';
-      try {
-        decoded = decodeURIComponent(value);
-      } catch {
-        decoded = '';
-      }
-      for (const candidate of [value, decoded]) {
-        if (!candidate || !looksLikeToken(candidate) || list.includes(candidate)) continue;
-        list.push(candidate);
-      }
-    };
-    const rows = Array.isArray(items) ? items : [];
-    const tokenish = /token|account|hg_|u8_|cred|passport|skland/i;
-    for (const item of rows) if (tokenish.test(String(item?.name || ''))) push(item?.value);
-    for (const item of rows) push(item?.value);
-    /* 上限 12 个：每轮轮询都要逐个试，太多会把这个账号试进风控 */
-    return list.slice(0, 12);
-  }
-
-  /**
-   * 森空岛网页版也可能把 token 放 localStorage（不走 cookie）。
-   * 拿不到 cookie 时补这一手，顺带把 JSON 里像 token 的字段挖出来。
-   */
-  async function sklandStorageCandidates(webContents) {
-    try {
-      const pairs = await webContents.executeJavaScript(
-        `(() => {
-          const out = [];
-          try {
-            for (let i = 0; i < localStorage.length; i += 1) {
-              const key = localStorage.key(i);
-              out.push([key, String(localStorage.getItem(key) || '').slice(0, 4096)]);
-            }
-          } catch (error) {
-            /* 跨域或页面未就绪，忽略 */
-          }
-          return out;
-        })()`,
-        true
-      );
-      if (!Array.isArray(pairs)) return [];
-      const list = [];
-      for (const [key, value] of pairs) {
-        if (looksLikeToken(value)) list.push(value);
-        /* 值是 JSON 时把里面的 token 字段也挖出来 */
-        if (value && value.trim().startsWith('{')) {
-          try {
-            const parsed = JSON.parse(value);
-            for (const field of ['token', 'access_token', 'accountToken', 'account_token', 'hgToken']) {
-              const found = parsed?.[field];
-              if (looksLikeToken(found)) list.push(String(found));
-            }
-          } catch {
-            /* 不是合法 JSON */
-          }
-        }
-        void key;
-      }
-      return list.slice(0, 6);
-    } catch {
-      return [];
-    }
-  }
-
-  /** 用候选 token 逐个换 cred，第一个成功的就留下。 */
-  async function sklandCredFromCandidates(candidates) {
-    let lastError = null;
-    for (const candidate of candidates) {
-      try {
-        const cred = await skland.loginByToken(candidate);
-        return { cred, accountToken: candidate };
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw lastError || new Error('这个账号的登录凭据用不了，请重新登录森空岛');
-  }
-
-  /**
-   * 把换到的 cred 落成账号记录。
-   * 轮询、粘贴令牌、接管通行证分区三条路都走这里，免得三份实现慢慢跑偏。
-   */
-  async function sklandSaveAccount({ cred, accountToken }) {
-    const account = {
-      id: `sk-${cred.userId || accountToken.slice(-8)}`,
-      accountToken,
-      cred: cred.cred,
-      credToken: cred.token,
-      userId: cred.userId,
-      roles: [],
-      savedAt: Date.now(),
-    };
-    const store = await readSklandStore();
-    store.accounts = store.accounts.filter((item) => item.id !== account.id);
-    store.accounts.unshift(account);
-    store.activeId = account.id;
-    await writeSklandStore(store);
-    try {
-      await refreshSklandRoles(account);
-    } catch {
-      /* 角色拉不到不影响登录本身 */
-    }
-    await writeSklandStore(store);
-    return account;
-  }
-
-  /**
-   * 顺手接管「鹰角通行证」那张卡已经登录的状态。
-   *
-   * 工具页上的「鹰角通行证」登录窗口跑在 persist:passport-hypergryph 分区里，
-   * 森空岛这边跑在 persist:skland，两者 cookie 不共享。但登录成功后种下的是
-   * 同一枚账号 token —— 用户先在通行证那边登过、再来点森空岛，不该再让他登一遍。
-   */
-  async function sklandAdoptPassportSession() {
-    try {
-      const ses = session.fromPartition('persist:passport-hypergryph');
-      const candidates = sklandTokenCandidates(await ses.cookies.get({}));
-      if (!candidates.length) return null;
-      return await sklandCredFromCandidates(candidates);
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * 换一份能用的 cred：有就直接用，没有或被告知失效就重新换。
-   * `force` 用于接口返回「凭据失效」之后的第二次尝试。
-   */
-  async function ensureSklandCred(account, force = false) {
-    if (!force && account.cred && account.credToken) {
-      return { cred: account.cred, token: account.credToken };
-    }
-    const fresh = await skland.loginByToken(account.accountToken);
-    account.cred = fresh.cred;
-    account.credToken = fresh.token;
-    account.userId = fresh.userId || account.userId;
-    return { cred: account.cred, token: account.credToken };
-  }
-
-  /**
-   * 终末地的 card/detail 与 war-echoes 都必须带 `userId`（森空岛账号 ID）。
-   *
-   * 以前直接读 account.userId。这个值只在「拉绑定角色」那一步顺手取，
-   * 取失败会被静默吞掉（注释写着"缺了也能用"，但终末地这两个接口缺了不行）——
-   * 于是 URL 里变成 `userId=`，服务端不解释，直接回 HTTP 401，
-   * 用户看到的只有一句「接口 HTTP 401」，怎么点重试都一样。
-   *
-   * 这里改成缺了就现取，取不到如实报错，不再让它退化成 401。
-   */
-  async function ensureSklandUserId(account, cred, token) {
-    if (account?.userId) return String(account.userId);
-    const userId = await skland.fetchUserId(cred, token);
-    if (account) account.userId = userId;
-    return userId;
-  }
-
-  /** 拉一次绑定角色，只留终末地那些，顺手写回 store。 */
-  async function refreshSklandRoles(account) {
-    const { cred, token } = await ensureSklandCred(account);
-    const all = await skland.fetchBindings(cred, token);
-    account.roles = all;
-    if (!account.userId) {
-      try {
-        account.userId = await skland.fetchUserId(cred, token);
-      } catch {
-        /* 少数接口不要 userId，缺了也能用 */
-      }
-    }
-    return account.roles;
-  }
-
-  /**
-   * 角色列表为空时补拉一次（每分钟最多一次）。
-   *
-   * 场景：存储升到 v2 后旧的角色缓存被清掉、或者刚登录还没同步过。
-   * 界面上每次重绘都会问状态，所以这里卡一个时间窗，避免打开工具页就
-   * 连打十几个 binding 请求。
-   */
-  const sklandRolesRefreshAt = new Map();
-  async function ensureSklandRoles(account, { force = false } = {}) {
-    if (!account) return [];
-    if (!force && skland.endfieldRolesOf(account.roles || []).length) return account.roles;
-    const last = sklandRolesRefreshAt.get(account.id) || 0;
-    if (!force && Date.now() - last < 60_000) return account.roles || [];
-    sklandRolesRefreshAt.set(account.id, Date.now());
-    try {
-      return await refreshSklandRoles(account);
-    } catch {
-      return account.roles || [];
-    }
-  }
-
-  /** 先查缓存，查不到再补拉一次绑定 —— 老数据迁移后用户不用手动点「同步角色」。 */
-  async function resolveEndfieldRole(account, roleId) {
-    const cached = endfieldRoleOf(account, roleId);
-    if (cached) return cached;
-    /*
-     * 这里是用户主动点了刷新/切游戏，别再受 status 那个 60 秒窗口限制：
-     * 窗口内不重试的话，网络刚好抖一下就会误报「这个账号下没有终末地角色」。
-     */
-    await ensureSklandRoles(account, { force: true });
-    return endfieldRoleOf(account, roleId);
-  }
-
-  /**
-   * 统一入口：挑账号 → 拿 cred → 执行 → 凭据失效时自动重换一次。
-   *
-   * 森空岛的过期信号是 10000（未登录）/ 10002（登录过期）。
-   * 只重试一次：如果是账号本身出问题，反复重换只会把风控惹毛。
-   */
-  async function withSkland(input, runner) {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input?.accountId);
-    if (!account) {
-      return { ok: false, error: '还没有登录森空岛，请先在工具页点「登录森空岛」', needLogin: true };
-    }
-    const run = async () => {
-      const { cred, token } = await ensureSklandCred(account);
-      return runner({ account, cred, token });
-    };
-    try {
-      const result = await run();
-      await writeSklandStore(store);
-      return { ok: true, data: result };
-    } catch (error) {
-      const code = error?.code;
-      const biz = Number(error?.bizCode);
-      /*
-       * 401 / 403 / 10000 / 10002 都按「凭据可能不同步」处理。
-       * 服务端对「cred 还有效、但签名用的 token 已经不是这一份」这种情况，
-       * 返回的是 HTTP 403 / 401 而不是 10002 这类业务码；用账号 token 重换一次
-       * cred 往往就通了，所以和 10002 走同一条重试路径。
-       *
-       * 401 是 2026-11-03 补的：终末地 card/detail 实际会返 401（响应体仍是
-       * {"code":10000}），以前只认 403，于是这种「重登一下就好」的情况被直接
-       * 当成最终错误甩给用户，点了重试还是同一条。
-       *
-       * 但 403 里有一种不该重试：响应体带 `code:10001` 的「操作失败，请稍后重试」。
-       * 那不是登录问题，而是请求里的角色/区服对不上（实测把 bindingList 的 uid
-       * 当 roleId 就会必现）。重换凭据一百次也是同一句，只会让用户以为号坏了。
-       * 这种直接如实说明并指向「同步角色」。
-       */
-      const paramRejected = code === 403 && biz === 10001;
-      const retryable =
-        !paramRejected && (code === 10000 || code === 10002 || code === 401 || code === 403);
-      if (!retryable) {
-        await writeSklandStore(store).catch(() => {});
-        if (paramRejected) {
-          const hint = error?.bizMessage ? `（10001 ${error.bizMessage}）` : '（10001）';
-          return {
-            ok: false,
-            error:
-              `森空岛不接受这次查询${hint}：请求里的角色或区服和这个账号对不上，` +
-              '不是登录过期。点战绩页的「同步角色」重新读一次绑定，再点刷新就好。',
-            code,
-          };
-        }
-        return { ok: false, error: String(error?.message || error), code: code ?? null };
-      }
-      try {
-        await ensureSklandCred(account, true);
-        const result = await run();
-        await writeSklandStore(store);
-        return { ok: true, data: result };
-      } catch (retryError) {
-        await writeSklandStore(store).catch(() => {});
-        const retryBiz = Number(retryError?.bizCode);
-        if (retryBiz === 10001) {
-          const hint = retryError?.bizMessage ? `（10001 ${retryError.bizMessage}）` : '（10001）';
-          return {
-            ok: false,
-            error:
-              `森空岛不接受这次查询${hint}：角色或区服和这个账号对不上。` +
-              '点「同步角色」重新读取绑定后再刷新。',
-            code: retryError?.code ?? 403,
-          };
-        }
-        const prefix = code === 401 || code === 403
-          ? `森空岛拒绝了这次请求（${code}），已经自动重新换过凭据仍然被拒`
-          : '森空岛登录态已失效';
-        return {
-          ok: false,
-          error: `${prefix}：${String(retryError?.message || retryError)}`,
-          needLogin: true,
-        };
-      }
-    }
-  }
-
-  /** 终末地角色（可能一个账号下挂多个服）。 */
-  function endfieldRoleOf(account, roleId) {
-    const roles = skland.endfieldRolesOf(account.roles || []);
-    if (!roles.length) return null;
-    const wanted = String(roleId || '');
-    if (wanted) {
-      const found = roles.find((role) => String(role.uid) === wanted || String(role.roleId) === wanted);
-      if (found) return found;
-    }
-    return roles.find((role) => role.isDefault) || roles[0];
-  }
-
-  /*
-   * 登录森空岛。
-   *
-   * 打开的是森空岛网页版而不是鹰角通行证首页 —— 后者登完只种 hypergryph 域的 cookie，
-   * 拿不到森空岛自己的 ACCOUNT；在森空岛页面里点登录，走的虽然是同一套通行证 SSO，
-   * 但登录态会同时落到 skland.com 下，正好是我们要的那一份。
-   */
-  ipcMain.handle('skland:login', async (_event, input = {}) => {
-    const ses = session.fromPartition('persist:skland');
-    if (input.relogin) {
-      try {
-        await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage'] });
-      } catch {
-        /* ignore */
-      }
-    }
-
-    /*
-     * 最常见的一种「明明登录了却识别不到」：
-     * 用户先在工具页的「鹰角通行证」卡里登过，再来点森空岛 —— 两边是不同的
-     * 会话分区，cookie 不互通，于是又弹一个空白的登录窗。
-     * 这里先拿通行证分区的凭据换一次 cred，成功了连窗口都不开。
-     *
-     * add=true（添加另一个账号）时必须跳过这一步：通行证分区里只有第一次那个号，
-     * 接管过来等于把用户已经有的账号又存一遍，新账号根本进不来。
-     */
-    if (!input.relogin && !input.add) {
-      const adopted = await sklandAdoptPassportSession();
-      if (adopted) {
-        const account = await sklandSaveAccount(adopted);
-        return { ok: true, account: publicSklandAccount(account), adopted: true };
-      }
-    }
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let poll = null;
-      let timeout = null;
-
-      const finish = (payload) => {
-        if (settled) return;
-        settled = true;
-        if (poll) clearInterval(poll);
-        if (timeout) clearTimeout(timeout);
-        try {
-          if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
-        } catch {
-          /* ignore */
-        }
-        resolve(payload);
-      };
-
-      const loginWindow = new BrowserWindow({
-        width: 560,
-        height: 760,
-        parent: win && !win.isDestroyed() ? win : undefined,
-        modal: false,
-        show: true,
-        title: '登录森空岛',
-        autoHideMenuBar: true,
-        webPreferences: {
-          session: ses,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
-      });
-      loginWindow.setMenuBarVisibility(false);
-      loginWindow.webContents.setUserAgent(passport.UA);
-
-      loginWindow.on('closed', () => {
-        finish({ ok: false, cancelled: true, reason: '已取消登录' });
-      });
-
-      loginWindow.loadURL('https://www.skland.com/').catch(() => {});
-
-      /*
-       * 轮询：每 1.5 秒探一次登录态。
-       *
-       * 两个讲究：
-       * ① 一进窗口先跑一次 —— 用户之前登录过、cookie 还留在 persist:skland 分区里时
-       *    能立刻接管，不用他自己发现「明明登着却还说我没登」。
-       * ② cookie 没变化就不重复换 cred。候选最多十二个，每轮全试一遍等于每 1.5 秒
-       *    打十几次接口，容易把这个账号试进风控；失败一次后补一轮 localStorage
-       *    （森空岛网页版也可能把 token 存那儿），补完仍失败就等 cookie 变化。
-       */
-      let lastProbeKey = '';
-      let needStorageFallback = false;
-      const probe = async () => {
-        if (settled || !loginWindow || loginWindow.isDestroyed()) return;
-        try {
-          const all = await ses.cookies.get({});
-          const fromCookie = sklandTokenCandidates(all);
-          const key = fromCookie.join('|');
-          if (key && key === lastProbeKey && !needStorageFallback) return;
-          lastProbeKey = key;
-          const candidates = fromCookie.slice();
-          if (needStorageFallback) {
-            needStorageFallback = false;
-            candidates.push(...(await sklandStorageCandidates(loginWindow.webContents)));
-          }
-          if (!candidates.length) return;
-          const account = await sklandSaveAccount(await sklandCredFromCandidates(candidates));
-          finish({ ok: true, account: publicSklandAccount(account) });
-        } catch {
-          /* 还没登好 / 网络抖动：允许补一次 localStorage，再失败就等 cookie 变化 */
-          needStorageFallback = true;
-        }
-      };
-      poll = setInterval(probe, 1500);
-      probe();
-
-      timeout = setTimeout(() => {
-        finish({ ok: false, cancelled: true, reason: '登录超时（5 分钟）' });
-      }, 5 * 60 * 1000);
-    });
+  installWindowIpc({
+    win,
+    pushState,
+    tray,
+    getStarRailFps,
+    channelFromArknightsRoot,
+    getCloseAskPending: () => closeAskPending,
+    setCloseAskPending: (value) => { closeAskPending = Boolean(value); },
+    setQuitting: (value) => { quitting = Boolean(value); },
+    startNavRoom,
+    applyStartNav,
+    collapseStartNav,
+    getStore: () => store,
+    getRunning: () => running,
+  });
+  installAppIpc({ snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore: () => store });
+  installSettingsIpc({ snapshot, normalizeUiScale, clearMusicResolveCache, validateCustomSource, normalizeProxyRules, normalizeAudioLanguages, applyNativeTheme, applyLoginItem, applyTitlebar, applyUiScale, pushState, applyProxySettings, applyDownloadLimit, dataFile, win, getStore: () => store });
+  installDownloadsIpc({ ensureDownloadsDir, safeFileName, uniquePath, pushState });
+  installPluginIpc({ dialog, win, getPluginRoot: () => pluginRoot() });
+  installUpdateIpc({ performUpdateCheck, readSystemProxy, probeProxy, startUpdate, dialog, win, updateBackupInfo, updateTempBase, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, getStore: () => store });
+  installDialogIpc({ win });
+  installBackgroundIpc({ getOfficialSyncState: () => officialSyncState });
+  installInstallIpc({ fetchLatestForChannel, shell });
+  installArknightsIpc({ targetExists, send, pushState, ARKNIGHTS_CN_CHANNELS, updateEndfieldGame, externalLinkSources, endfieldPackWritableRoot, ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_BILIBILI_PROFILE, verifyArknightsSource, updateEndfieldProfile, refreshPackChannels, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
+  installWuwaIpc({ targetExists, send, pushState, writeLaunchLog, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
+  installNevernessIpc({
+    pushState,
+    send,
+    getStore: () => store,
+    getRunning: () => running,
+    getNtePredownloadAbort: () => ntePredownloadAbort,
+    setNtePredownloadAbort: (value) => { ntePredownloadAbort = value; },
+  });
+  installScreenshotsIpc({ targetExists, screenshotAllow, getStore: () => store });
+  installMiscIpc({
+    describeStorage, cleanSafe, pushState, cleanGroup, setStarRailFps, snapshot, pathToFileURL,
+    neteaseGet, NETEASE_URL_BATCH, wuwaExeAt, findWeGameWuwaRoots, findWeGameDownloadRoots,
+    WEGAME_WUWA_ID, pathsOverlap, send, sendProgress, hardlinkTree, updateLogDirs, updateStatus,
+    APP_VERSION, ensureAnimatedStartBackgrounds, win, portableDownloads, ROOT,
+    getStore: () => store, getLinkJobs: () => linkJobs,
+    // 重构拆分时漏掉的依赖
+    repairMissingBackgrounds,
+    safeFileName,
+    minisign,
+    os,
+    setBh3OfficialRetry: (value) => { bh3OfficialRetry = Number(value) || 0; },
   });
 
-  /** 兜底：用户从 web-api.skland.com/account/info/hg 抄来的 token 直接粘进来。 */
-  ipcMain.handle('skland:login-token', async (_event, input = {}) => {
-    const token = String(input.token || '').trim();
-    if (!token) return { ok: false, error: '请先粘贴 token' };
-    try {
-      const cred = await skland.loginByToken(token);
-      const account = await sklandSaveAccount({ cred, accountToken: token });
-      return { ok: true, account: publicSklandAccount(account) };
-    } catch (error) {
-      return { ok: false, error: String(error?.message || error) };
-    }
-  });
+  // 更新弹窗配图（同人图）：读缓存，需要时刷新
+  installPostartIpc({ store, readHoyolabStore, pickHoyolabAccount });
 
-  ipcMain.handle('skland:status', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const active = pickSklandAccount(store, input.accountId);
-    /*
-     * 这里不主动联网：状态查询在页面每次重绘时都会调，
-     * 真去换 cred 会让打开工具页要多等两秒。失效会在读数据时被发现。
-     *
-     * 但要顺带看一眼分区里有没有残留的 cookie —— 有的话说明「用户在这个窗口里
-     * 登录过、只是账号还没被接管」，界面就能提示「点一次登录即可」，而不是干巴巴
-     * 写着「未登录」。读 cookie 是内存操作，不发网络请求。
-     */
-    let hasCookies = false;
-    if (!active) {
-      for (const partition of ['persist:skland', 'persist:passport-hypergryph']) {
-        if (hasCookies) break;
-        try {
-          const pieces = await session.fromPartition(partition).cookies.get({});
-          hasCookies = sklandTokenCandidates(pieces).length > 0;
-        } catch {
-          /* 分区还没建，视作没有 */
-        }
-      }
-    }
-    /*
-     * 例外：存储升级后角色缓存是空的（v1 存的是绑定编号，已经不再兼容）。
-     * 这时候补拉一次绑定，否则界面会误报「这个账号下没有终末地角色」。
-     * ensureSklandRoles 内部有 60 秒时间窗，成功一次就写回 store，不会反复请求。
-     */
-    if (active && !skland.endfieldRolesOf(active.roles || []).length) {
-      const before = (active.roles || []).length;
-      await ensureSklandRoles(active);
-      if ((active.roles || []).length !== before) await writeSklandStore(store).catch(() => {});
-    }
-    return {
-      ok: true,
-      loggedIn: Boolean(active),
-      hasCookies,
-      activeId: active?.id || '',
-      accounts: store.accounts.map(publicSklandAccount),
-      roles: active ? skland.endfieldRolesOf(active.roles || []) : [],
-    };
-  });
 
-  ipcMain.handle('skland:roles', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input.accountId);
-    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true, roles: [] };
-    try {
-      const roles = await refreshSklandRoles(account);
-      await writeSklandStore(store);
-      return { ok: true, roles: skland.endfieldRolesOf(roles) };
-    } catch (error) {
-      return { ok: false, error: String(error?.message || error), roles: skland.endfieldRolesOf(account.roles || []) };
-    }
-  });
 
-  /** 切换当前使用的森空岛账号。多个号各自有自己的 cred 与角色，互不影响。 */
-  ipcMain.handle('skland:use-account', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const wanted = String(input.accountId || '');
-    const account = store.accounts.find((item) => item.id === wanted);
-    if (!account) return { ok: false, error: '没有这个森空岛账号，可能已经被移除了' };
-    store.activeId = account.id;
-    await writeSklandStore(store);
-    return { ok: true, accountId: account.id, account: publicSklandAccount(account) };
-  });
 
-  ipcMain.handle('skland:logout', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input.accountId);
-    if (account) {
-      store.accounts = store.accounts.filter((item) => item.id !== account.id);
-      if (store.activeId === account.id) store.activeId = store.accounts[0]?.id || '';
-      await writeSklandStore(store);
-    }
-    /*
-     * 只有「一个号都不剩」时才清分区。
-     * 多账号时删掉其中一个就把整个 persist:skland 清空，会把另一个号留在分区里的
-     * cookie 一起扔了 —— 虽然它还能靠 accountToken 重新换 cred，但下次启动就得
-     * 多走一次授权，没必要。
-     */
-    if (!store.accounts.length) {
-      try {
-        const ses = session.fromPartition('persist:skland');
-        await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'cachestorage'] });
-      } catch {
-        /* ignore */
-      }
-    }
-    return { ok: true, accounts: store.accounts.map(publicSklandAccount), activeId: store.activeId };
-  });
 
-  ipcMain.handle('skland:note', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input.accountId);
-    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
-    const role = await resolveEndfieldRole(account, input.roleId);
-    await writeSklandStore(store).catch(() => {});
-    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色，请先在游戏里创建角色' };
-    const result = await withSkland(input, async ({ cred, token, account: current }) =>
-      skland.endfieldCard(cred, token, {
-        userId: await ensureSklandUserId(current, cred, token),
-        roleId: role.roleId,
-        serverId: role.serverId,
-      })
-    );
-    return { ...result, role };
-  });
 
-  ipcMain.handle('skland:record', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input.accountId);
-    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
-    const role = await resolveEndfieldRole(account, input.roleId);
-    await writeSklandStore(store).catch(() => {});
-    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色，请先在游戏里创建角色' };
-    const result = await withSkland(input, async ({ cred, token, account: current }) =>
-      skland.endfieldWarEchoes(cred, token, {
-        userId: await ensureSklandUserId(current, cred, token),
-        roleId: role.roleId,
-        serverId: role.serverId,
-        seasonId: input.seasonId,
-      })
-    );
-    return { ...result, role };
-  });
-
-  ipcMain.handle('skland:sign', async (_event, input = {}) => {
-    const store = await readSklandStore();
-    const account = pickSklandAccount(store, input.accountId);
-    if (!account) return { ok: false, error: '还没有登录森空岛', needLogin: true };
-    const role = await resolveEndfieldRole(account, input.roleId);
-    await writeSklandStore(store).catch(() => {});
-    if (!role) return { ok: false, error: '这个鹰角账号下没有终末地角色' };
-    const result = await withSkland(input, ({ cred, token }) =>
-      skland.endfieldAttendance(cred, token, { roleId: role.roleId, serverId: role.serverId })
-    );
-    return { ...result, role };
-  });
-
-  ipcMain.handle('app:install-update', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择花筱灵启动器更新包',
-      properties: ['openFile'],
-      filters: [{ name: '便携版 ZIP', extensions: ['zip'] }],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    const zipPath = result.filePaths[0];
-    const tempBase = updateTempBase();
-    await fsp.mkdir(tempBase, { recursive: true }).catch(() => {});
-    // 解压到启动器旁边的临时目录，覆盖程序文件后自动重新打开（数据目录不动）
-    const staged = await updater.stage({ zipPath, tempBase });
-    const conflict = updater.describeApplyProblem({ staged, currentVersion: APP_VERSION });
-    if (conflict) return { ok: false, message: conflict };
-    const busy = describeRunningProcesses(staged.locks);
-    if (busy.length) {
-      return { ok: false, message: `这些程序还开着，关掉之后再导入一次：${busy.join('、')}` };
-    }
-    await updater.apply({
-      staged,
-      onReadyToQuit: () => {
-        setTimeout(() => {
-          quitting = true;
-          app.quit();
-        }, 250);
-      },
-    });
-    return { ok: true, restarting: true, version: staged.version };
-  });
-
-  ipcMain.handle('update:check', async () => performUpdateCheck({ push: true, manual: true }));
-  // 代理：从系统里读一条现成的规则，省得用户自己去翻 Clash 的端口
-  ipcMain.handle('proxy:system', async () => readSystemProxy());
-  // 代理：拿真实地址试一下通不通，比「保存了但不知道有没有用」强
-  ipcMain.handle('proxy:test', async (_event, rules) => probeProxy(typeof rules === 'string' ? rules : ''));
-
-  ipcMain.handle('update:apply', async () => startUpdate());
-
-  ipcMain.handle('update:pick-source', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择更新源文件（latest.json）',
-      properties: ['openFile'],
-      filters: [{ name: '更新清单', extensions: ['json', 'txt'] }],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    store.data.settings.updateManifest = result.filePaths[0];
-    await store.saveNow();
-    const status = await performUpdateCheck({ push: true });
-    return { ok: true, status };
-  });
-
-  ipcMain.handle('update:backup', async () => updateBackupInfo());
-
-  ipcMain.handle('update:rollback', async () => {
-    const staged = await updater.prepareRollback({ tempBase: updateTempBase() });
-    if (!staged) return { ok: false, message: '没有找到可回滚的上一个版本备份' };
-    const busy = describeRunningProcesses(staged.locks);
-    if (busy.length) {
-      return { ok: false, message: `这些程序还开着，关掉之后再回滚：${busy.join('、')}` };
-    }
-    await updater.apply({
-      staged,
-      onReadyToQuit: () => {
-        setTimeout(() => {
-          quitting = true;
-          app.quit();
-        }, 250);
-      },
-    });
-    return { ok: true, restarting: true, version: staged.version };
-  });
-
-  ipcMain.handle('state:get', () => snapshot());
-
-  ipcMain.handle('settings:update', async (_event, patch) => {
-    if (!patch || typeof patch !== 'object') return snapshot();
-    const settings = store.data.settings;
-    const allowed = [
-      'profileName',
-      'avatar',
-      'theme',
-      'accent',
-      'sidebarCollapsed',
-      'quickPanelPinned',
-      'uiScale',
-      'alwaysAdmin',
-      // 「开游戏要管理员」这件事问过一次没有：界面点过「以管理员重启」或
-      // 「每次弹一次」之后置 true，免得每次启动都重新问
-      'elevationAsked',
-      'elevationDeclined',
-      'nevernessUseOfficialLauncher',
-      'closeToTray',
-      // 关闭按钮的真实行为（tray / quit）。和 closeToTray 由同一处逻辑同时写，
-      // 不放进白名单的话设置页改完会被快照回推抹掉。
-      'closeAction',
-      'launchAtLogin',
-      'minimizeOnLaunch',
-      'autoSyncOfficial',
-      'autoUpdateEndfieldPacks',
-      'autoUpdateArknightsPacks',
-      'autoGacha',
-      'audioLanguages',
-      'includeStoryResources',
-      // ldiff 增量加速开关：不留退路的话，介意「就地改写游戏文件」的用户没有别的选择。
-      'enableLdiff',
-      // 下载限速：全局带宽上限（KB/s，0 = 不限速）
-      'downloadLimitKBps',
-      // 装饰挂饰 / 角色背景水印：这两个以前不在白名单里，快照永远不带这两个键，
-      // 状态回推时会把刚点下去的值抹掉，开关表现为「点了直接弹回原状」。
-      'charms',
-      'charBg',
-      // 侧栏底部那张火花立绘：展开侧栏时会占掉一截高度，用户要能自己关掉
-      'sidebarChar',
-      'updateManifest',
-      // 更新源模式：不放进白名单的话，设置页写下去会被快照回推抹掉，
-      // 表现为「选了模式一刷新又变回自动」。
-      'updateSourceMode',
-      'autoCheckUpdate',
-      'proxyRules',
-      'notesSeenVersion',
-      // 「稍后再说」的推迟状态：不在白名单里的话，界面写下去会被快照回推抹掉，等于没记
-      'updateSnoozeVersion',
-      'updateSnoozeUntil',
-      'endfieldPackRoot',
-      'starwardDbPath',
-      'runtimeRoot',
-      'downloadDir',
-      'lastPage',
-      'material',
-      'customBackground',
-      'backgroundOpacity',
-      'backgroundBlur',
-      'backgroundMotion',
-      'backgroundRotate',
-      // 点歌台音源：内置音源的开关 + 用户自己导入的第三方音源
-      'musicSources',
-      'musicCustomSources',
-    ];
-    for (const key of allowed) {
-      if (!(key in patch)) continue;
-      if (key === 'profileName') {
-        settings.profileName = String(patch.profileName || '').slice(0, 24) || '大小姐';
-      } else if (key === 'avatar') {
-        settings.avatar = String(patch.avatar || '').slice(0, 500);
-      } else if (key === 'theme') {
-        if (['dark', 'light', 'system'].includes(patch.theme)) settings.theme = patch.theme;
-      } else if (key === 'accent') {
-        if (['spark', 'gold', 'sakura', 'cyan', 'rose', 'jade', 'violet', 'amber'].includes(patch.accent)) {
-          settings.accent = patch.accent;
-        }
-      } else if (key === 'sidebarCollapsed') {
-        settings.sidebarCollapsed = patch.sidebarCollapsed === true;
-      } else if (key === 'uiScale') {
-        settings.uiScale = normalizeUiScale(patch.uiScale);
-      } else if (key === 'quickPanelPinned') {
-        settings.quickPanelPinned = patch.quickPanelPinned === true;
-      } else if (key === 'alwaysAdmin') {
-        settings.alwaysAdmin = patch.alwaysAdmin === true;
-        // 重新打开这个开关＝用户愿意再看到授权窗口
-        if (settings.alwaysAdmin) settings.elevationDeclined = false;
-      } else if (key === 'elevationDeclined') {
-        settings.elevationDeclined = patch.elevationDeclined === true;
-      } else if (key === 'nevernessUseOfficialLauncher') {
-        settings.nevernessUseOfficialLauncher = patch.nevernessUseOfficialLauncher !== false;
-      } else if (key === 'closeAction') {
-        /*
-         * 关闭按钮的行为。字符串不能走下面那个 Boolean() 兜底（会被压成 true）。
-         * null 是「还没选过」，允许清空，下次点关闭会重新问一遍。
-         */
-        if (patch.closeAction === 'tray' || patch.closeAction === 'quit') {
-          settings.closeAction = patch.closeAction;
-          settings.closeToTray = patch.closeAction === 'tray';
-        } else if (patch.closeAction === null) {
-          settings.closeAction = null;
-        }
-      } else if (key === 'endfieldPackRoot') {
-        const dir = String(patch.endfieldPackRoot || '').trim();
-        if (dir && fs.existsSync(dir)) settings.endfieldPackRoot = dir;
-        if (!dir) settings.endfieldPackRoot = '';
-      } else if (key === 'starwardDbPath') {
-        const dbPath = String(patch.starwardDbPath || '').trim();
-        if (dbPath && fs.existsSync(dbPath)) settings.starwardDbPath = dbPath;
-        if (!dbPath) settings.starwardDbPath = '';
-      } else if (key === 'runtimeRoot') {
-        const dir = String(patch.runtimeRoot || '').trim();
-        settings.runtimeRoot = dir;
-      } else if (key === 'material') {
-        const value = String(patch.material || 'none');
-        if (['none', 'acrylic', 'mica', 'micaTabbed', 'auto'].includes(value)) {
-          settings.material = value;
-        }
-      } else if (key === 'customBackground') {
-        // 只接受 <userData>/backgrounds/ 下的文件名，避免被写成任意路径
-        const raw = String(patch.customBackground || '').trim();
-        if (!raw) {
-          settings.customBackground = '';
-        } else {
-          const base = path.basename(raw);
-          // ef- 前缀是官方背景同步下来的（backgrounds/official/），custom- 是本地导入的
-          if (
-            /^(ef-[a-z]+[a-f0-9]{6}\.(png|jpe?g|webp)|custom-[0-9a-f-]{36}\.(png|jpe?g|webp|gif))$/i.test(base)
-          ) {
-            settings.customBackground = `backgrounds/${base}`;
-          }
-        }
-      } else if (key === 'backgroundOpacity') {
-        const value = Number(patch.backgroundOpacity);
-        if (Number.isFinite(value)) settings.backgroundOpacity = Math.max(0, Math.min(100, Math.round(value)));
-      } else if (key === 'backgroundBlur') {
-        const value = Number(patch.backgroundBlur);
-        if (Number.isFinite(value)) settings.backgroundBlur = Math.max(0, Math.min(60, Math.round(value)));
-      } else if (key === 'backgroundMotion') {
-        settings.backgroundMotion = patch.backgroundMotion !== false;
-      } else if (key === 'backgroundRotate') {
-        settings.backgroundRotate = patch.backgroundRotate !== false;
-      } else if (key === 'musicSources') {
-        // 内置音源开关：只认已知的五个键，值只认布尔
-        const incoming = patch.musicSources;
-        const next = {};
-        if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
-          for (const name of ['netease', 'kuwo', 'migu', 'kugou', 'qq']) {
-            if (typeof incoming[name] === 'boolean') next[name] = incoming[name];
-          }
-        }
-        settings.musicSources = next;
-        // 开关变了必须清换源缓存：否则酷我开着时赢下的地址还会缓存 20 分钟，
-        // 关掉后同一首歌"仍然识别到酷我音源"，用户以为停用没生效
-        clearMusicResolveCache();
-      } else if (key === 'musicCustomSources') {
-        const list = Array.isArray(patch.musicCustomSources) ? patch.musicCustomSources : [];
-        settings.musicCustomSources = list
-          .filter((def) => validateCustomSource(def).ok)
-          .slice(0, 20)
-          .map((def) => ({
-            id: String(def.id || def.name || '').slice(0, 60),
-            name: String(def.name || def.id || '').slice(0, 60),
-            search: def.search,
-            url: def.url,
-            headers: def.headers && typeof def.headers === 'object' ? def.headers : undefined,
-            enabled: def.enabled !== false,
-          }));
-        // 启停第三方音源同理（导入那条路已经清了，这里补启停/删除）
-        clearMusicResolveCache();
-      } else if (key === 'updateManifest') {
-        settings.updateManifest = String(patch.updateManifest || '').trim().slice(0, 500);
-      } else if (key === 'updateSourceMode') {
-        // 只认这几种，别的值一律回到「自动」——多一个拼错的值就会让更新链变哑巴。
-        const mode = String(patch.updateSourceMode || '').trim();
-        settings.updateSourceMode = ['auto', 'gitee', 'jsdelivr', 'github', 'custom'].includes(mode)
-          ? mode
-          : 'auto';
-      } else if (key === 'proxyRules') {
-        settings.proxyRules = normalizeProxyRules(patch.proxyRules);
-      } else if (key === 'autoCheckUpdate') {
-        settings.autoCheckUpdate = patch.autoCheckUpdate !== false;
-      } else if (key === 'notesSeenVersion') {
-        // 更新公告弹窗「看过了」的版本号：存到 settings 里，跟着 launcher-data.json 走，
-        // 所以升级覆盖 resources/app 之后这个标记不会丢，同一个版本只弹一次。
-        settings.notesSeenVersion = String(patch.notesSeenVersion || '').trim().replace(/^v/i, '').slice(0, 32);
-      } else if (key === 'updateSnoozeVersion') {
-        settings.updateSnoozeVersion = String(patch.updateSnoozeVersion || '').trim().replace(/^v/i, '').slice(0, 32);
-      } else if (key === 'updateSnoozeUntil') {
-        settings.updateSnoozeUntil = Number(patch.updateSnoozeUntil) || 0;
-      } else if (key === 'downloadLimitKBps') {
-        /*
-         * 下载限速。上限按 100 MB/s 截：再高已经超过家用宽带上限，
-         * 而填个天文数字只会让「限速开着」变成摆设。0 = 不限速。
-         */
-        const value = Number(patch.downloadLimitKBps);
-        settings.downloadLimitKBps = Number.isFinite(value)
-          ? Math.max(0, Math.min(102400, Math.round(value)))
-          : 0;
-      } else if (key === 'downloadDir') {
-        const dir = String(patch.downloadDir || '').trim();
-        if (dir) {
-          await fsp.mkdir(dir, { recursive: true });
-          settings.downloadDir = dir;
-        }
-      } else if (key === 'lastPage') {
-        if (
-          [
-            'home',
-            'start',
-            'library',
-            'servers',
-            'gacha',
-            'song',
-            'downloads',
-            'news',
-            'announcements',
-            'settings',
-          ].includes(patch.lastPage)
-        ) {
-          settings.lastPage = patch.lastPage;
-        }
-      } else if (key === 'audioLanguages') {
-        // 必须是数组：兜底分支走的是 Boolean()，数组会被压成 true
-        settings.audioLanguages = normalizeAudioLanguages(patch.audioLanguages);
-      } else {
-        settings[key] = Boolean(patch[key]);
-      }
-    }
-    applyNativeTheme(settings.theme);
-    applyLoginItem(settings);
-    applyTitlebar();
-    applyUiScale(settings.uiScale);
-    // 先推状态再写盘：渲染进程要的是设置本身，没必要等磁盘 IO。
-    // 原来顺序反了，机械盘上点一次主题要等几十毫秒才有反应。
-    pushState(true);
-    await store.saveNow();
-    // 代理改完立刻生效，不用重启：用户点保存就能看到联网行为变化
-    if ('proxyRules' in patch) await applyProxySettings();
-    // 限速同理：立刻生效，正在跑的下载下一块就按新上限走（不用等下次下载）
-    if ('downloadLimitKBps' in patch) applyDownloadLimit();
-    return snapshot();
-  });
-
-  ipcMain.handle('gacha:sync', async (_event, input = {}) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game || !['genshin', 'starrail', 'zzz', 'endfield'].includes(game.builtinKey)) {
-      throw new Error('这个游戏没有接入官方抽卡同步');
-    }
-    if (game.builtinKey === 'endfield') {
-      let auth = input?.auth;
-      if (!auth) {
-        try {
-          auth = JSON.parse(await loadSecret('endfield'));
-        } catch {
-          auth = null;
-        }
-      }
-      // 优先读游戏自己写的日志：只要玩家打开过一次抽卡记录，
-      // 里面就有最新的 u8_token，完全不需要弹网页登录窗口。
-      if (!auth?.token) {
-        try {
-          const fromLog = readEndfieldTokenFromLog();
-          if (fromLog?.token) auth = fromLog;
-        } catch {
-          /* 日志不存在或格式变化时忽略 */
-        }
-      }
-      if (!auth?.token) {
-        // 只有真正拿不到 token 才需要用户介入。
-        // Electron 的 invoke 会丢掉自定义 error.code，所以用结构化结果返回。
-        return {
-          ok: false,
-          needLogin: true,
-          error: '没有读到终末地抽卡凭据。请先在游戏里打开一次「抽卡记录」页面，再回来点同步；如果仍然失败，再选择网页登录。',
-        };
-      }
-      try {
-        const result = await syncEndfieldGacha({ userData: app.getPath('userData'), auth });
-        await saveSecret('endfield', JSON.stringify(auth)).catch(() => {});
-        return { ok: true, ...result };
-      } catch (error) {
-        if (/token|40100|登录|到期|invalid/i.test(String(error.message))) {
-          await saveSecret('endfield', '').catch(() => {});
-          // 凭据失效：告诉界面可以走网页登录，而不是让用户面对一段报错
-          return {
-            ok: false,
-            needLogin: true,
-            error: String(error.message || '终末地登录已失效'),
-          };
-        }
-        throw error;
-      }
-    }
-    const server = (game.servers || []).find((item) => item.id === game.activeServerId);
-    let installRoot = server?.root;
-    if (!installRoot && game.target) installRoot = path.dirname(game.target);
-    if (!installRoot && server?.path) installRoot = path.dirname(server.path);
-    if (!installRoot || !targetExists(server?.path)) {
-      throw new Error('先配置这个游戏的客户端路径');
-    }
-    /*
-     * 手动同步的错误要带结构化字段回界面（Electron 的 invoke 会把自定义
-     * error.code / error.rateLimited 全丢掉，只剩 message），所以这里自己
-     * catch 一层：限流、正在同步、链接过期 三种给不同的可操作提示。
-     */
-    try {
-      return await syncGacha({
-        game: game.builtinKey,
-        installRoot,
-        userData: app.getPath('userData'),
-      });
-    } catch (error) {
-      if (error?.rateLimited) {
-        return {
-          ok: false,
-          rateLimited: true,
-          retryAfterMs: Number(error.cooldownMs) || 10 * 60 * 1000,
-          error: String(error.message || '抽卡接口被限流了，等十来分钟再试'),
-        };
-      }
-      if (error?.busy) {
-        return { ok: false, busy: true, error: String(error.message || '这个游戏的抽卡记录正在同步中') };
-      }
-      throw error;
-    }
-  });
-
-  ipcMain.handle('endfield:update-game', async (_event, options = {}) => {
-    const game = store.data.games.find((item) => item.builtinKey === 'endfield');
-    const server = game?.servers.find((item) => item.id === game.activeServerId);
-    if (!game || !server?.root || !targetExists(server.path)) {
-      throw new Error('先配置终末地客户端路径');
-    }
-    if (running.has(game.id)) throw new Error('请先退出终末地再更新');
-    /*
-     * 从启动页那颗「更新游戏」进来时会带 jobId：跟着发一份到 predownload:progress，
-     * 启动页按钮才能显示百分比（它只认这条通道 + 自己的 jobId）。不带 jobId 的老入口
-     * （服务器面板里的按钮）走原来的 endfield:game-progress，行为不变。
-     */
-    const jobId = String(options?.jobId || '');
-    /*
-     * 两个面板共用同一条出口：老入口只发 endfield:game-progress（服务器面板的 busy toast
-     * 在听），带 jobId 的再发一份 predownload:progress 给启动页那个进度面板。
-     * 补上 phase：endfield-packs 原来只发 current/processed/total/downloadedBytes，
-     * 没有 phase，界面拿到事件也拼不出「下载更新 42%」——只能落回「正在更新…」。
-     */
-    const meter = require('./progress-meter').createMeter((progress) => {
-      send('endfield:game-progress', progress);
-      if (!jobId) return;
-      send('predownload:progress', {
-        jobId,
-        ...progress,
-        // 面板读的是 bytesDone，这里把下载字节映射过去，按钮才有百分比
-        bytesDone: Number(progress?.bytesDone ?? progress?.downloadedBytes) || 0,
-      });
-    });
-    const emit = (progress) => {
-      const withPhase = { ...progress };
-      if (!withPhase.phase) {
-        // 有 downloadedBytes 认为是真在下网，否则是在比对/复用已有文件
-        withPhase.phase = Number(progress?.downloadedBytes) > 0 ? 'download' : 'install';
-      }
-      meter(withPhase);
-    };
-    /*
-     * 预下载过的 Diffs/ 里就是这次更新的 zip 分包，先走它：同名同 size 同 md5 直接命中，
-     * 不用重新下载。没预下载过时 hasCache 为 false，整段跳过，还是原来的逐文件校验更新。
-     */
-    const predownloadRoot = predownload.endfieldInstallRoot(game, server);
-    if (predownload.hasCache({ gameKey: 'endfield', channel: server.channel, installRoot: predownloadRoot })) {
-      try {
-        const applied = await predownload.apply({
-          gameKey: 'endfield',
-          channel: server.channel,
-          installRoot: predownloadRoot,
-          onProgress: (progress) => emit(progress),
-        });
-        if (applied?.ok) {
-          const version = String(applied.version || '');
-          server.predownload = null;
-          if (version) {
-            game.version = version;
-            game.versionName = version;
-          }
-          await store.saveNow();
-          pushState(true);
-          // 预下载内容落进真实安装目录后，链接运行时要失效（与 predownload:apply 同一语义）
-          invalidateRuntimesAfterUpdate(game);
-          return applied;
-        }
-      } catch (error) {
-        /*
-         * 预下载内容用不上，回落成逐文件全量更新。
-         *
-         * 这条回落原来只写一行 launch.log —— 用户那边看到的是「我明明预下载完了，
-         * 怎么更新还是下了几十 G」，没有任何提示。现在把原因报上去，界面能说明白；
-         * 同时顺手把用不上的 Diffs 清掉（apply 失败说明这批包跟当前清单对不上，
-         * 留着只会在下一次检测里继续被当成「可以应用」）。
-         */
-        const reason = String(error?.message || error || '未知原因');
-        writeLaunchLog(`endfield update: predownload apply fallback: ${reason}`);
-        emit({ phase: 'predownload', current: `预下载内容无法应用（${reason}），改为逐文件更新` });
-        try {
-          await predownload.clear({ gameKey: 'endfield', installRoot: predownloadRoot });
-        } catch {
-          /* 清不掉不影响后面的更新 */
-        }
-        if (server.predownload) {
-          server.predownload = null;
-          await store.saveNow();
-          pushState(true);
-        }
-      }
-    }
-    const result = await updateEndfieldGame({
-      root: server.root,
-      channel: server.channel,
-      // 同机另一份终末地（官服 / B服 / 国际服）已经在目标版本时，相同内容直接硬链接，不再重下
-      linkSources: externalLinkSources(game, server, server.root),
-      onProgress: (progress) => emit(progress),
-    });
-    /*
-     * 更新完把版本号落库。以前这里直接 return，卡片版本要等下一次检测才动，
-     * 用户看到「已更新到 1.5.0」的提示、卡片却还挂旧版本，以为没更上。
-     */
-    const version = String(result?.version || '');
-    if (result?.ok && version) {
-      game.version = version;
-      game.versionName = version;
-      game.lastOfficialSync = Date.now();
-      // Diffs 里的预下载包已经用掉了，状态跟着清掉，别再显示「可以应用」
-      server.predownload = null;
-      await store.saveNow();
-      pushState(true);
-    }
-    // 与其余逐文件更新落点统一：skipped（本地已是最新）时不触发无谓的运行时重建
-    if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
-    return result;
-  });
-
-  ipcMain.handle('arknights:update-game', async (_event, options) => {
-    const game = store.data.games.find((item) => item.builtinKey === 'arknights');
-    const server = game?.servers.find((item) => item.id === game.activeServerId);
-    if (!game || !server?.root || !targetExists(server.path)) {
-      throw new Error('先配置明日方舟客户端路径');
-    }
-    if (running.has(game.id)) throw new Error('请先退出明日方舟再更新');
-    /*
-     * 进度双路输出：老入口只发 arknights:game-progress（原来全仓没人订阅，界面一直
-     * 停在「正在准备更新…」），从启动页那颗按钮进来时带 jobId，再发一份
-     * predownload:progress 给进度面板 —— 和终末地那条桥保持同一形状。
-     */
-    const jobId = String(options?.jobId || '');
-    const emit = require('./progress-meter').createMeter((progress) => {
-      const withPhase = { ...progress };
-      if (!withPhase.phase) {
-        withPhase.phase = Number(progress?.downloadedBytes) > 0 ? 'download' : 'install';
-      }
-      send('arknights:game-progress', withPhase);
-      if (!jobId) return;
-      send('predownload:progress', {
-        jobId,
-        ...withPhase,
-        bytesDone: Number(withPhase.bytesDone ?? withPhase.downloadedBytes) || 0,
-      });
-    });
-    /*
-     * 国际服（EN / JP / KR）走 Yostar 自己的那套清单，和国服的鹰角清单毫无关系：
-     * 逐文件 CRC64 + 官方 game-launcher-config.json / manifest.json 元数据，
-     * 主程序和平台库都和国服不是一份文件。绝不能拿国服清单往它们目录里 in-place 写。
-     */
-    if (yostarPacks.isYostarChannel(server.channel)) {
-      const result = await yostarPacks.updateGame({
-        profile: server.channel,
-        installRoot: server.root,
-        allowDelete: true,
-        onProgress: (progress) => emit(progress),
-      });
-      if (result?.ok) {
-        game.version = String(result.version || game.version || '');
-        game.versionName = game.version;
-        await store.saveNow();
-        pushState(true);
-      }
-      return result;
-    }
-    // profileForChannel('arknights') 是国服全量清单（13749 文件/25.4GB）的专用哨兵值，
-    // 绝不能换成 server.channel（那会误拉终末地清单）。台服由第三个发行商发行、
-    // 协议未验证，在发起任何网络请求或写盘之前先挡住，避免被国服清单 in-place 覆盖刷坏。
-    if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
-      throw new Error('明日方舟台服暂不支持在此更新本体，请前往对应官网');
-    }
-    /*
-     * 明日方舟本体走的是鹰角同一套加密逐文件清单（GET {base}/game_files），
-     * 与终末地同构，直接用 updateEndfieldGame + profileForChannel('arknights') 重放即可，
-     * 不需要拉起官方启动器。启动前的渠道 SDK 注入由 games:launch 里的 ensureArknightsRuntime 负责，
-     * 更新完再启动依旧能正常进游戏。
-     */
-    const result = await updateEndfieldGame({
-      root: server.root,
-      channel: 'arknights',
-      linkSources: externalLinkSources(game, server, server.root),
-      onProgress: (progress) => emit(progress),
-    });
-    if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
-    return result;
-  });
-
-  /*
-   * 全游戏通用的「修复游戏」：按官方清单逐文件校验，重新下载损坏/缺失的文件。
-   * - 终末地 / 明日方舟：直接复用鹰角那套加密逐文件清单（force 重校，版本号没变也会重扫）
-   * - 米哈游系（原神 / 星铁 / 绝区零 / 崩坏3）：走 Sophon 逐 chunk 校验补齐
-   * - 异环：本体修复由官方启动器接管，这里直接拉起它
-   */
-  ipcMain.handle('games:repair-game', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到该游戏');
-    const server =
-      game.servers.find((item) => item.id === input?.serverId) ||
-      game.servers.find((item) => item.id === game.activeServerId) ||
-      game.servers[0];
-    if (!server?.root || !server.path || !targetExists(server.path)) {
-      throw new Error('这个服务器还没有可修复的客户端');
-    }
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修复');
-    const key = game.builtinKey;
-    if (key === 'endfield') {
-      const result = await updateEndfieldGame({
-        root: server.root,
-        channel: server.channel,
-        force: true,
-        // 修复时整盘重扫，正是跨渠道复用收益最大的场景：同内容文件直接链，不用重下
-        linkSources: externalLinkSources(game, server, server.root),
-        onProgress: (progress) => send('repair:progress', progress),
-      });
-      // 逐文件 rm+rename 换了 inode，硬链接运行时镜像必须失效重建
-      if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
-      return result;
-    }
-    if (key === 'arknights') {
-      /*
-       * 国际服（EN / JP / KR）：走 Yostar 自己的 updateGame 做全量校验补齐。
-       * 那边没有「每个文件都能单独下」的公开接口 —— 官方只给整文件 CRC64 清单，
-       * 所以修复就是「按清单对每个文件算 CRC64，不一致的重下」。allowDelete 传 false：
-       * 修复的目的是补缺补坏，不该顺手删东西（删清单由「更新本体」那条链负责）。
-       */
-      if (yostarPacks.isYostarChannel(server.channel)) {
-        const result = await yostarPacks.updateGame({
-          profile: server.channel,
-          installRoot: server.root,
-          allowDelete: false,
-          fullVerify: true,
-          onProgress: (progress) => send('repair:progress', progress),
-        });
-        if (result?.ok) {
-          game.version = String(result.version || game.version || '');
-          game.versionName = game.version;
-          await store.saveNow();
-          pushState(true);
-        }
-        return { ...result, repaired: true };
-      }
-      // 修复带 force:true 会整盘重扫、逐文件 in-place 覆盖；台服由第三个发行商发行、
-      // 协议未验证，绝不能被国服全量清单刷坏。'arknights' 是国服清单专用哨兵值，保持原样不动。
-      if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
-        throw new Error('明日方舟台服暂不支持在此修复本体，请前往对应官网');
-      }
-      const result = await updateEndfieldGame({
-        root: server.root,
-        channel: 'arknights',
-        force: true,
-        linkSources: externalLinkSources(game, server, server.root),
-        onProgress: (progress) => send('repair:progress', progress),
-      });
-      if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
-      return result;
-    }
-    if (['genshin', 'starrail', 'zzz', 'bh3'].includes(key)) {
-      const signal = { cancelled: false };
-      const result = await prepareSophon({
-        gameKey: key,
-        channel: server.channel,
-        baseRoot: server.root,
-        targetRoot: server.root,
-        cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-        audioLanguages: store.data?.settings?.audioLanguages,
-        includeStoryResources: storyResourcesEnabled(game, server),
-        // 修复要查的是「中间分块坏掉」这类问题，只比首尾两块查不出来，必须整份校验
-        verifyAll: true,
-        signal,
-        onProgress: (progress) => send('repair:progress', progress),
-      });
-      game.version = result.tag;
-      game.versionName = result.tag;
-      server.sophonVersion = result.tag;
-      game.lastOfficialSync = Date.now();
-      await store.saveNow();
-      pushState(true);
-      // 修复换了本体文件，链接运行时若有标记也应失效（非终末地当前为 no-op）
-      invalidateRuntimesAfterUpdate(game);
-      return { ok: true, version: result.tag, updated: result.files, root: server.root };
-    }
-    if (key === 'neverness') {
-      const root = nevernessChannels.findConfigRoot(server?.root || server?.path || game.target || '');
-      if (!root) throw new Error('没有找到异环安装目录，先在服务器设置里指好游戏路径');
-      const launcher = path.join(root, 'NTELauncher.exe');
-      if (!fs.existsSync(launcher)) throw new Error(`没有找到官方启动器：${launcher}`);
-      const error = await shell.openPath(launcher);
-      if (error) throw new Error(`官方启动器打开失败：${error}`);
-      return { ok: true, official: true };
-    }
-    throw new Error('这个游戏暂不支持修复');
-  });
-
-  ipcMain.handle('endfield:update-official-packs', async (_event, options = {}) => {
-    const root = endfieldPackWritableRoot();
-    /*
-     * 默认只补本机还缺的那几个渠道 —— 全新机器上五个一起下是约 400MB，把第一次
-     * 用的人直接劝退。真要备齐是用户在弹窗里点「下载全部」（all=true）的事。
-     */
-    const missing = Object.entries(ENDFIELD_PACK_NAMES)
-      .filter(([channel]) => !(store.data.settings.endfieldPackChannels || []).includes(channel))
-      .map(([, packName]) => packName);
-    const result = await updateEndfieldPacks({
-      root,
-      only: options.all ? null : missing,
-      onProgress: (progress) => send('endfield:pack-progress', progress),
-    });
-    store.data.settings.endfieldPackRoot = root;
-    refreshPackChannels();
-    await store.saveNow();
-    pushState(true);
-    return { ...result, requested: options.all ? 'all' : 'missing', missingCount: missing.length };
-  });
-
-  ipcMain.handle('endfield:pack-usage', async () => describePackUsage());
-
-  /*
-   * 释放渠道包占的空间。
-   *
-   * 内置包（随安装包分发的那份）默认装在 %LOCALAPPDATA%\Programs 下，是用户自己的
-   * 目录，可以直接删，不需要管理员。删完界面上就是「按需下载」，想要了随时能下回来。
-   * 连带删掉 .state 里的记录：不然 updateProfile 会以为这个包还是最新的，
-   * 重新下载时直接跳过，结果就是「显示能切，实际缺文件」。
-   */
-  ipcMain.handle('endfield:delete-packs', async (_event, options = {}) => {
-    const scope = ['endfield', 'arknights', 'all'].includes(options.scope)
-      ? options.scope
-      : 'endfield';
-    /*
-     * 单渠道释放：管理窗口里每一行都有自己的「释放」，只删那一个目录。
-     * 目录名过一遍白名单再拼路径 —— 这个值来自渲染层，不能直接当路径用。
-     */
-    const allDirs = new Set([...ENDFIELD_PACK_DIRS, ...ARKNIGHTS_PACK_DIRS]);
-    const requested = Array.isArray(options.directories)
-      ? options.directories.filter((name) => allDirs.has(String(name)))
-      : [];
-    const dirs = requested.length
-      ? requested
-      : scope === 'arknights'
-        ? ARKNIGHTS_PACK_DIRS
-        : scope === 'endfield'
-          ? ENDFIELD_PACK_DIRS
-          : [...ENDFIELD_PACK_DIRS, ...ARKNIGHTS_PACK_DIRS];
-    const roots = [endfieldPackWritableRoot(), builtinPackRoot()].filter(Boolean);
-    let freed = 0;
-    const removed = [];
-    for (const root of roots) {
-      for (const name of dirs) {
-        const dir = path.join(root, name);
-        if (!fs.existsSync(dir)) continue;
-        freed += dirSize(dir);
-        await fsp.rm(dir, { recursive: true, force: true });
-        await fsp.rm(path.join(root, '.state', `${name}.json`), { force: true }).catch(() => {});
-        removed.push(name);
-      }
-    }
-    refreshPackChannels();
-    refreshArknightsPackChannels();
-    pushState(true);
-    return { ok: true, freed, removed: Array.from(new Set(removed)) };
-  });
-
-  /*
-   * 明日方舟的两个渠道包。和终末地分开成一条：这两条是照着 Xel-Launcher 的
-   * 清单配的，虽然实测取得到（78.0.0），但还没在真机切服上验证过，
-   * 让用户单独点、单独看结果，不跟着终末地一起静默发生。
-   */
-  ipcMain.handle('arknights:update-packs', async () => {
-    const root = endfieldPackWritableRoot();
-    const results = [];
-    for (const [profile, label] of [
-      [ARKNIGHTS_OFFICIAL_PROFILE, '官服'],
-      [ARKNIGHTS_BILIBILI_PROFILE, 'B服'],
-    ]) {
-      if (!(await verifyArknightsSource(profile))) {
-        results.push({ iconName: profile.iconName, skipped: true, error: '官方接口上没有这份清单' });
-        continue;
-      }
-      try {
-        await updateEndfieldProfile(profile, root, (progress) =>
-          send('endfield:pack-progress', {
-            ...progress,
-            directory: profile.directory,
-            current: `[${label}] ${progress.current || ''}`,
-          })
-        );
-        results.push({ iconName: profile.iconName, skipped: false, updated: true });
-      } catch (error) {
-        results.push({ iconName: profile.iconName, skipped: false, error: error.message });
-      }
-    }
-    refreshPackChannels();
-    pushState(true);
-    return { ok: true, results };
-  });
-
-  ipcMain.handle('endfield:sync-packs', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择 XelLauncher 的 load 文件夹（用于同步渠道包更新）',
-      properties: ['openDirectory'],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    const source = result.filePaths[0];
-    const names = ['EndOfficial', 'EndBilibili', 'EndGlobal', 'EndPlay', 'EndSteam'];
-    const target = path.join(app.getPath('userData'), 'endfield-packs');
-    const stateFile = (root) => path.join(root, '.state');
-    const readState = (root, name) => {
-      try {
-        return JSON.parse(fs.readFileSync(path.join(stateFile(root), `${name}.json`), 'utf8'));
-      } catch {
-        return null;
-      }
-    };
-    const updated = [];
-    const skipped = [];
-    for (const name of names) {
-      const sourceDir = path.join(source, name);
-      if (!fs.existsSync(path.join(sourceDir, 'U8Data'))) continue;
-      const sourceState = readState(source, name);
-      const targetState = readState(target, name);
-      const sourceTime = Date.parse(sourceState?.UpdatedAtUtc || 0) || 0;
-      const targetTime = Date.parse(targetState?.UpdatedAtUtc || 0) || 0;
-      if (
-        fs.existsSync(path.join(target, name, 'U8Data')) &&
-        targetTime >= sourceTime &&
-        targetState?.Version === sourceState?.Version
-      ) {
-        skipped.push(name);
-        continue;
-      }
-      await fsp.rm(path.join(target, name), { recursive: true, force: true });
-      await fsp.cp(sourceDir, path.join(target, name), { recursive: true, force: true });
-      updated.push(name);
-    }
-    if (updated.length) {
-      await fsp.mkdir(stateFile(target), { recursive: true });
-      for (const name of updated) {
-        const state = readState(source, name);
-        if (state) {
-          await fsp.writeFile(
-            path.join(stateFile(target), `${name}.json`),
-            JSON.stringify(state, null, 2),
-            'utf8'
-          );
-        }
-      }
-      store.data.settings.endfieldPackRoot = target;
-      refreshPackChannels();
-      await store.saveNow();
-      pushState(true);
-    }
-    return { ok: true, updated, skipped, path: target };
-  });
-
-  ipcMain.handle('endfield:import-packs', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择 XelLauncher 的 load 文件夹',
-      properties: ['openDirectory'],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    const source = result.filePaths[0];
-    const names = ['EndOfficial', 'EndBilibili', 'EndGlobal', 'EndPlay', 'EndSteam'];
-    const found = names.filter((name) => fs.existsSync(path.join(source, name, 'U8Data')));
-    if (!found.length) throw new Error('这个目录里没有找到 EndOfficial / EndBilibili / EndGlobal 等渠道包');
-    const target = path.join(app.getPath('userData'), 'endfield-packs');
-    await fsp.mkdir(target, { recursive: true });
-    for (const name of found) {
-      await fsp.cp(path.join(source, name), path.join(target, name), {
-        recursive: true,
-        force: true,
-      });
-      /*
-       * 顺手把状态文件带过来：从另一台机器整个 endfield-packs 拷过来的机器，
-       * 差异渠道（国际服 / Play / Steam）靠它证明「这份包是按整套差异下完的」，
-       * 不带过来的话会被判成待下载、白问一遍。
-       */
-      try {
-        await fsp.mkdir(path.join(target, '.state'), { recursive: true });
-        await fsp.cp(
-          path.join(source, '.state', `${name}.json`),
-          path.join(target, '.state', `${name}.json`),
-          { force: true }
-        );
-      } catch {
-        /* XelLauncher 的 load 目录没有状态文件，正常 */
-      }
-    }
-    store.data.settings.endfieldPackRoot = target;
-    refreshPackChannels();
-    await store.saveNow();
-    pushState(true);
-    return { ok: true, imported: found, path: target };
-  });
-
-  /*
-   * 渠道包按需下载（2.5.0）：安装包不再内置这 632 MB，第一次切到某个服时
-   * 由渲染层先问一次「有没有 / 要下多少」，用户点了才下。
-   * 三条 IPC 分开是刻意的：查状态不该顺带下载，下载不该阻塞查状态。
-   */
-  ipcMain.handle('endfield:channel-pack-status', async (_event, input) => {
-    const { game, channel } = input || {};
-    return channelPackStatus(String(game || ''), String(channel || ''));
-  });
-
-  ipcMain.handle('endfield:channel-pack-download', async (_event, input) => {
-    const { game, channel } = input || {};
-    // 进度单独走一条通道：切服时的 busy toast 也在用 endfield:progress，
-    // 两套进度混在一条通道里，界面会收到对方的百分比
-    return downloadChannelPack(String(game || ''), String(channel || ''), (progress) => {
-      if (win && !win.isDestroyed()) win.webContents.send('endfield:pack-progress', progress);
-    });
-  });
-
-  ipcMain.handle('endfield:channel-pack-cancel', async (_event, input) => {
-    const { game, channel } = input || {};
-    return { ok: cancelChannelPack(String(game || ''), String(channel || '')) };
-  });
-
-  /** 设置页「释放空间」：列出现在占了哪些渠道包、各多大。 */
-  ipcMain.handle('endfield:channel-pack-list', async () => {
-    const rows = [];
-    for (const game of ['endfield', 'arknights']) {
-      const channels =
-        game === 'arknights'
-          ? Object.keys(ARKNIGHTS_PACK_CHANNELS)
-          : Object.keys(ENDFIELD_PACK_NAMES);
-      for (const channel of channels) {
-        const spec = channelPackSpec(game, channel);
-        if (!spec) continue;
-        const root = endfieldPackCandidateRoots().find((item) => channelPackReady(spec, item));
-        rows.push({
-          game,
-          channel,
-          directory: spec.directory,
-          label: spec.label,
-          ready: Boolean(root),
-          root: root || '',
-          bytes: root ? dirSize(path.join(root, spec.directory)) : 0,
-        });
-      }
-    }
-    return { ok: true, rows };
-  });
-
-  /**
-   * 切服前的唯一入口：这次切换需不需要先下渠道包、要下多少。
-   *
-   * 只回答「需不需要」（channelPackNeededFor），不下载；
-   * 用户点了弹窗里的下载才走 endfield:channel-pack-download。
-   */
-  ipcMain.handle('servers:channel-pack-plan', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    const server = game && (game.servers || []).find((item) => item.id === input?.serverId);
-    if (!game || !server) return { needed: false };
-    const need = channelPackNeededFor(game, server);
-    if (!need) return { needed: false };
-    const status = await channelPackStatus(need.game, need.channel);
-    if (status.ready) return { needed: false, ready: true };
-    return { needed: true, ...status, serverName: server.name };
-  });
-
-  ipcMain.handle('media:url', async (_event, source) => {
-    const value = String(source || '').trim();
-    if (!value) return '';
-    if (/^https?:\/\//i.test(value)) return value;
-    return pathToFileURL(path.resolve(value)).href;
-  });
-
-  ipcMain.handle('games:add', async (_event, input) => {
-    const game = normalizeGame(input);
-    game.id = crypto.randomUUID();
-    game.createdAt = new Date().toISOString();
-    game.launchCount = 0;
-    game.playSeconds = 0;
-    game.lastPlayed = null;
-    game.demo = false;
-    ensureServers(game);
-    store.data.games.unshift(game);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
-
-let neteaseSession = { apiBase: '', cookie: '' };
 loadSecret('netease')
   .then((raw) => {
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (parsed.cookie) neteaseSession = { apiBase: parsed.apiBase || '', cookie: parsed.cookie };
+    if (parsed.cookie) setNeteaseSession({ apiBase: parsed.apiBase || '', cookie: parsed.cookie });
   })
   .catch(() => {});
 
-function normalizeNeteaseBase(value) {
-  return String(value || 'http://127.0.0.1:3100').trim().replace(/\/+$/, '');
-}
 
-async function neteaseGet(apiBase, route, params = {}) {
-  const base = normalizeNeteaseBase(apiBase);
-  const query = new URLSearchParams({ ...params, timestamp: String(Date.now()) });
-  /*
-   * 把登录 cookie 带上，否则 /login/status 会返回未登录，
-   * /user/playlist 就会是空列表。
-   *
-   * neteaseSession.apiBase 可能是空的（比如从二维码登录后没记下地址，
-   * 或者地址是从 localStorage 默认值推出来的），这时只要有 cookie
-   * 就应该带上 —— 之前这里要求两个地址完全相等，
-   * 结果地址对不上时 cookie 被丢掉，表现就是「歌单是空的」。
-   */
-  if (neteaseSession.cookie) {
-    const saved = normalizeNeteaseBase(neteaseSession.apiBase);
-    if (!neteaseSession.apiBase || saved === base) {
-      query.set('cookie', neteaseSession.cookie);
-    }
-  }
-  const response = await fetch(`${base}${route}?${query.toString()}`, {
-    headers: { 'user-agent': BROWSER_UA, accept: 'application/json' },
-    signal: AbortSignal.timeout(20000),
-  });
-  if (!response.ok) throw new Error(`本地网易云 API HTTP ${response.status}`);
-  const json = await response.json();
-  // 拿到不属于网易云 API 的响应时早点报错，别让界面显示成「歌单是空的」
-  if (!looksLikeNeteaseApi(json)) {
-    throw new Error(
-      `本地 API 地址 ${base} 上跑的不是网易云服务（可能是别的程序占用了这个端口），请在登录窗口里换一个端口`
-    );
-  }
-  return json;
-}
 
 /**
  * 判断某个地址上跑的是不是一个真正的 NeteaseCloudMusicApi。
@@ -11120,53 +9772,7 @@ async function neteaseGet(apiBase, route, params = {}) {
  * 特征是：code 在 data 里、account 嵌在 data 下、账号对象带 anonimousUser 之类的字段。
  * 别的服务很难同时长成这样，所以用「形状」而不是「有没有 code」来判别。
  */
-function looksLikeNeteaseApi(json) {
-  if (!json || typeof json !== 'object') return false;
-  // snowluma 之类的失败响应
-  if (json.status === 'failed' || json.retcode !== undefined) return false;
 
-  // 典型形状：data.code + data.account
-  const data = json.data;
-  if (data && typeof data === 'object') {
-    const code = Number(data.code);
-    if (Number.isFinite(code)) {
-      // 未登录时 account 为空、只有 code
-      const account = data.account;
-      if (!account) return code === 200 || code === 301;
-      if (typeof account !== 'object') return false;
-      // 账号对象必须带网易云特征字段
-      return (
-        account.id !== undefined &&
-        ('anonimousUser' in account ||
-          'whitelistAuthority' in account ||
-          'tokenVersion' in account ||
-          'baoyueVersion' in account)
-      );
-    }
-  }
-
-  /*
-   * 其余接口（playlist / search 等）直接返回顶层 code。
-   * 这里故意不接受「顶层 code + 顶层 account」：
-   * /login/status 的真响应一定有 data 包装，而没有 data 包装、
-   * 却带着顶层 account 的，正是 snowluma 那一类冒牌服务。
-   */
-  const topCode = Number(json.code);
-  if (Number.isFinite(topCode) && !('account' in json)) return true;
-
-  return false;
-}
-
-async function probeNeteaseApi(base, timeout = 1200) {
-  try {
-    const response = await fetch(`${base}/login/status`, { signal: AbortSignal.timeout(timeout) });
-    if (!response.ok) return false;
-    const json = await response.json().catch(() => null);
-    return looksLikeNeteaseApi(json);
-  } catch {
-    return false;
-  }
-}
 
 /*
  * 点歌预热入口挂到 globalThis：did-finish-load 的 3 秒预热在个别环境下运行于
@@ -11175,103 +9781,9 @@ async function probeNeteaseApi(base, timeout = 1200) {
  */
 globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()).catch(() => {});
 
-async function startNeteaseService(apiBase) {
-  const base = normalizeNeteaseBase(apiBase);
-  if (await probeNeteaseApi(base)) return { started: false, apiBase: base, running: true };
-  const candidates = [
-    path.join(app.getPath('userData'), 'NeteaseCloudMusicApi'),
-    path.join(app.getPath('userData'), 'netease-api'),
-    path.join(process.env.USERPROFILE || '', 'NeteaseCloudMusicApi'),
-    path.join(process.cwd(), 'NeteaseCloudMusicApi'),
-    path.join(process.resourcesPath || '', 'NeteaseCloudMusicApi'),
-    path.join(process.resourcesPath || '', 'netease-api'),
-    path.join(app.getAppPath(), 'netease-api'),
-  ];
-  for (const dir of candidates) {
-    const entry = ['app.js', 'server.js', 'index.js']
-      .map((name) => path.join(dir, name))
-      .find((file) => fs.existsSync(file));
-    if (!entry) continue;
-    const port = new URL(base).port || '3000';
-    neteaseServiceProcess = spawn(process.execPath, [entry], {
-      cwd: dir,
-      windowsHide: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: '1',
-        PORT: port,
-        HOST: '127.0.0.1',
-      },
-    });
-    neteaseServiceProcess.unref();
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      if (await probeNeteaseApi(base, 1000)) return { started: true, apiBase: base, running: true };
-    }
-    throw new Error(
-      `本地服务已启动，但还没有响应（端口 ${port}）。如果这个端口被其它程序占用，请换一个端口再试`
-    );
-  }
-  throw new Error(
-    '没有找到 NeteaseCloudMusicApi。请把它下载到启动器数据目录下的 NeteaseCloudMusicApi 文件夹，或手动运行后填写地址。'
-  );
-}
 
 /** 一次查多少个播放地址：太多 id 拼在 URL 里会被本地 API 拒。 */
-const NETEASE_URL_BATCH = 200;
 
-  ipcMain.handle('media:netease-playlist', async (_event, input) => {
-    const apiBase = String(input?.apiBase || 'http://127.0.0.1:3100').replace(/\/+$/, '');
-    const rawUrl = String(input?.url || '');
-    const match = rawUrl.match(/(?:playlist\?id=|\/playlist\/)(\d+)/i) || rawUrl.match(/id=(\d+)/);
-    const playlistId = match?.[1];
-    if (!playlistId) throw new Error('没有识别出网易云歌单 ID，请粘贴完整歌单链接');
-    const detail = await neteaseGet(apiBase, '/playlist/detail', { id: playlistId });
-    const playlist = detail.playlist || detail.result?.playlist;
-    const tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
-    if (!tracks.length) throw new Error('歌单里没有歌曲，或本地 API 未登录/不可用');
-    /*
-     * 以前这里写的是 tracks.slice(0, 100)：不管歌单多少首都只导前 100 首，
-     * 用户贴个八百首的链接进来，队列里还是 100 首 —— 这就是「只能拿到 100 首」的来源。
-     * 现在整单全导，URL 查询按批切分（一次送上千个 id 会把请求撑爆）。
-     */
-    const level = input?.level || 'exhigh';
-    const urlMap = new Map();
-    for (let start = 0; start < tracks.length; start += NETEASE_URL_BATCH) {
-      const ids = tracks.slice(start, start + NETEASE_URL_BATCH).map((track) => track.id);
-      let urlJson = null;
-      try {
-        urlJson = await neteaseGet(apiBase, '/song/url/v1', { id: ids.join(','), level });
-      } catch {
-        urlJson = await neteaseGet(apiBase, '/song/url', { id: ids.join(',') });
-      }
-      for (const item of urlJson?.data || []) {
-        urlMap.set(String(item.id), { url: item.url, quality: item.level || level });
-      }
-    }
-    const songs = [];
-    for (const track of tracks) {
-      const info = urlMap.get(String(track.id));
-      if (!info?.url) continue;
-      const artists = (track.ar || track.artists || []).map((item) => item.name).filter(Boolean);
-      songs.push({
-        title: track.name,
-        artist: artists.join(' / '),
-        cover: String(track.al?.picUrl || track.album?.picUrl || '').replace(/^http:/i, 'https:'),
-        neteaseId: track.id,
-        quality: info.quality,
-        url: info.url,
-      });
-    }
-    return {
-      ok: true,
-      playlist: playlist.name || '网易云歌单',
-      total: tracks.length,
-      songs,
-      skipped: tracks.length - songs.length,
-    };
-  });
 
   ipcMain.handle('netease:service-start', async (_event, apiBase) => startNeteaseService(apiBase));
 
@@ -11280,74 +9792,18 @@ const NETEASE_URL_BATCH = 200;
  * 弹幕点歌 / 音质切换这些不走 music:resolve 的路径也要认这份开关，
  * 否则「停用酷我」只管住了换源竞速，管不住 unblock 兜底。
  */
-function currentMusicSourceFlags() {
-  return Object.assign(
-    { netease: true, migu: true, kuwo: false, kugou: false, qq: false },
-    normalizeSourceFlags(store?.data?.settings?.musicSources) || {}
-  );
-}
 
 /**
  * 跨平台兜底的 flags 感知版：在酷狗 / QQ 上找同名同歌手的免费那一份。
  * 替代 music-platforms.js 的 resolveFallbackUrl——那个写死了两家都试，
  * 没法按音源开关跳过，谁被停用了就整条跳过。
  */
-async function crossSourceFallbackUrl(title, artist, flags) {
-  const name = String(title || '').trim();
-  if (!name) throw new Error('没有歌名，无法换源');
-  const keyword = `${name} ${String(artist || '').split('/')[0].trim()}`.trim();
-  const tried = [];
-  const wants = { title: name, artist: String(artist || '') };
-  const tries = [];
-  if (flags.kugou !== false) {
-    tries.push([
-      '酷狗',
-      async () => {
-        const best = pickBest(await kugouSearch(keyword, 5), wants);
-        if (!best) throw new Error('没搜到同名曲');
-        if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
-        const info = await kugouSongUrl(best.hash);
-        return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
-      },
-    ]);
-  }
-  if (flags.qq !== false) {
-    tries.push([
-      'QQ 音乐',
-      async () => {
-        const best = pickBest(await qqSearch(keyword, 5), wants);
-        if (!best) throw new Error('没搜到同名曲');
-        if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
-        const info = await qqSongUrl(best.mid);
-        return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
-      },
-    ]);
-  }
-  if (!tries.length) throw new Error('酷狗和 QQ 音乐音源都已被停用');
-  for (const [label, run] of tries) {
-    try {
-      return await run();
-    } catch (error) {
-      tried.push(`${label}：${error.message}`);
-    }
-  }
-  throw new Error(tried.join('；') || '没有可用的替代音源');
-}
 
 /**
  * 内置 API 自带的换源：`/song/url/match` 会用 unblockmusic-utils
  * 去别的平台匹配同一首歌的完整音源（会员曲目也能拿到全长）。
  * 拿不到就返回空串，交给上层继续降级。
  */
-async function neteaseMatchUrl(apiBase, id) {
-  try {
-    const json = await neteaseGet(apiBase, '/song/url/match', { id });
-    const url = typeof json?.data === 'string' ? json.data : '';
-    return url ? String(url).replace(/^http:/i, 'https:') : '';
-  } catch {
-    return '';
-  }
-}
 
 /**
  * 取一首歌的播放地址，会员曲目也尽量让它能放。
@@ -11359,131 +9815,6 @@ async function neteaseMatchUrl(apiBase, id) {
  *   4. 酷狗 / QQ 音乐上同名同歌手的免费那一份；
  *   5. 都不行才报错，并把原因说清楚。
  */
-async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
-  const allowed = new Set(['standard', 'higher', 'exhigh', 'lossless', 'hires']);
-  const wanted = allowed.has(String(level)) ? String(level) : 'exhigh';
-  const ladder = [...new Set([wanted, 'exhigh', 'higher', 'standard'])];
-  let trial = null;
-  // 音源开关：网易云被停用时，原生直链和 unblock 换源都不走，只留跨平台兜底
-  const flags = meta.flags || currentMusicSourceFlags();
-  const neteaseAllowed = flags.netease !== false;
-
-  for (const quality of neteaseAllowed ? ladder : []) {
-    let json = null;
-    try {
-      json = await neteaseGet(apiBase, '/song/url/v1', { id, level: quality });
-    } catch {
-      try {
-        json = await neteaseGet(apiBase, '/song/url', { id });
-      } catch {
-        json = null;
-      }
-    }
-    const item = json?.data?.[0];
-    if (!item?.url) continue;
-    // unblock 可能把地址换成被停用平台的直链，撞上就当这条音质没拿到
-    if (disabledSourceOfUrl(item.url, flags)) continue;
-    const payload = {
-      url: String(item.url),
-      level: String(item.level || quality),
-      br: Number(item.br) || 0,
-      size: Number(item.size) || 0,
-      type: String(item.type || ''),
-    };
-    // 会员曲目在非会员账号下只会给一段试听，先留着当兜底
-    if (item.freeTrialInfo) {
-      if (!trial) trial = { ...payload, trial: true };
-      continue;
-    }
-    return payload;
-  }
-
-  // 2) 换源：拿到完整音源就不必再降级（match 结果同样按开关过滤）
-  if (neteaseAllowed) {
-    const matched = await neteaseMatchUrl(apiBase, id);
-    if (matched && !disabledSourceOfUrl(matched, flags)) {
-      return { url: matched, level: 'standard', br: 0, size: 0, type: 'flac', unblocked: true };
-    }
-  }
-
-  const title = String(meta.title || '').trim();
-  const artist = String(meta.artist || '').trim();
-
-  /*
-   * 3) 同一个歌名的其它版本（重制 / 现场 / 翻唱）通常没有版权限制。
-   *    只按歌名搜出来的列表里混着同名不同曲和别人的翻唱，以前是「第一个能播的就用」，
-   *    于是会出现「点了这首、放的是另一首」还毫无提示。先按同歌名 + 同歌手筛一遍。
-   */
-  if (neteaseAllowed && title) {
-    try {
-      const search = await neteaseGet(apiBase, '/search', { keywords: `${title} ${artist}`.trim(), limit: 8, type: 1 });
-      const list = (search?.result?.songs || []).filter(
-        (song) =>
-          song?.id &&
-          String(song.id) !== String(id) &&
-          sameSongEnough(
-            title,
-            artist,
-            song.name,
-            (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / ')
-          )
-      );
-      for (const song of list) {
-        if (!song?.id || String(song.id) === String(id)) continue;
-        try {
-          const alt = await neteaseGet(apiBase, '/song/url/v1', { id: song.id, level: 'standard' });
-          const item = alt?.data?.[0];
-          if (!item?.url || item.freeTrialInfo || disabledSourceOfUrl(item.url, flags)) continue;
-          return {
-            url: String(item.url),
-            level: String(item.level || 'standard'),
-            br: Number(item.br) || 0,
-            size: Number(item.size) || 0,
-            type: String(item.type || ''),
-            // 带上实际用的这份的歌名 / 歌手：渲染层换源后还要再核一次身份
-            // （用 matchedTitle/Artist，别覆盖 title/artist，否则队列里的歌名会被换掉）
-            matchedTitle: String(song.name || title),
-            matchedArtist: (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / '),
-            altOf: {
-              id: song.id,
-              title: String(song.name || ''),
-              artist: (song.ar || song.artists || []).map((a) => a.name).filter(Boolean).join(' / '),
-            },
-          };
-        } catch {
-          /* 换下一个版本 */
-        }
-      }
-    } catch {
-      /* 搜索失败就走跨平台 */
-    }
-  }
-
-  // 4) 酷狗 / QQ 音乐上免费的那一份（谁被停用就跳过谁）
-  if (title) {
-    try {
-      const alt = await crossSourceFallbackUrl(title, artist, flags);
-      return {
-        url: alt.url,
-        level: 'standard',
-        br: alt.br || 0,
-        size: 0,
-        type: '',
-        // 换到酷狗 / QQ 的那份：歌名歌手单独放 matched* 上，渲染层据此核「还是不是这首」
-        matchedTitle: alt.title || title,
-        matchedArtist: alt.artist || artist,
-        otherSource: { source: alt.source, matched: alt.matched || '' },
-      };
-    } catch {
-      /* 两家都要付费，落到最后统一报错 */
-    }
-  }
-
-  // 5) 实在没有完整音源，就把 30 秒试听给他，别让播放器干站着
-  if (neteaseAllowed && trial) return trial;
-
-  throw new Error('这首歌是会员专享，暂时没有可播放的音源；登录有会员的账号后即可完整播放');
-}
 
   ipcMain.handle('netease:search-song', async (_event, input) => {
     const apiBase = normalizeNeteaseBase(input?.apiBase);
@@ -11525,2078 +9856,25 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     });
   });
 
-  ipcMain.handle('live:bili-room', async (_event, input) => {
-    const raw = String(input?.url || input || '');
-    return resolveLiveRoom(raw);
+  installLiveIpc({
+    writeLaunchLog,
   });
 
-  /*
-   * 斗鱼 / 虎牙 / 抖音 / 快手 的弹幕抓取。
-   *
-   * 用一个隐藏窗口加载直播间网页，只读聊天区文字（见 electron/live-danmaku.js）。
-   * 渲染层每 900ms 拉一次新弹幕，断开时调 stop 关掉窗口。
-   */
-  ipcMain.handle('live:danmaku-start', async (_event, input) => startDanmaku(input));
-  ipcMain.handle('live:danmaku-poll', async (_event, id) => pollDanmaku(id));
-  ipcMain.handle('live:danmaku-stop', async (_event, id) => stopDanmaku(id));
-
-  /*
-   * B 站弹幕鉴权：官方 WebSocket 现在要求 auth 包里带 getDanmuInfo 发的
-   * token（key 字段），不带 key 服务器照样接受连接（界面显示"已连接"），
-   * 但一条弹幕都不会推——正是"连接成功、观众点歌没反应"的原因。
-   * 放主进程走 net.fetch：没有 CORS 限制，还能带上默认会话里的 B 站 cookie。
-   */
-  /*
-   * B 站风控(-352)：getDanmuInfo 只给"看起来像正常浏览器"的请求发鉴权 token，
-   * 判断依据主要是 cookie 里有没有 buvid3/buvid4。启动器会话里从没有过 B 站
-   * cookie 的用户就会被拦。这里主动领一对写进会话 cookie，让整个会话从此
-   * 都以"带身份的浏览器"身份请求 B 站（写一次，长期有效）。
-   */
-  const BILI_UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-  async function ensureBiliBuvid() {
-    const jar = session.defaultSession;
-    const existing = await jar.cookies.get({ url: 'https://live.bilibili.com/' });
-    if (existing.some((c) => c.name === 'buvid3')) return;
-    const spi = await fetch('https://api.bilibili.com/x/frontend/finger/spi', {
-      headers: { 'User-Agent': BILI_UA, Referer: 'https://www.bilibili.com/' },
-    })
-      .then((r) => r.json())
-      .catch(() => null);
-    const b3 = spi?.data?.b_3;
-    if (!b3) return;
-    const expires = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
-    await jar.cookies.setCookie({
-      url: 'https://www.bilibili.com/',
-      name: 'buvid3',
-      value: b3,
-      domain: '.bilibili.com',
-      path: '/',
-      secure: true,
-      expirationDate: expires,
-    });
-    if (spi?.data?.b_4) {
-      await jar.cookies.setCookie({
-        url: 'https://www.bilibili.com/',
-        name: 'buvid4',
-        value: spi.data.b_4,
-        domain: '.bilibili.com',
-        path: '/',
-        secure: true,
-        expirationDate: expires,
-      });
-    }
-  }
-
-  /*
-   * 走 Chromium 网络栈并自动携带会话 cookie 的 GET。
-   * 之前用 undici 的 fetch：手动拼 Cookie 头会被当"禁止头"剥掉，
-   * 会话里的 buvid/登录态根本发不出去。
-   */
-  function biliFetchText(url, referer) {
-    return new Promise((resolve, reject) => {
-      const request = net.request({ url, method: 'GET', useSessionCookies: true });
-      request.setHeader('User-Agent', BILI_UA);
-      request.setHeader('Referer', referer);
-      request.on('response', (response) => {
-        const chunks = [];
-        response.on('data', (chunk) => chunks.push(chunk));
-        response.on('end', () =>
-          resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') })
-        );
-      });
-      request.on('error', reject);
-      request.end();
-    });
-  }
-
-  /*
-   * 取一个 B 站接口的 JSON：先走 Chromium 栈，被拦了自动回落 Node 栈。
-   * accept 用来判断"这份结果算不算拿到"，默认是 code===0。
-   */
-  async function biliGetJson(url, referer, accept) {
-    const good = accept || ((parsed) => parsed?.code === 0);
-    let detail = '';
-    let json = null;
-    // 路线一：Chromium 网络栈，自动带会话 cookie，TLS 指纹与真实浏览器一致
-    try {
-      const { status, body } = await biliFetchText(url, referer);
-      detail = `HTTP ${status}`;
-      try {
-        json = JSON.parse(body);
-        if (good(json)) return { json, detail };
-      } catch {
-        json = null;
-        detail += `，返回的不是 JSON：${body.slice(0, 60)}`;
-      }
-    } catch (error) {
-      detail = `Chromium 请求失败：${error.message}`;
-    }
-    /*
-     * 路线二：Node fetch + 手动 Cookie。用户的系统级拦截软件（AdGuard 之类）
-     * 会把 Chromium 栈的请求挡成 ERR_BLOCKED_BY_CLIENT，这时走 Node 的
-     * 网络栈绕开它；undici 允许显式带 Cookie 头，会话里的 buvid/登录态照样能用。
-     */
-    try {
-      const jarCookies = await session.defaultSession.cookies.get({ url }).catch(() => []);
-      const cookie = jarCookies.map((c) => `${c.name}=${c.value}`).join('; ');
-      const res = await fetch(url, {
-        headers: {
-          'User-Agent': BILI_UA,
-          Referer: referer,
-          ...(cookie ? { Cookie: cookie } : {}),
-        },
-      });
-      const body = await res.text();
-      detail += `；Node 备用路线 HTTP ${res.status}`;
-      try {
-        const parsed = JSON.parse(body);
-        if (parsed && typeof parsed === 'object') json = parsed;
-      } catch {
-        detail += `，非 JSON：${body.slice(0, 60)}`;
-      }
-    } catch (error) {
-      detail += `；Node 备用路线失败：${error.message}`;
-    }
-    return { json, detail };
-  }
-
-  /*
-   * WBI 签名：B 站给一批 web 接口加的风控，getDanmuInfo 就在其中。
-   *
-   * -352 的根因：请求里的 w_rid 算错。w_rid = md5(排序后的 query + mixinKey)，
-   * 而 mixinKey 来自一份 64 位的置换表（WBI_MIXIN_TAB）。这份表以前在 idx40 之后
-   * 是错的，于是无论登录与否、带不带 buvid，签名永远不对，B 站一律回 -352，
-   * 文案一直让用户"去登录"，登录完照样 -352。已用探针逐位对照官方算法校正为规范表，
-   * 实测：不带 cookie 只带签名即可 code=0 拿到 token。
-   *
-   * 密钥（img_key / sub_key）从 x/web-interface/nav 的 wbi_img 里取，
-   * 未登录也能拿到，服务端会轮换，这里缓存 30 分钟。
-   */
-  // 注意：这是 B 站官方公开的规范 mixin 置换表（64 位）。之前这份表在 idx40 之后是错的，
-  // 导致 w_rid 算错、getDanmuInfo 永远回 -352（签名未通过）。已用探针对照官方算法逐位校正。
-  const WBI_MIXIN_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
-    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
-    26, 17, 0, 11, 60, 20, 21, 56, 34, 44, 52, 22, 36, 1, 63, 59, 57, 54, 62, 6,
-    4, 30, 25, 51,
-  ];
-  let biliWbiKeysCache = null;
-
-  function biliMixinKey(imgKey, subKey) {
-    const raw = `${imgKey}${subKey}`;
-    return WBI_MIXIN_TAB.map((index) => raw[index]).join('').slice(0, 32);
-  }
-
-  function biliWbiQuery(params, imgKey, subKey) {
-    const wbiEncode = (text) =>
-      encodeURIComponent(text).replace(/[!'()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
-    const signed = { ...params, wts: Math.floor(Date.now() / 1000) };
-    const query = Object.keys(signed)
-      .sort()
-      .map((key) => `${wbiEncode(key)}=${wbiEncode(String(signed[key]))}`)
-      .join('&');
-    const wRid = crypto
-      .createHash('md5')
-      .update(query + biliMixinKey(imgKey, subKey))
-      .digest('hex');
-    return `${query}&w_rid=${wRid}`;
-  }
-
-  async function biliWbiKeys(force) {
-    if (!force && biliWbiKeysCache && Date.now() - biliWbiKeysCache.at < 30 * 60 * 1000) {
-      return biliWbiKeysCache;
-    }
-    // nav 未登录时回 -101，但 wbi_img 照样给，所以这里按"有没有 wbi_img"算成功
-    const { json } = await biliGetJson(
-      'https://api.bilibili.com/x/web-interface/nav',
-      'https://www.bilibili.com/',
-      (parsed) => Boolean(parsed?.data?.wbi_img?.img_url && parsed?.data?.wbi_img?.sub_url)
-    );
-    const imgUrl = json?.data?.wbi_img?.img_url;
-    const subUrl = json?.data?.wbi_img?.sub_url;
-    if (!imgUrl || !subUrl) throw new Error('拿不到B站签名密钥，稍后重试');
-    biliWbiKeysCache = {
-      imgKey: String(imgUrl).split('/').pop().split('.')[0],
-      subKey: String(subUrl).split('/').pop().split('.')[0],
-      at: Date.now(),
-    };
-    return biliWbiKeysCache;
-  }
-
-  ipcMain.handle('live:danmu-info', async (_event, roomId) => {
-    const info = await getBiliDanmuInfo(roomId);
-    const first = info.hosts[0] || {};
-    return {
-      token: info.token,
-      host: String(first.host || ''),
-      port: Number(first.port || 443),
-      hosts: info.hosts,
-    };
+  installMusicIpc({
+    store,
+    pushState,
+    playlistCache,
+    slimCachedPlaylists,
+    PLAYLIST_CACHE_PLATFORMS,
+    BROWSER_UA,
+    MUSIC_LOGIN_PRELOAD,
+    // 重构拆分时漏掉的依赖
+    getMainWindow: () => win,
+    clearMusicResolveCache,
+    fetchSourceLyric,
+    musicLooksExpired,
   });
 
-  /*
-   * 弹幕 WebSocket 迁到主进程（根治渲染层长连接被本机网络层掐断的问题）。
-   * 渲染层只负责：发 live:danmu-connect(token+hosts) / 收 live:danmu-event。
-   * 真正建连、鉴权、心跳、断线重连、服务器轮换、token 刷新全在这里（Node 栈，
-   * 实测 95 秒以上稳定，不再受 Chromium 出站长连接约 70 秒被掐的限制）。
-   */
-  const zlib = require('zlib');
-  const WS = globalThis.WebSocket || WebSocket;
-  const biliDanmuConnections = new Map();
-
-  /*
-   * 组2：B 站弹幕「老捕捉不到 / 过一会就断」的稳定性修复参数。
-   * 以前 open 回调一触发就发 open 事件当「已连接」，但服务器可能只是接受了 TCP
-   * 握手、根本没推数据；也没有读超时，长连接变僵尸后永远等不到重连。
-   */
-  const BILI_FRAME_TIMEOUT = 60000;     // 60s 没收到任意帧（含 op=3 心跳回应）视为僵尸连接
-  const BILI_WATCHDOG_TICK = 15000;     // watchdog 每 15s 巡检一次
-  const BILI_FIRST_DANMU_WAIT = 15000;  // 真连上后若这段时间仍无弹幕，只给一句「房间较安静」提示（不重连）
-  const BILI_RECONNECT_BASE = 3000;     // 指数退避基数
-  const BILI_RECONNECT_MAX = 60000;     // 退避上限
-  const BILI_DECODE_LOG_LIMIT = 5;      // 解码失败日志按连接限流，别刷屏
-  const BILI_DANMU_LOG_LIMIT = 20;      // 弹幕落日志前 20 条（原来只记 5 条）
-
-  // 判断这个 state 是不是「当前仍挂在 Map 上、且没被用户主动关掉」的连接。
-  // 同 roomId 重连/重连替换时，旧 state 的异步回调靠这个判断避免误伤新连接。
-  function biliIsCurrent(state) {
-    return Boolean(state) && !state.closedByUser && biliDanmuConnections.get(state.roomId) === state;
-  }
-
-  // 统一删除：先清掉全部定时器，且只删「自己」，避免旧连接把新连接从 Map 里挤掉。
-  function biliRemoveConnection(state) {
-    biliClearAllTimers(state);
-    if (biliDanmuConnections.get(state.roomId) === state) biliDanmuConnections.delete(state.roomId);
-  }
-
-  // 限流日志：同一 state 同一 kind 最多写 limit 条，最后一条附带「已限流」说明。
-  function biliLogLimited(state, kind, limit, message) {
-    if (!state || !state.logCounts) return;
-    const key = String(kind);
-    const seen = state.logCounts[key] || 0;
-    if (seen >= limit) return;
-    state.logCounts[key] = seen + 1;
-    writeLaunchLog(seen + 1 === limit ? `${message}（后续同类日志已限流省略）` : message);
-  }
-
-  // 清掉「单条 ws 连接」的定时器（换 host / 断开时用）；reconnectTimer 是跨重连的，不动。
-  function biliClearWsTimers(state) {
-    if (state.heartbeat) { clearInterval(state.heartbeat); state.heartbeat = null; }
-    if (state.watchdog) { clearInterval(state.watchdog); state.watchdog = null; }
-    if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
-  }
-
-  // 连接彻底删除时把所有定时器都清掉，避免后台重试 / watchdog 泄漏。
-  function biliClearAllTimers(state) {
-    biliClearWsTimers(state);
-    if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
-  }
-
-  // 第 n 次重连的退避：3s、6s、12s、24s、48s、60s、60s…
-  function biliBackoff(tries) {
-    return Math.min(BILI_RECONNECT_BASE * Math.pow(2, Math.max(0, tries - 1)), BILI_RECONNECT_MAX);
-  }
-
-  /*
-   * 统一的「断线 -> 后台重连」入口：指数退避 + 长期重试，不再有「重连 3 次就彻底 closed」。
-   * 候选 host 全耗尽、被踢、1006、watchdog 超时都走这里，由 biliReconnect 重取 token 重来一轮。
-   */
-  function biliScheduleReconnect(state, code, opts = {}) {
-    if (state.closedByUser || !biliIsCurrent(state) || state.reconnectArmed) return;
-    // 先置 armed 再 close：下面 ws.close() 会在下一轮异步触发 onDrop，
-    // 不能让它又排一次重连、更不能让它误去连下一个 host。
-    state.reconnectArmed = true;
-    // closeWs=false 用于 watchdog 这类「调用方已自己 close」的场景，避免重复关。
-    if (opts.closeWs !== false) { try { state.ws && state.ws.close(); } catch {} }
-    biliClearWsTimers(state);
-    state.connected = false;
-    state.forceToken = true;   // 异常断开：下次 biliReconnect 一律强制重取 token
-    const tries = (state.retryCount || 0) + 1;
-    state.retryCount = tries;
-    state.lastRetryAt = Date.now();
-    const delay = biliBackoff(tries);
-    if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
-    writeLaunchLog(`danmu ${state.roomId}: 连接断开（code ${code ?? '未知'}），第 ${tries} 次重连，${Math.round(delay / 1000)}s 后重试`);
-    safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'reconnecting', tries, code, delayMs: delay });
-    // 保留原有 1006 / 被踢提示文案，只是从「彻底 closed」改成后台重连期间的状态提示
-    const statusText = opts.status || (code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : undefined);
-    if (statusText) {
-      safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'status', status: statusText });
-    }
-    state.reconnectTimer = setTimeout(() => {
-      state.reconnectTimer = null;
-      state.reconnectArmed = false;
-      biliReconnect(state);
-    }, delay);
-  }
-
-  // 取弹幕鉴权：与 live:danmu-info 共用同一套 wbi 签名逻辑，重连时主进程自己取，不绕回渲染层。
-  async function getBiliDanmuInfo(roomId) {
-    const id = String(roomId || '').trim();
-    if (!id) throw new Error('没有房间号');
-    await ensureBiliBuvid().catch(() => {});
-    const referer = `https://live.bilibili.com/${id}`;
-    let json = null;
-    let detail = '';
-    for (let attempt = 0; attempt < 2 && json?.code !== 0; attempt += 1) {
-      const { imgKey, subKey } = await biliWbiKeys(attempt > 0);
-      const url = `https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?${biliWbiQuery(
-        { id, type: 0 },
-        imgKey,
-        subKey
-      )}`;
-      const result = await biliGetJson(url, referer);
-      json = result.json;
-      detail = result.detail;
-    }
-    if (json?.code !== 0 || !json?.data?.token) {
-      const message = String(json?.message || '');
-      throw new Error(
-        message === '-352'
-          ? `被B站风控拦截(-352)，接口签名未通过（${detail || '原因不明'}）`
-          : `${message || '弹幕鉴权获取失败'}（${detail || '原因不明'}）`
-      );
-    }
-    const hosts = (json.data.host_list || [])
-      .map((item) => ({ host: String(item?.host || ''), port: Number(item?.wss_port || item?.ws_port || 443) }))
-      .filter((item) => item.host);
-    return { token: String(json.data.token), hosts };
-  }
-
-  function biliBuildWsUrls(hosts) {
-    const list = [];
-    const seen = new Set();
-    const push = (host, port) => {
-      const h = String(host || '').trim();
-      const p = Number(port) || 443;
-      if (!h) return;
-      const key = `${h}:${p}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      list.push(`wss://${h}:${p}/sub`);
-    };
-    for (const item of hosts || []) {
-      push(item && item.host, 443);
-      push(item && item.host, item && item.port);
-    }
-    push('broadcastlv.chat.bilibili.com', 443);
-    return list;
-  }
-
-  function biliPacketMain(value, operation = 7) {
-    const body = Buffer.from(JSON.stringify(value), 'utf8');
-    const buffer = Buffer.alloc(16 + body.length);
-    buffer.writeUInt32BE(16 + body.length, 0);
-    buffer.writeUInt16BE(16, 4);
-    buffer.writeUInt16BE(1, 6);
-    buffer.writeUInt32BE(operation, 8);
-    buffer.writeUInt32BE(1, 12);
-    body.copy(buffer, 16);
-    return buffer;
-  }
-
-  function safeSend(sender, channel, payload) {
-    try {
-      if (sender && !sender.isDestroyed()) sender.send(channel, payload);
-    } catch {
-      /* webContents 已销毁 */
-    }
-  }
-
-  /*
-   * 主进程的 WebSocket 是 Electron 暴露的 DOM 风格实现：用 addEventListener 注册事件，
-   * 不是 Node 的 ws 包（ws 包才有 .on）。为了不依赖具体版本，这里做个兼容：
-   * 优先 addEventListener；万一某版本暴露的是 ws 风格就退回 .on。
-   * message 事件：addEventListener 给的是 {data}，ws 风格直接给 data；
-   * close 事件：addEventListener 给的是 {code}，ws 风格直接给 code。都归一化一下。
-   */
-  function wsOn(ws, name, handler) {
-    if (typeof ws.addEventListener === 'function') {
-      ws.addEventListener(name, (event) => {
-        if (name === 'message') return handler(event && event.data !== undefined ? event.data : event);
-        if (name === 'close') return handler(event && event.code !== undefined ? event.code : event);
-        return handler(event);
-      });
-    } else {
-      ws.on(name, handler);
-    }
-  }
-
-  // 只有服务器回了 op=8（确认 auth 包）才算「真连上」：发 open 事件、置 connected。
-  // 空 key 的连接即使握手成功也拿不到 op=8，所以旧版那种「已连接（未取得弹幕鉴权）」
-  // 的假状态不会再出现；握手成功但迟迟不推数据则由 watchdog 兜底。
-  function biliMarkReallyConnected(state) {
-    if (state.connected) return;
-    state.connected = true;
-    // 已经拿到首条弹幕，别再让「等首条弹幕」的超时器误触发换线路
-    if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
-    // 真正稳定收到弹幕后重置退避计数（只在成功的这一刻清零，不再按「>5 分钟」丢计数）
-    state.retryCount = 0;
-    state.lastRetryAt = 0;
-    biliLogLimited(state, 'really-connected', BILI_DECODE_LOG_LIMIT,
-      `danmu ${state.roomId}: 已确认真实连上（收到首条弹幕），重连计数清零`);
-    safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'open', status: '已连接' });
-  }
-
-  function biliDecodeMain(buf, roomId, sender, state) {
-    let offset = 0;
-    while (offset + 16 <= buf.length) {
-      const total = buf.readUInt32BE(offset);
-      const header = buf.readUInt16BE(offset + 4);
-      const version = buf.readUInt16BE(offset + 6);
-      const operation = buf.readUInt32BE(offset + 8);
-      if (!total || total > buf.length - offset) break;
-      // 只要进了这个循环就是「收到了一帧」：刷新 watchdog 的读时间戳。
-      state.lastFrameAt = Date.now();
-      const body = buf.subarray(offset + header, offset + total);
-      if (operation === 8) {
-        // 服务器确认 auth 包：空 key / 被风控的连接永远收不到 op=8（配合 connect 处的空 token 拦截），
-        // 所以拿到它才算「真连上」——不会再出现「已连接（未取得弹幕鉴权）」那种一条弹幕都没有的假状态。
-        safeSend(sender, 'live:danmu-event', { roomId, type: 'pushing' });
-        biliMarkReallyConnected(state);
-        // 安静直播间可能几分钟都没弹幕：只给一句提示，绝不因「没弹幕」就换线路重连
-        // （旧版 15 秒强制重连反而制造「过一会就断」）。真正的僵尸连接交给 watchdog。
-        if (!state.waitFirstDanmuTimer) {
-          state.waitFirstDanmuTimer = setTimeout(() => {
-            state.waitFirstDanmuTimer = null;
-            if (state.connected && biliIsCurrent(state) && state.captured === 0) {
-              safeSend(sender, 'live:danmu-event', { roomId, type: 'status', status: '已连上，房间暂时没有弹幕' });
-            }
-          }, BILI_FIRST_DANMU_WAIT);
-        }
-      } else if (operation === 3) {
-        // 心跳回应 / 人气包：服务器还活着，刷新读时间戳（watchdog 已统一刷新），不必解析内容。
-      } else if (operation === 5) {
-        if (version === 2 || version === 3) {
-          try {
-            const inflated = version === 3 ? zlib.brotliDecompressSync(body) : zlib.inflateSync(body);
-            biliDecodeMain(inflated, roomId, sender, state);
-          } catch (error) {
-            biliLogLimited(state, `inflate-v${version}`, BILI_DECODE_LOG_LIMIT,
-              `danmu ${roomId}: op 5 压缩帧解压失败 version=${version} operation=${operation}：${error.message}`);
-          }
-        } else {
-          try {
-            const json = JSON.parse(body.toString('utf8'));
-            const items = Array.isArray(json) ? json : [json];
-            for (const item of items) {
-              if (String(item?.cmd || '').includes('DANMU_MSG')) {
-                const message = String(item.info?.[1] || '');
-                const user = String(item.info?.[2]?.[1] || '');
-                state.captured += 1;
-                state.lastMessageAt = Date.now();  // 真正的「最后一条弹幕」时间（token 复用看它）
-                biliMarkReallyConnected(state);    // 首条弹幕 = 真连上，发 open
-                if (state.captured <= BILI_DANMU_LOG_LIMIT) writeLaunchLog(`danmu ${roomId}: ${user}: ${message}`);
-                safeSend(sender, 'live:danmu-event', { roomId, type: 'danmu', message, user, captured: state.captured });
-              }
-            }
-          } catch (error) {
-            biliLogLimited(state, 'json-parse', BILI_DECODE_LOG_LIMIT,
-              `danmu ${roomId}: op 5 非 JSON 包 operation=${operation} version=${version}：${error.message}`);
-          }
-        }
-      }
-      offset += total;
-    }
-  }
-
-  function biliOpenWs(state) {
-    if (!biliIsCurrent(state)) return;
-    const urls = state.urls;
-    if (state.urlIndex >= urls.length) {
-      // 一轮候选全失败：不再直接判死刑，交给后台重连重取 token 再来一轮
-      // （closeWs:false 因为此刻没有在途 ws，避免重复关）。
-      biliScheduleReconnect(state, 1006, { closeWs: false, status: '弹幕服务器暂时都不通，正在重试…' });
-      return;
-    }
-    let ws = null;
-    try {
-      ws = new WS(urls[state.urlIndex]);
-    } catch {
-      state.urlIndex += 1;
-      biliOpenWs(state);
-      return;
-    }
-    state.ws = ws;
-    state.opened = false;
-    ws.binaryType = 'arraybuffer';
-    let done = false;
-    const goNext = () => {
-      try { ws.close(); } catch {}
-      state.urlIndex += 1;
-      biliOpenWs(state);
-    };
-    wsOn(ws, 'open', () => {
-      state.opened = true;
-      state.openedAt = Date.now();
-      state.lastFrameAt = Date.now();
-      // 发鉴权包。旧的 try/catch 会把失败吞掉、让界面停在假「已连接」，这里记进 launch.log。
-      try {
-        ws.send(biliPacketMain({ uid: 0, roomid: Number(state.roomId), protover: 2, platform: 'web', type: 2, key: state.token }));
-      } catch (error) {
-        biliLogLimited(state, 'auth-send', BILI_DECODE_LOG_LIMIT,
-          `danmu ${state.roomId}: 发送鉴权包失败：${error.message}`);
-      }
-      // 每次新 ws 都先清掉上一条 ws 遗留的定时器，避免叠加。
-      if (state.heartbeat) clearInterval(state.heartbeat);
-      if (state.watchdog) clearInterval(state.watchdog);
-      if (state.waitFirstDanmuTimer) { clearTimeout(state.waitFirstDanmuTimer); state.waitFirstDanmuTimer = null; }
-      state.heartbeat = setInterval(() => {
-        if (ws.readyState === WS.OPEN) {
-          try { ws.send(biliPacketMain({}, 2)); } catch {}
-        }
-      }, 20000);
-      // 读超时 watchdog：只发心跳不验活，TCP 半开时会一直显示「已连接」却不重连。
-      // 超过 BILI_FRAME_TIMEOUT 没收到任意帧（含 op=3 心跳回应）就主动重连。
-      state.watchdog = setInterval(() => {
-        if (!biliIsCurrent(state) || state.reconnectArmed) return;
-        if (Date.now() - (state.lastFrameAt || 0) > BILI_FRAME_TIMEOUT) {
-          writeLaunchLog(`danmu ${state.roomId}: ${Math.round(BILI_FRAME_TIMEOUT / 1000)}s 没收到任何数据，判定僵尸连接，主动重连`);
-          biliScheduleReconnect(state, 1006, { status: '连接长时间没有数据，正在重连…' });
-        }
-      }, BILI_WATCHDOG_TICK);
-      // 不再在这里发 open / 置 connected：等服务器回 op=8 由 biliMarkReallyConnected 发，
-      // 彻底消除「TCP 握手成功就被当成已连接」和「一条弹幕都没推」的假状态。
-    });
-    wsOn(ws, 'message', (data) => {
-      let buf;
-      if (data instanceof ArrayBuffer) buf = Buffer.from(data);
-      else if (ArrayBuffer.isView(data)) buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-      else buf = Buffer.from(data);
-      if (!buf || !buf.length) return;
-      biliDecodeMain(buf, state.roomId, state.sender, state);
-    });
-    const onDrop = (code) => {
-      if (done) return;
-      done = true;
-      biliClearWsTimers(state);
-      state.connected = false;
-      // 用户主动断开 / 旧连接已被替换：静默收尾，绝不往渲染层发事件。
-      // 事件是按 roomId 路由的，旧连接若发 'closed' 会误伤同一 roomId 的新卡片
-      // （手动重连时闪一下「已断开」），而这正是「过一会断开」要消除的观感。
-      // 主动断开时卡片本就由渲染层同步移除，不需要这条 closed 事件。
-      if (state.closedByUser || !biliIsCurrent(state)) {
-        if (biliDanmuConnections.get(state.roomId) === state) biliRemoveConnection(state);
-        return;
-      }
-      // 握手都没成功、或连上 5 秒内立刻被踢：先在本轮候选里换下一个 host。
-      // 这两种都算「线路不可用」而非稳定连接断开，换 host 更对症。
-      if (!state.opened || (state.openedAt && Date.now() - state.openedAt < 5000 && state.urlIndex + 1 < urls.length)) {
-        safeSend(state.sender, 'live:danmu-event', { roomId: state.roomId, type: 'status', status: '这个弹幕服务器连上就被踢，换一个…' });
-        goNext();
-        return;
-      }
-      // 真正的一次掉线：统一走指数退避 + 长期后台重连，不再「重连 3 次就彻底 closed」。
-      // 先置 armed（防止 ws.close 的异步 onDrop 二次入队），且本次 ws 已断不要再 close。
-      biliScheduleReconnect(state, code, { closeWs: false, status: code === 1006 ? '像是被代理或加速器掐断的，关掉加速器再连一次' : undefined });
-    };
-    wsOn(ws, 'error', () => { if (!done) onDrop(1006); });
-    wsOn(ws, 'close', (code) => onDrop(code));
-  }
-
-  async function biliReconnect(state) {
-    if (state.closedByUser || !biliIsCurrent(state)) return;
-    // 「最后弹幕时间」用真正的 lastMessageAt（旧 lastDanmuAt 其实是建连时间，命名误导）。
-    // 异常断开（forceToken）或 5 分钟没收到过弹幕，一律重取 token，不再拿被风控踢掉的旧 key 重试。
-    const recentMessage = state.lastMessageAt && Date.now() - state.lastMessageAt < 5 * 60 * 1000;
-    if (state.forceToken || !state.token || !recentMessage) {
-      try {
-        const info = await getBiliDanmuInfo(state.roomId);
-        // 取 token 是异步的，期间用户可能已断开或该连接已被替换。
-        if (state.closedByUser || !biliIsCurrent(state)) return;
-        state.token = info.token;
-        state.hosts = info.hosts;
-        state.lastMessageAt = Date.now();
-        state.forceToken = false;
-      } catch (error) {
-        if (state.closedByUser || !biliIsCurrent(state)) return;
-        biliLogLimited(state, 'reconnect-token', BILI_DECODE_LOG_LIMIT,
-          `danmu ${state.roomId}: 重连取鉴权失败：${error.message}`);
-        // 不彻底放弃：按退避继续后台重试（旧版这里直接判死刑）。
-        biliScheduleReconnect(state, 1006);
-        return;
-      }
-    }
-    state.urls = biliBuildWsUrls(state.hosts);
-    state.urlIndex = 0;
-    biliOpenWs(state);
-  }
-
-  ipcMain.on('live:danmu-connect', (event, payload = {}) => {
-    const roomId = String(payload.roomId || '');
-    if (!roomId) return;
-    const existing = biliDanmuConnections.get(roomId);
-    if (existing) {
-      existing.closedByUser = true;
-      biliRemoveConnection(existing);   // 清掉旧连接的全部定时器 + 只删自己
-      try { existing.ws && existing.ws.close(); } catch {}
-    }
-    const token = String(payload.token || '');
-    const hosts = Array.isArray(payload.hosts) ? payload.hosts : [];
-    const state = {
-      roomId,
-      token,
-      hosts,
-      lastDanmuAt: Date.now(),       // 保留旧字段以兼容，真正复用判断看 lastMessageAt
-      lastMessageAt: 0,             // 真正的「最后一条弹幕」时间
-      lastFrameAt: Date.now(),      // watchdog 的读时间戳
-      sender: event.sender,
-      urls: biliBuildWsUrls(hosts),
-      urlIndex: 0,
-      opened: false,
-      openedAt: 0,
-      retryCount: 0,
-      lastRetryAt: 0,
-      closedByUser: false,
-      forceToken: false,
-      reconnectArmed: false,
-      reconnectTimer: null,
-      heartbeat: null,
-      watchdog: null,
-      waitFirstDanmuTimer: null,
-      logCounts: {},
-      captured: 0,
-      ws: null,
-      connected: false,
-    };
-    biliDanmuConnections.set(roomId, state);
-    if (typeof WS !== 'function') {
-      safeSend(event.sender, 'live:danmu-event', { roomId, type: 'closed', status: '主进程缺少 WebSocket 支持' });
-      biliRemoveConnection(state);
-      return;
-    }
-    // 空 token 拦截：不带 key 服务器照样接受连接，但一条弹幕都不会推（旧版还会显示假「已连接」）。
-    if (!token) {
-      safeSend(event.sender, 'live:danmu-event', { roomId, type: 'closed', status: '弹幕鉴权失败：没有拿到 key，请重新连接或稍后再试' });
-      biliRemoveConnection(state);
-      return;
-    }
-    biliOpenWs(state);
-  });
-
-  ipcMain.on('live:danmu-disconnect', (_event, roomId) => {
-    const state = biliDanmuConnections.get(String(roomId || ''));
-    if (!state) return;
-    state.closedByUser = true;
-    biliRemoveConnection(state);   // 清 watchdog / 心跳 / 退避定时器 + 只删自己
-    try { state.ws && state.ws.close(); } catch {}
-  });
-
-  /*
-   * B 站账号登录窗口：passport.bilibili.com，扫码 / 账密都行。
-   * 用默认会话开窗——登录产生的 SESSDATA 等 cookie 直接落在主会话里，
-   * 弹幕鉴权（useSessionCookies）立刻就能用上，不需要导来导去。
-   * 窗口轮询到 SESSDATA 出现就自动关闭并返回成功。
-   *
-   * 注意：-352 并不是"没登录"造成的（见上面的 WBI 签名），登录入口只是
-   * 顺手保留。但它必须真的能用，不能点了没反应，所以这里补两件事：
-   *   1. 伪装成桌面 Chrome——Electron 默认 UA 带 Electron/xx，B 站登录页
-   *      会按 UA 判断"浏览器不受支持"，二维码渲染不出来 / 登录提交被拒。
-   *   2. 放行 window.open——QQ / 微信 / 短信登录是弹窗，Electron 默认拦掉，
-   *      不放行就是点了没反应。
-   */
-  let biliLoginWin = null;
-  ipcMain.handle('bili:login', () => {
-    if (biliLoginWin) {
-      biliLoginWin.focus();
-      return Promise.resolve({ ok: false, reason: '登录窗口已经开着，去看一眼' });
-    }
-    return new Promise((resolve) => {
-      let settled = false;
-      let poll = null;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        if (poll) clearInterval(poll);
-        resolve(result);
-      };
-      biliLoginWin = new BrowserWindow({
-        width: 1020,
-        height: 720,
-        title: '登录B站账号',
-        autoHideMenuBar: true,
-        backgroundColor: '#f6f7f8',
-        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-      });
-      try {
-        biliLoginWin.webContents.setUserAgent(BILI_UA);
-        biliLoginWin.webContents.session.setUserAgent(BILI_UA);
-      } catch {
-        /* ignore */
-      }
-      // QQ / 微信登录会另开弹窗，Electron 默认拦掉 window.open
-      biliLoginWin.webContents.setWindowOpenHandler(() => ({
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 520,
-          height: 720,
-          autoHideMenuBar: true,
-          webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-        },
-      }));
-      poll = setInterval(async () => {
-        try {
-          const cookies = await session.defaultSession.cookies.get({ domain: 'bilibili.com' });
-          if (cookies.some((c) => c.name === 'SESSDATA')) {
-            const win = biliLoginWin;
-            biliLoginWin = null;
-            try {
-              win.close();
-            } catch {
-              /* already gone */
-            }
-            finish({ ok: true });
-          }
-        } catch {
-          /* ignore poll errors */
-        }
-      }, 800);
-      biliLoginWin.on('closed', () => {
-        biliLoginWin = null;
-        finish({ ok: false, reason: '窗口已关闭' });
-      });
-      biliLoginWin.loadURL('https://passport.bilibili.com/login').catch(() => {});
-    });
-  });
-
-  // 应用退出时别把隐藏窗口留成孤儿进程
-  app.on('before-quit', () => {
-    try {
-      stopDanmaku();
-    } catch {
-      /* ignore */
-    }
-  });
-
-  /**
-   * 打开内置浏览器窗口让用户真实登录 QQ 音乐 / 酷狗。
-   *
-   * 登录方式（扫码 / QQ / 微信 / 手机验证码）完全由官网页面自己提供，
-   * 我们只负责在登录成功后把 cookie 里的凭证取出来并加密保存。
-   */
-  ipcMain.handle('music:login', async (_event, platform) => {
-    const key = String(platform || '');
-    const config = musicPlatformConfig(key);
-
-    /*
-     * 先把这个平台自己的登录态清干净再开窗口。
-     *
-     * 用户点「登录」的意思就是要扫码，可登录窗口跑在 persist 分区里，
-     * 上一轮的 cookie 还留着时窗口一加载就自动登进去了，用户根本没机会扫码。
-     * 而且这种情况下轮询会立刻判定「已登录」并把旧的整袋 cookie 再存一遍，
-     * 等于「退出登录」没任何效果。所以这里进入登录流程前先清分区。
-     */
-    try {
-      const stale = session.fromPartition(`persist:music-${key}-login`);
-      await stale.clearStorageData({
-        storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage', 'websql'],
-      });
-      await stale.clearAuthCache();
-    } catch (error) {
-      console.error('[music-login] 清理旧登录态失败（继续登录）:', error);
-    }
-
-    return new Promise((resolve, reject) => {
-      // 用明确的 session.fromPartition 拿分区，登录窗口和后续轮询共用同一个会话，
-      // 也避免 webPreferences.partition 在某些版本下没真正落盘、cookie 取不全的问题。
-      const ses = session.fromPartition(`persist:music-${key}-login`);
-      const loginWindow = new BrowserWindow({
-        width: 520,
-        height: 720,
-        parent: win || undefined,
-        modal: false,
-        show: true,
-        title: `${config.label} 登录`,
-        webPreferences: {
-          session: ses,
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-          preload: MUSIC_LOGIN_PRELOAD,
-        },
-      });
-
-      // 官网会按 UA 判断「浏览器是否受支持」。Electron 默认 UA 里带着
-      // Electron/xx 和启动器名字，QQ 音乐 / 酷狗会直接拒绝渲染登录二维码，
-      // 表现就是「点登录没反应、认不出浏览器」。统一伪装成桌面 Chrome。
-      try {
-        loginWindow.webContents.setUserAgent(BROWSER_UA);
-        loginWindow.webContents.session.setUserAgent(BROWSER_UA);
-      } catch {
-        /* ignore */
-      }
-
-      // QQ / 微信登录会另开一个弹窗（ptlogin2.qq.com 等）。
-      // Electron 默认拦掉 window.open，弹窗根本不出现；这里显式放行，
-      // 子窗口和父窗口共用同一个 session，cookie 仍然能被轮询抓到。
-      loginWindow.webContents.setWindowOpenHandler(() => ({
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 520,
-          height: 720,
-          autoHideMenuBar: true,
-          webPreferences: {
-            contextIsolation: true,
-            nodeIntegration: false,
-            sandbox: true,
-          },
-        },
-      }));
-
-      let settled = false;
-      let pollTimer = null;
-      // 是否已经用登录接口验过这一袋 cookie（见 check() 里的说明）
-      let verified = false;
-      let lastVerifyAt = 0;
-
-      const cleanup = () => {
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = null;
-        try {
-          loginWindow.close();
-        } catch {
-          /* ignore */
-        }
-      };
-
-      const finish = async (bag) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        try {
-          // 存【全量】cookie：歌单 / 取歌地址接口要的不止 uin + qqmusic_key，
-          // 少了 qm_keyst / skey / p_skey 这些，服务端就直接当成未登录。
-          const payload = {
-            ...bag,
-            __cookieHeader: cookieHeader(bag),
-            savedAt: new Date().toISOString(),
-          };
-          // 存盘失败不能静默吞掉：否则界面显示「已登录」，重启后却全没了。
-          // saveSecret 在没有系统加密可用时会返回 false，这种情况要明确报出来。
-          const saved = await saveSecret(`music-${key}`, JSON.stringify(payload)).catch((error) => {
-            console.error('[music-login] 保存登录状态失败:', error);
-            return false;
-          });
-          if (!saved) {
-            console.error('[music-login] saveSecret 返回 false，系统加密不可用或写入失败');
-          }
-          resolve({ ok: true, platform: key, cookies: payload, saved: Boolean(saved) });
-        } catch (error) {
-          reject(error);
-        }
-      };
-
-      // 轮询 cookie：官网登录成功后 cookie 会出现在窗口里。
-      // 不同平台（尤其酷狗）的 cookie 名不统一，这里把所有 cookie 都摊平成 bag，
-      // 交给 checkLogin 按候选组挑，命中即认为登录完成。
-      // 命中后存盘的是【整袋】cookie，不是挑出来的那几个键。
-      const check = async () => {
-        if (settled) return;
-        try {
-          const cookies = await ses.cookies.get({});
-          const bag = {};
-          for (const cookie of cookies || []) {
-            if (!cookie?.name) continue;
-            // 只认 kugou / qq 域的 cookie，避免把无关域的值混进来
-            const domain = String(cookie.domain || '');
-            if (config.host && !config.host.some((h) => domain.includes(h))) continue;
-            bag[cookie.name] = cookie.value;
-          }
-          musicLoginDebug = { at: Date.now(), platform: key, cookieCount: cookies.length, matched: Object.keys(bag) };
-          const checked = checkMusicLogin(config, bag);
-          if (checked.ok) {
-            /*
-             * 只凭 cookie 名齐了就存盘是不行的：QQ 音乐扫码过程中
-             * p_uin / p_tk 这类 QQ 互联的 cookie 会先落地，y.qq.com 自己的
-             * 会话还没写完，这时候存下来的是一袋半截凭证 —— 之后取歌单
-             * 一律 500003（服务端当未登录）。所以这里再用最轻的登录接口验一次，
-             * 验过才存；验不过就接着轮询。验证限流 3 秒一次，别把接口打爆。
-             */
-            const now = Date.now();
-            if (!verified && now - lastVerifyAt > 3000) {
-              lastVerifyAt = now;
-              const result = await verifyMusicSession(key, bag).catch(() => ({ ok: false }));
-              verified = Boolean(result && result.ok);
-              musicLoginDebug.verify = { ok: verified, error: (result && result.error) || '' };
-            }
-            if (verified) await finish(bag);
-          }
-        } catch {
-          /* 窗口还在加载时忽略 */
-        }
-      };
-
-      // 给界面一个「我已经扫码登录了」的兜底：只要窗口里出现过账号类 cookie，
-      // 就把整袋 cookie 存下来，不再苛求 qqmusic_key / qm_keyst 这种凭证名。
-      activeMusicLogin = {
-        platform: key,
-        confirm: async () => {
-          if (settled) return { ok: false, error: '登录窗口已经关闭，请重新打开' };
-          try {
-            const cookies = await ses.cookies.get({});
-            const bag = {};
-            for (const cookie of cookies || []) {
-              if (!cookie?.name) continue;
-              const domain = String(cookie.domain || '');
-              if (config.host && !config.host.some((h) => domain.includes(h))) continue;
-              bag[cookie.name] = cookie.value;
-            }
-            if (!Object.keys(bag).length) {
-              return { ok: false, error: '还没有读到任何登录 cookie，请先在窗口里完成扫码' };
-            }
-            /*
-             * 「我已登录」是用户的断言，所以这里不拦着他存盘：
-             * 只是顺手验一次，验不过就把话说明白，让他知道还要再等一下。
-             */
-            const probe = await verifyMusicSession(key, bag).catch(() => ({ ok: false, error: '验证没跑通' }));
-            await finish(bag);
-            return {
-              ok: true,
-              platform: key,
-              cookies: bag,
-              verified: Boolean(probe && probe.ok),
-              warning: probe && probe.ok ? '' : `已经存下来了，但还查不到账号信息（${(probe && probe.error) || '验证失败'}），歌单可能还读不出来`,
-            };
-          } catch (error) {
-            return { ok: false, error: error.message || '保存登录状态失败' };
-          }
-        },
-      };
-
-      const startPolling = () => {
-        if (pollTimer) return;
-        pollTimer = setInterval(check, 1200);
-        setTimeout(check, 600);
-      };
-
-      loginWindow.webContents.on('dom-ready', startPolling);
-      loginWindow.webContents.on('did-finish-load', async () => {
-        startPolling();
-
-        /*
-         * 官网首页要自己找到「登录」才出二维码。
-         * QQ 音乐的点开后是 yqq-dialog，里面嵌 graph.qq.com 的 OAuth；
-         * 酷狗也是首页点登录才出扫码框。
-         * 这里注入脚本帮用户点开，省得他在页面里找。
-         */
-        try {
-          await loginWindow.webContents.executeJavaScript(MUSIC_LOGIN_CLICK_SCRIPT, true);
-        } catch {
-          /* 页面还没准备好就跳过，用户自己点也行 */
-        }
-
-        // 在官网页面上叠一条自己的提示条：告诉用户扫完码可以点「我已登录」强制保存，
-        // 避免凭证 cookie 名不匹配导致窗口一直不关。
-        try {
-          await loginWindow.webContents.insertCSS(`
-            #hxl-music-login-bar{position:fixed;left:0;right:0;bottom:0;z-index:2147483647;
-              display:flex;align-items:center;gap:10px;padding:8px 12px;
-              background:rgba(16,10,12,.94);border-top:1px solid rgba(240,198,116,.35);
-              font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif;color:#e9dcc8;}
-            #hxl-music-login-bar span{flex:1}
-            #hxl-music-login-bar b{color:#f0c674}
-            #hxl-music-login-bar button{flex:none;height:26px;padding:0 12px;border-radius:6px;
-              border:1px solid rgba(240,198,116,.5);background:rgba(240,198,116,.14);
-              color:#f0c674;font:inherit;cursor:pointer;}
-            #hxl-music-login-bar button:hover{background:rgba(240,198,116,.26)}
-            body{padding-bottom:52px !important}
-          `);
-          await loginWindow.webContents.executeJavaScript(`
-            (() => {
-              if (document.getElementById('hxl-music-login-bar')) return true;
-              const bar = document.createElement('div');
-              bar.id = 'hxl-music-login-bar';
-              bar.innerHTML = '<span>扫码 / 登录完成后如果窗口没有自动关闭，点右边 <b>我已登录</b> 保存。</span>';
-              const btn = document.createElement('button');
-              btn.textContent = '我已登录';
-              btn.onclick = async () => {
-                btn.textContent = '正在保存…';
-                btn.disabled = true;
-                try {
-                  const r = await window.hxlMusicLoginConfirm();
-                  btn.textContent = r && r.ok ? '已保存，窗口即将关闭' : (r?.error || '没有读到登录状态');
-                  if (!r || !r.ok) { btn.disabled = false; btn.textContent = '我已登录'; }
-                } catch (e) {
-                  btn.disabled = false;
-                  btn.textContent = '我已登录';
-                }
-              };
-              bar.appendChild(btn);
-              document.body.appendChild(bar);
-              return true;
-            })();
-          `).catch(() => {});
-        } catch {
-          /* 官网页面结构特殊时忽略 */
-        }
-      });
-
-      // 用户在窗口里导航到同域其他页面也要继续轮询
-      loginWindow.webContents.on('did-navigate', () => {
-        if (pollTimer) return;
-        pollTimer = setInterval(check, 1200);
-        setTimeout(check, 600);
-      });
-
-      loginWindow.on('closed', () => {
-        if (activeMusicLogin && activeMusicLogin.platform === key) activeMusicLogin = null;
-        if (settled) return;
-        settled = true;
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = null;
-        resolve({ ok: false, cancelled: true });
-      });
-
-      loginWindow.webContents.on('did-fail-load', (_event, code, desc, url, isMainFrame) => {
-        if (!isMainFrame || settled) return;
-        if (code === -3) return; // 用户自己中断的导航
-        settled = true;
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = null;
-        try {
-          loginWindow.close();
-        } catch {
-          /* ignore */
-        }
-        resolve({ ok: false, error: `登录页打不开（${desc || code}）` });
-      });
-
-      loginWindow.loadURL(config.loginUrl);
-    });
-  });
-
-  /**
-   * 「我已经登录了」兜底：不管 cookie 名字对不对，把窗口里现有的整袋 cookie 存下来。
-   * 用于扫码成功但凭证 cookie 名不在候选列表里的情况。
-   */
-  ipcMain.handle('music:login-confirm', async () => {
-    if (!activeMusicLogin) return { ok: false, error: '当前没有打开的登录窗口' };
-    return activeMusicLogin.confirm();
-  });
-
-  /** 登录窗口的诊断信息：读到手几个 cookie、命中了哪些名字。 */
-  ipcMain.handle('music:login-debug', async () => musicLoginDebug);
-
-  /** 当前已保存哪些平台的登录。 */
-  /**
-   * 把登录窗口分区里现存的 cookie 合并进已保存的凭据。
-   *
-   * 为什么要这一步：登录成功时我们是把「当时的整袋 cookie」存下来的，
-   * 但酷狗 / QQ 音乐会在登录后再陆续补写几条关键 cookie（比如酷狗的
-   * userid、QQ 的 refreshing 票据）。只吃存盘那一份，就会出现
-   * 「明明登录了，服务端却说没登录」的情况。
-   */
-  async function mergePartitionCookies(key, creds) {
-    const bag = { ...creds };
-    try {
-      const part = session.fromPartition(`persist:music-${key}-login`);
-      const cookies = await part.cookies.get({});
-      for (const cookie of cookies || []) {
-        if (cookie && cookie.name) bag[cookie.name] = cookie.value;
-      }
-    } catch {
-      /* 分区可能没建过，用已保存的即可 */
-    }
-    // QQ 号在不同版本落在不同 cookie 名上，这里统一补一次
-    if (!bag.uin) bag.uin = bag.p_uin || bag.ptui_loginuin || bag.luin || bag.wxuin || '';
-    const pairs = [];
-    for (const [name, value] of Object.entries(bag)) {
-      if (name === '__cookieHeader' || name === 'savedAt') continue;
-      if (!/^[A-Za-z0-9_.$-]+$/.test(name)) continue;
-      if (value == null) continue;
-      pairs.push(`${name}=${String(value).replace(/;/g, '')}`);
-    }
-    bag.__cookieHeader = pairs.join('; ');
-    return bag;
-  }
-
-  /** 给任意 Promise 套硬上限，任何一步卡住都不能让界面一直转圈。 */
-  function playlistDeadline(promise, ms, label) {
-    let timer = null;
-    const guard = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new Error(`${label || '读取'}超时（${Math.round(ms / 1000)} 秒没有响应）`));
-      }, ms);
-    });
-    return Promise.race([promise, guard]).finally(() => {
-      if (timer) clearTimeout(timer);
-    });
-  }
-
-  /** 打开一个带登录态的内置窗口（分区就是登录时用的那个）。 */
-function musicLoginWindow(target) {
-  // 抓歌单用的窗口必须隐藏：弹出来的窗口会被用户随手关掉，
-  // 一关整个应用就退出（window-all-closed），而且隐藏窗口配合
-  // backgroundThrottling:false 一样能发请求、能跑 executeJavaScript。
-  const win = new BrowserWindow({
-    width: 1100,
-    height: 780,
-    show: false,
-    webPreferences: {
-      session: session.fromPartition(`persist:music-${target}-login`),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      backgroundThrottling: false,
-    },
-  });
-  // 伪装成桌面 Chrome：Electron 默认 UA 带 "Electron/xx"，
-  // QQ 音乐/酷狗会拒绝渲染或返回精简页。
-  try {
-    win.webContents.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    );
-  } catch {
-    /* ignore */
-  }
-  return win;
-}
-
-/** 收集一个 QQ 音乐 / 酷狗账号的歌单：先走网页，失败回退 OpenAPI。 */
-  async function collectPlatformPlaylists(key) {
-    /*
-     * 注意：这里的变量名不能叫 session。
-     * 早前写成 `const session = await loadMusicSession(...)`，把 electron 的
-     * session 模块整个遮住了，下面 `session.fromPartition` 直接抛
-     * 「fromPartition is not a function」——网页这条路从来没跑通过一次，
-     * 于是每次都默默回退到 OpenAPI，QQ 音乐 / 酷狗 的歌单也就一直是空的。
-     */
-    const saved = await loadMusicSession(key, loadSecret);
-    if (!saved) throw new Error('还没有登录');
-    const creds = await mergePartitionCookies(key, saved);
-    // 酷狗：m.kugou.com 的「我的歌单」要浏览器自己种的 cookie（Node 侧裸拼多半 Access Deny），
-    // 所以先走隐藏窗口。但曲目的 mobilecdn 接口是免登录的、Node 直连可用
-    // （只认 http，https 握手失败），所以「点开某个歌单」这条路径不必开窗口。
-    // QQ 音乐：先试接口（cookie 手动拼 header），失败再退到隐藏窗口抓包。
-    const tryApi = async () => {
-      const list = await playlistDeadline(accountPlaylists(key, creds), 18000, '接口读取歌单');
-      if (Array.isArray(list) && list.length) return { list: withLikedPlaylist(key, list), source: 'api' };
-      throw new Error('接口返回空列表');
-    };
-    const tryWeb = async () => {
-      const list = await playlistDeadline(
-        webMyPlaylists(key, creds, {
-          getWindow: async (target) => {
-            return { win: musicLoginWindow(target), ownWindow: true };
-          },
-        }),
-        key === 'qq' ? 60000 : 35000,
-        '网页读取歌单'
-      );
-      if (Array.isArray(list) && list.length) return { list: withLikedPlaylist(key, list), source: 'web' };
-      throw new Error('网页返回空列表');
-    };
-
-    if (key === 'kuwo') {
-      // 酷我：网页端用户歌单接口已全部删除，只走老接口 nplserver（api 路径）
-      try { return await tryApi(); }
-      catch (apiError) {
-        throw new Error(`酷我：读取我的歌单失败（${apiError.message}）`);
-      }
-    }
-    if (key === 'kugou') {
-      // 酷狗：网页优先（隐藏窗口），接口兜底
-      try { return await tryWeb(); }
-      catch (webError) {
-        try { return await tryApi(); }
-        catch (apiError) {
-          throw new Error(`酷狗：网页读取失败（${webError.message}）；接口也失败（${apiError.message}）`);
-        }
-      }
-    }
-    // QQ 音乐：接口优先，网页兜底
-    try { return await tryApi(); }
-    catch (apiError) {
-      try { return await tryWeb(); }
-      catch (webError) {
-        throw new Error(`QQ 音乐：接口失败（${apiError.message}）；网页也失败（${webError.message}）`);
-      }
-    }
-  }
-
-  /** 三个平台的登录状态，含网易云（它的会话不在 MUSIC_LOGIN_CONFIG 里）。 */
-  async function musicStatus() {
-    const out = {
-      netease: {
-        label: '网易云',
-        loggedIn: Boolean(neteaseSession.cookie),
-        savedAt: null,
-        uin: '',
-        userid: '',
-      },
-    };
-    for (const key of Object.keys(MUSIC_LOGIN_CONFIG)) {
-      const session = await loadMusicSession(key, loadSecret);
-      out[key] = {
-        label: MUSIC_LOGIN_CONFIG[key].label,
-        loggedIn: Boolean(session),
-        savedAt: session?.savedAt || null,
-        uin: session?.uin || '',
-        userid: session?.userid || '',
-      };
-    }
-    return out;
-  }
-
-  ipcMain.handle('music:status', async () => musicStatus());
-
-  /*
-   * 我的歌单缓存：读 / 写 / 丢。
-   *
-   * 写是合并的 —— 前端只把这次真正同步到的那几个平台传上来，
-   * 没传的平台保留旧缓存，否则点一次酷狗同步会把网易云那份缓存抹掉。
-   */
-  ipcMain.handle('music:playlists-cache', async () => {
-    const cache = playlistCache();
-    return {
-      ok: true,
-      savedAt: Number(cache.data.savedAt) || 0,
-      accounts: cache.data.accounts || {},
-      groups: cache.data.groups || {},
-    };
-  });
-
-  ipcMain.handle('music:playlists-cache-save', async (_event, input) => {
-    const cache = playlistCache();
-    const groups = Array.isArray(input?.groups) ? input.groups : [];
-    const accounts = input?.accounts && typeof input.accounts === 'object' ? input.accounts : null;
-    if (accounts) {
-      for (const key of PLAYLIST_CACHE_PLATFORMS) {
-        if (Object.prototype.hasOwnProperty.call(accounts, key)) {
-          cache.data.accounts[key] = String(accounts[key] || '');
-        }
-      }
-    }
-    for (const group of groups) {
-      const key = String(group?.platform || '');
-      if (!PLAYLIST_CACHE_PLATFORMS.includes(key)) continue;
-      const slim = slimCachedPlaylists(group);
-      // 空列表不写：同步失败时 list 是空的，写进去等于把上次好好的缓存冲掉
-      if (!slim.list.length) continue;
-      cache.data.groups[key] = slim;
-    }
-    cache.data.version = 1;
-    cache.data.savedAt = Date.now();
-    // JsonStore.save() 自带 400ms 防抖 + 串行写 + 原子 rename，不用自己再拼一遍
-    cache.save();
-    return { ok: true, savedAt: cache.data.savedAt };
-  });
-
-  /*
-   * 从「我的歌单」缓存里剔掉一张具体的歌单（链接导入的那种）。
-   *
-   * 为什么不复用 music:playlists-cache-save：那个是**合并写 + 空列表跳过**，
-   * 删掉某平台最后一张歌单时前端传上来的 list 是空的，主进程会直接 continue，
-   * 磁盘上的旧缓存原封不动 —— 重启后歌单原样复活，「删了没用」。
-   * 所以删除必须按 id 精确落到缓存上：剔完为空就把这个平台整组丢掉。
-   */
-  ipcMain.handle('music:playlist-remove', async (_event, input) => {
-    const key = String(input?.platform || '').trim().toLowerCase();
-    const id = String(input?.id || '').trim();
-    if (!PLAYLIST_CACHE_PLATFORMS.includes(key) || !id) {
-      return { ok: false, removed: 0, reason: '参数不完整' };
-    }
-    const cache = playlistCache();
-    const groups = cache.data.groups && typeof cache.data.groups === 'object' ? cache.data.groups : null;
-    const group = groups?.[key];
-    if (!Array.isArray(group?.list)) return { ok: true, removed: 0 };
-    const before = group.list.length;
-    const list = group.list.filter((item) => String(item?.id || '') !== id);
-    const removed = before - list.length;
-    if (!removed) return { ok: true, removed: 0 };
-    if (list.length) cache.data.groups[key] = { ...group, list };
-    else delete cache.data.groups[key];
-    // JsonStore.save() 自带防抖 + 串行写 + 原子 rename
-    cache.save();
-    return { ok: true, removed };
-  });
-
-  ipcMain.handle('music:playlists-cache-drop', async (_event, input) => {
-    const cache = playlistCache();
-    const keys = Array.isArray(input?.platforms)
-      ? input.platforms
-          .map((item) => String(item || '').trim().toLowerCase())
-          .filter((item) => PLAYLIST_CACHE_PLATFORMS.includes(item))
-      : [];
-    if (!keys.length) {
-      cache.data.groups = {};
-      cache.data.accounts = {};
-    } else {
-      for (const key of keys) {
-        delete cache.data.groups[key];
-        delete cache.data.accounts[key];
-      }
-    }
-    cache.save();
-    return { ok: true };
-  });
-
-
-  /**
-   * 退出登录：本地凭证和登录窗口里的网页会话都要清掉。
-   *
-   * 只删 sessions.enc.json 是不够的：登录窗口跑在 persist:music-qq-login 分区里，
-   * 那里的 cookie 还留着登录态，下次再点「登录」窗口一加载就自动登进去了，
-   * 用户根本没机会扫码。所以这里把分区里的 cookies / storage 一起清掉，
-   * 用户再点登录才会看到二维码。
-   */
-  ipcMain.handle('music:logout', async (_event, platform) => {
-    const key = String(platform || '');
-    musicPlatformConfig(key);
-    await saveSecret(`music-${key}`, '').catch((error) => {
-      console.error('[music-logout] 清除本地凭证失败:', error);
-    });
-    try {
-      const partition = session.fromPartition(`persist:music-${key}-login`);
-      await partition.clearStorageData({
-        storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage', 'websql'],
-      });
-      await partition.clearAuthCache();
-    } catch (error) {
-      // 分区可能压根没建过（从没登录过），这种失败不影响退出
-      console.error('[music-logout] 清理登录分区失败:', error);
-    }
-    return { ok: true };
-  });
-
-  /** 验证保存的会话是否还有效。 */
-  ipcMain.handle('music:verify', async (_event, platform) => {
-    const key = String(platform || '');
-    musicPlatformConfig(key);
-    const session = await loadMusicSession(key, loadSecret);
-    if (!session) return { ok: false, error: '还没有登录' };
-    return verifyMusicSession(key, session);
-  });
-
-  /**
-   * 登录账号的歌单列表。
-   * 没登录或接口拿不到时返回 { ok:false, reason }，由界面提示，
-   * 不要抛异常让用户看到一屏报错。
-   */
-  /**
-   * 把 QQ / 酷狗 的曲目解析成可播放地址。
-   * 走网易云找同名曲 + 内置 unblock 兜底，所以不需要会员也能听。
-   */
-  /*
-   * 把曲目解析成可以直接播放的地址。
-   *
-   * 顺序（见 electron/music-source.js）：
-   * 点歌台的换源现在走「多源并发竞速」：所有启用的音源同时开跑，谁先出
-   * 地址用谁，结果缓存 20 分钟（详见 music-source.js）。
-   * 默认只启用第三方免费音源：本地 NeteaseCloudMusicApi（含 /song/url/match
-   * 换源解锁，VIP 曲目也能出地址）+ 咪咕；酷狗 / QQ 的匿名接口对付费曲目一律
-   * 要会员，酷我常把人往手机端引，三家默认不参与，用户可在设置里打开。
-   * 全部失败时再退回老的「网易云找同名曲 + unblock」那条路。
-   */
-  ipcMain.handle('music:sources-import', async (_event, input) => {
-    let raw = '';
-    if (input?.text) {
-      raw = String(input.text).slice(0, 200000);
-    } else if (input?.url) {
-      const target = String(input.url).trim();
-      if (!/^https?:\/\//i.test(target)) return { ok: false, reason: '订阅地址必须是 http(s) 链接' };
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15000);
-      try {
-        const response = await fetch(target, { signal: controller.signal });
-        raw = await response.text();
-      } catch (error) {
-        return { ok: false, reason: `下载失败：${error.message}` };
-      } finally {
-        clearTimeout(timer);
-      }
-    } else {
-      return { ok: false, reason: '没有拿到音源内容' };
-    }
-
-    let parsed = null;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return { ok: false, reason: '不是合法的 JSON' };
-    }
-    const incoming = Array.isArray(parsed) ? parsed : [parsed];
-    const accepted = [];
-    const rejected = [];
-    for (const def of incoming) {
-      const check = validateCustomSource(def);
-      if (!check.ok) {
-        rejected.push(`${def?.name || def?.id || '未命名'}：${check.reason}`);
-        continue;
-      }
-      accepted.push({
-        id: String(def.id || def.name || '').slice(0, 60),
-        name: String(def.name || def.id || '').slice(0, 60),
-        search: def.search,
-        url: def.url,
-        headers: def.headers && typeof def.headers === 'object' ? def.headers : undefined,
-        enabled: true,
-      });
-    }
-    if (!accepted.length) return { ok: false, reason: rejected.join('；') || '里面没有可用的音源' };
-
-    const current = Array.isArray(store.data.settings.musicCustomSources)
-      ? store.data.settings.musicCustomSources
-      : [];
-    // 同 id 覆盖，最多存 20 个，免得被塞一堆死链把竞速拖垮
-    const merged = current
-      .filter((def) => !accepted.some((item) => item.id === def.id))
-      .concat(accepted)
-      .slice(0, 20);
-    store.data.settings.musicCustomSources = merged;
-    await store.saveNow().catch(() => {});
-    // 音源变了，旧的换源结果可能不再合适
-    clearMusicResolveCache();
-    // 这个 IPC 不走 settings:update，得自己把新状态推给界面，否则卡片看不到刚导入的音源
-    pushState(true);
-    return { ok: true, sources: merged, added: accepted.length, rejected };
-  });
-
-  ipcMain.handle('music:resolve', async (_event, input) => {
-    const song = input?.song || {};
-    const level = String(input?.level || 'exhigh');
-    const apiBase = normalizeNeteaseBase(input?.apiBase || '');
-    const settings = store?.data?.settings || {};
-    const attempts = [];
-    try {
-      const direct = await resolveSourceUrl(song, {
-        apiBase,
-        level,
-        sources: settings.musicSources,
-        customSources: settings.musicCustomSources,
-      });
-      if (direct?.url) return { ok: true, ...direct };
-    } catch (error) {
-      attempts.push(String(error.message || '解析失败'));
-    }
-    /*
-     * 回退路径走的是本地网易云 API（unblock 会在服务端偷偷换成酷我等平台的
-     * 直链），这里同样要认音源开关：网易云被停用就整条跳过；拿回来的地址
-     * 宿主撞上被停用的音源（比如酷我）就丢弃，不能因为「能放」就绕过开关。
-     */
-    try {
-      const flags = currentMusicSourceFlags();
-      const resolved = flags.netease === false ? null : await resolvePlayableUrl(apiBase, song, level);
-      if (resolved?.url) {
-        const banned = disabledSourceOfUrl(resolved.url, flags);
-        if (banned) {
-          attempts.push(`回退地址来自已停用的音源（${banned}），已丢弃`);
-        } else {
-          return { ok: true, ...resolved };
-        }
-      }
-      if (!resolved) {
-        return {
-          ok: false,
-          reason: attempts.join('；') || '没有找到可播放的版本',
-        };
-      }
-    } catch (error) {
-      attempts.push(String(error.message || '解析失败'));
-    }
-    return { ok: false, reason: attempts.join('；') || '解析失败' };
-  });
-
-  /*
-   * 歌词：按平台各自的公开接口取 LRC 文本。
-   * 原生平台没词时用「歌名 + 歌手」去酷我 / QQ 再找一遍。
-   */
-  ipcMain.handle('music:lyric', async (_event, input) => {
-    const song = input?.song || {};
-    const apiBase = normalizeNeteaseBase(input?.apiBase || '');
-    try {
-      const result = await fetchSourceLyric(song, { apiBase });
-      return { ok: Boolean(result?.lyric), lyric: result?.lyric || '', source: result?.source || '' };
-    } catch (error) {
-      return { ok: false, lyric: '', source: '', reason: String(error.message || '读取歌词失败') };
-    }
-  });
-
-  ipcMain.handle('music:my-playlists', async (_event, platform) => {
-    const key = String(platform || '');
-    try {
-      /*
-       * 网易云单独处理：它的凭证是本地 API 的 cookie，不走 persist 分区。
-       * 平台白名单校验（musicPlatformConfig）必须排在网易云分支之后：
-       * PLATFORM_CONFIG 里只有 qq / kugou，这句以前写在 try 外面先执行，
-       * 网易云一进来就抛「不支持的平台：netease」，界面上就变成了
-       * 「我的歌单里有网易云，点进去永远是空的」。
-       */
-      if (key === 'netease') {
-        // 本地服务可能要先启动，再加上逐次请求的超时，整体给个硬上限，
-        // 免得界面停在「正在读取网易云账号里的歌单…」。
-        const list = await playlistDeadline(
-          neteaseMyPlaylists(neteaseSession.apiBase || 'http://127.0.0.1:3100'),
-          45000,
-          '读取网易云歌单'
-        );
-        return { ok: true, list, source: 'api' };
-      }
-      musicPlatformConfig(key);
-      /*
-       * QQ 音乐 / 酷狗：先走网页（在 persist 分区里让页面自己请求，
-       * 用的是浏览器真实的 cookie / Referer / 签名上下文），
-       * 失败再退回 OpenAPI 直连，保证不会比之前更差。
-       */
-      const result = await collectPlatformPlaylists(key);
-      return { ok: true, list: result.list, source: result.source };
-    } catch (error) {
-      const reason = String(error.message || '读取歌单失败');
-      /*
-       * 500003 / Access Deny / 页面里找不到歌单链接，本质都是同一件事：
-       * 对方不认这次请求的登录态。标成 expired，界面就能直接给一个
-       * 「重新登录」的按钮，而不是让用户对着一串代码发呆。
-       */
-      const expired = musicLooksExpired(reason);
-      return { ok: false, reason, expired };
-    }
-  });
-
-  /**
-   * 网易云「我创建的歌单」。
-   *
-   * 走本地 NeteaseCloudMusicApi：先 /login/status 拿 uid，再 /user/playlist。
-   * 未登录时返回空列表而不是抛错，这样界面上「已登录但没歌单」和
-   * 「根本没登录」能区分开。
-   */
-  async function neteaseMyPlaylists(apiBase) {
-    const base = normalizeNeteaseBase(apiBase);
-    /*
-     * 先把本地服务探活 / 拉起来再查询。
-     * 用户直接点「我的歌单」时，可能还没进行过任何播放，服务压根没启动；
-     * 这时 neteaseGet 只会拿到 fetch failed，界面显示成「读取失败」，
-     * 谁都看不出真正原因是「本地网易云服务没跑」。
-     */
-    await startNeteaseService(base).catch((error) => {
-      console.error('[netease] 本地服务启动失败:', error);
-    });
-    const status = await neteaseGet(base, '/login/status');
-    const body = status?.data || status || {};
-    const account = body.account || body.profile || null;
-    const profile = body.profile || account || null;
-    const uid = profile?.userId || profile?.user_id || account?.id || '';
-    if (!uid) {
-      throw new Error('本地网易云服务没有登录（在网易云窗口里扫码后重试）');
-    }
-    const json = await neteaseGet(base, '/user/playlist', { uid: String(uid), limit: '1000' });
-    const list = Array.isArray(json?.playlist) ? json.playlist : [];
-    return list
-      .map((item) => ({
-        id: String(item.id || ''),
-        // 「我喜欢的音乐」和自建/收藏歌单都算，用户想看的是自己账号里有什么
-        name: String(item.name || '未命名歌单'),
-        count: Number(item.trackCount || 0),
-        cover: String(item.coverImgUrl || '').replace(/^http:/i, 'https:'),
-        creator: String(item.creator?.nickname || ''),
-        subscribed: Boolean(profile && item.creator?.userId && String(item.creator.userId) !== String(uid)),
-      }))
-      .filter((item) => item.id);
-  }
-
-  ipcMain.handle('netease:my-playlists', async () => {
-    const apiBase = neteaseSession.apiBase || 'http://127.0.0.1:3100';
-    try {
-      const list = await neteaseMyPlaylists(apiBase);
-      return { ok: true, list };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '读取网易云歌单失败') };
-    }
-  });
-
-  /**
-   * 一次性拿到所有已登录平台的歌单，按平台分组。
-   *
-   * 之前界面只显示「当前选中的那一个平台」，登了 QQ 音乐就看不到网易云的。
-   * 这里并发去要，哪个失败就只让那个平台带错误，不影响其它平台。
-   */
-  ipcMain.handle('music:all-playlists', async (_event, input) => {
-    const startedAt = Date.now();
-    /*
-     * 可选入参 { platforms: ['kugou'] }：只同步点名的这一家。
-     *
-     * 以前不论点哪个平台的「同步」，都会把四家全拉一遍 —— 用户抱怨的就是这个：
-     * 只想知道酷狗有没有更新，结果 QQ 和网易云跟着一起转。
-     * 不传 / 传空数组 = 全部，老的调用方式（preload 的 musicAllPlaylists()）照旧能用。
-     */
-    const PLATFORM_ORDER = ['netease', 'qq', 'kugou', 'kuwo'];
-    const requested = Array.isArray(input?.platforms)
-      ? [
-          ...new Set(
-            input.platforms
-              .map((item) => String(item || '').trim().toLowerCase())
-              .filter((item) => PLATFORM_ORDER.includes(item))
-          ),
-        ]
-      : [];
-    const wanted = requested.length ? requested : PLATFORM_ORDER;
-    const status = await musicStatus();
-    /*
-     * 四家平台一律并发。
-     * 以前网易云是「先 await 完再并发其它三家」，它自己有 45 秒硬上限，
-     * 一旦本地 NeteaseCloudMusicApi 没起来，QQ/酷狗要白等 45 秒才开始动，
-     * 用户看到的就是「点同步全部，转半天一个平台都没出来」。
-     * 现在各自独立跑，谁慢谁慢，快的那几家先落进结果里。
-     */
-    const jobs = [];
-    if (status?.netease?.loggedIn && wanted.includes('netease')) {
-      jobs.push(
-        (async () => {
-          try {
-            const list = await neteaseMyPlaylists(neteaseSession.apiBase || 'http://127.0.0.1:3100');
-            return { platform: 'netease', label: '网易云', ok: true, list, error: '', expired: false };
-          } catch (error) {
-            const message = String(error.message || '读取失败');
-            return {
-              platform: 'netease',
-              label: '网易云',
-              ok: false,
-              list: [],
-              error: message,
-              expired: musicLooksExpired(message),
-            };
-          }
-        })()
-      );
-    }
-    for (const key of ['qq', 'kugou', 'kuwo']) {
-      if (!wanted.includes(key)) continue;
-      if (!status?.[key]?.loggedIn) continue;
-      jobs.push(
-        (async () => {
-          const label = key === 'qq' ? 'QQ 音乐' : key === 'kuwo' ? '酷我' : '酷狗';
-          try {
-            const result = await collectPlatformPlaylists(key);
-            return { platform: key, label, ok: true, list: result.list, error: '', expired: false };
-          } catch (error) {
-            const message = String(error.message || '读取失败');
-            return { platform: key, label, ok: false, list: [], error: message, expired: musicLooksExpired(message) };
-          }
-        })()
-      );
-    }
-    // allSettled：某一家的实现里万一漏了 catch，也不至于把整次同步拖垮
-    const settled = await Promise.allSettled(jobs);
-    const groups = settled
-      .map((item) =>
-        item.status === 'fulfilled'
-          ? item.value
-          : { platform: 'unknown', label: '未知平台', ok: false, list: [], error: String(item.reason?.message || '未知错误'), expired: false }
-      )
-      // 固定顺序，界面上的分区不会因为谁先返回就跳来跳去
-      .sort((a, b) => {
-        return PLATFORM_ORDER.indexOf(a.platform) - PLATFORM_ORDER.indexOf(b.platform);
-      });
-    return { ok: true, groups, syncedAt: Date.now(), durationMs: Date.now() - startedAt };
-  });
-
-  /*
-   * 歌单广场：网易云 / QQ音乐 / 酷狗 / 酷我 四家的公开热门歌单，免登录。
-   * 返回 { ok, lists: [...], page }，渲染层按页续拉。
-   */
-  ipcMain.handle('music:plaza', async (_event, input) => {
-    const platform = String(input?.platform || '');
-    const page = Math.max(1, Number(input?.page) || 1);
-    try {
-      const lists = await playlistDeadline(publicPlaza(platform, page), 20000, '读取歌单广场');
-      return { ok: true, lists, page };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '读取歌单广场失败') };
-    }
-  });
-
-  ipcMain.handle('music:playlist-songs', async (_event, input) => {
-    const key = String(input?.platform || '');
-    const playlistId = String(input?.playlistId || '');
-    if (!playlistId) return { ok: false, reason: '缺少歌单 ID' };
-    /*
-     * 酷狗「自建歌单」的 ID 是 opaque 的（collect:uid:listid:chain:sign），
-     * 它跟账号登录态没关系，也不该先拿去做一次账号路径的尝试 ——
-     * 那条路只认纯数字 specialid，对它会直接抛「歌单 ID 无效」，
-     * 白等一轮再退回来。认出来就直奔公开读取。
-     */
-    if (/^collect:/i.test(playlistId)) {
-      try {
-        const detail = await playlistDeadline(
-          publicPlaylistSongs('kugou', playlistId),
-          40000,
-          '读取酷狗分享歌单'
-        );
-        return { ok: true, detail: { id: playlistId, name: detail.name, songs: detail.songs || [] } };
-      } catch (error) {
-        return { ok: false, reason: String(error.message || '读取酷狗分享歌单失败') };
-      }
-    }
-    try {
-      /*
-       * 网易云的歌单走本地 API：它没有存盘会话，loadMusicSession 读不到，
-       * 而 accountPlaylistSongs 也只支持 qq/kugou。
-       *
-       * 注意这里必须在 musicPlatformConfig(key) 之前处理：
-       * PLATFORM_CONFIG 里只有 qq / kugou，没有 netease，
-       * 之前那句校验会直接抛「不支持的平台：netease」，
-       * 被 catch 吞成 {ok:false}，界面上又没地方显示这个 reason，
-       * 于是用户看到的就是「歌单列表出来了，点进去毫无反应」。
-       */
-      if (key === 'netease') {
-        return await playlistDeadline(
-          (async () => {
-        /*
-         * 公开直连优先：music.163.com 的 v6 接口免登录可用，
-         * 不依赖本地服务；失败（私有歌单/网络问题）再退本地 API。
-         */
-        try {
-          const pub = await publicPlaylistSongs('netease', playlistId);
-          if (pub && pub.songs && pub.songs.length) {
-            return { ok: true, detail: { id: playlistId, name: pub.name, songs: pub.songs } };
-          }
-        } catch (pubError) {
-          console.error('[netease] 公开直连失败，退本地服务:', pubError && pubError.message);
-        }
-        const apiBase = neteaseSession.apiBase || 'http://127.0.0.1:3100';
-        // 本地服务没起来就先把它拉起来，否则读取必然失败
-        await startNeteaseService(apiBase).catch((error) => {
-          console.error('[netease] 本地服务启动失败:', error);
-        });
-        /*
-         * /playlist/detail 自带完整曲目（本地 API 的 module/playlist_detail.js
-         * 用的是 n=100000），所以一次请求就够；
-         * 万一拿到的是空列表，再走 /playlist/track/all 补一次。
-         */
-        let json = null;
-        let playlist = null;
-        try {
-          json = await neteaseGet(apiBase, '/playlist/detail', { id: playlistId });
-          playlist = json?.playlist || null;
-        } catch (error) {
-          console.error('[netease] 读取歌单详情失败:', error);
-        }
-        let tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
-        if (!tracks.length && playlist) {
-          /*
-           * /playlist/track/all 每页最多 200 条，之前只拉了一页，
-           * 381 首的歌单后半截全是空的。改成 offset 分页循环拉全：
-           * 空页 / 不满一页 / 去重后没新增，三个条件任一命中就停。
-           */
-          const PAGE = 200;
-          const seen = new Set();
-          for (let offset = 0; offset < PAGE * 50; offset += PAGE) {
-            const all = await neteaseGet(apiBase, '/playlist/track/all', {
-              id: playlistId,
-              limit: String(PAGE),
-              offset: String(offset),
-            }).catch(() => null);
-            const rows = Array.isArray(all?.songs) ? all.songs : [];
-            if (!rows.length) break;
-            let added = 0;
-            for (const row of rows) {
-              const songId = String(row?.id || '');
-              if (!songId || seen.has(songId)) continue;
-              seen.add(songId);
-              tracks.push(row);
-              added += 1;
-            }
-            if (!added || rows.length < PAGE) break;
-          }
-        }
-        if (!playlist && !tracks.length) {
-          return { ok: false, reason: '读取网易云歌单失败（本地网易云服务可能没启动，或歌单 ID 无效）' };
-        }
-        const songs = tracks.map((song) => ({
-          title: String(song.name || ''),
-          artist: String(
-            (song.ar || song.artists || []).map((a) => a.name || '').filter(Boolean).join(' / ')
-          ),
-          cover: String(song.al?.picUrl || song.album?.picUrl || '').replace(/^http:/i, 'https:'),
-          neteaseId: String(song.id || ''),
-          mid: String(song.id || ''),
-          hash: '',
-        }));
-        return {
-          ok: true,
-          detail: {
-            id: playlistId,
-            name: String(playlist?.name || '歌单'),
-            songs,
-          },
-        };
-          })(),
-          30000,
-          '读取网易云歌单'
-        );
-      }
-      /*
-       * 酷我：登录态歌单走老接口 nplserver（账号数据，含私有列表）；
-       * 没登录或账号路径失败时退到公开详情接口（广场歌单）。
-       * 详情要逐个 musicInfo 补元信息，给 35 秒。
-       */
-      if (key === 'kuwo') {
-        const savedKuwo = await loadMusicSession('kuwo', loadSecret);
-        if (savedKuwo) {
-          const creds = await mergePartitionCookies('kuwo', savedKuwo);
-          try {
-            const detail = await playlistDeadline(
-              accountPlaylistSongs('kuwo', creds, playlistId),
-              35000,
-              '读取酷我歌单'
-            );
-            return { ok: true, detail: { id: playlistId, name: detail.name, songs: detail.songs || [] } };
-          } catch (accountError) {
-            console.error('[kuwo] 登录歌单失败，退公开详情:', accountError && accountError.message);
-          }
-        }
-        const pub = await playlistDeadline(
-          publicPlaylistSongs('kuwo', playlistId),
-          30000,
-          '读取酷我公开歌单'
-        );
-        return { ok: true, detail: { id: playlistId, name: pub.name, songs: pub.songs || [] } };
-      }
-      musicPlatformConfig(key);
-      const session = await loadMusicSession(key, loadSecret);
-      /*
-       * 没登录时直接走公开详情（歌单广场的卡片本来就是公开歌单）；
-       * 登录了但账号路径失败，也退公开详情再试一次。
-       */
-      if (!session) {
-        const pub = await playlistDeadline(
-          publicPlaylistSongs(key, playlistId),
-          25000,
-          '读取公开歌单'
-        ).catch(() => null);
-        if (pub && pub.songs && pub.songs.length) {
-          return { ok: true, detail: { id: playlistId, name: pub.name, songs: pub.songs } };
-        }
-        return { ok: false, reason: '还没有登录，且公开详情不可用' };
-      }
-      let detail;
-      try {
-        detail =
-          playlistId === LIKED_ID
-            ? await playlistDeadline(
-                webLikedSongs(key, session, {
-                  getWindow: async (target) => ({ win: musicLoginWindow(target), ownWindow: true }),
-                }),
-                34000,
-                '读取我喜欢的音乐'
-              )
-            : await playlistDeadline(
-                accountPlaylistSongs(key, session, playlistId),
-                25000,
-                '读取歌单曲目'
-              );
-      } catch (accountError) {
-        if (playlistId === LIKED_ID) throw accountError;
-        console.error('[music] 账号路径读取失败，退公开详情:', accountError && accountError.message);
-        detail = await playlistDeadline(
-          publicPlaylistSongs(key, playlistId),
-          25000,
-          '读取公开歌单'
-        );
-      }
-      return { ok: true, detail };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '读取歌单失败') };
-    }
-  });
-
-  /**
-   * 歌单分享链接 → 平台 + 歌单 ID。
-   * 只做解析，不去取曲目，方便界面先告诉用户「识别成酷狗歌单了」再去拉。
-   * 认不出来时把原因原样回给界面，由界面 toast 出来，
-   * 绝不让用户看到一个干巴巴的「导入失败」。
-   */
-  ipcMain.handle('music:parse-playlist-link', async (_event, input) => {
-    try {
-      /*
-       * 必须 await：解析酷狗短链要跟一次 302（见 music-playlists.js 里的说明），
-       * 函数已经是 async 的。漏了 await 会拿到一个 Promise，
-       * 展开成 {...promise} 就是空对象，界面只会看到 ok:true 但没有任何字段。
-       */
-      const parsed = await parseSharedPlaylistLink(typeof input === 'string' ? input : input?.url || '');
-      return { ok: true, ...parsed };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '没有识别出歌单 ID') };
-    }
-  });
-
-  // QQ 音乐 / 酷狗的公开榜单：只读曲目列表，播放仍走网易云或原站
-  /**
-   * 榜单：默认返回三家合并去重后的列表。
-   * 传 platform 时保留旧的单平台行为，方便回退。
-   */
-  ipcMain.handle('music:charts', async (_event, input) => {
-    const platform = typeof input === 'string' ? input : input?.platform || '';
-    const apiBase = normalizeNeteaseBase(
-      (typeof input === 'object' && input?.apiBase) || ''
-    );
-    if (!platform || platform === 'all') {
-      return mergedCharts(apiBase);
-    }
-    return { charts: await musicCharts(platform, apiBase), counts: { [platform]: 0, merged: 0 } };
-  });
-
-  ipcMain.handle('music:chart-songs', async (_event, input) => {
-    const limit = Math.max(1, Math.min(60, Number(input?.limit) || 30));
-    const apiBase = normalizeNeteaseBase(input?.apiBase || '');
-
-    // 新的合并结构：直接给 chart 对象（含 sourceIds）
-    if (input?.chart && typeof input.chart === 'object') {
-      const detail = await mergedChartSongs(input.chart, apiBase, limit);
-      return { ...detail, songs: detail.songs };
-    }
-
-    // 旧调用方式保持兼容
-    const platform = String(input?.platform || '');
-    const chartId = String(input?.chartId || '');
-    if (!chartId) throw new Error('缺少榜单 ID');
-    return chartSongs(platform, chartId, limit, apiBase);
-  });
-
-  /**
-   * 搜索歌曲：三个平台都走公开接口，不需要登录。
-   * platform 传 all（或不传）时并发搜全部三家，单个平台失败不影响其它平台。
-   */
-  ipcMain.handle('music:search', async (_event, input) => {
-    const platform = String(input?.platform || 'all');
-    const keyword = String(input?.keyword || '').trim();
-    const limit = Math.max(1, Math.min(50, Number(input?.limit) || 30));
-    const apiBase = normalizeNeteaseBase(input?.apiBase || '');
-    if (!keyword) return { keyword: '', songs: [], errors: [] };
-    const result = await searchSongs(platform, keyword, apiBase, limit);
-    // 搜索结果也按音源开关过滤：停用了酷我，列表里就不该再出现「酷我」标签
-    const flags = currentMusicSourceFlags();
-    const songs = (result?.songs || []).filter((item) => flags[item.platform] !== false);
-    return { ...result, songs };
-  });
-
-  ipcMain.handle('netease:song-meta', async (_event, input) => {
-    const apiBase = normalizeNeteaseBase(input?.apiBase);
-    const id = String(input?.id || '');
-    if (!id) return { lyric: '' };
-    const [detail, lyric] = await Promise.all([
-      neteaseGet(apiBase, '/song/detail', { ids: id }).catch(() => null),
-      neteaseGet(apiBase, '/lyric', { id }).catch(() => null),
-    ]);
-    const song = detail?.songs?.[0];
-    return {
-      name: song?.name || '',
-      artist: (song?.ar || []).map((item) => item.name).filter(Boolean).join(' / '),
-      cover: String(song?.al?.picUrl || '').replace(/^http:/i, 'https:'),
-      lyric: lyric?.lrc?.lyric || '',
-      translated: lyric?.tlyric?.lyric || '',
-    };
-  });
-
-  ipcMain.handle('netease:qr-create', async (_event, input) => {
-    const apiBase = normalizeNeteaseBase(input?.apiBase);
-    const keyJson = await neteaseGet(apiBase, '/login/qr/key');
-    const key = keyJson.data?.unikey;
-    if (!key) throw new Error('本地 API 没有返回二维码 key');
-    const qrJson = await neteaseGet(apiBase, '/login/qr/create', { key, qrimg: 'true' });
-    return { apiBase, key, qrimg: qrJson.data?.qrimg || '', qrurl: qrJson.data?.qrurl || '' };
-  });
-
-  /**
-   * 把 NeteaseCloudMusicApi 吐出来的 cookie 串修成合法的请求 Cookie 头。
-   *
-   * 那个接口返回的 cookie 是【Set-Cookie 格式】：
-   *   `NMTID=xxx; Max-Age=315360000; Expires=Wed, 22 Oct 2036 ...; Path=/;`
-   * 直接塞进请求头会把 Max-Age / Expires / Path 当成 cookie 名，
-   * 服务端解析失败 → 认不出登录态 → 退成匿名账号（profile 为 null）。
-   * 这里只保留 name=value 形式的片段，属性名白名单外的都丢掉。
-   */
-  function sanitizeNeteaseCookie(raw) {
-    const ATTRS = new Set([
-      'max-age', 'expires', 'path', 'domain', 'secure', 'httponly', 'samesite',
-      'partitioned', 'priority', 'version', 'comment',
-    ]);
-    const parts = [];
-    for (const piece of String(raw || '').split(';')) {
-      const text = piece.trim();
-      if (!text) continue;
-      const eq = text.indexOf('=');
-      if (eq <= 0) continue;
-      const name = text.slice(0, eq).trim();
-      if (!name || ATTRS.has(name.toLowerCase())) continue;
-      parts.push(text);
-    }
-    return parts.join('; ');
-  }
-
-  ipcMain.handle('netease:qr-check', async (_event, input) => {
-    const apiBase = normalizeNeteaseBase(input?.apiBase);
-    const json = await neteaseGet(apiBase, '/login/qr/check', { key: input?.key });
-    if (Number(json.code) === 803 && json.cookie) {
-      const cookie = sanitizeNeteaseCookie(json.cookie);
-      neteaseSession = { apiBase, cookie };
-      await saveSecret('netease', JSON.stringify(neteaseSession)).catch(() => {});
-    }
-    return {
-      code: Number(json.code) || 0,
-      message: String(json.message || ''),
-      loggedIn: Boolean(neteaseSession.cookie && neteaseSession.apiBase === apiBase),
-    };
-  });
-
-  ipcMain.handle('netease:status', async () => ({
-    loggedIn: Boolean(neteaseSession.cookie),
-    apiBase: neteaseSession.apiBase,
-  }));
-
-  ipcMain.handle('netease:logout', async () => {
-    neteaseSession = { apiBase: '', cookie: '' };
-    await saveSecret('netease', '').catch(() => {});
-    return { ok: true };
-  });
-
-  ipcMain.handle('games:update-cover', async (_event, id, cover) => {
-    const game = store.data.games.find((item) => item.id === id);
-    if (!game) throw new Error('没有找到这个游戏');
-    const value = String(cover || '').trim();
-    if (value && !fs.existsSync(path.join(app.getPath('userData'), value))) {
-      throw new Error('封面文件不存在');
-    }
-    game.cover = value;
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
-
-  ipcMain.handle('games:update', async (_event, id, input) => {
-    const index = store.data.games.findIndex((g) => g.id === id);
-    if (index === -1) throw new Error('没有找到这个游戏');
-    const current = store.data.games[index];
-    const next = normalizeGame(input);
-    /*
-     * 调用方没提渲染后端就沿用原值。
-     * 收藏、改名这些局部更新都会走这个 IPC，而 normalizeGame 对缺失字段给的是默认值，
-     * 直接合并会把用户设好的 DX12 悄悄改回「跟随默认」——用户只会觉得「设了不生效」。
-     */
-    if (!input || input.renderApi === undefined) {
-      next.renderApi = renderApi.normalizeMode(current.renderApi);
-    }
-    const merged = {
-      ...current,
-      ...next,
-      demo: current.demo && !next.target ? current.demo : false,
-      id,
-    };
-    if (next.target !== current.target) {
-      const active =
-        (merged.servers || []).find((server) => server.id === merged.activeServerId) ||
-        (merged.servers || [])[0];
-      if (active) {
-        active.path = next.target || '';
-        active.root = next.target ? path.dirname(next.target) : '';
-      }
-    }
-    ensureServers(merged);
-    store.data.games[index] = merged;
-    await store.saveNow();
-    pushState(true);
-    return publicGame(merged);
-  });
 
   /*
    * 只改渲染后端这一个字段（启动页「开始游戏」下面的三段式开关走这里）。
@@ -13605,104 +9883,29 @@ function musicLoginWindow(target) {
    * normalizeGame 当成「没填游戏名称」直接抛错；补齐所有字段又等于把编辑逻辑抄一遍，
    * 漏一个字段就会把用户的改名/启动参数覆盖回默认值。这里点名改一个键，风险为零。
    */
-  ipcMain.handle('games:render-api', async (_event, id, mode) => {
-    const game = store.data.games.find((item) => item.id === id);
-    if (!game) throw new Error('没有找到这个游戏');
-    // 参数只在启动那一刻传给客户端，运行中改了也不会生效，直接挡住比让它「看起来成功了」好
-    if (running.has(id)) throw new Error('游戏正在运行，关掉之后再切换渲染后端');
-    game.renderApi = renderApi.normalizeMode(mode);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
+  /* ------------------------------------------------------------------ */
+  /* 角色图鉴（原神 / 星铁 / 绝区零）                                    */
+  /* ------------------------------------------------------------------ */
+  /*
+   * 和战绩接口共用同一个登录态取法，uid/server 由前端从账号中心带过来 ——
+   * 这里不猜，猜错了就是查别人的号。
+   */
+  installRosterIpc({ store, readHoyolabStore, pickHoyolabAccount });
 
-  ipcMain.handle('games:remove', async (_event, id) => {
-    if (running.has(id)) {
-      await killGame(id);
-    }
-    const index = store.data.games.findIndex((g) => g.id === id);
-    if (index === -1) return false;
-    const [removed] = store.data.games.splice(index, 1);
-    if (removed?.builtinKey) {
-      store.data.hiddenBuiltins = Array.from(
-        new Set([...(store.data.hiddenBuiltins || []), removed.builtinKey])
-      );
-    }
-    if (removed && removed.cover && removed.cover.startsWith('covers/cover-')) {
-      fsp.unlink(path.join(app.getPath('userData'), removed.cover)).catch(() => {});
-    }
-    await store.saveNow();
-    pushState(true);
-    return true;
-  });
+  /* ------------------------------------------------------------------ */
+  /* 明日方舟（鹰角账号 token）                                          */
+  /* ------------------------------------------------------------------ */
 
-  ipcMain.handle('games:clear-demo', async () => {
-    store.data.games = store.data.games.filter((g) => !g.demo);
-    await store.saveNow();
-    pushState(true);
-    return true;
-  });
 
-  ipcMain.handle('games:detect', async (_event, id) => {
-    const targets = id
-      ? store.data.games.filter((game) => game.id === id)
-      : store.data.games.filter((game) => game.builtin);
-    if (!targets.length) {
-      return { ok: false, error: '没有找到可以自动检测的游戏' };
-    }
-    /*
-     * 先修历史错配，再检测。
-     * 顺序很重要：老数据里「官服行 = 国际服客户端」时，先检测会把同一条路径
-     * 也写进国际服行，两行指向同一个 exe，后面的修复就看不出该清哪一条了。
-     * 先修能把路径搬回国际服行，检测再写一次也只是原地覆盖。
-     */
-    let repaired = await repairServerChannels();
-    const updated = [];
-    for (const game of targets) {
-      if (!game.builtinKey) continue;
-      const found = await detectGame(game.builtinKey);
-      if (found) {
-        const active = (game.servers || []).find((server) => server.id === game.activeServerId);
-        const activeHadPath = Boolean(active && active.path);
-        // 同 detectBuiltins：写进真实渠道那一行，没有官服客户端时不再凭空占用官服行。
-        const channel = await detectionChannel(game, found);
-        // 留一行日志：以后用户再报「被识别成官服」，从 launch.log 就能看到判定结果与依据
-        writeLaunchLog(`detect ${game.builtinKey}: ${channel || '未知'} ← ${found}`);
-        const detected = serverForDetected(game, channel);
-        if (detected) {
-          detected.path = found;
-          detected.root = path.dirname(found);
-          detected.incomplete = false;
-          detected.unavailable = false;
-        }
-        if (detected && (!active || !activeHadPath)) {
-          game.activeServerId = detected.id;
-          game.target = found;
-          game.workDir = path.dirname(found);
-        }
-        updated.push(game.name);
-      }
-    }
-    // 检测完再扫一遍：discover 类逻辑可能又把路径写回了旧行
-    repaired += await repairServerChannels();
-    if (updated.length || repaired) {
-      await store.saveNow();
-      pushState(true);
-    }
-    if (!updated.length) {
-      return {
-        ok: false,
-        error: id
-          ? '没有自动找到安装位置，可以手动选择启动程序，或前往官网下载。'
-          : '没有自动找到已安装的游戏，可以手动添加或前往官网下载。',
-      };
-    }
-    return {
-      ok: true,
-      updated,
-      path: id ? targets[0].target : null,
-    };
-  });
+  /*
+   * 鹰角账号：打开官网登录窗口，登录完成后自动把账号 token 拿回来。
+   *
+   * 手填 token 那条路太劝退 —— 要开 F12 或者翻页面源码找一串 base64。
+   * 官网的登录态就在 cookie 里，而 web-api.hypergryph.com/account/info/hg
+   * 只认登录域的 cookie，所以这里用同一个 persist 分区开 user.hypergryph.com，
+   * 轮询到登录态就回主进程换 token。换成 token 之后 cookie 就没用了。
+   */
+
 
   /*
    * 按「某个服务器的渠道」扫一遍。
@@ -13711,95 +9914,7 @@ function musicLoginWindow(target) {
    * 这个是「B服 装在哪」，只认 B服 的 exe。用户在 B服 那一行点自动扫描，
    * 期待的显然是 B服 被填上，而不是官服那一行又刷新一遍。
    */
-  ipcMain.handle('games:detect-server', async (_event, id, serverId) => {
-    const game = store.data.games.find((item) => item.id === id);
-    if (!game) return { ok: false, error: '没有找到这个游戏' };
-    const server = (game.servers || []).find((item) => item.id === serverId);
-    if (!server) return { ok: false, error: '没有找到这个服务器' };
-    const found = await detectServerExecutable(game, server);
-    if (!found) {
-      return {
-        ok: false,
-        error: `没扫到${server.name}的客户端。它可能还没下载，或者装在非常规目录里 —— 可以手动选路径。`,
-      };
-    }
-    server.path = found;
-    server.root = path.dirname(found);
-    server.incomplete = false;
-    server.unavailable = false;
-    await store.saveNow();
-    pushState(true);
-    return { ok: true, path: found, name: server.name };
-  });
 
-  ipcMain.handle('servers:add', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    const serverPath = String(input?.path || '').trim();
-    if (!serverPath || !targetExists(serverPath)) throw new Error('请选择一个存在的启动程序');
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(serverPath)) throw new Error('服务器配置需要一个本地启动程序');
-    if (!Array.isArray(game.servers)) game.servers = [];
-    const name = String(input?.name || '').trim().slice(0, 40) || `服务器 ${game.servers.length + 1}`;
-    const serverRoot = String(input?.root || '').trim();
-    if (serverRoot) {
-      let rootStat;
-      try { rootStat = fs.statSync(serverRoot); } catch {}
-      if (!rootStat || !rootStat.isDirectory()) throw new Error('自定义根目录不存在，请重新选择');
-    }
-    const server = {
-      id: crypto.randomUUID(),
-      name,
-      channel: 'custom',
-      path: serverPath,
-      root: serverRoot || path.dirname(serverPath),
-      addedAt: new Date().toISOString(),
-    };
-    game.servers.push(server);
-    if (!game.activeServerId) game.activeServerId = server.id;
-    ensureServers(game);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
-
-  ipcMain.handle('servers:update', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    const prevPath = server.path;
-    const prevRoot = server.root;
-    server.name = String(input?.name || '').trim().slice(0, 40) || server.name;
-    const serverPath = String(input?.path || '').trim();
-    if (serverPath) {
-      if (!targetExists(serverPath)) throw new Error('这个启动程序不存在');
-      server.path = serverPath;
-      server.confirmed = true;
-      // 用户手动指定了有效启动程序：它就是一个可用的客户端，不再视为「需要重建」。
-      server.incomplete = false;
-      server.unavailable = false;
-      if (server.packPath === server.path) server.packPath = '';
-    }
-    const serverRoot = String(input?.root || '').trim();
-    if (serverRoot) {
-      let rootStat;
-      try { rootStat = fs.statSync(serverRoot); } catch {}
-      if (!rootStat || !rootStat.isDirectory()) throw new Error('自定义根目录不存在，请重新选择');
-      server.root = serverRoot;
-    } else if (serverPath) {
-      server.root = path.dirname(serverPath);
-    }
-    if (game.activeServerId === server.id && server.path) {
-      game.target = server.path;
-      game.workDir = server.root;
-    }
-    // 换了安装目录/启动程序，旧渠道的预下载状态不能再挂到新目录上（切服假状态）。
-    if (prevPath !== server.path || prevRoot !== server.root) server.predownload = null;
-    ensureServers(game);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
 
   /*
    * 清路径 / 移出配置时，把所有「跟着这个路径走」的运行时记忆一并清掉。
@@ -13824,138 +9939,6 @@ function musicLoginWindow(target) {
     server.predownload = null;
   }
 
-  ipcMain.handle('servers:clear-path', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修改服务器');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    resetServerState(server);
-    ensureServers(game);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
-
-  ipcMain.handle('servers:remove', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再修改服务器');
-    const target = game.servers.find((item) => item.id === input?.serverId);
-    if (target?.builtinServer || game.builtin) {
-      if (!target) throw new Error('没有找到这个服务器');
-      resetServerState(target);
-      await store.saveNow();
-      pushState(true);
-      return publicGame(game);
-    }
-    if (game.servers.length <= 1) throw new Error('至少保留一个服务器配置');
-    game.servers = game.servers.filter((server) => server.id !== input?.serverId);
-    if (!game.servers.some((server) => server.id === game.activeServerId)) {
-      game.activeServerId = game.servers[0]?.id || null;
-    }
-    ensureServers(game);
-    await store.saveNow();
-    pushState(true);
-    return publicGame(game);
-  });
-
-  ipcMain.handle('servers:activate', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    if (server.incomplete && game.builtinKey !== 'endfield') {
-      throw new Error('这个目录是资源替换包，不是完整客户端；请点这一行的下载按钮生成国际服客户端');
-    }
-    if (!server.path || !targetExists(server.path)) {
-      if (game.builtinKey !== 'endfield') {
-        throw new Error('这个服务器还没有配置启动程序，先点“编辑”选择客户端');
-      }
-    }
-    if (game.builtinKey === 'genshin' && server.channel === 'global') {
-      /*
-       * 生成国际服运行时可能要搬几十 GB：以前这里不传 onProgress，用户点「切换」
-       * 只看到一个不动的转圈。现在照终末地那条路把进度发到同一个频道，
-       * 界面上现有的切换提示条就能显示「百分比 + 已处理/总量 + 速度」。
-       */
-      const prepared = await prepareGenshinPackRuntime(game, server, (progress) =>
-        send('endfield:progress', { ...progress, serverName: server.name })
-      );
-      if (prepared) {
-        server.path = prepared.executable;
-        server.root = prepared.runtimeRoot;
-        server.runtimeLinked = true;
-      }
-    }
-    if (game.builtinKey === 'endfield') {
-      // 有可用路径时保持“尽力而为”：渠道包/基础客户端缺失不阻断已就绪服务器的切换；
-      // 没有任何路径时才把自动生成的错误抛给用户看。
-      // 旧单 work 混合目录绝不能算「已就绪、可以静默沿用」：它正是 B服 6 秒崩
-      // 的配方。即使迁移没覆盖到的历史数据残留了指向它的路径，这里也要当作
-      // 没有可用路径，让重建失败显式报错，而不是被「尽力而为」吞掉又启动旧目录。
-      const hadPath =
-        server.path &&
-        targetExists(server.path) &&
-        !isEndfieldLegacyWorkRoot(path.dirname(server.path));
-      // 切服是「官服删了」最常走的入口：只剩运行时可用时必须能建
-      const prepared = await ensureEndfieldChannelRuntime(game, server, { allowRuntimeBase: true }).catch((error) => {
-        if (hadPath) return null;
-        throw error;
-      });
-      if (prepared) {
-        server.path = prepared.launchPath;
-        server.root = prepared.runtimeRoot;
-        // 官服直启自己客户端、没有生成独立运行时时不贴「差异运行时」标签
-        server.runtimeLinked = !prepared.directBase;
-      }
-    }
-    // 明日方舟（2.4.0 合并）：官服 / B服 在同一套安装目录里，按终末地那套运行时
-    // 方案复制出独立目录，大文件硬链接、渠道 SDK 换成目标服的。缺 B服 载荷时直接抛错。
-    if (game.builtinKey === 'arknights') {
-      // 同上：方舟硬链接运行时也要报进度，否则切服时界面一动不动
-      await ensureArknightsRuntime(game, server, {
-        onProgress: (progress) => send('endfield:progress', { ...progress, serverName: server.name }),
-      });
-    }
-    /*
-     * 版本号跟着当前客户端走。以前它是「一个游戏一个」，官服更到 7.2 再切到还是 7.1
-     * 的国际服，启动页仍写着 v7.2 —— 看着像切了个假服。以目标客户端 config.ini
-     * 为准重读一次；读不出来（非米哈游客户端 / 没这份 ini）就保持原值不动。
-     */
-    const clientVersion = clientChannel.gameVersionFromPath(server.path);
-    if (clientVersion) {
-      game.version = clientVersion;
-      game.versionName = clientVersion;
-    }
-    /*
-     * 切成功了：记下「用过切服」，并在这个用户还没表过态（null）时把对应游戏的
-     * 渠道包自动更新打开。两个游戏各一个开关：只切过终末地的人，不该被顺手打开
-     * 明日方舟那条。手动关掉的（false）保持关着 —— 用户明确表过态就不替他改。
-     */
-    store.data.settings.hasSwitchedServer = true;
-    if (game.builtinKey === 'arknights') {
-      if (store.data.settings.autoUpdateArknightsPacks == null) {
-        store.data.settings.autoUpdateArknightsPacks = true;
-      }
-    } else if (store.data.settings.autoUpdateEndfieldPacks == null) {
-      store.data.settings.autoUpdateEndfieldPacks = true;
-    }
-    game.activeServerId = server.id;
-    game.target = server.path;
-    game.workDir = server.root || path.dirname(server.path);
-    await store.saveNow();
-    pushState(true);
-    /*
-     * 切完再问一次这个渠道有没有更新（不阻塞返回，界面先切过去）。
-     * 以前这一步要等 30 分钟的自动检查，切到落后的那个服时按钮不会变「更新游戏」。
-     */
-    setTimeout(() => {
-      refreshPredownloadAfterSwitch(game).catch(() => {});
-    }, 400);
-    return publicGame(game);
-  });
 
   /*
    * 解析硬链接的两个根目录：既支持已配置的服务器，也支持直接指定两个文件夹。
@@ -14011,130 +9994,6 @@ function musicLoginWindow(target) {
     };
   }
 
-  ipcMain.handle('servers:link', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再建立硬链接');
-
-    // 检测与执行共用同一套根目录解析
-    const { sourceRoot, targetRoot, sourceName, targetName } = resolveLinkRoots(game, input);
-
-    const jobId = crypto.randomUUID();
-    const signal = { cancelled: false };
-    linkJobs.set(jobId, signal);
-    send('link:progress', {
-      jobId,
-      gameId: game.id,
-      phase: 'scan',
-      processed: 0,
-      total: 0,
-      linked: 0,
-      savedBytes: 0,
-      skipped: 0,
-      current: '正在扫描两个客户端…',
-    });
-
-    try {
-      const result = await linkTrees({
-        sourceRoot,
-        targetRoot,
-        mode: input?.mode === 'fast' ? 'fast' : 'full',
-        signal,
-        onProgress: (progress) => {
-          /*
-           * 硬链接也走计量器（sendProgress）：这条链路以前只发 processed/total 文件数，
-           * 面板三行里的「下载」行就拿不到字节量，只会在硬链接生成时显示一行干巴巴的文字。
-           * link.js 现在已经按目标文件大小累加 bytesDone/totalBytes，这里补上速度与剩余时间。
-           */
-          sendProgress('link:progress', jobId, {
-            gameId: game.id,
-            ...progress,
-            sourceName,
-            targetName,
-          });
-        },
-      });
-      send('link:done', { jobId, gameId: game.id, ...result });
-      return { ok: true, jobId, ...result };
-    } catch (error) {
-      send('link:done', { jobId, gameId: game.id, ok: false, error: error.message });
-      throw error;
-    } finally {
-      linkJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('servers:link-preview', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再检测');
-    const { sourceRoot, targetRoot, sourceName, targetName } = resolveLinkRoots(game, input);
-
-    const jobId = crypto.randomUUID();
-    const signal = { cancelled: false };
-    linkJobs.set(jobId, signal);
-    const sendPreview = (payload) => send('link:preview-progress', { jobId, gameId: game.id, sourceName, targetName, ...payload });
-
-    try {
-      const result = await previewTrees({
-        sourceRoot,
-        targetRoot,
-        mode: input?.mode === 'fast' ? 'fast' : 'full',
-        signal,
-        onProgress: sendPreview,
-      });
-      send('link:preview-done', { jobId, gameId: game.id, ...result });
-      return { ok: true, jobId, ...result };
-    } catch (error) {
-      send('link:preview-done', { jobId, gameId: game.id, ok: false, error: error.message });
-      throw error;
-    } finally {
-      linkJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('servers:prepare-endfield', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game || game.builtinKey !== 'endfield') throw new Error('这个功能只用于明日方舟：终末地');
-    if (await pruneStaleRunning()) pushState(true);
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    if (server.channel === 'official') throw new Error('官服请直接指定官服客户端');
-
-    if (!ENDFIELD_PACK_NAMES[server.channel]) throw new Error('这个服务器没有对应的渠道差异包');
-
-    // 渠道包缺失时会在 ensureEndfieldChannelRuntime 里现下（它自己调
-    // ensureEndfieldPackFor），这里不再重复准备一遍。
-    // 基础客户端的挑选、每渠道运行时目录的位置与重叠校验，也全部在那边统一做
-    // —— 它本来就是「启动游戏」时走的那条路，两条路合一才不会慢慢走偏。
-    /*
-     * 手动「重新生成」传 forceRuntime:true，强制从最新官服本体整树重建该渠道的
-     * 独立运行时；buildEndfieldChannelRuntime 会把旧目录的 Endfield_Data\Persistent
-     * （用户下好的语音包 + 游戏自己维护的索引）整体搬到 staging 再就位，不会丢下载内容。
-     */
-    try {
-      const result = await ensureEndfieldChannelRuntime(game, server, {
-        runtimeRoot: input?.runtimeRoot,
-        forceRuntime: true,
-        allowRuntimeBase: true,
-      });
-      ensureServers(game);
-      await store.saveNow();
-      pushState(true);
-      return {
-        ok: true,
-        runtimeRoot: result.runtimeRoot,
-        path: result.launchPath,
-        linked: result.linked || 0,
-        overlay: result.overlay || 0,
-        packDownloaded: result.packDownloaded || false,
-      };
-    } catch (error) {
-      pushState(true);
-      throw error;
-    }
-  });
 
   /**
    * 估算生成差异客户端要占多少空间。
@@ -14336,12 +10195,45 @@ function musicLoginWindow(target) {
     if (!server) throw new Error('没有找到这个服务器');
     if (await pruneStaleRunning()) pushState(true);
     if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
-    if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
+    /*
+     * Yostar 三区（EN/JP/KR）走三区互为源的镜像分支：root 可以是空的（目录还没装出来，
+     * 从另一个区生成）；国服 / B服 仍要求 root 已存在（硬链接基础客户端的旧链路）。
+     */
+    const isYostarTarget = yostarPacks.isYostarChannel(server.channel);
+    if (!isYostarTarget && !ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
       throw new Error('国际服 / 台服是各自独立的客户端，请直接指到它们自己的安装目录，不能用国服生成');
     }
     const baseRoot = String(server.root || '').trim();
-    if (!baseRoot || !fs.existsSync(baseRoot)) {
+    if (!isYostarTarget && (!baseRoot || !fs.existsSync(baseRoot))) {
       throw new Error('这个服务器还没有客户端目录，先在它那一行点“编辑”把目录指到明日方舟的安装目录');
+    }
+    if (isYostarTarget && !baseRoot) {
+      throw new Error('这个服务器还没有客户端目录：先用「下载游戏」装一个国际服，或把目录指到已有的国际服客户端');
+    }
+    if (isYostarTarget && input?.estimate) {
+      // 三区互切的空间估算：从另一个区运行时算「可硬链 / 需下载」的真实数字
+      const source = (game.servers || []).find(
+        (item) => item.id !== server.id && yostarPacks.isYostarChannel(item.channel) && item.root && fs.existsSync(item.root)
+      );
+      if (!source) {
+        return {
+          estimate: true,
+          needBytes: 0,
+          note: '还没有其它国际服安装目录可以当源（先用「下载游戏」装一个），生成时会改为完整下载',
+        };
+      }
+      const plan = await yostarPacks.planCrossRuntime({
+        sourceRoot: source.root,
+        targetProfile: server.channel,
+      });
+      return {
+        estimate: true,
+        needBytes: Number(plan.downloadBytes) || 0,
+        hardlinkBytes: Number(plan.hardlinkBytes) || 0,
+        downloadCount: plan.downloadCount,
+        hardlinkCount: plan.hardlinkCount,
+        note: `可硬链接 ${plan.hardlinkCount} 个（${((Number(plan.hardlinkBytes) || 0) / 1024 ** 3).toFixed(2)} GB），需下载 ${plan.downloadCount} 个（${((Number(plan.downloadBytes) || 0) / 1024 ** 3).toFixed(2)} GB）`,
+      };
     }
     const runtime = runtimePaths(baseRoot, 'arknights', server.channel, input?.runtimeRoot);
     if (!runtime.sameDrive) {
@@ -14350,7 +10242,7 @@ function musicLoginWindow(target) {
     if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
       throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
     }
-    if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
+    if (!isYostarTarget && input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
 
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = { cancelled: false };
@@ -14380,375 +10272,6 @@ function musicLoginWindow(target) {
     }
   }
 
-  ipcMain.handle('servers:prepare-sophon', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (game.builtinKey === 'endfield') return prepareEndfieldRuntimeJob(game, input);
-    if (game.builtinKey === 'arknights') return prepareArknightsRuntimeJob(game, input);
-    if (!['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
-      throw new Error('这个游戏没有接入 Sophon 清单');
-    }
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再准备服务器');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    /*
-     * 放开官服作为「生成」目标：没有官服客户端、但装了 B服 / 国际服的玩家，
-     * 也能以 B服 / 国际服 当基础，硬链接相同的文件、只下载官服独有的差异分块，
-     * 省下一次完整下载。原来这里只允许 bilibili / global，官服点「重建」只会让你选路径，
-     * 而没官服客户端的人根本没路径可选，死循环。
-     * play / steam 这些没接入 Sophon 清单的渠道仍然不支持。
-     */
-    if (!['official', 'bilibili', 'global'].includes(server.channel)) {
-      throw new Error('这个渠道暂时不支持生成差异客户端');
-    }
-    // 基础客户端优先取官服、其次 B服（都是国服系，本地分块能复用得最多），
-    // 只装了国际服的玩家用国际服当基础也能生成，只是复用率略低。
-    const base =
-      game.servers.find(
-        (item) => item.id !== server.id && item.channel === 'official' && item.path && targetExists(item.path)
-      ) ||
-      game.servers.find(
-        (item) => item.id !== server.id && item.channel === 'bilibili' && item.path && targetExists(item.path)
-      ) ||
-      game.servers.find((item) => item.id !== server.id && item.path && item.root && targetExists(item.path));
-    if (!base || !base.root) {
-      throw new Error(
-        '没有找到可以当作基础的客户端。生成国际服 / B服 需要一份已安装的客户端当基础：请先在任意一服那一行点“编辑”选择已经装好的客户端（官服、国际服或 B服 都行）。'
-      );
-    }
-
-    // 基础客户端和目标目录重合时，生成过程会把基础客户端本身清空，必须先拦住。
-    const runtime = runtimePaths(base.root, game.builtinKey, server.channel, input?.runtimeRoot);
-    if (!runtime.sameDrive) {
-      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
-    }
-    const targetRoot = runtime.target;
-    if (path.resolve(base.root).toLowerCase() === path.resolve(targetRoot).toLowerCase()) {
-      throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
-    }
-
-    /*
-     * 只做预估，不真跑：界面里先告诉用户目标盘还剩多少、基础客户端有多大，
-     * 免得跑到一半才发现空间不够。只读本地信息，不走网络。
-     */
-    if (input?.estimate) {
-      return estimateRuntimeSpace(base.root, targetRoot);
-    }
-
-    const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
-    sophonJobs.set(jobId, signal);
-    beginBackgroundTask();
-    send('sophon:progress', {
-      jobId,
-      phase: 'start',
-      current: '正在读取官方清单…',
-      processed: 0,
-      total: 0,
-    });
-    try {
-      const result =
-        server.channel === 'bilibili' && base.channel === 'official'
-          ? await prepareBilibiliRuntime({
-              gameKey: game.builtinKey,
-              baseRoot: base.root,
-              targetRoot,
-              cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-              signal,
-              onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-            })
-          : await prepareSophon({
-              gameKey: game.builtinKey,
-              channel: server.channel,
-              baseRoot: base.root,
-              targetRoot,
-              // 除了当基础的那份，其它渠道客户端里也有大量同内容文件，一并拿来硬链接
-              linkSources: externalLinkSources(game, server, targetRoot),
-              cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-              audioLanguages: store.data?.settings?.audioLanguages,
-              // 绝区零那 111 份分类剧情资源（约 19.73GB）要不要一起装。默认不装。
-              includeStoryResources: storyResourcesEnabled(game, server),
-              signal,
-              onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-            });
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      if (!result.executable) throw new Error('清单安装完成，但没有找到游戏启动程序');
-      server.path = result.executable;
-      server.root = targetRoot;
-      server.sophonVersion = result.tag;
-      server.incomplete = false;
-      server.packPath = '';
-      game.activeServerId = server.id;
-      game.target = result.executable;
-      game.workDir = targetRoot;
-      ensureServers(game);
-      await store.saveNow();
-      pushState(true);
-      send('sophon:progress', {
-        jobId,
-        phase: 'done',
-        processed: result.files,
-        total: result.files,
-        linked: result.linked,
-        downloaded: result.downloaded,
-        bytesDone: result.totalBytes,
-        totalBytes: result.totalBytes,
-        current: '完成',
-      });
-      return { ok: true, ...result };
-    } finally {
-      endBackgroundTask();
-      sophonJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('servers:update-sophon', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game || !['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey)) {
-      throw new Error('这个游戏没有接入 Sophon 更新');
-    }
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再更新');
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server || !server.root || !server.path || !targetExists(server.path)) {
-      throw new Error('这个服务器还没有可更新的客户端');
-    }
-    if (game.builtinKey === 'bh3' && server.channel && server.channel !== 'official') {
-      throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
-    }
-    /*
-     * 动手之前先探一下「这个目录到底让不让我们写」。
-     *
-     * 不探的话，权限问题会在下载完几十 GB、开始替换文件的那一刻才爆出来，报错还被
-     * Node 说成「文件被其它程序占用」，用户把所有程序都关掉也修不好（2026-11-11 报障）。
-     * 预检只做只读探测（试建临时文件 + 试改名已有可执行文件再改回来），不删用户任何东西。
-     *
-     * 这里不自动提权：UAC 弹在开始之前是最佳时机，但由界面决定要不要弹 —— 主进程只把
-     * 结论告诉界面，界面弹「以管理员身份重启并继续更新」，用户点了才走 app:relaunch-admin。
-     */
-    if (!currentElevation()) {
-      const probe = await probeUpdateWritable(server.root);
-      if (probe.blocked) {
-        writeLaunchLog(`update ${game.id}: 写权限预检未过 → ${probe.reason}`);
-        return {
-          ok: false,
-          code: 'NEED_ELEVATION',
-          reason: probe.reason,
-          root: server.root,
-          gameId: game.id,
-          serverId: server.id,
-        };
-      }
-    }
-    const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
-    sophonJobs.set(jobId, signal);
-    beginBackgroundTask();
-    /*
-     * 别的渠道客户端（官服 / B服 / 国际服）可以作为硬链接源：
-     * 官方同一个构建产物的资源包逐字节相同，另一份已经更新过的话，
-     * 这次更新只需要链接、不需要为同一份内容再下一次。
-     */
-    const linkSources = externalLinkSources(game, server, server.root);
-    if (linkSources.length) {
-      writeLaunchLog(`update ${game.id}: 可用复用源 ${linkSources.length} 份 → ${linkSources.join(' ; ')}`);
-    }
-    /*
-     * 更新时以「客户端自己声明的渠道」为准，不跟着服务器行的标签走。
-     *
-     * 行的 channel 是启动器推断/用户手选的，可能错配（比如 B服 那一行挂着官服客户端）；
-     * 而 prepareSophon 收尾会用这个 channel 整份重写 config.ini ——
-     * 只要标签错一次，就会把玩家的官服客户端改写成 B服，之后每次登录都要先弹一次
-     * 「二级地址解析失败」再回退。config.ini 里读不到渠道时才回退到行标签。
-     */
-    const actualChannel =
-      (server.channel !== 'custom' && clientChannel.configChannelFromPath(server.path)) || server.channel;
-    if (actualChannel !== server.channel) {
-      writeLaunchLog(
-        `update ${game.id}: 行标签 ${server.channel} 与客户端实际渠道 ${actualChannel} 不一致，按客户端渠道更新`
-      );
-    }
-    /*
-     * 之前预下载过的话，产物就在这里吃掉：
-     *   - 分块模式：chunk/ 里就是新版本的分块，命中的 0 流量，缺的才联网补；
-     *   - 补丁模式：ldiff/ 里是官方给的差量补丁包，就地打比按块下省一半。
-     * 两者都没有时两个判据都是 false，这里整段跳过，行为与原来完全一致。
-     */
-    if (
-      predownload.hasCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root }) ||
-      predownload.hasPatchCache({ gameKey: game.builtinKey, channel: actualChannel, installRoot: server.root })
-    ) {
-      try {
-        const appliedResult = await predownload.apply({
-          gameKey: game.builtinKey,
-          channel: actualChannel,
-          installRoot: server.root,
-          cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-          audioLanguages: store.data?.settings?.audioLanguages,
-          includeCategory: storyResourcesEnabled(game, server),
-          // 预下载产物 + 别的渠道客户端的同内容文件，两条路都能省掉下载
-          linkSources,
-          signal,
-          onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-        });
-        if (signal.cancelled) return { ok: false, cancelled: true };
-        if (appliedResult?.ok) {
-          server.predownload = null;
-          game.version = appliedResult.tag;
-          game.versionName = appliedResult.tag;
-          game.lastOfficialSync = Date.now();
-          if (game.activeServerId === server.id) {
-            game.target = server.path;
-            game.workDir = server.root;
-          }
-          await store.saveNow();
-          pushState(true);
-          syncOfficialGame(game, []).catch(() => {});
-          send('sophon:progress', {
-            jobId,
-            phase: 'done',
-            processed: appliedResult.files,
-            total: appliedResult.files,
-            linked: 0,
-            downloaded: appliedResult.applied,
-            skipped: appliedResult.skipped,
-            current: `预下载内容已应用完成（复用分块 ${appliedResult.reusedChunks} 个）`,
-          });
-          // 预下载内容落进真实安装目录后，链接运行时要失效（与 predownload:apply 同一语义）
-          invalidateRuntimesAfterUpdate(game);
-          return { ok: true, ...appliedResult, patched: true, fromPredownload: true };
-        }
-      } catch (error) {
-        writeLaunchLog(`update ${game.id}: predownload apply fallback: ${error.message}`);
-      }
-    }
-    try {
-      /*
-       * ldiff 预修补：把「本地已有旧文件 + 官方给了本地版本补丁」的那批文件就地改成新内容。
-       *
-       * 它**不是**一次完整更新 —— 补丁清单只覆盖有差分的文件，没差分的文件不在清单里，
-       * 所以绝不能像以前那样 patch 完就宣布更新完成（那会漏文件还报成功）。
-       * 这里只当省钱预处理用，后面必须照常跑 prepareSophon 做最终校验：
-       * 被这里改对的文件会走 quickFileMatches → skipped，其余走本地 chunk 复用 / 联网补下。
-       *
-       * 原神 7.0.0 → 7.1.0 实测：1151 个文件可修补；这些文件走 chunk 要下 37.26GB（压缩后、按
-       * chunk id 去重），ldiff 补丁只要 9.32GB，省流 27.94GB（75.0%）。
-       *
-       * 判据与 Starward / Collapse 保持一致：**不看 enable_ldiff**。
-       * 那两家一个只在 GameConfig 里声明了这个字段却从没读过（Starward），
-       * 一个连字段都没解析（Collapse）；它们真正的判据是「补丁清单里有没有当前版本」，
-       * 也就是下面 applyHdiffPrepass 内部按 diff_tags 判的那一步。
-       * 官方配置说别用、但清单里确实给了你当前版本的补丁 —— 那这份补丁就是能用的。
-       * 没给（崩坏3 这类真没补丁的）会在里面以 version-not-patchable 干净退出，
-       * 不会白算一轮 md5：那一步在读完分支信息之后、扫盘之前。
-       */
-      let ldiff = null;
-      try {
-        const userEnabled = store.data?.settings?.enableLdiff !== false;
-        if (userEnabled) {
-          ldiff = await applyHdiffPrepass({
-            gameKey: game.builtinKey,
-            channel: actualChannel,
-            installRoot: server.root,
-            cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-            // 预下载时先存下的补丁包在这儿：命中就不用再下一遍
-            patchRoot: path.join(server.root, 'ldiff'),
-            audioLanguages: store.data?.settings?.audioLanguages,
-            includeStory: storyResourcesEnabled(game, server),
-            // 别的渠道已经更到目标版本时，这批文件直接硬链接，别去下增量补丁
-            linkSources,
-            signal,
-            onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-          });
-          if (ldiff?.ok && (ldiff.applied > 0 || ldiff.linked > 0)) {
-            writeLaunchLog(
-              `update ${game.id}: ldiff 修补 ${ldiff.applied} 个文件，` +
-                `硬链接复用 ${ldiff.linked || 0} 个，补丁 ${ldiff.patchBytes} 字节，省流 ${ldiff.saveBytes} 字节`
-            );
-          } else if (ldiff?.reason) {
-            writeLaunchLog(`update ${game.id}: ldiff 跳过（${ldiff.reason}）`);
-          }
-        } else {
-          writeLaunchLog(`update ${game.id}: 跳过 ldiff（用户在设置里关掉了），走纯 chunk`);
-        }
-      } catch (error) {
-        writeLaunchLog(`update ${game.id}: ldiff 预处理失败，退回纯 chunk：${error.message}`);
-      }
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      const result = await prepareSophon({
-        gameKey: game.builtinKey,
-        // 同理：写回 config.ini 用的就是这个 channel，必须取客户端真实渠道
-        channel: actualChannel,
-        baseRoot: server.root,
-        targetRoot: server.root,
-        cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-        audioLanguages: store.data?.settings?.audioLanguages,
-        // 必须和安装那条路径用同一个取值，否则会出现「安装时不装、一更新就补 19.73GB」
-        includeStoryResources: storyResourcesEnabled(game, server),
-        linkSources,
-        signal,
-        onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-      });
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      if (result.externalLinked) {
-        writeLaunchLog(
-          `update ${game.id}: 从其它渠道客户端硬链接复用 ${result.externalLinked} 个文件（${(
-            Number(result.externalBytes || 0) / 1024 ** 3
-          ).toFixed(2)} GB），没走下载`
-        );
-      }
-      if (game.activeServerId === server.id) {
-        const exe = result.executable || server.path;
-        game.target = exe;
-        game.workDir = server.root;
-        server.path = exe;
-      }
-      game.version = result.tag;
-      game.versionName = result.tag;
-      // 更新成功后同步服务器实际版本：以前只有「生成一份」会写这个字段，
-      // 更新不写，本地更到 7.2 了服务器还挂着上次生成的 7.1.0
-      server.sophonVersion = result.tag;
-      game.lastOfficialSync = Date.now();
-      await store.saveNow();
-      pushState(true);
-      // 本体文件被刷过，链接运行时若有标记也应失效（非终末地当前为 no-op）
-      invalidateRuntimesAfterUpdate(game);
-      syncOfficialGame(game, []).catch(() => {});
-      // 把 ldiff 的战果带回去，界面上能显示「其中 N 个文件是本地补丁修好的，省流 X」。
-      if (ldiff?.ok && ldiff.applied > 0) {
-        return {
-          ok: true,
-          ...result,
-          ldiff: {
-            applied: ldiff.applied,
-            failed: ldiff.failed,
-            // 从别的渠道客户端硬链接过来的文件数：这批既没下补丁、也没走 chunk
-            linked: ldiff.linked || 0,
-            patchBytes: ldiff.patchBytes,
-            saveBytes: ldiff.saveBytes,
-            localVersion: ldiff.localVersion,
-          },
-        };
-      }
-      return { ok: true, ...result };
-    } finally {
-      endBackgroundTask();
-      sophonJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('servers:pause-sophon', async (_event, input) => {
-    const job = sophonJobs.get(String(input?.jobId));
-    if (!job) return false;
-    job.paused = input?.paused === true;
-    return true;
-  });
-
-  ipcMain.handle('servers:cancel-sophon', async (_event, jobId) => {
-    const job = sophonJobs.get(String(jobId));
-    if (!job) return false;
-    job.cancelled = true;
-    return true;
-  });
 
   /*
    * ── 一键下载（未安装游戏） ──────────────────────────────────────────
@@ -14774,6 +10297,8 @@ function musicLoginWindow(target) {
     bh3: 'sophon',
     endfield: 'endfield',
     arknights: 'endfield',
+    // 鸣潮：三渠道全走库洛官方 index.json 清单引擎（kuro-packs.js）
+    wutheringwaves: 'kuro',
   };
 
   /*
@@ -14785,6 +10310,7 @@ function musicLoginWindow(target) {
    */
   function engineFor(gameKey, channel) {
     if (gameKey === 'arknights' && yostarPacks.isYostarChannel(channel)) return 'yostar';
+    if (gameKey === 'wutheringwaves' && kuroPacks.isKuroChannel(channel)) return 'kuro';
     return DOWNLOADABLE_KEYS[gameKey];
   }
 
@@ -14869,11 +10395,20 @@ function musicLoginWindow(target) {
         parkedOk = true;
       } catch {
         /* 改名也不行，那就是真动不了 */
-      }
-      if (parkedOk) {
-        await fsp.rename(parked, target).catch(() => {});
-      } else {
         report.filesBlocked.push(path.basename(target));
+      } finally {
+        // 探的是用户真实的 exe/dll，改名后必须在 finally 里搬回原名：
+        // 中间再抛任何异常都不能把真文件留在 X.exe.hxl-probe-* 上，否则游戏直接少一个文件。
+        if (parkedOk) {
+          try {
+            await fsp.rename(parked, target);
+          } catch (error) {
+            // 搬回失败不抛（预检本身不能把更新流程炸掉），但必须记日志、且判为被挡：
+            // 真文件此刻还停在探针名下，绝不能吞掉错误还报「可写」放行更新（预检会误判）。
+            console.warn(`[update] 探针文件搬回失败 ${parked} -> ${target}：${String(error?.message || error)}`);
+            report.filesBlocked.push(`${path.basename(target)}（探针搬回失败，真文件暂留在 ${path.basename(parked)}）`);
+          }
+        }
       }
     }
     if (report.filesBlocked.length) {
@@ -14893,7 +10428,7 @@ function musicLoginWindow(target) {
     }
   }
 
-  /** 官方清单口径的全量体积：sophon 读清单，终末地 / 明日方舟读整包卷 total_size，Yostar 读远端清单。 */
+  /** 官方清单口径的全量体积：sophon 读清单，终末地 / 明日方舟读整包卷 total_size，Yostar / 库洛读远端清单。 */
   async function estimateDownloadBytes(game, server, engine, installDir) {
     if (engine === 'yostar') {
       /*
@@ -14902,6 +10437,18 @@ function musicLoginWindow(target) {
        * 但用户在已有目录上重新下载时这个差别就是几十 MB 和 3.5 GB 的差别。
        */
       const plan = await yostarPacks.planForGame({ profile: server.channel, installRoot: installDir });
+      return {
+        version: plan.version,
+        totalBytes: plan.totalBytes,
+        downloadBytes: plan.downloadBytes,
+        needDownload: plan.needDownload,
+        willDelete: plan.willDelete,
+        storyResources: null,
+      };
+    }
+    if (engine === 'kuro') {
+      // 鸣潮：同 Yostar 口径，planForGame 返回清单求和的真实下载量
+      const plan = await kuroPacks.planForGame({ profile: server.channel, installRoot: installDir });
       return {
         version: plan.version,
         totalBytes: plan.totalBytes,
@@ -14937,214 +10484,6 @@ function musicLoginWindow(target) {
     return { version: latest.version, totalBytes: latest.totalSize, storyResources: null };
   }
 
-  ipcMain.handle('servers:download-estimate', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (!DOWNLOADABLE_KEYS[game.builtinKey]) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
-    const installDir = path.resolve(String(input?.installDir || '').trim());
-    if (!installDir || installDir === path.parse(installDir).root) {
-      throw new Error('请先选择一个安装目录');
-    }
-    const server = serverForDownload(game, String(input?.channel || ''));
-    const engine = engineFor(game.builtinKey, server.channel);
-    if (!engine) throw new Error('这个渠道暂不支持自动下载，请前往官网下载安装');
-    const summary = await estimateDownloadBytes(game, server, engine, installDir);
-    return {
-      ok: true,
-      engine,
-      ...summary,
-      freeBytes: await driveFreeBytes(installDir),
-      installDir,
-    };
-  });
-
-  ipcMain.handle('servers:download-game', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    if (!DOWNLOADABLE_KEYS[game.builtinKey]) throw new Error('这款游戏暂不支持自动下载，请前往官网下载安装');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再下载');
-    const server = serverForDownload(game, String(input?.channel || ''));
-    const engine = engineFor(game.builtinKey, server.channel);
-    if (!engine) throw new Error('这个渠道暂不支持自动下载，请前往官网下载安装');
-    const installDir = path.resolve(String(input?.installDir || '').trim());
-    if (!installDir || installDir === path.parse(installDir).root) {
-      throw new Error('请先选择一个安装目录');
-    }
-    await assertDirWritable(installDir);
-
-    const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
-    // 信号登记进 sophonJobs：现有的 servers:pause-sophon / servers:cancel-sophon 直接生效
-    sophonJobs.set(jobId, signal);
-    beginBackgroundTask();
-    send('sophon:progress', { jobId, phase: 'start', current: '正在读取官方清单…', processed: 0, total: 0 });
-    try {
-      /*
-       * 同盘空间校验：全新安装要下整个客户端，剩余空间必须盖得住清单总大小。
-       * 清单请求有缓存（sophon-cache / 接口本身很轻），多读一次不亏。
-       */
-      const summary = await estimateDownloadBytes(game, server, engine, installDir);
-      const freeBytes = await driveFreeBytes(installDir);
-      const needBytes = Number(summary.totalBytes) || 0;
-      if (needBytes > 0 && freeBytes > 0 && freeBytes < needBytes) {
-        throw new Error(
-          `目标盘剩余空间不足：客户端约 ${(needBytes / 1024 ** 3).toFixed(1)} GB，` +
-            `该盘只剩 ${(freeBytes / 1024 ** 3).toFixed(1)} GB，请换个安装目录或先清理空间`
-        );
-      }
-      let executable = '';
-      let version = String(summary.version || '');
-      if (engine === 'sophon') {
-        /*
-         * 全新安装：baseRoot = targetRoot = 安装目录（空目录）。
-         * prepareSophon 在两者同路径时跳过本地分块索引，所有文件按清单逐 chunk
-         * 下载写盘并做 md5 校验 —— 本地基线相当于空清单，即完整下载。
-         */
-        const result = await prepareSophon({
-          gameKey: game.builtinKey,
-          channel: server.channel,
-          baseRoot: installDir,
-          targetRoot: installDir,
-          cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-          audioLanguages: store.data?.settings?.audioLanguages,
-          // 必须和安装 / 更新那条路径用同一个取值，否则口径不一致
-          includeStoryResources: storyResourcesEnabled(game, server),
-          signal,
-          onProgress: (progress) => sendProgress('sophon:progress', jobId, progress),
-        });
-        executable = result.executable || '';
-      } else if (engine === 'yostar') {
-        /*
-         * 明日方舟 EN / JP / KR：Yostar 自己的逐文件清单（CRC64 校验）。
-         * 秒传 / 断点续传 / 断硬链接都在 yostarPacks.installGame 里做完了，
-         * 这里只负责把进度翻成界面认识的那套 phase 字段。
-         */
-        const result = await yostarPacks.installGame({
-          profile: server.channel,
-          installRoot: installDir,
-          signal,
-          onProgress: (progress) => {
-            const phase =
-              progress.phase === 'download' ? 'download' : progress.phase === 'install' ? 'install' : 'manifest';
-            send('sophon:progress', {
-              jobId,
-              phase,
-              current: progress.current || '',
-              processed: progress.processed || 0,
-              total: progress.total || 0,
-              bytesDone: progress.processed && progress.total && summary.totalBytes
-                ? Math.round((Number(summary.totalBytes) || 0) * (progress.processed / progress.total))
-                : 0,
-              totalBytes: Number(summary.totalBytes) || 0,
-            });
-          },
-        });
-        executable = path.join(installDir, result.executable || 'Arknights.exe');
-        version = String(result.version || version || '');
-      } else {
-        /*
-         * 终末地 / 明日方舟：优先官方分卷整包 + 7z 解压（一卷连读 .002/.003）；
-         * 没有 7-Zip 退回逐文件全量下载。渠道合法性在 downloadPackProfile 里先校验。
-         */
-        const packProfile = downloadPackProfile(game.builtinKey, server.channel);
-        const packChannel = game.builtinKey === 'arknights' ? 'arknights' : server.channel;
-        if (findSevenZip()) {
-          await downloadAndExtractSplit({
-            profile: packProfile,
-            root: installDir,
-            onProgress: (progress) => {
-              if (progress.phase === 'download') {
-                // 分卷进度换算成和 sophon 一样的 processed/total 口径，前端进度条不用另写一套；
-                // 字节按整包体积线性折算，只为进度显示，不做精确承诺
-                const totalPacks = progress.total || 0;
-                const packIndex = progress.index || 0;
-                // 卷内进度（0~1）：几百 MB 的一卷要能看出在走，不能一卷一跳
-                const done = packIndex + (Number(progress.fraction) || 0);
-                send('sophon:progress', {
-                  jobId,
-                  phase: 'download',
-                  processed: packIndex,
-                  total: totalPacks,
-                  bytesDone: totalPacks ? Math.round((Number(summary.totalBytes) || 0) * (done / totalPacks)) : 0,
-                  totalBytes: Number(summary.totalBytes) || 0,
-                  current: `下载分卷 ${packIndex} / ${totalPacks}`,
-                });
-              } else if (progress.phase === 'extract') {
-                send('sophon:progress', {
-                  jobId,
-                  phase: 'install',
-                  processed: 1,
-                  total: 1,
-                  bytesDone: 0,
-                  totalBytes: 0,
-                  current: '解压整包（7-Zip）…',
-                });
-              }
-            },
-          });
-        } else {
-          send('sophon:progress', { jobId, phase: 'manifest', current: '没有找到 7-Zip，改用逐文件下载…' });
-          await updateEndfieldGame({
-            root: installDir,
-            channel: packChannel,
-            onProgress: (progress) =>
-              send('sophon:progress', {
-                jobId,
-                phase: 'download',
-                processed: progress.processed || 0,
-                total: progress.total || 0,
-                bytesDone: progress.downloadedBytes || 0,
-                totalBytes: progress.totalBytes || 0,
-                current: progress.current || '',
-              }),
-          });
-        }
-        // 解压 / 下载完找启动程序；整包解出来的目录结构有出入时按检测注册表兜底
-        const packExes =
-          game.builtinKey === 'arknights'
-            ? // 明日方舟整包根目录是 Arknights.exe，鹰角启动器子目录布局留给 detectGame 兜底
-              ['Arknights.exe', path.join('games', 'Arknights Game', 'Arknights.exe')]
-            : ['Endfield.exe', 'PlatformProcess.exe'];
-        executable = packExes.map((name) => path.join(installDir, name)).find((file) => fs.existsSync(file)) || '';
-        if (!executable) {
-          const found = await detectGame(game.builtinKey);
-          if (found) executable = found;
-        }
-      }
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      if (!executable) throw new Error('下载完成，但没有找到游戏启动程序');
-      // 写回服务器与游戏：收尾口径和 servers:prepare-sophon 保持一致
-      server.path = executable;
-      server.root = installDir;
-      server.incomplete = false;
-      server.unavailable = false;
-      game.activeServerId = server.id;
-      game.target = executable;
-      game.workDir = installDir;
-      if (version) {
-        game.version = version;
-        game.versionName = version;
-        // 全新安装也要记服务器版本，否则这条服务器一直挂着空值
-        if (engine === 'sophon') server.sophonVersion = version;
-      }
-      ensureServers(game);
-      await store.saveNow();
-      pushState(true);
-      send('sophon:progress', {
-        jobId,
-        phase: 'done',
-        processed: 1,
-        total: 1,
-        bytesDone: Number(summary.totalBytes) || 0,
-        totalBytes: Number(summary.totalBytes) || 0,
-        current: '下载完成',
-      });
-      return { ok: true, engine, version, path: executable, targetRoot: installDir };
-    } finally {
-      endBackgroundTask();
-      sophonJobs.delete(jobId);
-    }
-  });
 
   /*
    * ── 预下载 ──────────────────────────────────────────────────────────
@@ -15191,8 +10530,12 @@ function musicLoginWindow(target) {
      * 但「点更新」这条链不该依赖那次修复已经跑过：这里再问一次客户端本身，
      * 免得拿着 nap_cn / hkrpg_cn 去和国际服客户端比对版本。
      */
+    // 鸣潮的渠道记在 launcherDownloadConfig.json，不是米哈游那套 config.ini；
+    // 拿 configChannelFromPath 去问只会读出空或误判成 official，直接用渠道行本身。
     const clientChannelOfServer =
-      game.builtinKey === 'endfield' ? '' : clientChannel.configChannelFromPath(server.path);
+      game.builtinKey === 'endfield' || game.builtinKey === 'wutheringwaves'
+        ? ''
+        : clientChannel.configChannelFromPath(server.path);
     return {
       game,
       server,
@@ -15372,116 +10715,6 @@ function musicLoginWindow(target) {
   );
   setInterval(() => autoRefreshPredownloadStatus().catch(() => {}), 30 * 60 * 1000);
 
-  ipcMain.handle('predownload:check', async (_event, input) => {
-    const { server, base } = resolvePredownload(input);
-    const report = await predownloadSim.check({ ...base, verify: input?.verify === true });
-    await savePredownloadState(server, report);
-    return report;
-  });
-
-  ipcMain.handle('predownload:start', async (_event, input) => {
-    const { game, server, base } = resolvePredownload(input);
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再预下载');
-    const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
-    predownloadJobs.set(jobId, signal);
-    beginBackgroundTask();
-    send('predownload:progress', { jobId, phase: 'start', current: '正在读取官方清单…' });
-    try {
-      const result = await predownloadSim.start({
-        ...base,
-        signal,
-        onProgress: (progress) => sendProgress('predownload:progress', jobId, progress),
-      });
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      await savePredownloadState(server, await predownloadSim.check(base));
-      send('predownload:progress', { jobId, phase: 'done', current: '预下载完成' });
-      return { ok: true, ...result };
-    } catch (error) {
-      server.predownload = {
-        ...(server.predownload || {}),
-        state: 'error',
-        error: error.message,
-        updatedAt: new Date().toISOString(),
-      };
-      await store.saveNow().catch(() => {});
-      send('predownload:progress', { jobId, phase: 'error', current: error.message });
-      throw error;
-    } finally {
-      endBackgroundTask();
-      predownloadJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('predownload:apply', async (_event, input) => {
-    const { game, server, base } = resolvePredownload(input);
-    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再应用更新');
-    // 异环更新会改写 NTELauncher 下的文件，官方启动器开着会锁文件 / 退出时回写配置
-    if (game.builtinKey === 'neverness') await nevernessChannels.assertLauncherClosed();
-    const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
-    predownloadJobs.set(jobId, signal);
-    beginBackgroundTask();
-    send('predownload:progress', { jobId, phase: 'start', current: '正在校验并应用预下载内容…' });
-    try {
-      /*
-       * 同机另一渠道客户端里已经有同内容的文件时，直接硬链接过来，别再下/解压一遍。
-       * 「更新游戏」那条路一直是这么做的，应用预下载这条以前没接上：assembleFile 里的
-       * 复用逻辑一直在，但没人把源递进来，等于白写。
-       */
-      const linkSources =
-        game.builtinKey === 'endfield' ? [] : externalLinkSources(game, server, base.installRoot);
-      const result = await predownloadSim.apply({
-        ...base,
-        linkSources,
-        signal,
-        onProgress: (progress) => sendProgress('predownload:progress', jobId, progress),
-      });
-      if (signal.cancelled) return { ok: false, cancelled: true };
-      const tag = String(result?.tag || result?.version || '');
-      /*
-       * 异环这条「更新」动的只是 NTELauncher 那层资源，返回的是启动器资源版本
-       * （实测 1.0.7.1029），跟卡片上的游戏版本（1.4）不是一回事。以前无条件
-       * 覆盖，点完「更新启动器」卡片就变成 v1.0.7.1029，用户以为游戏升到别的版本了。
-       * scope='launcher' 或异环这种「只更启动器」的结果一律不碰游戏版本号。
-       */
-      const launcherOnly =
-        String(result?.scope || '') === 'launcher' || game.builtinKey === 'neverness' || base.gameKey === 'neverness';
-      server.predownload = null;
-      // 更新落在了真实安装目录，把链接运行时的标记清掉，下次启动自动重建
-      invalidateRuntimesAfterUpdate(game);
-      // 演练模式不能改写游戏真实版本号，否则卡片会挂一个官方根本没发布过的版本
-      if (tag && !result?.simulated && !launcherOnly) {
-        game.version = tag;
-        game.versionName = tag;
-      }
-      game.lastOfficialSync = Date.now();
-      if (game.activeServerId === server.id) {
-        game.target = server.path || game.target;
-        game.workDir = server.root || game.workDir;
-      }
-      await store.saveNow();
-      pushState(true);
-      syncOfficialGame(game, []).catch(() => {});
-      send('predownload:progress', { jobId, phase: 'done', current: '更新已应用' });
-      return { ok: true, ...result };
-    } catch (error) {
-      send('predownload:progress', { jobId, phase: 'error', current: error.message });
-      throw error;
-    } finally {
-      endBackgroundTask();
-      predownloadJobs.delete(jobId);
-    }
-  });
-
-  ipcMain.handle('predownload:clear', async (_event, input) => {
-    const { server, base } = resolvePredownload(input);
-    const result = await predownloadSim.clear({ gameKey: base.gameKey, installRoot: base.installRoot });
-    server.predownload = null;
-    await store.saveNow();
-    pushState(true);
-    return { ok: true, ...result };
-  });
 
   /*
    * ── 异环（neverness）官服 / B服 渠道 ─────────────────────────────────
@@ -15492,61 +10725,12 @@ function musicLoginWindow(target) {
    * 所以这里只读写那三行，不动任何游戏文件。官方口径是「PC 端只支持官服」，
    * B服能否登录以实际为准 —— 这条提示放在返回的 notice 里，界面要显示出来。
    */
-  ipcMain.handle('neverness:channel', async (_event, input) => {
-    const game = store.data.games.find((item) => item.builtinKey === 'neverness');
-    if (!game) throw new Error('没有找到异环');
-    const server =
-      (game.servers || []).find((item) => item.id === input?.serverId) ||
-      (game.servers || []).find((item) => item.id === game.activeServerId);
-    return nevernessChannels.readNevernessChannel({
-      installRoot: server?.root || '',
-      gamePath: server?.path || game.target || '',
-    });
-  });
-
-  ipcMain.handle('neverness:set-channel', async (_event, input) => {
-    const game = store.data.games.find((item) => item.builtinKey === 'neverness');
-    if (!game) throw new Error('没有找到异环');
-    if (running.has(game.id)) throw new Error('游戏正在运行，先退出异环再切换服务器');
-    const server =
-      (game.servers || []).find((item) => item.id === input?.serverId) ||
-      (game.servers || []).find((item) => item.id === game.activeServerId);
-    const result = await nevernessChannels.setNevernessChannel({
-      installRoot: server?.root || '',
-      gamePath: server?.path || game.target || '',
-      channel: input?.channel,
-    });
-    // 把当前渠道记在服务器上，界面下次打开就能直接显示
-    const target =
-      (game.servers || []).find((item) => item.channel === result.channel) || server || null;
-    if (target) game.activeServerId = target.id;
-    await store.saveNow();
-    pushState(true);
-    return result;
-  });
 
   /*
    * 切到 B服后一键拉起官方启动器下载 B服资源。
    * 官方启动器按 Config.ini 里的 VersionInfoFileURL 拉对应渠道的版本清单，
    * 资源只有首次需要下载，之后切来切去都是秒切，这一步只是为了省得用户手动去找。
    */
-  ipcMain.handle('neverness:open-launcher', async () => {
-    const game = store.data.games.find((item) => item.builtinKey === 'neverness');
-    if (!game) throw new Error('没有找到异环');
-    const server =
-      (game.servers || []).find((item) => item.id === game.activeServerId) ||
-      (game.servers || [])[0] ||
-      null;
-    const root = nevernessChannels.findConfigRoot(
-      server?.root || server?.path || game.target || ''
-    );
-    if (!root) throw new Error('没有找到异环安装目录，先在服务器设置里指好游戏路径');
-    const launcher = path.join(root, 'NTELauncher.exe');
-    if (!fs.existsSync(launcher)) throw new Error(`没有找到官方启动器：${launcher}`);
-    const error = await shell.openPath(launcher);
-    if (error) throw new Error(`官方启动器打开失败：${error}`);
-    return { ok: true };
-  });
 
   /*
    * 预下载渠道资源：花筱灵自己按官方清单把对应渠道的启动器侧文件铺齐，
@@ -15554,127 +10738,18 @@ function musicLoginWindow(target) {
    */
   let ntePredownloadAbort = null;
   let nteToolAbort = null;
-  ipcMain.handle('neverness:predownload', async (_event, input) => {
-    if (ntePredownloadAbort) throw new Error('已有预下载在进行中');
-    const game = store.data.games.find((item) => item.builtinKey === 'neverness');
-    if (!game) throw new Error('没有找到异环');
-    const server =
-      (game.servers || []).find((item) => item.id === input?.serverId) ||
-      (game.servers || []).find((item) => item.id === game.activeServerId) ||
-      (game.servers || [])[0] ||
-      null;
-    ntePredownloadAbort = new AbortController();
-    try {
-      return await nevernessPredownload.predownload({
-        installRoot: server?.root || server?.path || game.target || '',
-        channel: input?.channel || 'bilibili',
-        signal: ntePredownloadAbort.signal,
-        onProgress: (progress) => send('nte-predownload', progress),
-      });
-    } finally {
-      ntePredownloadAbort = null;
-    }
-  });
-  ipcMain.handle('neverness:predownload-cancel', () => {
-    if (ntePredownloadAbort) {
-      ntePredownloadAbort.abort();
-      return { ok: true };
-    }
-    return { ok: false };
-  });
 
   /*
    * 异环抽卡导出工具一键获取：查 GitHub 最新 release → 下载（自动换镜像）→
    * 解压到系统下载目录并打开文件夹。可取消，进度走 send('nte-tool', ...)。
    */
-  ipcMain.handle('gacha:nte-tool', async (_event, _input) => {
-    if (nteToolAbort) throw new Error('工具正在下载中');
-    nteToolAbort = new AbortController();
-    try {
-      const result = await nteTool.run({
-        downloadsDir: app.getPath('downloads'),
-        signal: nteToolAbort.signal,
-        onProgress: (progress) => send('nte-tool', progress),
-      });
-      // 下载解压完直接打开文件夹，省得用户自己找
-      if (result?.dir) shell.openPath(result.dir).catch(() => {});
-      return result;
-    } finally {
-      nteToolAbort = null;
-    }
-  });
-  ipcMain.handle('gacha:nte-tool-cancel', () => {
-    if (nteToolAbort) {
-      nteToolAbort.abort();
-      return { ok: true };
-    }
-    return { ok: false };
-  });
 
   /*
    * 单个服务器覆盖「剧情分类资源包」开关。
    * 走独立 IPC 而不是扩 servers:update 的白名单，是为了不改动那个 handler 的现有逻辑。
    * 传 enabled=null 表示「不覆盖，跟随全局设置」。
    */
-  ipcMain.handle('predownload:set-story-resources', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    const server = (game.servers || []).find((item) => item.id === input?.serverId);
-    if (!server) throw new Error('没有找到这个服务器');
-    const enabled = input?.enabled;
-    if (enabled === null || enabled === undefined) {
-      delete server.includeStoryResources;
-    } else {
-      server.includeStoryResources = Boolean(enabled);
-    }
-    await store.saveNow();
-    pushState(true);
-    // 口径变了要重新查一次，界面上的「已完成 / 需要重新预下载」才会跟着变
-    const report = await predownload
-      .check({
-        gameKey: game.builtinKey,
-        channel: server.channel,
-        installRoot:
-          game.builtinKey === 'endfield' ? predownload.endfieldInstallRoot(game, server) : predownload.hoyoInstallRoot(server),
-        cacheDir: path.join(app.getPath('userData'), 'sophon-cache'),
-        audioLanguages: store.data?.settings?.audioLanguages,
-        includeCategory: storyResourcesEnabled(game, server),
-      })
-      .catch((error) => ({ state: 'error', error: error.message }));
-    server.predownload = predownload.stateFromReport(report);
-    await store.saveNow();
-    pushState(true);
-    return { ok: true, enabled: server.includeStoryResources ?? null, report };
-  });
 
-  ipcMain.handle('predownload:cancel', async (_event, jobId) => {
-    const job = predownloadJobs.get(String(jobId));
-    if (!job) return false;
-    job.cancelled = true;
-    return true;
-  });
-
-  ipcMain.handle('predownload:pause', async (_event, input) => {
-    const job = predownloadJobs.get(String(input?.jobId));
-    if (!job) return false;
-    job.paused = input?.paused === true;
-    return true;
-  });
-
-  ipcMain.handle('servers:cancel-link', async (_event, jobId) => {
-    const job = linkJobs.get(jobId);
-    if (!job) return false;
-    job.cancelled = true;
-    return true;
-  });
-
-  ipcMain.handle('servers:open-folder', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    const server = game?.servers.find((item) => item.id === input?.serverId);
-    if (!server || !server.root) return false;
-    await shell.openPath(server.root);
-    return true;
-  });
 
   /*
    * 卸载某个渠道的客户端（删掉安装目录里的文件）。
@@ -15734,17 +10809,19 @@ function musicLoginWindow(target) {
         shared,
       };
     }
-    return { ok: true, root, exists: fs.existsSync(root) };
+    return {
+      ok: true,
+      root,
+      exists: fs.existsSync(root),
+      /*
+       * 硬链接运行时：这一份目录里绝大多数文件是链到官服本体的同一个 inode，
+       * 删掉它只省得掉「真正独占的那几个渠道件」，空间不会像目录体积那样掉下来。
+       * 前端要据此多说一句，不然用户删完看到没腾出空间会以为是没删干净。
+       */
+      runtimeLinked: Boolean(server?.runtimeLinked),
+    };
   };
 
-  ipcMain.handle('servers:uninstall-plan', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) return { ok: false, reason: '没有找到这个游戏' };
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) return { ok: false, reason: '没有找到这个服务器' };
-    const plan = uninstallPlan(game, server);
-    return { ...plan, running: running.has(game.id) };
-  });
 
   /*
    * 卸载客户端。
@@ -15758,667 +10835,44 @@ function musicLoginWindow(target) {
    *   TRASH 回收站用不了（被策略禁用、回收站损坏、UWP 精简系统）—— 可以 force 直删
    *   OTHER 其它系统错误，附原始信息
    */
-  ipcMain.handle('servers:uninstall', async (_event, input) => {
-    const game = store.data.games.find((item) => item.id === input?.gameId);
-    if (!game) return { ok: false, code: 'NOT_FOUND', reason: '没有找到这个游戏' };
-    if (running.has(game.id) || launching.has(game.id)) {
-      return {
-        ok: false,
-        code: 'RUNNING',
-        reason: '游戏正在运行，先关掉游戏再卸载客户端',
-      };
-    }
-    const server = game.servers.find((item) => item.id === input?.serverId);
-    if (!server) return { ok: false, code: 'NOT_FOUND', reason: '没有找到这个服务器' };
-    const plan = uninstallPlan(game, server);
-    if (!plan.ok) return { ok: false, code: plan.running ? 'RUNNING' : 'BLOCKED', reason: plan.reason };
 
-    let moved = false;
-    if (plan.exists) {
-      if (input?.force === true) {
-        // 二次确认过的永久删除：回收站用不了时的唯一出路
-        try {
-          await fsp.rm(plan.root, { recursive: true, force: true, maxRetries: 2 });
-        } catch (error) {
-          return {
-            ok: false,
-            code: 'OTHER',
-            reason: `直接删除也没成功，可能有程序还占着这些文件：${String(
-              error?.message || error || ''
-            )}`,
-            root: plan.root,
-          };
-        }
-      } else {
-        // 回收站而不是直接删：这一步之后用户还能在回收站里找回来
-        try {
-          await shell.trashItem(plan.root);
-        } catch (error) {
-          const raw = String(error?.message || error || '');
-          if (/EBUSY|EPERM|EACCES|being used|正在使用|占用|locked/i.test(raw)) {
-            return {
-              ok: false,
-              code: 'BUSY',
-              // 别断言「被占用」：Windows 上「ACL 没给 DELETE 权限」和「文件被别的进程打开」
-              // 在 Node 里都是 EPERM，靠错误码分不出来（2026-11-11 用户报障就是这个误判）。
-              // 这里只把两种可能都摆出来，让用户按顺序排查。
-              reason: `「${plan.root}」里的文件动不了：可能是游戏/更新器还开着（托盘里也退掉），也可能是这个目录的权限不够。完全退出后仍然不行，就用管理员身份重新打开启动器再试`,
-              root: plan.root,
-            };
-          }
-          /*
-           * 剩下最常见的就是回收站本身用不了 —— 系统策略禁用、回收站损坏、
-           * 或者目录在某个不支持回收站的卷上。这种情况允许改成永久删除。
-           */
-          return {
-            ok: false,
-            code: 'TRASH',
-            reason: '系统回收站用不了，没法把文件挪进去（文件本身没动）',
-            detail: raw,
-            root: plan.root,
-          };
-        }
-      }
-      moved = true;
-    }
-    // 文件没了，路径记录也要跟着清：否则启动器还指着一个空目录
-    resetServerState(server);
-    ensureServers(game);
-    await store.saveNow();
-    pushState(true);
-    return { ok: true, target: plan.root, moved, forced: input?.force === true };
-  });
 
-  ipcMain.handle('games:sync-official', async () => syncAllOfficial());
 
-  ipcMain.handle('games:launch', async (_event, id, options) => {
-    const game = store.data.games.find((g) => g.id === id);
-    if (!game) return { ok: false, error: '没有找到这个游戏' };
-    /*
-     * purpose 目前只有一个值：'predownload'（异环「打开官方预下载」）。
-     * 这条路上的差别是：不刷新最近游玩、不自动点「开始游戏」，也绝不杀掉
-     * 已经在跑的官方启动器（用户可能正靠它下载预下载资源）。
-     */
-    const purpose = options && typeof options === 'object' ? String(options.purpose || '') : '';
-    // 先清掉已经不存在的进程，避免「点了没反应、只说游戏在运行」
-    if (await pruneStaleRunning()) pushState(true);
-    if (running.has(id)) return { ok: false, error: '游戏已经在运行了' };
-    if (launching.has(id)) {
-      return { ok: false, error: '正在启动中，请稍候…（如果弹出了管理员授权窗口，请点“是”）' };
-    }
+  /*
+   * WeGame 版鸣潮转换：探针与执行入口。
+   *
+   * 背景（2026-11-11 用户验证 + B站评论区实测）：WeGame 版鸣潮与官方启动器版的
+   * Client/ 主体是同一份文件，把官方版目录整树放进 WeGame 的下载目录
+   * `WeGameApps\downloading\2002137\` 后，WeGame 能识别已就位的文件，
+   * 只补 <1GB 的渠道件（TPS 登录 SDK 等）即可启动 —— 与官B服 99.24% 相似的
+   * 结论完全一致。这条链路只往 WeGame 自己的目录写，绝不碰官方版本体。
+   */
+  /*
+   * WeGame 目录 helper 一律用模块级（pathsOverlap 之后）的那一份：
+   * WEGAME_WUWA_ID / WEGAME_WUWA_DIRNAME / WEGAME_LAUNCH_URI / wuwaExeAt /
+   * findWeGameDownloadRoots / findWeGameWuwaRoots / findWeGameWuwaRoot。
+   * 这里绝不重复定义：内层同名函数会遮蔽模块级版本，又退回「只认
+   * downloading\2002137」的旧行为，而装好后 WeGame 会把目录搬到
+   * rail_apps\Wuthering Waves(2002137)、downloading 目录直接消失。
+   */
 
-    let target = String(game.target || '').trim();
-    const activeServer = (game.servers || []).find(
-      (server) =>
-        server.id === game.activeServerId &&
-        server.path &&
-        targetExists(server.path) &&
-        // 旧单 work 混合目录绝不沿用：否则 allowPackDownload 会被关掉、
-        // 重建失败又被「尽力而为」吞掉，最后静默启动那个 3~9 秒就崩的目录。
-        !isEndfieldLegacyWorkRoot(path.dirname(server.path))
-    );
-    if (activeServer) {
-      target = activeServer.path;
-      game.target = activeServer.path;
-      game.workDir = activeServer.root || path.dirname(activeServer.path);
-    }
-    if (game.builtinKey === 'endfield' && !running.has(id)) {
-      // 所有渠道统一先走自动生成：该渠道的独立运行时已建好且签名未变就只复用（很快），
-      // 只有目录里连 Endfield.exe 都没有、或基础客户端更新过才会重建，并清掉 incomplete
-      // 让启动页状态点变绿。
-      const efServer = (game.servers || []).find((server) => server.id === game.activeServerId);
-      if (efServer) {
-        // 已经能直接启动时就不要再为了补渠道包让「开始游戏」等上一场下载
-        const prepared = await ensureEndfieldChannelRuntime(game, efServer, {
-          allowPackDownload: !(activeServer && targetExists(activeServer.path)),
-          allowRuntimeBase: true,
-        }).catch((error) => {
-          // 已经有可用路径时尽力而为：重建失败不阻断启动；连路径都没有就只能报错。
-          if (activeServer && targetExists(activeServer.path)) return null;
-          return { ok: false, error: '自动生成' + efServer.name + '运行时失败：' + error.message };
-        });
-        if (prepared) writeLaunchLog(`launch ${id}: endfield runtime ok=${prepared.ok !== false} built=${prepared.built === true} root=${prepared.runtimeRoot || ''}`);
-        if (prepared && prepared.ok === false) return prepared;
-        if (prepared) {
-          target = prepared.launchPath;
-          game.target = prepared.launchPath;
-          game.workDir = prepared.runtimeRoot;
-        }
-      }
-    }
-    /*
-     * 启动前轻量只读预检（边界①）：只读已落盘的 server.predownload 发个 toast，
-     * 补掉「启动后 18 秒定时检查」的空窗。fire-and-forget：不联网、不下载、
-     * 不阻断启动；异环打开官方预下载那条路不提示。异常一律吞掉。
-     */
-    if (purpose !== 'predownload' && activeServer) {
-      try { launchPreflightNotice(game, activeServer); } catch {}
-    }
-    if (!target) {
-      return { ok: false, error: '还没有配置启动程序，先编辑这个游戏吧' };
-    }
 
-    try {
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) {
-        await shell.openExternal(target);
-        await markLaunched(game);
-        return { ok: true, external: true };
-      }
-
-      if (!path.isAbsolute(target)) {
-        return { ok: false, error: '启动程序需要使用完整路径，请重新选择一次' };
-      }
-
-      if (!fs.existsSync(target)) {
-        return { ok: false, error: '启动程序不存在，请编辑游戏重新选择' };
-      }
-
-      const stat = fs.statSync(target);
-      if (!stat.isFile()) return { ok: false, error: '启动路径不是一个文件' };
-
-      let nteDirectArgs = [];
-      if (game.builtinKey === 'neverness' && store.data.settings.nevernessUseOfficialLauncher !== false) {
-        /*
-         * 官方启动链的中间环节 NTEGame.exe /launcher：自带资源校验，直达登录窗，
-         * 跳过 NTELauncher 主界面（资讯/商城那些）——点花筱灵「启动」≈直接到登录。
-         * NTEGame 不在时回落 NTELauncher.exe 完整链路。
-         */
-        const nteGame = findNteGame(target);
-        if (nteGame) {
-          writeLaunchLog(`launch ${id}: NTE direct game chain=${nteGame}`);
-          target = nteGame;
-          nteDirectArgs = ['/launcher'];
-        } else {
-          const launcher = findNteLauncher(target);
-          if (launcher) {
-            writeLaunchLog(`launch ${id}: NTE official launcher=${launcher}`);
-            target = launcher;
-          }
-        }
-        /*
-         * 清掉官方启动器的托盘残留：它关窗只是缩托盘，进程不退。带着旧进程 spawn
-         * 会触发它的单实例「唤醒旧实例→旧实例退出→新实例秒退」，点了等于没点。
-         */
-        if (/^nte(game|launcher)\.exe$/i.test(path.basename(target))) {
-          if (purpose === 'predownload') {
-            /*
-             * 预下载只借用官方启动页：它已经开着就直接拉到前台，绝不先杀掉。
-             * 官方正在下载预下载资源时把它结束掉，等于把用户几十分钟的进度连进程一起收了。
-             */
-            const alive = await listRunningImages(['NTEGame.exe']);
-            if (alive.length) {
-              await activateWindowByImage('NTEGame.exe');
-              writeLaunchLog(`launch ${id}: NTE official launcher already open, reused for predownload`);
-              return { ok: true, reused: true, officialPage: true };
-            }
-          }
-          const nteClear = await clearNteLingeringLauncher(id);
-          if (nteClear.code === 'game-running') {
-            return { ok: false, error: '异环已经在运行了（HTGame.exe）。先玩着，或退出游戏再启动。' };
-          }
-          if (nteClear.code === 'updater-running') {
-            return { ok: false, error: '异环官方更新器正在自更新，等十几秒再点一次。' };
-          }
-        }
-      }
-
-      if (game.builtinKey === 'endfield') {
-        /*
-         * 「点了启动却弹出官方启动器」的根因：安装/更新/兜底链路会把 server.path
-         * 存成 PlatformProcess.exe（平台进程）甚至 HypergryphLauncher.exe ——
-         * 这两个直接跑起来就是官方平台/启动器界面，永远不会是游戏。
-         * 启动前统一修正：同目录（或 workDir）有 Endfield.exe 就用它，
-         * 按官方启动器托管布局再找一层（games\Endfield Game\Endfield.exe）；
-         * 都没有就明确报错，绝不直接执行平台进程。
-         */
-        const baseName = path.basename(target).toLowerCase();
-        if (baseName !== 'endfield.exe') {
-          const rootDir =
-            game.workDir && fs.existsSync(path.join(game.workDir, 'Endfield.exe'))
-              ? game.workDir
-              : path.dirname(target);
-          const gameExe = [
-            path.join(path.dirname(target), 'Endfield.exe'),
-            path.join(rootDir, 'Endfield.exe'),
-            path.join(path.dirname(target), 'games', 'Endfield Game', 'Endfield.exe'),
-            path.join(rootDir, 'games', 'Endfield Game', 'Endfield.exe'),
-          ].find((candidate) => fs.existsSync(candidate));
-          if (gameExe) {
-            writeLaunchLog(`launch ${id}: 终末地启动路径被修正 ${target} -> ${gameExe}`);
-            target = gameExe;
-            game.workDir = path.dirname(gameExe);
-          } else if (/platformprocess|hypergryphlauncher/i.test(baseName)) {
-            writeLaunchLog(`launch ${id}: 终末地路径指向平台进程且找不到游戏本体：${target}`);
-            return {
-              ok: false,
-              error:
-                '这个服务器指向的是官方启动器的平台进程，不是游戏本体（Endfield.exe 缺失）。' +
-                '请在这个服务器上点「重建运行时」，或到服务器设置里把路径指到 Endfield.exe。',
-            };
-          }
-        }
-      }
-
-      if (game.builtinKey === 'arknights') {
-        /*
-         * 明日方舟官服 / B服 的目录里同样躺着 PlatformProcess.exe（鹰角两家游戏
-         * 共用同一套平台层，Xel-Launcher 的方舟渠道清单里就包含它）。扫描时我们
-         * 只认 Arknights.exe 当入口，不会存成它；但用户手改过路径、或者数据是从
-         * 更早的版本升上来的，server.path 有可能已经指向平台进程 —— 跑起来就是
-         * 官方平台界面。这里同样修正到本体。
-         */
-        const baseName = path.basename(target).toLowerCase();
-        if (baseName !== 'arknights.exe') {
-          const rootDir =
-            game.workDir && fs.existsSync(path.join(game.workDir, 'Arknights.exe'))
-              ? game.workDir
-              : path.dirname(target);
-          const gameExe = [
-            path.join(path.dirname(target), 'Arknights.exe'),
-            path.join(rootDir, 'Arknights.exe'),
-            path.join(path.dirname(target), 'games', 'Arknights Game', 'Arknights.exe'),
-            path.join(rootDir, 'games', 'Arknights Game', 'Arknights.exe'),
-          ].find((candidate) => fs.existsSync(candidate));
-          if (gameExe) {
-            writeLaunchLog(`launch ${id}: 明日方舟启动路径被修正 ${target} -> ${gameExe}`);
-            target = gameExe;
-            game.workDir = path.dirname(gameExe);
-          } else if (/platformprocess|hypergryphlauncher/i.test(baseName)) {
-            writeLaunchLog(`launch ${id}: 明日方舟路径指向平台进程且找不到游戏本体：${target}`);
-            return {
-              ok: false,
-              error:
-                '这个服务器指向的是官方启动器的平台进程，不是游戏本体（Arknights.exe 缺失）。' +
-                '请在这个服务器上点「重建运行时」，或到服务器设置里把路径指到 Arknights.exe。',
-            };
-          }
-        }
-      }
-
-      const lower = target.toLowerCase();
-      let cwd = game.workDir && fs.existsSync(game.workDir) ? game.workDir : path.dirname(target);
-      if (
-        game.builtinKey === 'neverness' &&
-        ['ntelauncher.exe', 'ntegame.exe'].includes(path.basename(target).toLowerCase())
-      ) {
-        cwd = path.dirname(target);
-      }
-      let args = splitArgs(game.args);
-      /*
-       * 渲染后端（DX11 / DX12）参数拼在最前面：用户自定义参数在后，
-       * 万一两边写了冲突的开关，以用户手填的为准。
-       */
-      const renderArgs = renderApi.argsFor(game.builtinKey, game.renderApi);
-      if (renderArgs.length) args = [...renderArgs, ...args];
-      if (
-        nteDirectArgs.length &&
-        path.basename(target).toLowerCase() === 'ntegame.exe' &&
-        !args.some((item) => /^\/?launcher$/i.test(item))
-      ) {
-        args = [...nteDirectArgs, ...args];
-      }
-
-      if (lower.endsWith('.lnk') || lower.endsWith('.url')) {
-        /*
-         * 终末地不允许走快捷方式：快捷方式可能指向官方启动器（那就白弹一次界面），
-         * 而且绕过签名父进程后游戏会报 10100。直接让用户指到本体。
-         */
-        if (game.builtinKey === 'endfield') {
-          return {
-            ok: false,
-            error: '终末地不能用快捷方式启动（可能指向官方启动器）。请在这个服务器上把路径直接指到 Endfield.exe。',
-          };
-        }
-        const openError = await shell.openPath(target);
-        if (openError) return { ok: false, error: openError };
-        await markLaunched(game);
-        return { ok: true, external: true };
-      }
-
-      if (!lower.endsWith('.exe') && !lower.endsWith('.bat') && !lower.endsWith('.cmd')) {
-        const openError = await shell.openPath(target);
-        if (openError) return { ok: false, error: openError };
-        await markLaunched(game);
-        return { ok: true, external: true };
-      }
-
-      /*
-       * 终末地：不论 exe 叫什么名字（含用户改过名的 Endfield_cn.exe），一律经签名
-       * 父进程 —— 只要落到下面的通用启动，父进程就是花筱灵自己，游戏立刻报
-       * 10100「请通过官方启动器打开游戏」。指向平台进程的那种在上面已经被拦下。
-       *
-       * 明日方舟**不走**这条链路：它不校验父进程，双击本体就能开。Xel-Launcher 里
-       * 也是同一条界线 —— 它的 decoy 父进程桥只对 Endfield / BiliEndfield /
-       * GlobalEndfield / PlayEndfield 四个渠道启用，Arknights 系一律普通启动。
-       * 套上去只会让每次开方舟都白跑一次 PowerShell，在没装终末地的机器上
-       * 还会必然失败。
-       */
-      if (game.builtinKey === 'endfield') {
-        const signed = await launchWithSignedParent(game, target, cwd, {
-          requireElevation: true,
-          strict: true,
-          // 渲染后端参数也要一起传：这条链路绕过了下面的 spawn，漏传等于 DX 开关对终末地无效
-          args: args.join(' '),
-        });
-        if (signed.handled) return signed.result;
-      }
-
-      launching.set(id, Date.now());
-      writeLaunchLog(`launch ${id}: target=${target} args=${args.join(' ')} cwd=${cwd}`);
-
-      let pid = null;
-      let shellError = '';
-      const needExplicitArgs = args.length > 0 || (game.workDir && fs.existsSync(game.workDir));
-      if (needExplicitArgs) {
-        const result = await startWithShellExecute(target, args, cwd);
-        if (result.ok) pid = result.pid;
-        else shellError = result.error;
-      } else {
-        const openError = await shell.openPath(target);
-        if (openError) {
-          const result = await startWithShellExecute(target, args, cwd);
-          if (result.ok) pid = result.pid;
-          else shellError = result.error;
-        }
-      }
-
-      if (!pid && shellError) {
-        // 最后再尝试一次 CreateProcess，部分绿色程序不接受 ShellExecute。
-        try {
-          const child = spawn(target, args, {
-            cwd,
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: false,
-          });
-          if (child.pid) {
-            pid = child.pid;
-            running.set(id, { pid, startedAt: Date.now() });
-            child.once('error', () => {
-              running.delete(id);
-              pushState(true);
-            });
-            child.once('exit', () => finishGame(id));
-            child.unref();
-          }
-        } catch (error) {
-          launching.delete(id);
-          writeLaunchLog(`launch ${id}: failed ${shellError}; ${error.message}`);
-          return { ok: false, error: shellError || error.message };
-        }
-      }
-
-      // 预下载只是去官方页面下资源，不算「玩过这个游戏」——别去动最近游玩时间
-      if (purpose !== 'predownload') await markLaunched(game);
-
-      if (lower.endsWith('.exe') && !running.has(id)) {
-        const isNeverness = game.builtinKey === 'neverness';
-        const trackExe = isNeverness ? 'HTGame.exe' : path.basename(target);
-        trackGameProcess(
-          id,
-          trackExe,
-          isNeverness ? null : Date.now(),
-          isNeverness ? 150 : 8
-        ).catch(() => {});
-        /*
-         * 请求了渲染后端就核对一次结果。
-         * 参数传过去不等于生效：客户端可能不认这个开关，也可能显卡不支持而静默回退。
-         * 45 秒足够冷启动写完 Player.log，又不至于拖到用户已经进游戏几分钟。
-         * 详情只进启动日志，不打扰界面 —— 读不到日志路径是常态，不该弹提示。
-         */
-        if (renderArgs.length) {
-          const probe = setTimeout(async () => {
-            try {
-              const requested = renderApi.labelFor(game.builtinKey, game.renderApi);
-              const actual = await renderApi.readActualApi(game.builtinKey);
-              writeLaunchLog(
-                `launch ${id}: 渲染后端 请求=${requested} 实际=${actual || '未从游戏日志确认'}`
-              );
-            } catch {
-              /* 日志读不到就算了，不影响游戏 */
-            }
-          }, 45000);
-          probe.unref?.();
-        }
-        if (isNeverness && path.basename(target).toLowerCase() === 'ntegame.exe') {
-          if (purpose === 'predownload') {
-            // 只试着点官方页面上的「预下载」，绝不点「开始游戏」——那是直接进游戏
-            autoClickNtePredownload(id);
-          } else {
-            // 异环直达登录窗后，帮忙把「开始游戏」也点了（UIA 找按钮，找不到就静默让人点）
-            autoClickNteStart(id);
-          }
-        }
-      } else {
-        launching.delete(id);
-      }
-
-      return { ok: true, pid: pid || null };
-    } catch (error) {
-      launching.delete(id);
-      writeLaunchLog(`launch ${id}: exception ${error.message}`);
-      return { ok: false, error: error.message };
-    }
-  });
-
-  ipcMain.handle('games:stop', async (_event, id) => {
-    if (!running.has(id)) return { ok: false, error: '这个游戏没有在运行' };
-    await killGame(id);
-    return { ok: true };
-  });
-
-  ipcMain.handle('games:reveal', async (_event, id) => {
-    const game = store.data.games.find((g) => g.id === id);
-    if (!game || !game.target) return false;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(game.target)) return false;
-    try {
-      if (fs.existsSync(game.target)) {
-        shell.showItemInFolder(game.target);
-        return true;
-      }
-    } catch {
-      /* ignore */
-    }
-    return false;
-  });
-
-  ipcMain.handle('dialog:pick-executable', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择游戏的启动程序',
-      properties: ['openFile'],
-      filters: [
-        { name: '可执行文件与快捷方式', extensions: ['exe', 'lnk', 'url', 'bat', 'cmd'] },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-    });
-    return result.canceled ? null : result.filePaths[0];
-  });
-
-  ipcMain.handle('dialog:pick-image', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      // 头像、封面、自定义背景都走这个选择器，所以标题保持中性
-      title: '选择图片',
-      properties: ['openFile'],
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'] }],
-    });
-    return result.canceled ? null : result.filePaths[0];
-  });
-
-  ipcMain.handle('dialog:pick-audio', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择歌曲',
-      properties: ['openFile'],
-      filters: [{ name: '音频', extensions: ['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac'] }],
-    });
-    return result.canceled ? null : result.filePaths[0];
-  });
-
-  ipcMain.handle('dialog:pick-directory', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择文件夹',
-      properties: ['openDirectory', 'createDirectory'],
-    });
-    return result.canceled ? null : result.filePaths[0];
-  });
-
-  ipcMain.handle('cover:import', async (_event, sourcePath) => {
-    if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error('图片不存在');
-    const stat = fs.statSync(sourcePath);
-    if (stat.size > 20 * 1024 * 1024) throw new Error('图片不能超过 20 MB');
-    const ext = path.extname(sourcePath).toLowerCase() || '.png';
-    const allowed = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
-    if (!allowed.has(ext)) throw new Error('不支持这种图片格式');
-    const dir = path.join(app.getPath('userData'), 'covers');
-    await fsp.mkdir(dir, { recursive: true });
-    const fileName = `cover-${crypto.randomUUID()}${ext}`;
-    await fsp.copyFile(sourcePath, path.join(dir, fileName));
-    return `covers/${fileName}`;
-  });
-
-  ipcMain.handle('avatar:import', async (_event, sourcePath) => {
-    if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error('图片不存在');
-    const stat = fs.statSync(sourcePath);
-    if (stat.size > 20 * 1024 * 1024) throw new Error('头像不能超过 20 MB');
-    const ext = path.extname(sourcePath).toLowerCase() || '.png';
-    const allowed = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
-    if (!allowed.has(ext)) throw new Error('不支持这种图片格式');
-    const dir = path.join(app.getPath('userData'), 'avatars');
-    await fsp.mkdir(dir, { recursive: true });
-    const fileName = `avatar-${crypto.randomUUID()}${ext}`;
-    await fsp.copyFile(sourcePath, path.join(dir, fileName));
-    return `avatars/${fileName}`;
-  });
 
   /*
    * 官方背景：跟随鹰角「版本简报」页面自动换。
    * sync 是手动按钮 / 启动时共用的入口；official-state 给切换器出缩略图。
    */
   let officialSyncState = { busy: false, lastError: '', lastResult: null };
-  ipcMain.handle('background:sync-official', async () => {
-    if (officialSyncState.busy) return { busy: true };
-    officialSyncState.busy = true;
-    officialSyncState.lastError = '';
-    try {
-      const result = await hgBackgrounds.syncOfficialBackgrounds(app.getPath('userData'));
-      officialSyncState.lastResult = result;
-      return { ok: true, ...result };
-    } catch (error) {
-      officialSyncState.lastError = (error && error.message) || String(error);
-      console.warn('官方背景同步失败：', officialSyncState.lastError);
-      return { ok: false, error: officialSyncState.lastError };
-    } finally {
-      officialSyncState.busy = false;
-    }
-  });
-  ipcMain.handle('background:official-state', async () => {
-    const backgrounds = await hgBackgrounds.listOfficialBackgrounds(app.getPath('userData'));
-    return {
-      backgrounds,
-      busy: officialSyncState.busy,
-      lastError: officialSyncState.lastError,
-      lastResult: officialSyncState.lastResult,
-    };
-  });
-  ipcMain.handle('background:official-stat', async () =>
-    hgBackgrounds.officialBackgroundsStat(app.getPath('userData'))
-  );
 
-  ipcMain.handle('background:import', async (_event, sourcePath) => {
-    if (!sourcePath || !fs.existsSync(sourcePath)) throw new Error('图片不存在');
-    const stat = fs.statSync(sourcePath);
-    if (stat.size > 40 * 1024 * 1024) throw new Error('背景图不能超过 40 MB');
-    const ext = path.extname(sourcePath).toLowerCase() || '.png';
-    const allowed = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
-    if (!allowed.has(ext)) throw new Error('请选择 PNG / JPG / WebP / GIF 图片');
-    const dir = path.join(app.getPath('userData'), 'backgrounds');
-    await fsp.mkdir(dir, { recursive: true });
-    // 清掉旧的自定义背景，避免目录无限增长
-    try {
-      for (const name of await fsp.readdir(dir)) {
-        if (name.startsWith('custom-')) await fsp.rm(path.join(dir, name), { force: true });
-      }
-    } catch {
-      /* 清理失败不影响导入 */
-    }
-    const fileName = `custom-${crypto.randomUUID()}${ext}`;
-    await fsp.copyFile(sourcePath, path.join(dir, fileName));
-    return `backgrounds/${fileName}`;
-  });
 
-  ipcMain.handle('shell:open-path', async (_event, target) => {
-    if (!target || typeof target !== 'string') return false;
-    const error = await shell.openPath(target);
-    if (error) throw new Error(error);
-    return true;
-  });
-
-  ipcMain.handle('shell:open-external', async (_event, url) => {
-    if (!/^https?:\/\//i.test(String(url))) return false;
-    await shell.openExternal(url);
-    return true;
-  });
-
-  ipcMain.handle('app:open-data-folder', async () => {
-    await fsp.mkdir(app.getPath('userData'), { recursive: true });
-    await shell.openPath(app.getPath('userData'));
-  });
-
-  ipcMain.handle('app:open-download-folder', async () => {
-    try {
-      const dir = await ensureDownloadsDir();
-      const error = await shell.openPath(dir);
-      // 静默失败最糟：用户点了没反应，还以为下载丢了自己去找
-      if (error) return { ok: false, path: dir, error };
-      return { ok: true, path: dir, error: '' };
-    } catch (error) {
-      console.warn('打开下载文件夹失败：', error && error.message);
-      return { ok: false, path: '', error: (error && error.message) || String(error) };
-    }
-  });
 
   /*
    * 打开覆盖脚本留下的日志。
    * 更新是在 detached 的 PowerShell 里做的，控制台没人看得到；
    * 用户报「更新没完成」时，让他把这个文件发回来就能定位到底卡在哪一步。
    */
-  ipcMain.handle('app:open-update-log', async () => {
-    const candidates = ['update-log.txt', 'self-heal.log', 'last-update.json', 'update-error.json'];
-    for (const dir of updateLogDirs()) {
-      for (const name of candidates) {
-        const target = path.join(dir, name);
-        if (fs.existsSync(target)) {
-          await shell.openPath(target);
-          return { ok: true, path: target, opened: true };
-        }
-      }
-    }
-    const dir = updateLogDirs()[0];
-    await fsp.mkdir(dir, { recursive: true }).catch(() => {});
-    await shell.openPath(dir);
-    return { ok: true, path: dir, opened: false };
-  });
 
   /** 直接把日志内容读回渲染层，省得用户还要去找文件。 */
-  ipcMain.handle('app:read-update-log', async () => {
-    const dirs = updateLogDirs();
-    const read = async (name) => {
-      for (const dir of dirs) {
-        try {
-          const text = await fsp.readFile(path.join(dir, name), 'utf8');
-          return text.replace(/^\uFEFF/, '').trim();
-        } catch {
-          /* 换下一个目录 */
-        }
-      }
-      return '';
-    };
-    return {
-      dir: dirs[0],
-      log: await read('update-log.txt'),
-      selfHeal: await read('self-heal.log'),
-      error: await read('update-error.json'),
-    };
-  });
 
   /*
    * 一键导出诊断信息到桌面。
@@ -16427,351 +10881,12 @@ function musicLoginWindow(target) {
    * 压缩软件。内容只含版本、系统、设置摘要、网络请求元数据和已有日志；设置是
    * 按白名单逐项挑的，不是把 settings 整个 dump 出去——那里有账号和密钥。
    */
-  ipcMain.handle('diag:export', async () => {
-    try {
-      const dirs = updateLogDirs();
-      const readLog = async (name, limit = 12000) => {
-        for (const dir of dirs) {
-          try {
-            const text = await fsp.readFile(path.join(dir, name), 'utf8');
-            const clean = text.replace(/^\uFEFF/, '').trim();
-            return clean.length > limit ? clean.slice(-limit) : clean;
-          } catch {
-            /* 换下一个目录 */
-          }
-        }
-        return '';
-      };
-      let crashLog = '';
-      try {
-        const raw = await fsp.readFile(path.join(app.getPath('userData'), 'crash.log'), 'utf8');
-        crashLog = raw.length > 20000 ? raw.slice(-20000) : raw;
-      } catch {
-        /* 没崩溃过就没有这个文件 */
-      }
 
-      /*
-       * stage 失败时写的「解压结构诊断」：最有用的一份证据，以前用户拿不到——
-       * 它在 vela-update-* 里，下次启动就被 cleanTemp 删了。所以 stage 现在会
-       * 额外往 tempBase 根写一份（cleanTemp 不删根文件），这里两处都找，取最新的。
-       */
-      const findLatestStageDebug = async (limit = 12000) => {
-        const found = [];
-        for (const dir of dirs) {
-          try {
-            const file = path.join(dir, 'stage-debug.json');
-            const stat = await fsp.stat(file);
-            found.push({ path: file, mtimeMs: stat.mtimeMs });
-          } catch {
-            /* 没有根级兜底副本就算了 */
-          }
-        }
-        for (const dir of dirs) {
-          let entries;
-          try {
-            entries = await fsp.readdir(dir, { withFileTypes: true });
-          } catch {
-            continue;
-          }
-          for (const entry of entries) {
-            if (!entry.isDirectory() || !entry.name.startsWith('vela-update-') || entry.name.includes('staging')) continue;
-            const file = path.join(dir, entry.name, 'stage-debug.json');
-            try {
-              const stat = await fsp.stat(file);
-              found.push({ path: file, mtimeMs: stat.mtimeMs });
-            } catch {
-              /* 这个目录里没有诊断文件 */
-            }
-          }
-        }
-        if (!found.length) return null;
-        found.sort((a, b) => b.mtimeMs - a.mtimeMs);
-        const latest = found[0];
-        let text = (await fsp.readFile(latest.path, 'utf8')).replace(/^\uFEFF/, '').trim();
-        if (text.length > limit) text = text.slice(-limit);
-        return { path: latest.path, text };
-      };
-      const stageDebug = await findLatestStageDebug();
-      let launchLog = '';
-      try {
-        const raw = await fsp.readFile(path.join(app.getPath('userData'), 'launch.log'), 'utf8');
-        launchLog = raw.length > 6000 ? raw.slice(-6000) : raw;
-      } catch {
-        /* 没记录过就没有这个文件 */
-      }
 
-      const cfg = store?.data?.settings || {};
-      const updateSourceModeText = {
-        auto: '自动（内置镜像依次尝试）',
-        gitee: 'Gitee 镜像优先',
-        jsdelivr: 'jsDelivr 优先',
-        github: 'GitHub 直连优先',
-        custom: '只用手填地址',
-      }[cfg.updateSourceMode || 'auto'] || `未知（${cfg.updateSourceMode}）`;
-      const settingsSummary = {
-        主题: `${cfg.theme || '跟随系统'} / 强调色 ${cfg.accent || '默认'}`,
-        代理: cfg.proxyRules ? String(cfg.proxyRules) : '未设置（直连）',
-        更新源模式: updateSourceModeText,
-        更新源: cfg.updateManifest ? String(cfg.updateManifest) : '内置官方源',
-        自动检查更新: cfg.autoCheckUpdate === false ? '关闭' : '开启',
-        清单签名: `已启用，公钥 ${minisign.KEY_ID}，最近验签版本 ${cfg.updateSignedVersion || '（还没验过）'}`,
-        最近一次检查: updateStatus
-          ? `${updateStatus.ok ? '成功' : '失败'}  当前 ${updateStatus.current || APP_VERSION} / 最新 ${updateStatus.latest || '?'}${updateStatus.error ? `  错误：${updateStatus.error}` : ''}`
-          : '（还没检查过）',
-        游戏数量: String((store?.data?.games || []).length),
-      };
-      const env = {
-        版本: APP_VERSION,
-        Electron: process.versions.electron || '',
-        Chrome: process.versions.chrome || '',
-        Node: process.versions.node || '',
-        系统: `${os.type()} ${os.release()} ${process.arch}`,
-        安装目录: path.dirname(process.execPath),
-        数据目录: app.getPath('userData'),
-      };
-
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const stampName = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const target = path.join(app.getPath('desktop'), `花筱灵诊断-${stampName}.txt`);
-      const text = diagnostics.buildReport({
-        generatedAt: now.toLocaleString('zh-CN'),
-        env,
-        settings: settingsSummary,
-        logs: [
-          { title: '覆盖安装日志 update-log.txt', text: await readLog('update-log.txt') },
-          { title: '自愈日志 self-heal.log', text: await readLog('self-heal.log', 6000) },
-          { title: '崩溃日志 crash.log（尾部）', text: crashLog },
-          { title: '启动/运行日志 launch.log（尾部 6000 字）', text: launchLog },
-          ...(stageDebug
-            ? [{ title: `最近一次解压诊断 stage-debug.json：${stageDebug.path}`, text: stageDebug.text }]
-            : []),
-        ],
-      });
-      await fsp.mkdir(path.dirname(target), { recursive: true }).catch(() => {});
-      await fsp.writeFile(target, text, 'utf8');
-      diagnostics.recordEvent('info', 'diag', `诊断已导出：${path.basename(target)}`);
-      return { ok: true, path: target, requests: diagnostics.requestCount() };
-    } catch (error) {
-      return { ok: false, error: (error && error.message) || String(error) };
-    }
-  });
-
-  ipcMain.handle('start:refresh-art', async (_event, gameId) => {
-    const game = store?.data?.games?.find((item) => item.id === gameId);
-    if (!game) return { ok: false, reason: '没有找到这个游戏' };
-    if (!game.builtinKey) return { ok: false, reason: '这个游戏不是内置游戏，没有官方动态背景' };
-    // 手动触发时把自动重试计数清零，否则接口抖动留下的 3 次上限会一直卡着
-    bh3OfficialRetry = 0;
-    try {
-      await ensureAnimatedStartBackgrounds({ only: game.builtinKey });
-    } catch (error) {
-      return { ok: false, reason: error.message || '获取失败' };
-    }
-    const video = String(game.backgroundVideo || '');
-    if (video) return { ok: true, video };
-    return { ok: false, reason: `${game.name} 的官方接口这次没有返回动态背景` };
-  });
-
-  ipcMain.handle('start:export-video', async (_event, gameId) => {
-    const game = store.data.games.find((item) => item.id === gameId);
-    if (!game) throw new Error('没有找到这个游戏');
-    const relative = String(game.backgroundVideo || '');
-    if (!relative) throw new Error('这个游戏还没有动态背景');
-
-    // 只有本地缓存能导出；远程 URL 先下载到临时文件再让用户另存
-    let sourcePath = '';
-    if (/^https?:/i.test(relative)) {
-      const cachePath = path.join(app.getPath('userData'), 'backgrounds', `${game.builtinKey}.mp4`);
-      await fsp.mkdir(path.dirname(cachePath), { recursive: true });
-      const response = await fetch(relative, { signal: AbortSignal.timeout(120000) });
-      if (!response.ok) throw new Error(`下载动图失败：HTTP ${response.status}`);
-      const buffer = Buffer.from(await response.arrayBuffer());
-      await fsp.writeFile(cachePath, buffer);
-      sourcePath = cachePath;
-    } else if (/^file:/i.test(relative)) {
-      sourcePath = decodeURIComponent(relative.replace(/^file:\/\/\/?/i, ''));
-    } else {
-      sourcePath = path.join(app.getPath('userData'), relative);
-    }
-    if (!fs.existsSync(sourcePath)) throw new Error('动态背景文件不存在，可能已被清理');
-
-    const defaultName = `${safeFileName(game.name)}-启动页动图.mp4`;
-    const result = await dialog.showSaveDialog(win, {
-      title: '保存动态背景',
-      defaultPath: path.join(
-        portableDownloads || app.getPath('downloads'),
-        defaultName
-      ),
-      filters: [{ name: '视频', extensions: ['mp4', 'webm'] }],
-    });
-    if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
-    await fsp.copyFile(sourcePath, result.filePath);
-    const stat = await fsp.stat(result.filePath);
-    return { ok: true, path: result.filePath, bytes: stat.size };
-  });
-
-  ipcMain.handle('app:create-desktop-shortcut', async () => {
-    if (process.platform !== 'win32') {
-      throw new Error('当前系统不支持创建 Windows 桌面快捷方式');
-    }
-    const desktop = app.getPath('desktop');
-    await fsp.mkdir(desktop, { recursive: true });
-    const shortcutPath = path.join(desktop, '花筱灵启动器.lnk');
-    const portableTarget = process.env.PORTABLE_EXECUTABLE_FILE;
-    const target =
-      portableTarget && fs.existsSync(portableTarget) ? portableTarget : process.execPath;
-    const existed = fs.existsSync(shortcutPath);
-    const options = {
-      target,
-      cwd: app.isPackaged ? path.dirname(target) : app.getAppPath(),
-      args: app.isPackaged ? '' : `"${app.getAppPath()}"`,
-      description: '花筱灵启动器',
-      icon: target,
-      iconIndex: 0,
-      appUserModelId: 'com.huaxiaoling.launcher',
-    };
-    const ok = shell.writeShortcutLink(shortcutPath, existed ? 'replace' : 'create', options);
-    if (!ok) throw new Error('系统未能创建桌面快捷方式');
-    return { ok: true, path: shortcutPath, existed };
-  });
-
-  ipcMain.handle('app:relaunch-admin', async (_event, input) => {
-    if (!app.isPackaged) return { ok: false, error: '开发模式下请直接用管理员终端运行' };
-    /*
-     * 带上「重启后要开哪个游戏」：界面上点的是「以管理员重启」，用户的本意是
-     * 「把游戏打开」「别再问权限」，重启完必须接着开，不能让他再点一次。
-     */
-    const gameId = String(input?.launchGameId || '');
-    if (gameId) {
-      store.data.settings.pendingLaunchGameId = gameId;
-      await store.saveNow().catch(() => {});
-    }
-    /*
-     * 「更新到一半被权限挡住 → 以管理员重启 → 接着更新」这条链。
-     * 和开游戏那条分开存：游戏目录权限不够和开游戏提权不是一回事，
-     * 用户可能只是想更新，不想一开机就把游戏拉起来。
-     */
-    const updateGameId = String(input?.updateGameId || '');
-    if (updateGameId) {
-      store.data.settings.pendingUpdateGameId = updateGameId;
-      store.data.settings.pendingUpdateServerId = String(input?.updateServerId || '');
-      await store.saveNow().catch(() => {});
-    }
-    if (currentElevation()) return { ok: true, already: true };
-    /*
-     * 必须走 relaunchElevated()：它确认提权脚本进程真的起来了才退当前实例。
-     * 以前这里直接 spawn + app.quit()——powershell 被安全软件拦掉时脚本没跑、
-     * 老实例已经退了，用户看到的就是「点了重启，启动器消失，权限还是普通」，
-     * 也就是「管理员权限功能根本无效」。
-     */
-    if (await relaunchElevated()) return { ok: true };
-    return {
-      ok: false,
-      error: '无法调度提权重启（PowerShell 可能被安全软件拦截）。请右键启动器选「以管理员身份运行」',
-    };
-  });
-
-  ipcMain.handle('app:quit', () => {
-    quitting = true;
-    app.quit();
-  });
-
-  ipcMain.handle('news:list', async () => {
-    try {
-      const file = path.join(ROOT, 'src', 'data', 'news.json');
-      return JSON.parse(await fsp.readFile(file, 'utf8'));
-    } catch {
-      return [];
-    }
-  });
 
   /* ── 抽卡记录云备份：状态 / 保存 / 测试 / 列云端 / 恢复 ──────────────── */
-  ipcMain.handle('gacha:backup-status', () => gachaBackupSnapshot());
-
-  /*
-   * 保存配置。
-   *
-   * 密码和加密口令走「空串 = 沿用已存的那份」：表单是密码框，回显不了明文，
-   * 用户只是想改地址时不该被迫重填密码。要清掉就传 null。
-   */
-  ipcMain.handle('gacha:backup-save', async (_event, patch = {}) => {
-    const settings = store.data.settings.gachaBackup;
-    if (!settings) return { ok: false, error: '设置还没准备好' };
-    const input = patch && typeof patch === 'object' ? patch : {};
-    if ('enabled' in input) settings.enabled = input.enabled === true;
-    if ('url' in input) settings.url = String(input.url || '').trim().slice(0, 500);
-    if ('username' in input) settings.username = String(input.username || '').trim().slice(0, 200);
-    if ('keep' in input) {
-      settings.keep = Math.max(1, Math.min(10, Number(input.keep) || gachaBackup.DEFAULT_KEEP));
-    }
-    if ('password' in input) {
-      const value = input.password === null ? '' : String(input.password || '').trim();
-      if (input.password === null || value) await saveSecret(GACHA_BACKUP_PASSWORD_KEY, value);
-    }
-    if ('secret' in input) {
-      const value = input.secret === null ? '' : String(input.secret || '');
-      if (input.secret === null || value) await saveSecret(GACHA_BACKUP_SECRET_KEY, value);
-    }
-    await refreshGachaSecretFlags();
-    await store.saveNow();
-    // 用户刚改过地址或密码：失败退避清零，否则他要白等几小时才会重试
-    gachaBackupFailStreak = 0;
-    gachaBackupRetryAt = 0;
-    // 开开关之后要重排定时器，否则要等到下一次启动才会开始算周期
-    scheduleGachaBackup();
-    pushState(true);
-    return { ok: true, backup: gachaBackupSnapshot() };
-  });
-
-  ipcMain.handle('gacha:backup-test', async () => {
-    try {
-      const result = await gachaBackup.testConnection({ config: await gachaBackupCredentials() });
-      // 刚验证通过：说明配置能用，把自动备份的失败退避清掉
-      if (result && result.ok !== false) {
-        gachaBackupFailStreak = 0;
-        gachaBackupRetryAt = 0;
-      }
-      return result;
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
-
-  ipcMain.handle('gacha:backup-list', async () => {
-    try {
-      return await gachaBackup.listBackups({ config: await gachaBackupCredentials() });
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
-
-  ipcMain.handle('gacha:backup-restore', async (_event, input = {}) => {
-    try {
-      const result = await gachaBackup.restoreFrom({
-        config: await gachaBackupCredentials(),
-        userData: app.getPath('userData'),
-        name: input && input.name ? String(input.name) : '',
-      });
-      const settings = store.data.settings.gachaBackup;
-      settings.lastResult = result.text;
-      settings.lastError = '';
-      await store.saveNow();
-      pushState(true);
-      return result;
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
 
   /** 手动「立即备份」：直接复用 runGachaBackup（内部有锁、成败记录、pushState）。 */
-  ipcMain.handle('gacha:backup-now', async () => {
-    try {
-      return await runGachaBackup('手动');
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
 
   /*
    * 启动器设置导出 / 导入。
@@ -16780,251 +10895,51 @@ function musicLoginWindow(target) {
    * 注意：sessions.enc.json（密码 / 加密口令等凭据）不在这份文件里，导出导入
    * 不会把别人的凭据带进来，也带不走你自己的凭据——这点和抽卡云备份一样。
    */
-  ipcMain.handle('settings:export', async () => {
-    try {
-      const source = dataFile();
-      if (!fs.existsSync(source)) throw new Error('还没生成设置文件，先改个设置再导出');
-      const result = await dialog.showSaveDialog(win && !win.isDestroyed() ? win : undefined, {
-        title: '导出启动器设置',
-        defaultPath: path.join(app.getPath('downloads') || app.getPath('userData'), '花筱灵设置.json'),
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      });
-      if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
-      await fsp.copyFile(source, result.filePath);
-      const stat = await fsp.stat(result.filePath);
-      return { ok: true, path: result.filePath, bytes: stat.size };
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
 
-  ipcMain.handle('settings:import', async () => {
-    try {
-      const result = await dialog.showOpenDialog(win && !win.isDestroyed() ? win : undefined, {
-        title: '导入启动器设置',
-        properties: ['openFile'],
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      });
-      if (result.canceled || !result.filePaths || !result.filePaths.length) {
-        return { ok: false, cancelled: true };
-      }
-      const file = result.filePaths[0];
-      const raw = await fsp.readFile(file, 'utf8');
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return { ok: false, error: '文件不是合法的 JSON' };
-      }
-      if (!parsed || typeof parsed !== 'object') return { ok: false, error: '文件内容不是设置数据' };
-      // 只认可顶层带 settings 的启动器数据文件，避免误导入别的东西把配置冲了
-      if (!parsed.settings || typeof parsed.settings !== 'object') {
-        return { ok: false, error: '这份文件不是启动器设置备份（缺少 settings 字段）' };
-      }
-      const merged = { ...store.data, settings: { ...store.data.settings, ...parsed.settings } };
-      store.data = merged;
-      await store.saveNow();
-      pushState(true);
-      return { ok: true, path: file };
-    } catch (error) {
-      return { ok: false, error: error.message };
-    }
-  });
-
-  ipcMain.handle('gacha:load', async (_event, force = false) => {
-    // 用户不需要手动选库：路径为空或已失效时自动重新探测一次
-    const configured = store.data.settings.starwardDbPath;
-    if (!configured || !fs.existsSync(configured)) {
-      const detected = detectStarwardDbPath();
-      if (detected !== configured) {
-        store.data.settings.starwardDbPath = detected;
-        await store.saveNow();
-      }
-    }
-    return loadGachaHistory(
-      store.data.settings.starwardDbPath,
-      path.join(app.getPath('userData'), 'gacha-meta-v2.json'),
-      force === true,
-      importsPath(app.getPath('userData'))
-    );
-  });
-
-  ipcMain.handle('gacha:import', async (_event, input = {}) => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '导入 UIGF 抽卡记录',
-      properties: ['openFile'],
-      filters: [{ name: 'UIGF / SRGF JSON', extensions: ['json'] }],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    const imported = await importUigf({
-      filePath: result.filePaths[0],
-      userData: app.getPath('userData'),
-      game: input?.game,
-    });
-    return { ...imported, filePath: result.filePaths[0] };
-  });
 
   // 异环：把导出目录开给用户，并把当前识别到的账号回给界面
-  ipcMain.handle('gacha:nte-folder', async () => {
-    const dir = nteGachaDir();
-    await fsp.mkdir(dir, { recursive: true }).catch(() => {});
-    shell.openPath(dir);
-    return dir;
-  });
 
-  ipcMain.handle('gacha:nte-refresh', async () => {
-    const account = await refreshNteAccount().catch(() => null);
-    const imported = await scanNteGachaDrops({ notify: true }).catch(() => 0);
-    pushState(true);
-    return { ok: true, account: account || store.data.nteAccount || null, imported };
-  });
-
-  ipcMain.handle('gacha:nte-capture-info', async () =>
-    nteCapture.info(app.getPath('userData')),
-  );
-
-  ipcMain.handle('gacha:nte-capture-start', async (_event, input = {}) => {
-    const result = await nteCapture.start({
-      userData: app.getPath('userData'),
-      jsonDir: nteGachaDir(),
-      autoPage: input?.autoPage !== false,
-      onProgress: (message) => send('nte-capture', { phase: 'progress', message }),
-      onDone: async (payload) => {
-        const imported = await scanNteGachaDrops({ notify: false }).catch(() => 0);
-        await refreshNteAccount().catch(() => null);
-        pushState(true);
-        send('nte-capture', {
-          phase: 'done',
-          imported,
-          captured: payload?.count || 0,
-          jsonPath: payload?.jsonPath || '',
-        });
-        send('toast', {
-          type: imported > 0 ? 'success' : 'info',
-          message:
-            imported > 0
-              ? `已自动导入异环抽卡记录 ${imported} 条`
-              : '抓取完成，但没有发现新的抽卡记录',
-        });
-      },
-      onError: (error) => {
-        send('nte-capture', { phase: 'error', message: error.message || '抓取失败' });
-        send('toast', { type: 'error', message: error.message || '异环抓取失败' });
-      },
-    });
-    send('nte-capture', { phase: 'capturing', jsonPath: result.jsonPath, autoPage: input?.autoPage !== false });
-    return { ok: true, ...result };
-  });
-
-  ipcMain.handle('gacha:nte-capture-stop', async () => {
-    const result = await nteCapture.stop();
-    send('nte-capture', { phase: 'stopped', message: result.message || '' });
-    return result;
-  });
-
-  ipcMain.handle('gacha:refresh-meta', async () => {
-    // 强制刷新终末地 / 异环的图鉴缓存，拉到新版本角色和武器
-    const metaPath = path.join(app.getPath('userData'), 'gacha-meta-ext.json');
-    const meta = await loadGachaMeta(metaPath, true);
-    return {
-      ok: true,
-      updatedAt: meta.updatedAt ? new Date(meta.updatedAt).toISOString() : null,
-      endfield: Object.keys(meta.endfield?.bySlug || {}).length,
-      neverness: Object.keys(meta.neverness?.items || {}).length,
-      errors: meta.errors || [],
-    };
-  });
-
-  ipcMain.handle('gacha:pick-db', async () => {
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择抽卡记录数据库',
-      properties: ['openFile'],
-      filters: [{ name: '抽卡记录数据库', extensions: ['db', 'sqlite', 'sqlite3'] }],
-    });
-    if (result.canceled) return null;
-    const dbPath = result.filePaths[0];
-    store.data.settings.starwardDbPath = dbPath;
-    await store.saveNow();
-    pushState(true);
-    return dbPath;
-  });
-
-  ipcMain.handle('downloads:add', async (_event, input) => {
-    const dir = await ensureDownloadsDir();
-    const rawUrl = String(input && input.url ? input.url : '').trim();
-    let parsed;
-    try {
-      parsed = new URL(rawUrl);
-    } catch {
-      throw new Error('请输入有效的下载链接');
-    }
-    if (!/^https?:$/.test(parsed.protocol)) throw new Error('只支持 http 或 https 链接');
-
-    let fileName = String(input && input.fileName ? input.fileName : '').trim();
-    if (!fileName) {
-      try {
-        fileName = decodeURIComponent(path.basename(parsed.pathname)) || 'download';
-      } catch {
-        fileName = 'download';
-      }
-    }
-    fileName = safeFileName(fileName);
-    const finalPath = uniquePath(dir, fileName);
-
-    const item = downloads.add({
-      url: parsed.href,
-      fileName: path.basename(finalPath),
-      filePath: finalPath,
-      dir,
-      total: 0,
-      received: 0,
-      status: 'queued',
-      speed: 0,
-      error: null,
-      createdAt: Date.now(),
-    });
-    downloads.start(item.id);
-    pushState(true);
-    return item;
-  });
-
-  ipcMain.handle('downloads:pause', (_event, id) => downloads.pause(id));
-  ipcMain.handle('downloads:resume', (_event, id) => downloads.resume(id));
-  ipcMain.handle('downloads:cancel', async (_event, id) => downloads.cancel(id));
-  ipcMain.handle('downloads:remove', async (_event, id) => downloads.remove(id));
-  ipcMain.handle('downloads:open', async (_event, id) => downloads.open(id));
-  ipcMain.handle('downloads:open-folder', async (_event, id) => downloads.openFolder(id));
-
-  /* ---------------- 游戏能力注册表 ---------------- */
   /*
-   * 渲染层通过这三个通道拿到「哪些游戏支持哪些功能」，
-   * 从而不必在 app.js 里散落 if (game === 'genshin') 之类的判断。
-   * 以后加游戏只改 electron/game-features.js，前端自动跟随。
-   */
-  ipcMain.handle('features:all', async () => gameFeatures.describeAll());
-  ipcMain.handle('features:describe', async (_event, gameKey) => gameFeatures.describe(gameKey));
-  ipcMain.handle('features:by-category', async () => gameFeatures.featuresByCategory());
-
-  /* ---------------- 用户自定义插件 ---------------- */
-  /*
-   * 打开插件开发说明。
+   * SToken 账号管理。
    *
-   * 用户目录里那份是给「写插件的人」看的随包文档；它可能被用户删掉或者
-   * 从没装过（比如只装了示例插件没要说明），所以找不到就退回打开插件目录，
-   * 至少让用户看见 .hxl 文件长什么样，别弹一个「文件不存在」的死路。
+   * 只有这里能拿到完整的 stoken / ltoken，返回给渲染进程的一律是
+   * listAccounts() 处理过的脱敏版本 —— 界面不需要真值，也就不给它。
    */
-  ipcMain.handle('plugin:open-doc', async () => {
-    const dir = pluginHost.pluginsDir(app.getPath('userData'));
-    await fsp.mkdir(dir, { recursive: true });
-    const doc = path.join(dir, 'README.md');
-    const exists = await fsp
-      .access(doc)
-      .then(() => true)
-      .catch(() => false);
-    const target = exists ? doc : dir;
-    const reason = await shell.openPath(target);
-    return { ok: !reason, path: target, error: reason || '' };
-  });
+
+  /*
+   * 扫码登录。
+   *
+   * 为什么要扫码：申请抽卡 authkey 的 genAuthKey 只认真正的 SToken，
+   * 而启动器里内嵌的米游社网页登录只能拿到 ltoken_v2 —— 那条路实测一律 -100。
+   * 手机米游社扫一下游戏二维码是唯一能自助拿到 SToken 的路径，
+   * 而且扫码返回里带着 UID，用户不用开游戏、也不用自己抄任何东西。
+   */
+  let scanSession = null;
+
+  /*
+   * 扫码日志：只记状态码、stat、raw 长度和开头 160 字符，不记 token 本身。
+   * 目的是回答「扫完为什么没反应」——这只能靠服务端的原始返回判断。
+   */
+  function qrLogPath() {
+    return path.join(app.getPath('userData'), 'stoken-scan.log');
+  }
+
+  function qrLog(payload) {
+    try {
+      fs.appendFileSync(qrLogPath(), new Date().toISOString() + ' ' + JSON.stringify(payload) + '\n');
+    } catch {
+      /* 记日志失败不影响扫码本身 */
+    }
+  }
+
+  function stopScanSession() {
+    if (scanSession) {
+      scanSession.stop();
+      scanSession = null;
+    }
+  }
+
+
 
   /*
    * 插件文件都放在 userData/plugins 下，配置在 userData/plugins.json。
@@ -17034,270 +10949,18 @@ function musicLoginWindow(target) {
    */
   const pluginRoot = () => app.getPath('userData');
 
-  ipcMain.handle('plugin:list', async () => {
-    const { dir, plugins } = await pluginHost.listPlugins(pluginRoot());
-    return { ok: true, dir, plugins, permissions: pluginHost.PERMISSIONS };
-  });
-
-  ipcMain.handle('plugin:read', async (_event, id) => pluginHost.readPlugin(pluginRoot(), String(id || '')));
-
-  ipcMain.handle('plugin:import', async () => {
-    const result = await dialog.showOpenDialog(win && !win.isDestroyed() ? win : undefined, {
-      title: '选择插件文件',
-      properties: ['openFile'],
-      filters: [{ name: '花筱灵插件', extensions: ['hxl', 'js'] }],
-    });
-    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-    return pluginHost.importPlugin(pluginRoot(), result.filePaths[0]);
-  });
-
-  ipcMain.handle('plugin:remove', async (_event, id) => pluginHost.removePlugin(pluginRoot(), String(id || '')));
-
-  ipcMain.handle('plugin:storage-get', async (_event, id) => pluginHost.getStorage(pluginRoot(), String(id || '')));
-
-  ipcMain.handle('plugin:storage-set', async (_event, input) => {
-    const payload = input && typeof input === 'object' ? input : {};
-    return pluginHost.setStorage(pluginRoot(), String(payload.id || ''), payload.value);
-  });
 
 
   /* ---------------- 截图管理 ---------------- */
-  ipcMain.handle('screenshots:list', async () => {
-    const customRoots = store.data?.settings?.screenshotRoots || {};
-    try {
-      // 游玩区间 → 游戏 key，用于把混在一个目录里的截图分回各自游戏
-      const playLog = store.data?.stats?.playLog || [];
-      const idToKey = new Map();
-      const knownKeys = new Set(gameFeatures.listGames().map((item) => item.key));
-      for (const game of store.data?.games || []) {
-        const key = gameFeatures.normalizeKey(game.featureKey || game.id) || '';
-        // 自定义游戏 normalizeKey 会原样返回 id，那种 key 图鉴里没有意义，丢掉
-        if (key && knownKeys.has(key)) idToKey.set(game.id, key);
-      }
-      const sessionWindows = screenshotLib.sessionWindowsFrom(playLog, (id) => idToKey.get(id) || '');
-      // 截图管理要指向「每个游戏的截图目录」，而不是电脑自带的截图文件夹。
-      // 游戏安装目录 = exe 所在目录，截图通常落在 <游戏目录>\ScreenShot 及常见变体。
-      // 所以当用户没手动配置截图目录时，就从各游戏安装路径推导出它的截图目录，
-      // 而不是退回 defaultRoots 里的 Pictures\Screenshots。
-      const screenshotRoots = {};
-      if (customRoots && Object.keys(customRoots).length) {
-        screenshotRoots.custom = customRoots;
-      } else {
-        for (const game of store.data?.games || []) {
-          const key = idToKey.get(game.id);
-          const dirs = new Set();
-          for (const server of game.servers || []) {
-            if (!server.path || !targetExists(server.path)) continue;
-            const gameDir = path.dirname(server.path);
-            const shotNames = ['ScreenShot', 'Screenshot', '截图', 'screenshot', 'Screenshots', 'ScreenShots'];
-            for (const name of shotNames) dirs.add(path.join(gameDir, name));
-            dirs.add(path.join(gameDir, 'Photos'));
-          }
-          if (key && dirs.size) screenshotRoots[key] = [...dirs];
-        }
-      }
-      const result = await screenshotLib.listScreenshots({
-        customRoots: screenshotRoots.custom || screenshotRoots,
-        sessionWindows,
-      });
-      // 刷新缩略图白名单：只有本次扫描出来的路径能被 hxl-shot 协议读到
-      screenshotAllow.clear();
-      for (const list of Object.values(result.groups || {})) {
-        for (const item of list) screenshotAllow.add(path.normalize(item.path.toLowerCase()));
-      }
-      return { ok: true, ...result };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '扫描失败') };
-    }
-  });
-
-  ipcMain.handle('screenshots:check-dir', async (_event, dir) => screenshotLib.checkDir(String(dir || '')));
-
-  /*
-   * 缩略图本体通过 IPC 取回 data URL，而不是自定义协议：
-   * 页面跑在 file:// 下，file:// → hxl-shot:// 属于跨源，会被 CORS 直接拦掉。
-   * 只允许「本次扫描过的路径」，单张超过 8MB 不内联，避免内存暴涨。
-   */
-  ipcMain.handle('screenshots:thumb', async (_event, filePath) => {
-    const target = String(filePath || '');
-    if (!target) return { ok: false, reason: '缺少路径' };
-    if (!screenshotAllow.has(path.normalize(target.toLowerCase()))) {
-      return { ok: false, reason: '这个文件不在扫描结果里' };
-    }
-    try {
-      const stat = await fsp.stat(target);
-      if (stat.size > 8 * 1024 * 1024) return { ok: false, reason: '图片太大，请用系统看图工具打开' };
-      const buffer = await fsp.readFile(target);
-      const ext = path.extname(target).toLowerCase().replace('.', '');
-      const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', bmp: 'image/bmp' }[ext];
-      if (!mime) return { ok: false, reason: '不支持的图片格式' };
-      return { ok: true, dataUrl: `data:${mime};base64,${buffer.toString('base64')}` };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '读取失败') };
-    }
-  });
 
 
-  ipcMain.handle('screenshots:open', async (_event, filePath) => {
-    const target = String(filePath || '');
-    if (!target) return { ok: false };
-    try {
-      await shell.openPath(target);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '') };
-    }
-  });
-
-  ipcMain.handle('screenshots:reveal', async (_event, filePath) => {
-    const target = String(filePath || '');
-    if (!target) return { ok: false };
-    shell.showItemInFolder(target);
-    return { ok: true };
-  });
 
   /* ---------------- 窗口材质 ---------------- */
 
-  ipcMain.handle('window:material', async (_event, input) => {
-    const material = String(input?.material || 'none');
-    const result = windowMaterial.applyMaterial(win, material);
-    return {
-      ...result,
-      material,
-      transparency: windowMaterial.transparencyEnabled(),
-      supported: windowMaterial.MATERIALS,
-    };
-  });
-
-  ipcMain.handle('window:material-state', async () => ({
-    ok: true,
-    material: store.data.settings?.material || 'none',
-    transparency: windowMaterial.transparencyEnabled(),
-    supported: windowMaterial.MATERIALS,
-  }));
-
-  /* ---------------- 安装与更新 ---------------- */
-
-  /**
-   * 汇总每个内置游戏的安装状态。
-   *
-   * 分三类：
-   *   hyp  米哈游 — 版本读 exe 的 FileVersion，更新交给官方启动器
-   *   pack 鹰角   — 本地版本读 .vela-game-state.json，远端版本查 launcher API
-   * 远端查询是网络操作，所以单独放进 games:update-check，列表接口只给本地信息。
-   */
-  ipcMain.handle('install:list', async () => {
-    const rows = [];
-    for (const game of store.data.games || []) {
-      const key = game.builtinKey || game.featureKey || '';
-      const normalized = gameFeatures.normalizeKey(key);
-      const trait = normalized ? gameFeatures.traitOf(normalized, 'install-manager') : null;
-      const servers = Array.isArray(game.servers) ? game.servers : [];
-      const active = servers.find((s) => s.id === game.activeServerId) || servers[0] || null;
-
-      // 找一个真实存在的安装目录
-      let installed = null;
-      for (const server of servers) {
-        const entryName =
-          normalized === 'arknights' ? 'Arknights.exe' : normalized === 'endfield' ? 'Endfield.exe' : '';
-        if (!server.root || !entryName) continue;
-        // 明日方舟（2.4.0 合并）：官服 / B服 共用同一目录，
-        // 按渠道 SDK 文件校正真实渠道（只读，不落盘）
-        if (normalized === 'arknights') {
-          server.channel = channelFromArknightsRoot(server.root);
-        }
-        const probe = installManager.looksInstalled(server.root, entryName);
-        if (probe && probe.hasEntry) {
-          installed = { ...probe, serverName: server.name, serverId: server.id, channel: server.channel };
-          break;
-        }
-      }
-
-      const exePath = installed?.entry || active?.path || game.target || '';
-      const fileVer = installed ? installManager.fileVersion(exePath) : '';
-
-      rows.push({
-        id: game.id,
-        name: game.name,
-        subtitle: game.subtitle || '',
-        featureKey: normalized,
-        kind: trait ? trait.kind : null,
-        packId: trait && trait.id ? trait.id : null,
-        installed: Boolean(installed),
-        root: installed ? installed.root : active?.root || '',
-        entry: exePath,
-        totalBytes: installed ? installed.totalBytes : 0,
-        fileCount: installed ? installed.fileCount : 0,
-        fileVersion: fileVer,
-        serverName: installed ? installed.serverName : active?.name || '',
-        channel: installed ? installed.channel : active?.channel || '',
-        servers: servers.map((s) => ({ id: s.id, name: s.name, channel: s.channel, root: s.root || '' })),
-        activeServerId: game.activeServerId || '',
-        running: running.has(game.id),
-      });
-    }
-    return {
-      ok: true,
-      games: rows,
-      miyousheLauncher: installManager.findMiyousheLauncher(),
-    };
-  });
 
   /** 查某个鹰角游戏的远端最新版，和本地版本对比。 */
-  ipcMain.handle('install:check-remote', async (_event, input) => {
-    const channel = String(input?.channel || '').trim();
-    if (!channel) return { ok: false, reason: '缺少渠道' };
-    try {
-      const latest = await fetchLatestForChannel(channel);
-      const root = String(input?.root || '').trim();
-      let localVersion = '';
-      if (root) {
-        try {
-          const stateFile = path.join(root, '.vela-game-state.json');
-          const raw = JSON.parse(await fsp.readFile(stateFile, 'utf8'));
-          localVersion = String(raw?.version || '');
-        } catch {
-          /* 没有本地状态文件就当未知 */
-        }
-      }
-      return {
-        ok: true,
-        localVersion,
-        remoteVersion: latest.version,
-        clientVersion: latest.clientVersion || '',
-        totalSize: latest.totalSize || 0,
-        base: latest.base || '',
-        packCount: Array.isArray(latest.packs) ? latest.packs.length : 0,
-        outdated: Boolean(localVersion && latest.version && localVersion !== latest.version),
-      };
-    } catch (error) {
-      return { ok: false, reason: String(error.message || '查询失败') };
-    }
-  });
 
   /** 打开官方启动器 / 官网 / 安装目录。 */
-  ipcMain.handle('install:open', async (_event, input) => {
-    const what = String(input?.what || '');
-    if (what === 'miyoushe') {
-      const exe = installManager.findMiyousheLauncher();
-      if (!exe) return { ok: false, reason: '没有找到米哈游启动器（HYP.exe），请先安装 HoYoPlay' };
-      await shell.openPath(exe);
-      return { ok: true };
-    }
-    if (what === 'folder') {
-      const target = String(input?.path || '');
-      if (!target || !fs.existsSync(target)) return { ok: false, reason: '目录不存在' };
-      await shell.openPath(target);
-      return { ok: true };
-    }
-    if (what === 'site') {
-      const url = String(input?.url || '');
-      if (!/^https:\/\//i.test(url)) return { ok: false, reason: '链接不合法' };
-      await shell.openExternal(url);
-      return { ok: true };
-    }
-    return { ok: false, reason: '未知操作' };
-  });
 
   /* ---------------- 画质配置 ---------------- */
 
@@ -18554,8 +12217,132 @@ function startMihoyoGachaWatcher() {
           writeLaunchLog(
             `gacha ${game.builtinKey}: 自动同步失败（${error?.message || error}），这份缓存 ${Math.round(cooldownMs / 60000)} 分钟内不再重试`
           );
+          /*
+           * 链接过期是唯一一种「用户必须动手才能解决」的失败（进游戏点一次抽卡
+           * 记录页）。把它单独发到前端，抽卡记录页顶部挂一条常驻提醒；同步成功
+           * 或链接刷新（签名变化触发重试）后由前端自动撤掉。限流 / 忙这类不用
+           * 用户动手的失败不发这条，免得提醒常驻却无事可做。
+           */
+          const messageText = String(error?.message || error || '');
+          if (messageText.includes('过期')) {
+            send('gacha:link-expired', { game: game.builtinKey, message: messageText });
+          }
         } finally {
           mihoyoGachaWatching = false;
+        }
+      }
+    }
+  };
+  setInterval(attempt, 20000);
+}
+
+/*
+ * 鸣潮抽卡自动同步（2026-11-12）。
+ *
+ * 鸣潮跟米哈游不一样：它没有「本地抽卡缓存文件」，抽卡分享链接是游戏自己写进
+ * `Client/Saved/Logs/Client*.log` 的（ELog XOR 加密，kuro-gacha.js 负责解密）。
+ * 用户每一次在游戏里打开「抽卡记录」页并点分享，都会往这个日志里追加一条链接。
+ *
+ * 所以自动同步的触发条件就是「这个日志文件变大」：
+ *   - 只 stat 文件大小，不整读几十 MB 的日志（和米哈游那套同样轻量）；
+ *   - 签名按「游戏 + 渠道目录」记，多渠道互不干扰；
+ *   - 只有真同步成功才把签名记为已处理，失败下个 tick 用同签名重试；
+ *   - 失败记冷却，免得 20 秒一轮反复打网络（分享链接过期是常见失败）。
+ * 这样用户在游戏里点一次分享，切回启动器最多 20 秒抽卡记录就自己进来了，
+ * 不需要再手动点「同步」。
+ */
+let kuroGachaWatching = false;
+const kuroGachaSignatures = new Map();
+const kuroGachaFailures = new Map();
+const KURO_GACHA_FAIL_COOLDOWN = 5 * 60 * 1000;
+
+function startKuroGachaWatcher() {
+  const rootsOf = (game) => {
+    const roots = [];
+    const pushDir = (value) => {
+      if (!value) return;
+      let dir = value;
+      try {
+        if (fs.statSync(dir).isFile()) dir = path.dirname(dir);
+      } catch {
+        return;
+      }
+      if (!roots.includes(dir)) roots.push(dir);
+    };
+    for (const server of game.servers || []) {
+      pushDir(server.root);
+      pushDir(server.path);
+    }
+    pushDir(game.target);
+    return roots;
+  };
+  /* 日志签名：目录下 Client*.log 的「文件名:大小」。只 stat，不读内容。 */
+  const logSignature = (root) => {
+    const dir = path.join(root, 'Client', 'Saved', 'Logs');
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return '';
+    }
+    const parts = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^Client.*\.log$/i.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(path.join(dir, entry.name));
+        parts.push(`${entry.name}:${stat.size}`);
+      } catch {
+        /* 文件正在被游戏写，stat 偶尔失败，下一轮再看 */
+      }
+    }
+    parts.sort();
+    return parts.join('|');
+  };
+  const attempt = async () => {
+    if (kuroGachaWatching || store.data.settings.autoGacha === false) return;
+    for (const game of store.data.games) {
+      if (game.builtinKey !== 'wutheringwaves') continue;
+      for (const root of rootsOf(game)) {
+        const signature = logSignature(root);
+        if (!signature) continue;
+        const key = `${game.id}\u0000${root}`;
+        if (signature === kuroGachaSignatures.get(key)) continue;
+        const failed = kuroGachaFailures.get(key);
+        if (
+          failed &&
+          failed.signature === signature &&
+          Date.now() - failed.at < (Number(failed.cooldownMs) || KURO_GACHA_FAIL_COOLDOWN)
+        ) continue;
+        kuroGachaWatching = true;
+        try {
+          const result = await kuroGacha.syncWuwaGacha({
+            installRoot: root,
+            userData: app.getPath('userData'),
+          });
+          kuroGachaSignatures.set(key, signature);
+          kuroGachaFailures.delete(key);
+          if (result.imported > 0) {
+            send('gacha:updated', result);
+            send('toast', {
+              type: 'success',
+              message: `鸣潮抽卡记录已自动同步 ${result.imported} 条`,
+            });
+          }
+        } catch (error) {
+          /*
+           * needShare（日志里没有可用分享链接）是最常见的：用户只是玩了游戏、
+           * 没点过分享。不弹 toast、不挂常驻提醒，记冷却就好 —— 等他真的点了
+           * 分享、日志变大，签名一变就自动接上。
+           */
+          const cooldownMs = Number(error?.cooldownMs) || KURO_GACHA_FAIL_COOLDOWN;
+          kuroGachaFailures.set(key, { signature, at: Date.now(), cooldownMs });
+          writeLaunchLog(
+            `gacha wutheringwaves: 自动同步跳过（${error?.message || error}），这份日志 ${Math.round(
+              cooldownMs / 60000
+            )} 分钟内不再重试`
+          );
+        } finally {
+          kuroGachaWatching = false;
         }
       }
     }
@@ -18966,9 +12753,27 @@ app.whenReady().then(async () => {
 
   // 协议必须在创建任何窗口之前注册好，否则首帧里的 <img src="hxl-shot:..."> 会 404
   installShotProtocol();
-  const ipc = installIpc();
+
+  /*
+   * 顺序很重要，别调回去：
+   *
+   * `installIpc()` 会把 win / tray 作为「按值参数」发给 14 个 IPC 模块
+   * （window / dialog / app / gacha / music / settings / skland / endfield /
+   *  hoyolab / passport / plugin / misc / update / live）。这些模块内部拿到的是
+   * 启动那一刻的快照 —— 如果 installIpc() 跑在 createWindow() 之前，
+   * 快照里的 win 就是 null，于是关闭、最小化、最大化、所有「以主窗口为父窗口」
+   * 的对话框全部静默失效（点关闭没反应就是这么来的）。
+   *
+   * tray 同理：installTray() 原本在最下面，installWindowIpc 拿到的 tray 是 null，
+   * 「收进托盘」那条分支永远走不到。
+   *
+   * 所以：先把窗口和托盘建出来，再注册 IPC。
+   */
   if (process.env.HX_CAPTURE !== '1') createSplashWindow();
   createWindow();
+  installTray();
+
+  const ipc = installIpc();
   // 开机预读画质：用户点进画质页时直接拿缓存，不用再等注册表
   ipc?.primeGraphicsCache?.();
   ensureNevernessCover();
@@ -18993,6 +12798,7 @@ app.whenReady().then(async () => {
   // 放这里会 ReferenceError —— 以前就这么错过一次，见那个函数上方的说明）。
   setTimeout(startEndfieldGachaWatcher, 5000);
   setTimeout(startMihoyoGachaWatcher, 5000);
+  setTimeout(startKuroGachaWatcher, 5000);
   // 自更新：开机后 15 秒查一次，之后每 6 小时一次（老版本机器靠这个收到提示）
   settlePreviousUpdate();
   updater.cleanTemp(updateTempBase()).catch(() => {});
@@ -19008,7 +12814,7 @@ app.whenReady().then(async () => {
     scanNteGachaDrops({ notify: true }).catch(() => {});
     refreshNteAccount().catch(() => {});
   }, 30 * 1000);
-  installTray();
+  /* installTray() 已经在创建窗口时提前调用过了（IPC 注册需要拿到真实 tray） */
   if (process.env.KUGOU_COOKIE_DUMP === '1') {
     setTimeout(async () => {
       try {
@@ -19197,7 +13003,7 @@ app.on('second-instance', showWindow);
 app.on('before-quit', () => {
   quitting = true;
   try {
-    if (neteaseServiceProcess) neteaseServiceProcess.kill();
+    killNeteaseService();
   } catch {
     /* ignore */
   }

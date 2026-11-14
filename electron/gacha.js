@@ -5,6 +5,8 @@ const path = require('node:path');
 const initSqlJs = require('./vendor/sql-wasm.js');
 const { readImportGroups } = require('./gacha-import');
 const { loadGachaMeta, ENDFIELD_SLUG_ALIAS } = require('./gacha-meta');
+// 原神的抽卡记录没有 item_id，只能靠「名字 -> 观测枢图标」补头像
+const { loadIcons } = require('./gacha-icons');
 
 const GAME_DEFS = [
   {
@@ -69,28 +71,7 @@ const GAME_DEFS = [
     weaponBanners: [3],
     bangbooBanners: [5],
   },
-  {
-    key: 'bh3',
-    name: '崩坏3',
-    table: 'BH3GachaItem',
-    infoTable: 'BH3GachaInfo',
-    infoId: 'ItemId',
-    infoName: 'ItemName',
-    infoIcon: 'IconUrl',
-    fiveRank: 5,
-    fourRank: 4,
-    // 崩坏3 补给类型：1=标配补给（常驻），2=精准补给（武器/圣痕），其余为活动限定。
-    // 卡池具体编号以 Starward 数据库实际为准；即便个别编号对不上，总抽数与五星/垫数统计不受影响。
-    banners: {
-      1: '标配补给',
-      2: '精准补给',
-      11: '活动补给',
-      12: '扩充补给',
-    },
-    standard: [1],
-    weaponBanners: [2],
-  },
-  {
+{
     key: 'endfield',
     name: '明日方舟：终末地',
     table: '',
@@ -452,7 +433,8 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
         const info = infoMap.get(String(row.ItemId));
         fiveDetails.push({
           name: (info && info.name) || row.Name,
-          icon: (info && info.icon) || null,
+          // row.icon 是给原神补的：那边 ItemId 恒为空串，infoMap 永远查不到
+          icon: (info && info.icon) || row.icon || null,
           time: row.Time,
           banner: bannerName(def, type),
           pity: counter,
@@ -475,7 +457,7 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
         const info = infoMap.get(String(row.ItemId));
         fourDetails.push({
           name: (info && info.name) || row.Name,
-          icon: (info && info.icon) || null,
+          icon: (info && info.icon) || row.icon || null,
           time: row.Time,
           itemType: categoryOf(def, row),
         });
@@ -539,11 +521,25 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
       importMtime = 0;
     }
   }
+  /*
+   * 原神的头像图鉴，必须在缓存判定之前拿到：图鉴是后加的功能，老缓存里
+   * 一条记录的图标都没有。不把它算进缓存判定的话，用户升级后要等两小时
+   * （META_TTL）缓存过期才看得见头像，会以为这功能根本没做。
+   * 拉不到就是 null，下面跳过补图标，不影响其它游戏。
+   */
+  const genshinIcons = await loadIcons(
+    path.join(path.dirname(metaCachePath), 'genshin-icons.json'),
+    force
+  ).catch(() => null);
+  const genshinIconsAt = genshinIcons ? Number(genshinIcons.updatedAt || 0) : 0;
+
   if (
     !force &&
     cache.path === (dbExists ? dbPath : importsPath) &&
     cache.mtime === (stat ? stat.mtimeMs : importMtime) &&
     cache.importMtime === importMtime &&
+    // 图鉴更新过（新角色上线）就得重算，否则新抽到的角色没有头像
+    cache.iconsAt === genshinIconsAt &&
     cache.data &&
     Date.now() - cache.metaAt < META_TTL
   ) {
@@ -632,6 +628,27 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
       }
       if (!unique.length) continue;
       unique.sort((a, b) => String(a.Time).localeCompare(String(b.Time)));
+      /*
+       * 原神的抽卡记录 ItemId 恒为空串（接口就不给），所以 infoMap 查不到图标，
+       * 界面上头像位置只能空着。这里按名字去观测枢图鉴里对一遍，把图标直接
+       * 补在 row 上 —— summarize 那边用 row.icon 兜底。
+       * 图鉴拉不到就跳过，不能因为头像接口挂了让抽卡页打不开。
+       */
+      if (def.key === 'genshin' && genshinIcons) {
+        const icons = genshinIcons;
+        {
+          for (const row of unique) {
+            if (row.icon) continue;
+            const name = String(row.Name || '').trim();
+            if (!name) continue;
+            const isWeapon = String(row.ItemType || '') === '武器';
+            const icon = isWeapon
+              ? icons.weapon?.[name] || icons.character?.[name] || ''
+              : icons.character?.[name] || icons.weapon?.[name] || '';
+            if (icon) row.icon = icon;
+          }
+        }
+      }
       games.push({
         key: def.key,
         name: def.name,
@@ -655,6 +672,7 @@ async function loadGachaHistory(dbPath, metaCachePath, force = false, importsPat
       mtime: stat ? stat.mtimeMs : importMtime,
       importMtime,
       metaAt: meta.updatedAt,
+      iconsAt: genshinIconsAt,
       data,
     };
     return data;

@@ -132,7 +132,65 @@ async function releaseChannelPacks(scope) {
 
 async function handleAction(action, id, element, event = null) {
   switch (action) {
-    case 'music-accounts':
+    case 'roster-sort':
+      rosterState.sortBy = element.dataset.value || 'level';
+      rosterRender();
+      break;
+
+case 'roster-refresh':
+      if (typeof rosterLoad === 'function') {
+        await rosterLoad(rosterState.game, true);
+      }
+      break;
+
+case 'roster-rarity':
+      rosterState.filterRarity = Number(element.dataset.value) || 0;
+      rosterRender();
+      break;
+
+case 'roster-pick':
+      if (typeof rosterState === 'object') {
+        rosterState.picked = String(element.dataset.value || '');
+        rosterRender();
+      }
+      break;
+
+case 'roster-open':
+      /*
+       * 角色图鉴只对米家三款有用（终末地的森空岛没有角色接口）。
+       * 从工具页进来时带上当前选中的游戏，省得再点一次。
+       */
+      if (typeof openRosterModal === 'function') {
+        openRosterModal(element.dataset.value || '');
+      } else {
+        toast('这个版本没有带上角色图鉴', 'info');
+      }
+      break;
+
+case 'roster-game':
+      if (typeof rosterLoad === 'function') {
+        await rosterLoad(element.dataset.value || 'genshin', false);
+      }
+      break;
+
+case 'roster-element':
+      rosterState.filterElement = element.dataset.value || '';
+      rosterRender();
+      break;
+
+case 'gacha-sync-run':
+      await runGachaSync(element.dataset.value || 'cache');
+      break;
+
+case 'gacha-manual-url':
+      gachaManualUrlModal();
+      break;
+
+case 'gacha-ak-new':
+      if (typeof openGachaAkModal === 'function') openGachaAkModal();
+      break;
+
+case 'music-accounts':
       openMusicAccountsModal(element.dataset.platform || '');
       break;
     case 'song-pop-toggle': {
@@ -832,18 +890,6 @@ async function handleAction(action, id, element, event = null) {
         });
       }
       render({ preserveScroll: true });
-      /*
-       * 开正式进度面板。
-       *
-       * 以前这条只把进度打到启动页按钮的一行字上，用户点完只看到「正在更新…」，
-       * 既没有百分比也没有覆盖量（原话：「你倒是给我加个百分比和覆盖了多少吧」）。
-       * 面板自己订阅进度通道，actions 这边只管把任务跑完。
-       */
-      try {
-        if (typeof openGameUpdateModal === 'function') openGameUpdateModal(game.id);
-      } catch {
-        /* 面板打不开也不能挡住更新本身 */
-      }
       try {
         /*
          * 终末地的「更新游戏」必须走后端那条复合入口（有 Diffs 就用预下载包，没有就走
@@ -1082,6 +1128,15 @@ async function handleAction(action, id, element, event = null) {
       openLinkModal(gameId);
       break;
     }
+    case 'wegame-convert': {
+      // 鸣潮 WeGame 版转换（用户 2026-11-11 拍板的功能）：
+      // 把官方启动器版客户端硬链接进 WeGame 的 downloading\2002137\，
+      // 之后在 WeGame 里点「继续下载」补齐渠道件（TPS 登录件那 <1GB）即可启动。
+      // 这条链路只写 WeGame 自己的目录，绝不碰官方版本体。
+      closeStartServerMenu();
+      openWeGameConvertModal(element.dataset.game);
+      break;
+    }
     case 'back-home':
       navigate('home');
       break;
@@ -1189,6 +1244,16 @@ async function handleAction(action, id, element, event = null) {
       }
       break;
     }
+    case 'open-gacha-token': {
+      if (typeof openGachaTokenModal === 'function') openGachaTokenModal();
+      else toast('这个版本没有带上抽卡账号模块', 'info');
+      break;
+    }
+    case 'open-account-center': {
+      if (typeof openAccountCenter === 'function') openAccountCenter();
+      else navigate('settings');
+      break;
+    }
     case 'gacha-source': {
       const source = element.dataset.value;
       if (source === 'endfield') {
@@ -1209,6 +1274,15 @@ async function handleAction(action, id, element, event = null) {
     case 'import-gacha':
       openGachaImportModal();
       break;
+    case 'gacha-stoken': {
+      // SToken 登录入口已收进左下角「账号中心」浮层：
+      // 不再往抽卡页底部挂那个默认收起的折叠面板（用户明确说它很糟）。
+      // gachaStokenCtx.panel 始终为 null，chrome.js 的 gachaStokenRestore() 会直接 return，
+      // 因此 C 自研的 gachaStoken* 系列虽留在文件里，不会再被挂载出来。
+      if (typeof openAccountCenter === 'function') openAccountCenter();
+      else navigate('settings');
+      break;
+    }
     case 'nte-folder': {
       try {
         const dir = await api.gacha.nteFolder();
@@ -1289,6 +1363,12 @@ async function handleAction(action, id, element, event = null) {
       } catch (error) {
         toast(`图鉴更新失败：${error.message}`, 'error');
       }
+      break;
+    }
+    case 'gacha-expired-dismiss': {
+      // 「知道了」只是用户不想再看到横幅；下次自动同步再失败还会重新挂上
+      state.gachaLinkExpired = null;
+      render({ preserveScroll: true });
       break;
     }
     case 'gacha-game':
@@ -1707,7 +1787,11 @@ async function handleAction(action, id, element, event = null) {
       const choice = await uninstallDialog({
         title: `卸载「${server.name}」`,
         message: plan.exists
-          ? `会把下面这个文件夹整个删掉，只动这一个目录，其它服务器的客户端不受影响。启动器里的「${server.name}」卡片会留着，之后可以重新下载。`
+          ? `会把下面这个文件夹整个删掉，只动这一个目录，其它服务器的客户端不受影响。启动器里的「${server.name}」卡片会留着，之后可以重新下载。${
+              plan.runtimeLinked
+                ? '\n\n注意：这一份是「硬链接生成一份」出来的运行时，里面绝大部分文件是和官服本体共用的同一份数据，删掉它只省得掉真正独占的那几个渠道件，磁盘空间不会按目录体积掉下来，官服本体也不会受影响。'
+                : ''
+            }`
           : `「${server.name}」记录的目录已经不在了，这一步只会清掉启动器里的路径记录。`,
         root: plan.exists ? plan.root : '',
         exists: Boolean(plan.exists),
@@ -2487,6 +2571,9 @@ async function handleAction(action, id, element, event = null) {
         await api.getState().then(onState);
       } catch (error) {
         toast(`明日方舟本体更新失败：${error.message}`, 'error');
+      } finally {
+        // 同终末地：方舟这条也不带 jobId、后端不发 done，面板得自己收。
+        if (typeof setTaskState === 'function') setTaskState(null);
       }
       break;
     }
@@ -2730,6 +2817,13 @@ async function handleAction(action, id, element, event = null) {
         await api.getState().then(onState);
       } catch (error) {
         toast(`终末地本体更新失败：${error.message}`, 'error');
+      } finally {
+        /*
+         * 服务器面板这条路不带 jobId，进度走 endfield:progress，而终末地后端从来不发
+         * phase:'done'（全文件只有 download），光靠事件收不掉启动页那块统一面板。
+         * 这里自己收一次，免得更新完面板一直挂着。
+         */
+        if (typeof setTaskState === 'function') setTaskState(null);
       }
       break;
     }
@@ -3493,17 +3587,6 @@ async function handleAction(action, id, element, event = null) {
       break;
     }
 
-    case 'tools-tab': {
-      const key = element.dataset.value || '';
-      if (!key || key === state.toolsTab) break;
-      state.toolsTab = key;
-      render({ preserveScroll: true });
-      break;
-    }
-    /* 工具页右上角：账号登录弹窗（米游社 + 其它发行方通行证） */
-    case 'tools-accounts':
-      openToolsAccountsModal();
-      break;
     /* 工具页里的「自定义插件」是独立页面，直接跳过去 */
     case 'nav-plugins':
       navigate('plugins');

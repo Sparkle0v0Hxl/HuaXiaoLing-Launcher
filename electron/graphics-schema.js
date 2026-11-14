@@ -75,8 +75,8 @@ const COMMON_RESOLUTIONS = [
 
 const FIELD_SCHEMA = {
   // ── 分辨率 / 窗口 ────────────────────────────────
-  width: { label: '分辨率宽', unit: 'px', type: 'number', min: 640, max: 7680, help: '渲染画面宽度，改完需要重新启动游戏才生效。' },
-  height: { label: '分辨率高', unit: 'px', type: 'number', min: 360, max: 4320, help: '渲染画面高度，和宽度一起决定分辨率。' },
+  width: { label: '分辨率宽', unit: 'px', type: 'number', min: 640, max: 7680, help: '渲染画面宽度，改完需要重新启动游戏才生效；下面的常见分辨率可以直接选。' },
+  height: { label: '分辨率高', unit: 'px', type: 'number', min: 360, max: 4320, help: '渲染画面高度，和宽度一起决定分辨率；下面的常见分辨率可以直接选。' },
   isFullScreen: { label: '全屏', type: 'bool', help: '开启后游戏占满整个屏幕；关闭则以窗口运行。' },
 
   // ── 星穹铁道 GraphicsSettings_Model ─────────────
@@ -156,12 +156,11 @@ const FIELD_SCHEMA = {
   VSync: { label: '垂直同步', type: 'bool', help: '开启后画面撕裂更少，但可能锁死在显示器刷新率。' },
 
   // ── JSON 型设置里的字段名 ───────────────────────
-  // 崩坏3 的 ScreenSettingData 用小写的 height / width / isfullScreen，
-  // 和 Unity 的 Screenmanager 写法（带空格）不同，需要单独收一份。
-  height: { label: '分辨率高', type: 'number', unit: 'px', min: 360, max: 4320, help: '画面高度，下面的常见分辨率可以直接选。' },
-  width: { label: '分辨率宽', type: 'number', unit: 'px', min: 640, max: 7680, help: '画面宽度，下面的常见分辨率可以直接选。' },
+  // 崩坏3 的 ScreenSettingData 用小写的 isfullScreen，
+  // 和 Unity 的 Screenmanager 写法（isFullScreen）不同，需要单独收一份。
+  // 注意 height / width 是大小写无关的同一个键，上面已经定义过，这里不能重复写
+  // （重复写会让后一份静默覆盖前一份，help 文案跟着丢失）。
   isfullScreen: { label: '全屏', type: 'bool', help: 'true 为全屏，false 为窗口。' },
-  isFullScreen: { label: '全屏', type: 'bool', help: 'true 为全屏，false 为窗口。' },
 };
 
 /** 星铁数字档位的中文名：数值越大画质越高。 */

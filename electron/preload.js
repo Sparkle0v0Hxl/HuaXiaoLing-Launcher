@@ -44,6 +44,11 @@ contextBridge.exposeInMainWorld('launcher', {
     switchAccount: (input) => ipcRenderer.invoke('hoyolab:switch', input),
     logout: (input) => ipcRenderer.invoke('hoyolab:logout', input),
     record: (input) => ipcRenderer.invoke('hoyolab:record', input),
+    // 角色图鉴（等级 / 命座 / 武器 / 圣遗物）
+    roster: (input) => ipcRenderer.invoke('roster:load', input),
+    rosterDetail: (input) => ipcRenderer.invoke('roster:detail', input),
+    // 社区昵称 + 头像（公开资料，按 uid 查）
+    profile: (input) => ipcRenderer.invoke('hoyolab:profile', input),
   },
 
   // 通用通行证（鹰角 / 完美世界 / 库街区）
@@ -139,6 +144,8 @@ contextBridge.exposeInMainWorld('launcher', {
   onUpdateAvailable: (callback) => subscribe('update:available', callback),
   onUpdateProgress: (callback) => subscribe('update:progress', callback),
   onGachaUpdated: (callback) => subscribe('gacha:updated', callback),
+  // 自动同步发现抽卡链接过期（前端在抽卡记录页顶部挂提醒，用户回游戏刷新后自动撤掉）
+  onGachaLinkExpired: (callback) => subscribe('gacha:link-expired', callback),
   onGameExited: (callback) => subscribe('game:exited', callback),
   // 提权重启之后接着开刚才点的那款游戏（主进程在页面加载完后发）
   onGameAutolaunch: (callback) => subscribe('game:autolaunch', callback),
@@ -252,6 +259,9 @@ contextBridge.exposeInMainWorld('launcher', {
     // 卸载这个渠道的客户端：先问能不能删（共用目录 / 盘符根目录会被拒），再真删
     uninstallPlan: (input) => ipcRenderer.invoke('servers:uninstall-plan', input),
     uninstall: (input) => ipcRenderer.invoke('servers:uninstall', input),
+    // WeGame 版鸣潮转换：探针（找源/目标目录）与执行（硬链接整树）
+    weGameProbe: () => ipcRenderer.invoke('wegame:wuwa-probe'),
+    weGameConvert: (input) => ipcRenderer.invoke('wegame:wuwa-convert', input),
   },
 
   pick: {
@@ -357,7 +367,13 @@ contextBridge.exposeInMainWorld('launcher', {
     load: (force = false) => ipcRenderer.invoke('gacha:load', force),
     pickDatabase: () => ipcRenderer.invoke('gacha:pick-db'),
     import: (game = '') => ipcRenderer.invoke('gacha:import', { game }),
-    sync: (gameId, auth) => ipcRenderer.invoke('gacha:sync', { gameId, auth }),
+    // options: { accountId, uid, allowCache, manualUrl, full }
+    //   accountId   走 SToken 账号（米哈游三款）
+    //   allowCache  SToken 失败时退回读游戏缓存
+    //   manualUrl   用户自己粘的抽卡链接，最高优先级
+    //   full        全量重拉（默认只增量）
+    sync: (gameId, auth, options = {}) =>
+      ipcRenderer.invoke('gacha:sync', { gameId, auth, ...options }),
     nteFolder: () => ipcRenderer.invoke('gacha:nte-folder'),
     nteRefresh: () => ipcRenderer.invoke('gacha:nte-refresh'),
     nteCaptureInfo: () => ipcRenderer.invoke('gacha:nte-capture-info'),
@@ -376,6 +392,39 @@ contextBridge.exposeInMainWorld('launcher', {
     backupList: () => ipcRenderer.invoke('gacha:backup-list'),
     backupRestore: (name = '') => ipcRenderer.invoke('gacha:backup-restore', { name }),
     backupNow: () => ipcRenderer.invoke('gacha:backup-now'),
+    // SToken 账号管理（2026-11-13）
+    stokenList: () => ipcRenderer.invoke('gacha:stoken-list'),
+    stokenBind: (input) => ipcRenderer.invoke('gacha:stoken-bind', input),
+    stokenBindBundle: (input) => ipcRenderer.invoke('gacha:stoken-bind-bundle', input),
+    stokenLoginState: () => ipcRenderer.invoke('gacha:stoken-login-state'),
+    stokenBindLogin: (input) => ipcRenderer.invoke('gacha:stoken-bind-login', input),
+    stokenScanStart: (input) => ipcRenderer.invoke('gacha:stoken-scan-start', input),
+    stokenScanStop: () => ipcRenderer.invoke('gacha:stoken-scan-stop'),
+    stokenRemove: (input) => ipcRenderer.invoke('gacha:stoken-remove', input),
+    /*
+     * 明日方舟：鹰角账号 token → 寻访记录。
+     * 参数形状与上方 stoken* 保持一致的「整体对象」风格（上游约定）。
+     */
+    akList: () => ipcRenderer.invoke('gacha:ak-list'),
+    akBind: (token) => ipcRenderer.invoke('gacha:ak-bind', { token }),
+    akLogin: () => ipcRenderer.invoke('gacha:ak-login'),
+    akRemove: (id) => ipcRenderer.invoke('gacha:ak-remove', { id }),
+    akActive: (id) => ipcRenderer.invoke('gacha:ak-active', { id }),
+    stokenActive: (input) => ipcRenderer.invoke('gacha:stoken-active', input),
+    stokenRefresh: (input) => ipcRenderer.invoke('gacha:stoken-refresh', input),
+    stokenSync: (input) => ipcRenderer.invoke('gacha:stoken-sync', input),
+    stokenReveal: (input) => ipcRenderer.invoke('gacha:stoken-reveal', input),
+    /* 迁移期别名：早期代码调用 onStokenScan，这里保留一份等价实现。 */
+    onStokenScan: (handler) => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('gacha:stoken-scan', listener);
+      return () => ipcRenderer.removeListener('gacha:stoken-scan', listener);
+    },
+    onGachaStokenScan: (cb) => {
+      const l = (_e, data) => cb(data);
+      ipcRenderer.on('gacha:stoken-scan', l);
+      return () => ipcRenderer.removeListener('gacha:stoken-scan', l);
+    },
   },
 
   downloads: {

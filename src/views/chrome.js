@@ -334,20 +334,25 @@ function updateChrome() {
     const label = button.querySelector('span');
     if (label) label.textContent = settings.sidebarCollapsed ? '展开侧栏' : '收起侧栏';
   });
-  if (dom.profileName) dom.profileName.textContent = settings.profileName || '大小姐';
+  /* 侧栏这块跟着当前通行证账号走，没有登录才回落到设置里的名字和头像 */
+  const displayName = sidebarDisplayName(settings);
+  if (dom.profileName) dom.profileName.textContent = displayName;
   if (dom.profileAvatar) {
-    dom.profileAvatar.innerHTML = avatarContent(settings);
+    dom.profileAvatar.innerHTML = sidebarAvatarHtml(settings);
     const image = dom.profileAvatar.querySelector('img');
     if (image) {
       image.addEventListener(
         'error',
         () => {
-          dom.profileAvatar.textContent = initial(settings.profileName || '大小姐');
+          /* 头像挂了退回首字，别留一个破图标 */
+          dom.profileAvatar.textContent = initial(displayName);
         },
         { once: true }
       );
     }
   }
+  /* 先按缓存渲染，再异步纠正成当前通行证的昵称 / 头像 */
+  if (typeof refreshSidebarAccount === 'function') refreshSidebarAccount();
   if (dom.badgeLibrary) dom.badgeLibrary.textContent = String(state.games.length);
   const active = activeDownloads().length;
   if (dom.badgeDownloads) {
@@ -993,6 +998,204 @@ function setViewScroll(top) {
   appliedViewScroll = top;
 }
 
+/*
+ * 侧栏左下角那个头像，跟着「当前选中的通行证账号」走。
+ *
+ * 以前它只认设置里手填的 profileName / avatar（默认「大小姐」）。用户明明登了
+ * 米游社，那个位置还写着「大小姐」，看着像没登录。这里把当前激活账号的社区
+ * 昵称和头像拉下来盖掉；没登录、或者拉不到（国际服在国内 IP 被 region_block
+ * 挡掉）就退回设置里的值，不会变成空白。
+ *
+ * 缓存一份到 localStorage：下次开启动器先按上次的头像渲染，网络回来再纠正，
+ * 避免冷启动时先闪一下「大小姐」。
+ */
+const sidebarAccount = { provider: "", accountId: "", nickname: "", avatarUrl: "", loading: false };
+
+function sidebarAccountLoad() {
+  try {
+    const raw = localStorage.getItem("vela:sidebar-account");
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    sidebarAccount.provider = String(parsed.provider || "");
+    sidebarAccount.accountId = String(parsed.accountId || "");
+    sidebarAccount.nickname = String(parsed.nickname || "");
+    sidebarAccount.avatarUrl = String(parsed.avatarUrl || "");
+  } catch {
+    /* 存坏了就当没有，下一次刷新会覆盖 */
+  }
+}
+
+function sidebarAccountSave() {
+  try {
+    localStorage.setItem(
+      "vela:sidebar-account",
+      JSON.stringify({
+        provider: sidebarAccount.provider,
+        accountId: sidebarAccount.accountId,
+        nickname: sidebarAccount.nickname,
+        avatarUrl: sidebarAccount.avatarUrl,
+      })
+    );
+  } catch {
+    /* 隐私模式写不进去也不影响显示 */
+  }
+}
+
+/*
+ * 冷启动时先把上次缓存的账号昵称 / 头像读回来。
+ *
+ * 必须在顶层调用（不能塞进 updateChrome）：第一次 render 时就要用上，
+ * 否则会先闪一下设置里的「大小姐」再跳成真实昵称。
+ */
+sidebarAccountLoad();
+
+function sidebarDisplayName(settings) {
+  if (sidebarAccount.nickname) return sidebarAccount.nickname;
+  return (settings && settings.profileName) || "大小姐";
+}
+
+function sidebarAvatarHtml(settings) {
+  if (sidebarAccount.avatarUrl) {
+    return '<img src="' + esc(sidebarAccount.avatarUrl) + '" alt="" referrerpolicy="no-referrer" />';
+  }
+  if (sidebarAccount.nickname) return esc(initial(sidebarAccount.nickname));
+  return avatarContent(settings);
+}
+
+async function sidebarAkAccount() {
+  if (!api || !api.gacha || !api.gacha.akList) return null;
+  const store = await api.gacha.akList().catch(() => null);
+  const list = Array.isArray(store && store.accounts) ? store.accounts : [];
+  if (!list.length) return null;
+  const account =
+    list.find((item) => String(item.id) === String(store.activeId)) || list[0] || null;
+  if (!account) return null;
+  return { provider: "hypergryph", account };
+}
+
+/*
+ * 完美世界通行证账号。
+ *
+ * passport:status 只告诉我们「登录过没有 / 什么时候登的」，
+ * 没有昵称也没有头像（官方没给这些接口），所以昵称固定成「完美通行证」。
+ */
+async function sidebarPerfectAccount() {
+  if (!api || !api.passport || !api.passport.status) return null;
+  const store = await api.passport.status({ provider: 'perfectworld' }).catch(() => null);
+  if (!store || store.loggedIn !== true) return null;
+  return { provider: 'perfectworld', account: { id: 'perfectworld', nickname: '完美通行证', savedAt: store.savedAt || 0 } };
+}
+
+async function refreshSidebarAccount(force, prefer) {
+  if (!api) return sidebarAccount;
+  if (sidebarAccount.loading) return sidebarAccount;
+  sidebarAccount.loading = true;
+  try {
+    let hit = null;
+    const providers = ["miyoushe", "hoyolab"];
+    if (api.hoyolab && api.hoyolab.status) {
+      /*
+       * prefer 是账号中心当前打开的那一栏。
+       * 用户在鹰角那栏点「切换 / 登录」时，侧栏得跟着变成鹰角账号 ——
+       * 所以先把 prefer 排到最前面试一次，命中就用它，不再看别的。
+       */
+      const order = prefer === "hoyolab" ? ["hoyolab", "miyoushe"] : providers;
+      for (const providerId of order) {
+        if (hit) break;
+        const status = await api.hoyolab.status({ provider: providerId }).catch(() => null);
+        if (!status || status.loggedIn !== true) continue;
+        const list = Array.isArray(status.accounts) ? status.accounts : [];
+        const account =
+          list.find((item) => String(item.id) === String(status.activeId)) || list[0] || null;
+        if (!account) continue;
+        hit = { provider: providerId, account };
+        if (prefer === providerId) break;
+      }
+    }
+    /*
+     * 用户正停在完美那栏时，完美最优先 —— 哪怕米游社也登着，
+     * 因为在那一栏里点登录 / 退出，侧栏就该跟着变。
+     */
+    if (prefer === "perfectworld") {
+      const perfect = await sidebarPerfectAccount();
+      if (perfect) hit = perfect;
+    }
+    /* 米游社、HoYoLAB 都没登录（或用户正停在鹰角那栏）时，才轮到鹰角 */
+    if (prefer === "hypergryph" || !hit) {
+      const ak = await sidebarAkAccount();
+      if (ak) hit = ak;
+    }
+    /* 上面都没命中时最后试完美：它是最后才接进来的一家 */
+    if (!hit) {
+      const perfect = await sidebarPerfectAccount();
+      if (perfect) hit = perfect;
+    }
+    if (!hit) {
+      const had = Boolean(sidebarAccount.provider || sidebarAccount.nickname);
+      sidebarAccount.provider = "";
+      sidebarAccount.accountId = "";
+      sidebarAccount.nickname = "";
+      sidebarAccount.avatarUrl = "";
+      sidebarAccountSave();
+      if (had) updateChrome();
+      return sidebarAccount;
+    }
+    const accountId = String(hit.account.id || "");
+    const changed =
+      sidebarAccount.provider !== hit.provider || sidebarAccount.accountId !== accountId;
+    if (hit.provider === "perfectworld") {
+      /*
+       * 完美没有头像接口，昵称也只有「完美通行证」这一个固定值，
+       * 所以清掉 avatarUrl —— 别把上一家（米游社 / 鹰角）的痕迹留在这里。
+       */
+      sidebarAccount.provider = hit.provider;
+      sidebarAccount.accountId = accountId;
+      sidebarAccount.nickname = String(hit.account.nickname || "完美通行证");
+      sidebarAccount.avatarUrl = "";
+      sidebarAccountSave();
+      if (changed) updateChrome();
+      return sidebarAccount;
+    }
+    if (hit.provider === "hypergryph") {
+      /*
+       * 鹰角没有头像接口，昵称也只存在本地账号库（登录时从 binding_list 拿的），
+       * 所以这里不再发请求，直接用本地那份。avatarUrl 清空 —— 别把上一家
+       * 米游社的头像留在方舟账号名下。
+       */
+      sidebarAccount.provider = hit.provider;
+      sidebarAccount.accountId = accountId;
+      sidebarAccount.nickname = String(hit.account.nickname || hit.account.uid || "");
+      sidebarAccount.avatarUrl = "";
+      sidebarAccountSave();
+      if (changed) updateChrome();
+      return sidebarAccount;
+    }
+    /* 账号自带的 label 已经是「角色昵称 > UID > 账号尾号」，先当兜底用 */
+    let nickname = String(hit.account.label || "");
+    let avatarUrl = "";
+    if (api.hoyolab.profile) {
+      const profile = await api.hoyolab
+        .profile({ provider: hit.provider, uid: accountId, force: force === true })
+        .catch(() => null);
+      if (profile && profile.ok !== false) {
+        if (profile.nickname) nickname = String(profile.nickname);
+        if (profile.avatarUrl) avatarUrl = String(profile.avatarUrl);
+      }
+    }
+    sidebarAccount.provider = hit.provider;
+    sidebarAccount.accountId = accountId;
+    sidebarAccount.nickname = nickname;
+    /* 资料接口偶发失败时别把上次拿到的头像清掉，否则头像会凭空消失 */
+    sidebarAccount.avatarUrl = avatarUrl || (changed ? "" : sidebarAccount.avatarUrl);
+    sidebarAccountSave();
+    updateChrome();
+    return sidebarAccount;
+  } finally {
+    sidebarAccount.loading = false;
+  }
+}
+
 function render(options = {}) {
   if (!state.games.length && !state.app.version) return;
   document.body.classList.toggle('start-mode', state.route === 'start');
@@ -1125,6 +1328,9 @@ function render(options = {}) {
   const nextLyricBox = dom.view.querySelector('#song-lyrics');
   if (nextLyricBox && lyricScroll) nextLyricBox.scrollTop = lyricScroll;
   bindView();
+  // 抽卡页：SToken 面板挂在 .page 底部，整页 innerHTML 重绘会把它抹掉；
+  // 之前打开过就重建 + 恢复展开状态（gacha.js，跨文件靠全局解析）
+  if (state.route === 'gacha' && typeof gachaStokenRestore === 'function') gachaStokenRestore();
   restoreStartVideo(videoMemo);
   bindStartArtVideo();
   setupStartDrawerSync();

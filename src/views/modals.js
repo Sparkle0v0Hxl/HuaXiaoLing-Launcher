@@ -235,6 +235,7 @@ const RENDER_API_SUPPORT = {
   zzz: { label: '绝区零', modes: ['default', 'dx11', 'dx12'] },
   endfield: { label: '终末地', modes: ['default', 'dx11', 'dx12'] },
   neverness: { label: '异环', modes: ['default', 'dx11', 'dx12'] },
+  wutheringwaves: { label: '鸣潮', modes: ['default', 'dx11', 'dx12'] },
 };
 
 const RENDER_API_LABELS = {
@@ -655,6 +656,8 @@ const DOWNLOAD_GAME_ENGINES = {
   bh3: 'sophon',
   endfield: 'endfield',
   arknights: 'endfield',
+  // 鸣潮：三渠道全走库洛官方 index.json 清单引擎（与主进程 kuro-packs.js 同源）
+  wutheringwaves: 'kuro',
 };
 
 /** 暂不支持自动下载的游戏 → 官网入口（弹窗里如实说明后跳转）。 */
@@ -668,6 +671,7 @@ const DOWNLOAD_UNSUPPORTED_SITES = {
  * 无法唯一定位）；明日方舟国服走鹰角清单，国际服 EN / JP / KR 走 Yostar
  * 自己那套 CRC64 清单（三区协议已实网跑通），台服协议未验证所以仍不列出。
  * 渠道行本身还在，只是下载弹窗里不列出，避免用户选了才在 estimate 阶段报错。
+ * 鸣潮三渠道（官服/B服/国际服）全部走库洛官方 index.json，无白名单限制。
  */
 const DOWNLOAD_CHANNELS_OK = {
   bh3: ['official'],
@@ -3333,6 +3337,196 @@ function openLinkModal(gameId) {
   });
 
   paintStep();
+}
+
+/*
+ * WeGame 版鸣潮转换（2026-11-11 用户拍板，按钮位置：服务器管理下面）。
+ *
+ * 原理（B站评论区实测 + 官B服 99.24% 相似佐证）：WeGame 版与官方启动器版的
+ * Client/ 主体是同一份文件。把官方版目录整树硬链接进 WeGame 的
+ * `WeGameApps\downloading\2002137\`，WeGame 能识别已就位的文件，
+ * 用户再在 WeGame 里点「继续下载」补 <1GB 渠道件即可启动。
+ * 全程只写 WeGame 自己的目录，官方版本体一个字节不动。
+ */
+function openWeGameConvertModal(gameId) {
+  const game = state.games.find((item) => item.id === gameId);
+  if (!game || game.builtinKey !== 'wutheringwaves') return;
+  const html = `
+    <div class="modal-backdrop" data-backdrop>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div>
+            <h2>转换为 WeGame 版</h2>
+            <p>${esc(game.name)} · 把已装好的官方版硬链接进 WeGame，之后在 WeGame 里补齐渠道件即可启动</p>
+          </div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <div id="wegame-probe" class="wegame-probe">
+            <p class="sw-note">${icon('alert', 'xs')}<span>正在检查官方版客户端与 WeGame 目录…</span></p>
+          </div>
+          <div class="link-progress" id="wegame-progress" style="display:none">
+            <div class="link-progress-head">
+              <strong id="wegame-phase">准备中…</strong>
+              <span id="wegame-count"></span>
+            </div>
+            <div class="progress-bar"><span id="wegame-bar" style="width:0%"></span></div>
+            <div class="link-progress-meta">
+              <span id="wegame-linked"></span>
+              <span id="wegame-current"></span>
+            </div>
+          </div>
+          <div class="field-error" id="wegame-error"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" data-close>关闭</button>
+          <button class="btn btn-ghost" id="wegame-cancel" style="display:none">停止</button>
+          <button class="btn btn-primary" id="wegame-start" disabled>开始转换</button>
+        </div>
+      </div>
+    </div>`;
+  let probe = null;
+  let running = false;
+  let unsubProgress = null;
+  let currentJobId = null;
+  openModal(html, {
+    onClose: () => {
+      if (unsubProgress) unsubProgress();
+      if (running && currentJobId) api.servers.cancelLink(currentJobId).catch(() => {});
+    },
+  });
+  const probeBox = document.querySelector('#wegame-probe');
+  const progress = document.querySelector('#wegame-progress');
+  const phase = document.querySelector('#wegame-phase');
+  const count = document.querySelector('#wegame-count');
+  const bar = document.querySelector('#wegame-bar');
+  const linked = document.querySelector('#wegame-linked');
+  const current = document.querySelector('#wegame-current');
+  const error = document.querySelector('#wegame-error');
+  const startButton = document.querySelector('#wegame-start');
+  const cancelButton = document.querySelector('#wegame-cancel');
+
+  function fmt(value) {
+    return fmtBytes(Number(value) || 0);
+  }
+
+  (async () => {
+    try {
+      probe = await api.servers.weGameProbe();
+    } catch (err) {
+      probeBox.innerHTML = `<p class="field-error">${esc(err.message || '检查失败')}</p>`;
+      return;
+    }
+    if (!probe.sourceReady) {
+      probeBox.innerHTML = `
+        <p class="field-error">先在启动器里把官方启动器版鸣潮配好（下载游戏或指定目录），再来转换。</p>`;
+      return;
+    }
+    if (!probe.wegameFound) {
+      probeBox.innerHTML = `
+        <p class="field-error">没有找到 WeGame 的下载目录（WeGameApps\\downloading）。先确认 WeGame 已安装。</p>`;
+      return;
+    }
+    if (!probe.targetExists) {
+      probeBox.innerHTML = `
+        <details class="sw-note-more" open>
+          <summary>第一次用？跟着这三步走（点开看详细说明）</summary>
+          <ol class="wegame-tutorial">
+            <li><b>在 WeGame 里建下载任务</b>：打开 WeGame → 搜「鸣潮」进商店页 → 选「高清」→ 点一次「下载」，它会先创建下载目录（这一步不用等它下完）。</li>
+            <li><b>暂停下载并完全退出 WeGame</b>：目录建出来后（就是下面显示的路径），把 WeGame 的下载暂停掉、整个退出（任务栏托盘里也退掉）——WeGame 开着时改它的目录可能被它拦。</li>
+            <li><b>回到这里点「开始转换」</b>：启动器会把官方版的全部文件用硬链接放进 WeGame 的目录（同一块盘不占额外空间，几秒到几分钟），然后再打开 WeGame 点「继续下载」。</li>
+          </ol>
+          <p class="wegame-tutorial-note">⚠️ WeGame 之后显示的下载进度<b>不是在重下整个游戏</b>：它先逐个校验我们已经硬链过去的文件（秒过），然后只下载它自己的渠道登录件和<b>你的官服没装过的画质包</b>。比如官服只装了「流畅」，选「高清」它就会把高清包（约 40GB）补上——那部分是新增内容，不是重复下载。不想下高清就选「流畅」，补完的量最小。</p>
+        </details>
+        <p class="sw-note">${icon('alert', 'xs')}<span>WeGame 里还没有鸣潮的下载目录。确认上面第 1 步做完后，点下面的「重新检查」。</span></p>
+        <p class="hint">WeGame 目录（应在这里出现）：<code>${esc(probe.targetRoot || '')}</code></p>`;
+      const recheck = document.createElement('button');
+      recheck.className = 'btn btn-ghost btn-sm';
+      recheck.textContent = '重新检查';
+      recheck.style.marginTop = '8px';
+      recheck.addEventListener('click', async () => {
+        recheck.disabled = true;
+        probeBox.innerHTML = `<p class="sw-note">${icon('alert', 'xs')}<span>正在重新检查…</span></p>`;
+        try {
+          probe = await api.servers.weGameProbe();
+        } catch (err) {
+          probeBox.innerHTML = `<p class="field-error">${esc(err.message || '检查失败')}</p>`;
+          return;
+        }
+        // 递归重画：直接再走一遍本弹窗的初始化逻辑
+        closeModal();
+        openWeGameConvertModal(gameId);
+      });
+      probeBox.appendChild(recheck);
+      return;
+    }
+    probeBox.innerHTML = `
+      <p><strong>官方版源目录</strong><br><code>${esc(probe.sourceRoot)}</code></p>
+      <p><strong>WeGame 目标目录</strong><br><code>${esc(probe.targetRoot)}</code></p>
+      <p class="sw-note">${icon('alert', 'xs')}<span>转换前先完全退出 WeGame 和游戏。文件会在同一块盘上建硬链接，不占额外空间、不复制内容；官方版一个字节都不会动。转换完回到 WeGame 点「继续下载」，它会自己补齐剩下的渠道件。<b>补完确认 WeGame 能正常进游戏后，官方启动器版和 WeGame 版想留哪个都可以，另一个可以卸载掉</b>——两边文件互为硬链接，卸载时只删自己那份的链接，不会动到另一边。</span></p>`;
+    startButton.disabled = false;
+  })();
+
+  unsubProgress = api.onLinkProgress((payload) => {
+    if (!payload || payload.gameId !== gameId || !running) return;
+    progress.style.display = 'block';
+    const percent = payload.total > 0 ? Math.min(100, (payload.processed / payload.total) * 100) : 0;
+    bar.style.width = `${payload.phase === 'done' ? 100 : percent}%`;
+    count.textContent = payload.total > 0 ? `${payload.processed} / ${payload.total}` : '';
+    linked.textContent = `已硬链接 ${payload.linked || 0} 个文件`;
+    current.textContent = payload.current || '';
+    if (payload.phase === 'scan') phase.textContent = '正在扫描官方版客户端…';
+    else if (payload.phase === 'link') phase.textContent = '正在硬链接进 WeGame 目录…';
+    else if (payload.phase === 'done') phase.textContent = '转换完成';
+    else phase.textContent = '处理中…';
+  });
+
+  cancelButton.addEventListener('click', async () => {
+    if (currentJobId) await api.servers.cancelLink(currentJobId).catch(() => {});
+  });
+
+  startButton.addEventListener('click', async () => {
+    if (!probe || running) return;
+    running = true;
+    error.textContent = '';
+    startButton.disabled = true;
+    cancelButton.style.display = '';
+    progress.style.display = 'block';
+    phase.textContent = '准备中…';
+    try {
+      const result = await api.servers.weGameConvert({
+        sourceRoot: probe.sourceRoot,
+        targetRoot: probe.targetRoot,
+      });
+      currentJobId = result.jobId || null;
+    } catch (err) {
+      running = false;
+      cancelButton.style.display = 'none';
+      progress.style.display = 'none';
+      error.textContent = err.message || '转换失败';
+      startButton.disabled = false;
+    }
+  });
+
+  api.onLinkDone((payload) => {
+    if (!payload || payload.gameId !== gameId || !running) return;
+    running = false;
+    cancelButton.style.display = 'none';
+    currentJobId = null;
+    if (payload.ok) {
+      phase.textContent = '转换完成';
+      bar.style.width = '100%';
+      linked.textContent = `已硬链接 ${payload.linked || 0} 个文件 · 转换完成`;
+      current.textContent = '回到 WeGame 点「继续下载」，补齐渠道件后就能从 WeGame 启动了。确认 WeGame 能正常进游戏后，官方启动器版可以卸载（两边是硬链接，互不影响）。';
+      startButton.textContent = '完成';
+      startButton.disabled = false;
+      startButton.onclick = () => closeModal();
+    } else {
+      error.textContent = payload.error || '转换失败';
+      progress.style.display = 'none';
+      startButton.disabled = false;
+    }
+  });
 }
 
 function openNewsModal(id) {

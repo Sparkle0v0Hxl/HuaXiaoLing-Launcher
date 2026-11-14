@@ -207,10 +207,13 @@ function hasLoginCookie(items) {
  * DS2 签名（Starward 的 CreateSecret2）。
  * 查询参数要按字典序排好再拼进 q，否则服务端算出来的不一样。
  */
-function createDs2(url, salt2) {
+function createDs2(url, salt2, bodyText = '') {
   const t = Math.floor(Date.now() / 1000);
   const r = String(Math.floor(100000 + Math.random() * 100000));
-  const b = '';
+  /*
+   * POST 接口要把请求体签进 DS2 的 b 段；GET 传空串，与旧行为完全一致。
+   */
+  const b = String(bodyText || '');
   const parts = String(url || '').split('?');
   const q = parts.length === 2 ? parts[1].split('&').sort().join('&') : '';
   const raw = `salt=${salt2}&t=${t}&r=${r}&b=${b}&q=${q}`;
@@ -591,10 +594,19 @@ async function fetchRecord(path, cookieStr, providerId = 'miyoushe', options = {
   if (options.origin) {
     headers.Origin = options.origin;
   }
+  /*
+   * POST 的 DS2 要把请求体一起签进去（salt&t&r&b=body），
+   * 否则服务端签名校验不过，回 -100 / 5003 那种含糊错误。
+   */
+  const method = String(options.method || 'GET').toUpperCase();
+  const bodyText = method === 'POST' && options.body !== undefined ? JSON.stringify(options.body) : '';
   if (options.ds !== false) {
-    headers.DS = createDs2(url, provider.api.salt2);
+    headers.DS = createDs2(url, provider.api.salt2, bodyText);
   }
-  const response = await fetch(url, { headers });
+  if (method === 'POST') {
+    headers['Content-Type'] = 'application/json';
+  }
+  const response = await fetch(url, method === 'POST' ? { method: 'POST', headers, body: bodyText } : { headers });
   const json = await readJson(response);
   if (json.retcode !== 0) {
     const error = new Error(json.message || `战绩接口返回 ${json.retcode}`);

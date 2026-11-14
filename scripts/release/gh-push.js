@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const WS = 'H:\\花筱灵启动器-源码';
+const WS = process.env.HXL_WS || 'E:\\新建文件夹\\新建文件夹 (2)\\merged';
 const REPO = 'Sparkle0v0Hxl/HuaXiaoLing-Launcher';
 const BRANCH = 'main';
 const TOKEN = process.env.GH_TOKEN;

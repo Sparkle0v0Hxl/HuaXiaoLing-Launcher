@@ -619,6 +619,13 @@ const LOGIN_PROVIDERS = {
     openDialogScript: '',
     methods: ['qrcode', 'sms', 'password'],
     api: { roleList: 'https://api.kurobbs.com/user/role/list' },
+    /*
+     * 注意：这份 gameBiz 目前**没有任何代码读它** —— 战绩查询那条链
+     * （main.js 的 game-record 分支）只认 LOGIN_PROVIDERS.miyoushe / hoyolab
+     * 的 api，库街区没有对外的战绩端点，鸣潮/战双的战绩功能也就没接。
+     * 这里的键是库街区的 gameBiz 口径（mc / pgr），跟 builtinKey
+     * （wutheringwaves / punishi）不是一个东西，别拿 builtinKey 来对。
+     */
     gameBiz: { wuthering: 'mc', punishi: 'pgr' },
   },
 };

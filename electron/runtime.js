@@ -359,9 +359,15 @@ async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, s
     try {
       await fsp.rename(destination, parked);
       parkedOk = true;
-    } catch {
-      // 目标不存在（第一次铺）或改名也失败：退回删除，删不掉就让 copyFile 报真错
-      await fsp.rm(destination, { force: true }).catch(() => {});
+    } catch (error) {
+      // 目标不存在（第一次铺）：没有旧文件、不存在硬链接可写穿，直接往下写新文件。
+      if (error?.code !== 'ENOENT') {
+        // 改名挪不开、目标又确实存在（被占用 / ACL 权限不足）：**绝不退回原地覆盖写**。
+        // 目标多半是硬链接，copyFile 原地截断写会顺着 inode 写穿到基础客户端
+        // （官服本体被渠道文件污染，硬链接架构下这是不可逆的）。这里直接拒绝本次操作，
+        // 让用户关掉占用该文件的程序或提权重试。
+        throw new Error(`无法替换渠道文件 ${file.rel}：目标被其它进程占用或权限不足（${String(error?.message || error)}）。为避免沿硬链接写穿基础客户端，已拒绝原地覆盖写，请关闭占用该文件的程序后重试。`);
+      }
     }
     try {
       await fsp.copyFile(file.full, destination);
@@ -378,9 +384,16 @@ async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, s
       }
       throw new Error(`无法写入渠道文件 ${file.rel}：${error.message}`);
     }
-    // 挪开的旧文件尽量清掉；清不掉（ACL 挡着）也只是几十字节的垃圾，
-    // 绝不能因为清理失败就把整次切服中断
-    if (parkedOk) await fsp.rm(parked, { force: true }).catch(() => {});
+    // 挪开的旧文件尽量清掉。清不掉（ACL 挡着）不能静默吞掉：残留的是**整个旧渠道文件**
+    // （可能是大 .dll/.chk，不是几十字节），切几次服会累积好几份；这里记日志留痕，
+    // 方便事后清扫，但不因此中断整次切服。
+    if (parkedOk) {
+      try {
+        await fsp.rm(parked, { force: true });
+      } catch (error) {
+        console.warn(`[runtime] 旧渠道文件清理失败，残留 ${parked}：${String(error?.message || error)}`);
+      }
+    }
     processed += 1;
     bytesDone += Number(file.size) || 0;
     const now = Date.now();
