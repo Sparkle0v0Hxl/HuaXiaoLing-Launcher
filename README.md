@@ -1,7 +1,7 @@
-﻿# 花筱灵启动器
+# 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.10.2-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.11.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.10.2**（正式版）
+**当前版本：v2.11.0**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -125,7 +125,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.10.2-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.11.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -199,7 +199,23 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.10.2 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.11.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.11.0</b></summary>
+
+- 账号中心：登录入口统一收进左下角头像，点开是浮层，五个标签页（米游社 / HoYoLAB / 鹰角账号 / 完美通行证 / 抽卡账号）。每个标签页能看到当前登录的是谁、有哪些游戏角色，可切换或退出；米游社和 HoYoLAB 显示社区昵称与头像。抽卡页底部那个默认收起的折叠面板撤掉，页头「米游社账号」按钮改为直接打开账号中心。鹰角与完美世界官方未开放角色列表接口，登录后只存登录态。
+- 抽卡头像与扫码登录：原神抽卡记录带角色和武器图标（图鉴取自米游社观测枢，角色 138 条 / 武器 253 条，日更 + 落盘缓存 + 失败回退）。登录改为扫码，不再需要手贴 Cookie。同步按 uid 认人，重复点击不再翻倍请求；限流单独识别并给冷却提示。
+- 鸣潮预下载与更新重做：官方 3.0.1.0 起改用分包（bundle）协议，旧清单接口里没有预下载字段。按新协议重写后能正确显示下载量与所需空间；预下载落在 `_kuro_predownload/<目标版本>/` 暂存区，不触碰游戏本体，支持断点续传与取消；正式更新先核对线上版本与逐文件 md5，命中则从暂存区搬入，避免重下十几个 G。同时修掉中断信号传普通对象导致「清单读到、下载 0 个文件、两分钟后失败」的问题。鸣潮抽卡记录一并接入。
+- 终末地切服修复：切国际服下载中文语音包后再切回国服，官服会持续报「检查资源完整性时发现异常」并反复下载。根因是各渠道运行时为省磁盘硬链接到基础客户端，`Endfield_Data\Persistent` 下的资源索引（`index_main.json` / `pref_main.json` / 各 VFS 的 `.blc`）被两个渠道共享，国际服改写后官服读到的记录与实际文件数不符。改为可写文件真拷贝，判据从「只看扩展名」扩成三重（目录段 / 文件名片段 / 扩展名）加两份实测清单；并修掉多段路径前缀匹配不上的问题（此前 `Endfield_Data/Persistent` 这条规则实际未生效）。整树重建时先搬 `Persistent`，不丢已下语音包。
+- 主进程重构：`main.js` 里 11,302 行的 `installIpc()` 按业务域拆成 26 个 IPC 模块（音乐 / 服务器 / 直播 / 游戏 / 抽卡 / 森空岛 / 米游社 / 终末地 / 设置 / 窗口 / 预下载 / 通行证 / 截图 / 方舟 / 鸣潮 / 异环 / 下载 / 安装 / 背景 / 更新 / 对话框 等），`installIpc()` 降到 1,713 行 / 5 个 IPC，`main.js` 从 21,110 行降到 12,832 行。功能行为不变，只是结构更清楚。
+- 抽出两个公共模块：`secret-store.js`（`loadSecret` / `saveSecret`，safeStorage 加密读写 `sessions.enc.json`，26 个模块共用）、`netease-client.js`（网易云客户端 + 播放地址回退链，11 个函数）。
+- 崩坏3 静态背景不更新（用户反馈「经常拿不到最新静态背景图」）：修掉 4 处独立根因 —— 官方接口 `time` 字段为空导致排序失效、静态图只要文件存在就跳过检查、静态图只在拿不到视频时才生成、官方给的是 webp 却写死成 `.png` 扩展名导致解码失败。现在按 URL 日期段取版本、记录来源 URL 比对、静态图无条件核对、按真实格式落盘；米家四款同时加了动图新鲜度检查。
+- 画质页：星穹铁道帧率卡片接回画质配置页（30 / 60 / 120 三档），之前 handler 在但界面没入口。
+- 崩坏3 抽卡记录移除：官方接口域名不存在，从未开放补给记录；游戏本体支持不受影响。
+- 清理：删掉 14 个全仓零引用的函数（约 300 行）、工具页旧的多 tab 结构残留、「账号登录」重复入口（现在只在左下角账号中心）。
+
+</details>
 
 <details>
 <summary><b>v2.10.2</b></summary>
