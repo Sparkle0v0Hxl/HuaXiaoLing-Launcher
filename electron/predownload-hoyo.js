@@ -237,9 +237,16 @@ async function fetchBuild(info, branchPackage, tag = '') {
  */
 const AUDIO_KEYS = new Set(AUDIO_LANGUAGES.map(([key]) => key));
 const MINI_PREFIX = 'mini-';
+/*
+ * 崩坏3 的 asb 清单是必装本体的一部分（BH3_Data/StreamingAssets/Asb 数据包），
+ * 不是可选的剧情资源 —— 安装链路（sophon.js pickManifests）无条件带上它，
+ * 预下载这里也必须带上，否则 apply 阶段要重下 35GB。
+ */
+const ASB_FIELD = 'asb';
 
 function manifestKind(field) {
   if (field === 'game') return 'game';
+  if (field === ASB_FIELD) return 'asb';
   if (field.startsWith(MINI_PREFIX)) return 'mini';
   if (AUDIO_KEYS.has(field)) return 'audio';
   return 'category';
@@ -254,11 +261,12 @@ function classifyManifests(build, languages, options = {}) {
   const manifests = build.manifests || [];
   const wanted = new Set(normalizeAudioLanguages(languages));
   const includeCategory = options.includeCategory === true;
-  const groups = { game: [], audio: [], category: [], mini: [] };
+  const groups = { game: [], audio: [], category: [], mini: [], asb: [] };
   for (const item of manifests) {
     const field = String(item.matching_field || '').toLowerCase();
     const kind = manifestKind(field);
     if (kind === 'game') groups.game.push(item);
+    else if (kind === 'asb') groups.asb.push(item);
     else if (kind === 'mini') groups.mini.push(item);
     else if (kind === 'audio') {
       if (wanted.has(field)) groups.audio.push(item);
@@ -267,7 +275,7 @@ function classifyManifests(build, languages, options = {}) {
     }
   }
   if (!groups.game.length) throw new Error('官方清单缺少游戏资源');
-  return { all: [...groups.game, ...groups.audio, ...groups.category], ...groups };
+  return { all: [...groups.game, ...groups.asb, ...groups.audio, ...groups.category], ...groups };
 }
 
 function pickManifests(build, languages, options = {}) {

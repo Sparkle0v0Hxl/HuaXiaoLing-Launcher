@@ -1023,8 +1023,8 @@ function predownloadWired(game) {
 /**
  * 预下载的渠道判据统一读 server.caps.predownload —— 权威表在
  * electron/game-channels.js，按用户 2026-11-16 定的规则算出来：
- *   · 崩坏3 只有官服：B服走 B 站自有启动器，国际服在 sg-hyp-api 里有多条
- *     bh3_global 无法唯一定位（见 sophon.js 的 CHANNELS），HoYoPlay 只给 bh3_cn；
+ *   · 崩坏3 官服与国际服都有清单（国际服本体 game_id=5TIVvvcwtM，2026-11-17 实测），
+ *     B服走 B 站自有启动器，三个 B服 launcher 都查不到崩坏3；
  *   · 异环只认官服（publish_ob）/ B服（publish_ob_B）：国际服没有对应 CDN 前缀
  *     （见 neverness-predownload.js 的 channelCdnDir），给了入口只会报
  *     「异环没有这个渠道的启动器资源清单」；
@@ -1037,7 +1037,7 @@ function predownloadChannelOk(game, server) {
   if (server.caps) return server.caps.predownload === true;
   // 老渲染层缓存没有 caps：退回原来的判据，宁可多给入口也不让功能凭空消失
   const channel = String(server.channel || '');
-  if (game.builtinKey === 'bh3') return channel === 'official';
+  if (game.builtinKey === 'bh3') return channel === 'official' || channel === 'global';
   // 异环：国际服留了渠道行，但预下载只认官服 / B服
   if (game.builtinKey === 'neverness') return channel === 'official' || channel === 'bilibili';
   // WeGame 版没有库洛 bundle 协议的官方清单，更新走 WeGame 自己
@@ -1337,7 +1337,7 @@ function openPredownloadModal(gameId, serverId) {
   if (!predownloadChannelOk(game, server)) {
     toast(
       game?.builtinKey === 'bh3'
-        ? '崩坏3 只有官服支持预下载，B服 / 国际服由官方启动器负责'
+        ? '崩坏3 只有官服 / 国际服支持预下载，B服由 B 站官方启动器负责'
         : '这个渠道的更新由对应平台自己负责，启动器不做预下载',
       'info'
     );

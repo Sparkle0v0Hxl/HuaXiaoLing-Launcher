@@ -1007,7 +1007,7 @@ function openGameDownloadModal(gameId) {
   const servers = (game.servers || []).filter((server) => !server.exists || server.incomplete);
   const allChoices = servers.length ? servers : game.servers || [];
   // 渠道能不能下载由后端 caps.download 说了算（downloadChannelOk 里做兜底）：
-  // 崩坏3 只有官服、明日方舟只有官服 + Yostar 三区有清单，其余渠道在这里就被滤掉，
+  // 崩坏3 官服 / 国际服、明日方舟官服 + Yostar 三区有清单，其余渠道在这里就被滤掉，
   // 不会出现「选了才在 estimate / download 阶段报错」的情况。
   const choices = allChoices.filter((server) => downloadChannelOk(game, server));
   if (!choices.length) {

@@ -830,7 +830,7 @@ function openServerSetupDialog(gameId, serverId) {
   const showLink = canLinkByEngine;
   /* 下载引擎表与 modals.js 的 DOWNLOAD_GAME_ENGINES 同源：
    * 有引擎的游戏可以直接进一键下载弹窗（真下载，不是 UI 摆设）。
-   * 渠道是否能下再看 server.caps.download（崩坏3 只有官服有官方清单）。 */
+   * 渠道是否能下再看 server.caps.download（崩坏3 官服 / 国际服有官方清单）。 */
   const DOWNLOAD_SETUP_ENGINES = {
     genshin: 'sophon',
     starrail: 'sophon',

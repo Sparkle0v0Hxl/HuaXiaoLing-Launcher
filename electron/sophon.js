@@ -41,12 +41,24 @@ const CHANNELS = {
   },
   /*
    * 崩坏3 官服：同一个 HoYoPlay 启动器接口体系，game_id 从
-   * getAllGameBasicInfo(launcher_id=jGHBHlcOq1) 的 biz=bh3_cn 条目实测拿到。
-   * B服不在 HoYoPlay 分发体系里（走 B 站自有启动器），国际服 game_id 在
-   * sg-hyp-api 里有多条 bh3_global 无法唯一定位 —— 一键下载只接官服。
+   * getGameBranches(launcher_id=jGHBHlcOq1) 的 biz=bh3_cn 条目实测拿到。
+   *
+   * 国际服（2026-11-17 实测补上，参考本机 Starward 源码 H:\_research\Starward
+   * 的 src/Starward.Core/HoYoPlay/GameId.cs:25-30）：
+   * sg-hyp-api 里 bh3_global 有 5 个 game_id，是「同一款游戏的不同发行区服」——
+   *   5TIVvvcwtM 国际服本体 / g0mMIvshDb 日服 / uxB4MC7nzC 韩服
+   *   bxPTXSET5t 东南亚 / wkE5P5WsIf 繁中
+   * Starward 只把本体那个当默认（其余四个在它那边是注释掉的自选区服）。
+   * 用 getGameBranches 实网验过：本体那条返回 tag=9.1.0、matching_fields=[game, asb]，
+   * 两份清单（game 1.42GB + asb 35.27GB）都能正常下载并 zstd 解码，
+   * 所以国际服的一键下载 / 更新 / 预下载在协议层完全可用。
+   *
+   * B服确实没有：实测三个 B服 launcher（umfgRO5gh5 原神 / 6P5gHMNyK3 星铁 /
+   * xV0f4r1GT0 绝区零）下都查不到崩坏3 —— B服走 B站自有启动器，不在 HoYoPlay 体系里。
    */
   bh3: {
     official: { launcher: 'jGHBHlcOq1', game: 'osvnlOc0S8', server: 'cn' },
+    global: { launcher: 'VYTpXlbWo8', game: '5TIVvvcwtM', server: 'global' },
   },
 };
 
@@ -1077,8 +1089,8 @@ function channelConfig(gameKey, channel, tag, sdkVersion = '') {
     genshin: channel === 'global' ? 'hk4e_global' : 'hk4e_cn',
     starrail: channel === 'global' ? 'hkrpg_global' : 'hkrpg_cn',
     zzz: channel === 'global' ? 'nap_global' : 'nap_cn',
-    // 崩坏3 一键下载只接官服，固定 bh3_cn
-    bh3: 'bh3_cn',
+    // 崩坏3：国际服是 bh3_global（2026-11-17 实测 + Starward 源码一致）
+    bh3: channel === 'global' ? 'bh3_global' : 'bh3_cn',
   }[gameKey];
 
   let cps = 'hyp_mihoyo';

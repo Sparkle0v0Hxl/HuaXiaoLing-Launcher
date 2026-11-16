@@ -46,7 +46,9 @@ const SUPPORT = {
   genshin: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   starrail: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
   zzz: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / B服 / 国际服）' },
-  bh3: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（仅官服）' },
+  // 崩坏3 2026-11-17 实测：官服 bh3_cn 与国际服 bh3_global 都有官方清单（国际服本体
+  // game_id=5TIVvvcwtM，参考本机 Starward 源码 GameId.cs），B服三个 launcher 都查不到。
+  bh3: { supported: true, kind: 'hoyo', note: '米哈游 Sophon chunk 预下载（官服 / 国际服）' },
   endfield: { supported: true, kind: 'endfield', note: '鹰角 zip 分包预下载（Diffs/）' },
   /*
    * 鸣潮（库洛 G152 / G153）：3.0.1.0 起官方启动器改用 bundle 分包协议，
@@ -105,7 +107,8 @@ function describe(gameKey, channel = '') {
   /*
    * 统一的渠道判据（用户 2026-11-16 定的规则）：预下载要看官方有没有对这个渠道发清单，
    * 这件事 game-channels.js 的能力表里已经写好了，这里不再各游戏各写一套。
-   *   崩坏3  —— 只有官服有 Hoyoverse 预下载清单（bh3_cn），B服 / 国际服得用对应官方启动器；
+   *   崩坏3  —— 官服 bh3_cn 与国际服 bh3_global 都有 Hoyoverse 预下载清单
+   *     （国际服本体 game_id=5TIVvvcwtM，2026-11-17 实测），B服得用 B 站官方启动器；
    *   鸣潮   —— official / bilibili / global / wegame 四个渠道都在表里（用户 2026-11-16 定的是全渠道）；
    *   原神 / 星铁 / 绝区零 —— 三个渠道都有。
    * 三个前提缺一不可：

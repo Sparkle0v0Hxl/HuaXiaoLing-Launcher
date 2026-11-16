@@ -89,30 +89,31 @@ const GAME_CHANNEL_CAPS = {
     label: '崩坏3',
     /*
      * 用户：「崩坏三我没有，但是做的时候，应该也是全都可以的」。
-     * 硬链接本身是本地文件操作，不依赖远端清单 —— 只要有一份完整客户端当源，
-     * 铺一份 B服 / 国际服 目录（再补对应 SDK 文件）在技术上是成立的，所以 link 放全渠道。
-     * 但「一键下载」和「检查更新」依赖 HoYoPlay 清单，官方只给 bh3_cn，放不开。
-     */
-    /*
-     * 硬链接保留全渠道 —— 用户 2026-11-16 定的规则是「崩坏三也应该全都可以硬链接」。
-     * 但要如实记着：现在还差一块。官服的客户端是 HoYoPlay 发的一套，
-     * B服走 B站 自有启动器、国际服的 game_id 在 sg-hyp-api 里有好几条，
-     * 官服以外那两个渠道**没有官方清单**，也就拿不到「差异分块」。
-     * 所以现在这条只能做到「整树硬链接官服」，
-     * 而渠道专属的 SDK 载荷（让登录界面切到 B站 / 国际服的那几件）我们手上没有来源，
-     * 点下去会明确提示「这条渠道没有官方清单」。
-     * 要真正做通，得先把那几件载荷的来源找齐（参考 Xel-Launcher 的 BiliArknightsPayload 做法）。
+     *
+     * 2026-11-17 实测修正（参考本机 Starward 源码 H:\_research\Starward
+     * src/Starward.Core/HoYoPlay/GameId.cs:25-30 + getGameBranches 实网验证）：
+     *   · 官服 bh3_cn   game_id=osvnlOc0S8  launcher=jGHBHlcOq1  server=cn
+     *   · 国际服 bh3_global game_id=5TIVvvcwtM launcher=VYTpXlbWo8 server=global
+     *     （sg-hyp-api 里 bh3_global 有 5 个 game_id，是同一款游戏的 5 个发行区服：
+     *       本体 5TIVvvcwtM / 日服 g0mMIvshDb / 韩服 uxB4MC7nzC /
+     *       东南亚 bxPTXSET5t / 繁中 wkE5P5WsIf；Starward 只把本体当默认。）
+     *     实测国际服分支返回 tag=9.1.0、matching_fields=[game, asb]，
+     *     两份清单（game 1.42GB + asb 35.27GB）都能正常下载并 zstd 解码。
+     *   · B服确实没有：三个 B服 launcher（umfgRO5gh5 / 6P5gHMNyK3 / xV0f4r1GT0）
+     *     下都查不到崩坏3 —— B服走 B站自有启动器，不在 HoYoPlay 分发体系里。
+     * 所以 download / repair / update / predownload 现在官服 + 国际服都通，
+     * B服只剩 link（硬链接是纯本地文件操作，不依赖远端清单）。
      */
     link: CH_BH3,
-    download: ['official'],
+    download: ['official', 'global'],
     /*
-     * 修复走的是 prepareSophon({ verifyAll: true })，仍要读该渠道的官方清单
-     * （sophon.js 的 CHANNELS.bh3 只有 official），B服/国际服进去只会拿到
-     * 「这个服务器没有 Sophon 清单」。所以修复也只放官服，别给点了必报错的入口。
+     * 修复走的是 prepareSophon({ verifyAll: true })，要读该渠道的官方清单。
+     * 官服 bh3_cn、国际服 bh3_global 都有清单，B服没有 —— 所以 B服 不在这张表里，
+     * 别给点了必报错的入口。
      */
-    repair: ['official'],
-    update: ['official'],
-    predownload: ['official'],
+    repair: ['official', 'global'],
+    update: ['official', 'global'],
+    predownload: ['official', 'global'],
   },
   endfield: {
     label: '明日方舟：终末地',

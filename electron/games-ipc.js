@@ -166,8 +166,9 @@ function installGamesIpc(ctx) {
         /*
          * 修复要重新拉官方清单校验分块，所以它跟「更新」一样受渠道限制，不能只看游戏。
          * 用户 2026-11-16 定的规则：原神 / 星铁 / 绝区零三渠道都能修（官方 HoYoPlay
-         * 对 hk4e / hkrpg / nap 都发 *_global 清单）；崩坏3 只有官服能修 ——
-         * 官方只给 bh3_cn 清单，B服 / 国际服的本体得交给对应官方启动器。
+         * 对 hk4e / hkrpg / nap 都发 *_global 清单）；崩坏3 2026-11-17 实测官服与
+         * 国际服都有清单（国际服本体 game_id=5TIVvvcwtM，参考本机 Starward 源码），
+         * B服查不到清单，所以 B服才会被下面这道闸拦下。
          * 硬链接（link）虽然三渠道全开，但那是本地文件操作，跟这里的远端校验不是一回事。
          */
         if (!gameChannels.can(key, server.channel, 'repair')) {

@@ -617,13 +617,16 @@ function installServersIpc(ctx) {
       /*
        * 渠道判据交给能力表的 update 能力，不再写死「bh3 只认 official」。
        * 用户 2026-11-16 定的规则：原神 / 星铁 / 绝区零三渠道都能更新（官方 HoYoPlay
-       * 对 hk4e / hkrpg / nap 都发 *_global 清单，已实网验证）；崩坏3 的 download/update
-       * 只官服 —— 因为官方 HoYoPlay 只给 bh3_cn 清单，B服 / 国际服的本体得用对应官方启动器。
-       * 崩坏3 保留原来那句专属文案，其它游戏给通用文案，方便用户直接看懂该去哪儿更新。
+       * 对 hk4e / hkrpg / nap 都发 *_global 清单，已实网验证）。
+       * 崩坏3 2026-11-17 实测补上国际服（sg-hyp-api 的 bh3_global 本体
+       * game_id=5TIVvvcwtM，launcher=VYTpXlbWo8，参考本机 Starward 源码
+       * src/Starward.Core/HoYoPlay/GameId.cs:25-30），所以官服 / 国际服都能更新；
+       * B服在三个 B服 launcher 下都查不到崩坏3，只有 B服会走到下面这句专属文案
+       * （其它游戏给通用文案，方便用户直接看懂该去哪儿更新）。
        */
       if (server.channel && !gameChannels.can(game.builtinKey, server.channel, 'update')) {
         if (game.builtinKey === 'bh3') {
-          throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
+          throw new Error('崩坏3 本体更新支持官服 / 国际服，B服请使用 B 站官方启动器更新');
         }
         throw new Error(
           `${game.name || '这个游戏'}的${clientChannel.channelLabel(server.channel)}没有官方 Sophon 更新清单，请用对应官方启动器更新`
