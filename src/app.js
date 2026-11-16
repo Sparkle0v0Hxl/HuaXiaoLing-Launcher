@@ -28,6 +28,12 @@ const REPO_RELEASES_URL = `${REPO_URL}/releases`;
  */
 const GITEE_MANIFEST_URL = 'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json';
 /**
+ * GitCode 上的更新源（同样只放一份 latest.json，几 KB）。
+ * GitCode 的 Release 附件接口不开放，Setup.exe / Portable.zip 传不上去，
+ * 所以这里只当「清单源」用：清单里的下载地址仍指向 GitHub Release（带加速前缀）。
+ */
+const GITCODE_MANIFEST_URL = 'https://raw.gitcode.com/huahuozuikeai/hxl-update/raw/master/latest.json';
+/**
  * 设置页「项目主页 / 问题反馈」这两个入口的地址。
  *
  * 反馈走仓库自带的 issue 表单（`.github/ISSUE_TEMPLATE/bug_report.yml`），

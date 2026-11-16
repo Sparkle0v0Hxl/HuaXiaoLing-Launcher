@@ -420,6 +420,7 @@ function installMiscIpc(ctx) {
         const updateSourceModeText = {
           auto: '自动（内置镜像依次尝试）',
           gitee: 'Gitee 镜像优先',
+          gitcode: 'GitCode 更新源优先',
           jsdelivr: 'jsDelivr 优先',
           github: 'GitHub 直连优先',
           custom: '只用手填地址',

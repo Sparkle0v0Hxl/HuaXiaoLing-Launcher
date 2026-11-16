@@ -2452,6 +2452,22 @@ case 'music-accounts':
       render();
       break;
     }
+    case 'fill-gitcode-source': {
+      const input = document.querySelector('#update-manifest');
+      if (input) input.value = GITCODE_MANIFEST_URL;
+      await api.updateSettings({ updateManifest: GITCODE_MANIFEST_URL });
+      toast('已换成 GitCode 更新源，正在检查…', 'success');
+      try {
+        const result = await api.checkUpdate();
+        if (result && result.hasUpdate) openUpdateModal(result);
+        else if (result && result.ok) toast('已经是最新版本', 'success');
+        else toast((result && result.error) || '检查失败', 'error');
+      } catch (error) {
+        toast(`检查失败：${humanError(error)}`, 'error');
+      }
+      render();
+      break;
+    }
     case 'fill-mirror-source': {
       const input = document.querySelector('#update-manifest');
       if (input) input.value = GITEE_MANIFEST_URL;

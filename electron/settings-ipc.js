@@ -197,7 +197,7 @@ function installSettingsIpc(ctx) {
         } else if (key === 'updateSourceMode') {
           // 只认这几种，别的值一律回到「自动」——多一个拼错的值就会让更新链变哑巴。
           const mode = String(patch.updateSourceMode || '').trim();
-          settings.updateSourceMode = ['auto', 'gitee', 'jsdelivr', 'github', 'custom'].includes(mode)
+          settings.updateSourceMode = ['auto', 'gitee', 'gitcode', 'jsdelivr', 'github', 'custom'].includes(mode)
             ? mode
             : 'auto';
         } else if (key === 'proxyRules') {

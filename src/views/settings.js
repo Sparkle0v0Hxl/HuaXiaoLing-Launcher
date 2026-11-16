@@ -1075,11 +1075,12 @@ function settingsView() {
           <h2>${icon('download')}软件更新</h2>
           <p class="desc">内置更新源，下载后做 sha256 校验</p>
           <div class="setting-row">
-            <div class="setting-copy"><strong>更新源</strong><span>决定「检查更新」和「下载更新包」走哪条路。<b>自动</b>适合绝大多数人：按 Gitee → jsDelivr → GitHub 的顺序挨个试，哪个通用哪个。国内网络一直卡在「检查更新」或下载不动时，可以在下面锁死某一个源试试。</span></div>
+            <div class="setting-copy"><strong>更新源</strong><span>决定「检查更新」和「下载更新包」走哪条路。<b>自动</b>适合绝大多数人：按 Gitee → GitCode → jsDelivr → GitHub 的顺序挨个试，哪个通用哪个。国内网络一直卡在「检查更新」或下载不动时，可以在下面锁死某一个源试试。</span></div>
             <div class="setting-control update-source-control">
               <select class="select" id="update-source-mode">
                 <option value="auto"${esc(settings.updateSourceMode || 'auto') === 'auto' ? ' selected' : ''}>自动（推荐）</option>
                 <option value="gitee"${settings.updateSourceMode === 'gitee' ? ' selected' : ''}>Gitee 镜像</option>
+                <option value="gitcode"${settings.updateSourceMode === 'gitcode' ? ' selected' : ''}>GitCode 更新源</option>
                 <option value="jsdelivr"${settings.updateSourceMode === 'jsdelivr' ? ' selected' : ''}>jsDelivr</option>
                 <option value="github"${settings.updateSourceMode === 'github' ? ' selected' : ''}>GitHub 直连</option>
                 <option value="custom"${settings.updateSourceMode === 'custom' ? ' selected' : ''}>自定义地址</option>
@@ -1094,6 +1095,7 @@ function settingsView() {
               <input class="text-input" id="update-manifest" value="${esc(settings.updateManifest || '')}" placeholder="留空 = 内置官方源" spellcheck="false" />
               <button class="btn btn-ghost" data-action="save-update-source">保存</button>
               <button class="btn btn-ghost" data-action="fill-mirror-source" title="${GITEE_MANIFEST_URL}">${icon('server')}填入 Gitee 镜像</button>
+              <button class="btn btn-ghost" data-action="fill-gitcode-source" title="${GITCODE_MANIFEST_URL}">${icon('server')}填入 GitCode</button>
             </div>
           </div>
           <div class="setting-row">

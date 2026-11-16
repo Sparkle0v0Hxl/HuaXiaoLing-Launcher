@@ -7435,6 +7435,9 @@ const OFFICIAL_UPDATE_MANIFESTS = [
   // Gitee 镜像仓库：裸连可达，且清单里的下载地址带加速前缀，国内最快的一条。
   // 每次发版后把正式清单同步过去一份。
   'https://gitee.com/SparkleHxl/hxl-update/raw/master/latest.json',
+  // GitCode 更新源：只放清单（Release 附件接口不开放，包传不上去）。
+  // 清单里的下载地址同样带加速前缀，所以它当兜底源很好用。
+  'https://raw.gitcode.com/huahuozuikeai/hxl-update/raw/master/latest.json',
   // fastly 节点：国内裸连比 cdn.jsdelivr.net 稳得多。
   'https://fastly.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
   'https://cdn.jsdelivr.net/gh/Sparkle0v0Hxl/HuaXiaoLing-Launcher@main/latest.json',
@@ -7447,6 +7450,7 @@ function updateSourceKindOf(url) {
   const text = String(url || '').toLowerCase();
   if (!text) return '';
   if (text.includes('gitee.com')) return 'gitee';
+  if (text.includes('gitcode.com')) return 'gitcode';
   if (text.includes('jsdelivr.net')) return 'jsdelivr';
   if (text.includes('github.com') || text.includes('githubusercontent.com')) return 'github';
   return '';
@@ -7484,14 +7488,14 @@ function updateSourceList() {
     return list;
   }
   // 锁定某一条内置源时，把它排到最前面；其余官方源仍排在后面兜底。
-  if (mode === 'gitee' || mode === 'jsdelivr' || mode === 'github') {
+  if (mode === 'gitee' || mode === 'gitcode' || mode === 'jsdelivr' || mode === 'github') {
     for (const url of OFFICIAL_UPDATE_MANIFESTS) {
       if (updateSourceKindOf(url) === mode) push(url);
     }
   }
   /*
    * 自动模式：Gitee 镜像最先（国内裸连最稳、清单里的下载地址还带加速前缀），
-   * 其次 fastly / cdn 两个 jsDelivr 节点，最后 GitHub 源站。
+   * 其次 GitCode 更新源，再其次 fastly / cdn 两个 jsDelivr 节点，最后 GitHub 源站。
    * 手填地址在自动模式下不参与——设置页也是这样写的「只在选了自定义地址时生效」，
    * 不然用户填过一个旧地址之后，明明选着「自动」却一直读那份旧的，很难看出来。
    */
