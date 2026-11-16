@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.11.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,9 +18,9 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.11.0**（正式版）
+**当前版本：v2.12.0**（正式版）
 
-一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
+一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
 > 原创实现，与米哈游 / HoYoverse、Hypergryph、完美世界 / Hotta Studio、Starward 均无隶属关系。界面与代码为原创，启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有；封面与动态背景在联网时从官方页面获取并缓存到本机。
 
@@ -42,7 +42,7 @@
 
 ### 多服务器与硬链接去重
 
-同一个游戏可以同时挂官服 / B服 / 国际服（终末地还有 Play / Steam），当前服务器在启动页一眼可见，点一下就连切带启动。
+同一个游戏可以同时挂官服 / B服 / 国际服（终末地还有 Play / Steam，鸣潮还有 WeGame 版），当前服务器在启动页一眼可见，点一下就连切带启动。
 
 当两个客户端在同一磁盘、且某些文件完全相同时，可以把它们合并成一份数据：
 
@@ -63,7 +63,7 @@
 
 ### 抽卡记录
 
-六个游戏统一成同一套界面：概览 KPI、卡池垫数、卡池统计、最近获得，出金带「X 抽」垫数徽章与角色立绘。
+七款游戏统一成同一套界面：概览 KPI、卡池垫数、卡池统计、最近获得，出金带「X 抽」垫数徽章与角色立绘。
 
 数据来源：
 
@@ -71,6 +71,7 @@
 |---|---|---|
 | 原神 / 星铁 / 绝区零 / 崩坏3 | 本地抽卡数据库 / UIGF 导出 | 自动读取，也支持官方 webCache 增量同步 |
 | 明日方舟：终末地 | 官方 `ef-webview` 接口 | 网页登录后自动从游戏日志取 Token，角色池 + 武器池一起拉 |
+| 鸣潮 | 本地日志里的带签名链接 | 游戏里点一次「抽卡记录」页的分享，启动器读到链接后自动拉取 |
 | 异环 | NTE_Gacha_Exporter 导出 JSON | 导入后自动补全名称与头像 |
 
 **图鉴自动更新**：终末地角色名与立绘取自官网干员页，异环取自官网角色头像 + 社区名称表；缓存 24 小时，新版本上线后下次刷新就会带上新角色，不需要改代码。抓取失败一律回退旧缓存，抽卡页不会因为网络问题打不开。
@@ -86,7 +87,7 @@
 
 ### 官方公告
 
-七款游戏的官网公告汇总成一张公告墙，每 10 分钟自动刷新，启动时后台预取，点开即跳官网。
+八款游戏的官网公告汇总成一张公告墙，每 10 分钟自动刷新，启动时后台预取，点开即跳官网。
 
 ### 其他
 
@@ -125,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.11.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -186,9 +187,9 @@ pnpm pack
 
 ### 技术栈
 
-- Electron 45，主进程 `electron/main.js`（约 4700 行），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
+- Electron 45，主进程 `electron/main.js`（约 13200 行，IPC 已按业务域拆成 40 多个 `*-ipc.js` 分片），渲染层原生 HTML/CSS/JS，无框架无构建步骤；
 - 渲染层通过 `preload.js` 暴露的 `window.launcher` 调用 IPC，开启 `contextIsolation` 与 `sandbox`；
-- 领域模块：`link.js`（硬链接）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
+- 领域模块：`link.js`（硬链接）、`link-source.js`（跨服硬链接复用）、`runtime.js`（运行时）、`sophon.js`（差异更新）、`hdiff.js`（补丁）、`endfield-packs.js`（渠道包）、`endfield-launch.js`（管理员启动）、`game-channels.js`（渠道能力总表）、`endfield-gacha.js` / `gacha.js` / `gacha-import.js` / `gacha-sync.js` / `gacha-meta.js`（抽卡）、`kuro-packs.js` / `kuro-predownload.js`（鸣潮）、`yostar-packs.js`（明日方舟）、`background-clean.js`（背景去字）、`starrail-fps.js`（注册表帧率）、`downloads.js`、`store.js`、`seed.js`。
 
 测试钩子：`HX_SMOKE=1` 启动冒烟、`HX_CAPTURE=1` 生成页面截图、`HX_USER_DATA` 隔离数据目录。
 
@@ -199,7 +200,22 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.11.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.0</b></summary>
+
+- 渠道能力收成一张表：以前「这个渠道能不能一键下载 / 能不能检查更新 / 能不能预下载」散在十几处各写一份名单，改一个游戏要翻半天，还容易两边打架。现在后端一张表（`electron/game-channels.js`）统一算好，前端一律读它。
+- 崩坏3 的边界是实测出来的：官方 HoYoPlay 接口只有官服（`bh3_cn`）有资源清单，B服 和国际服查不到分支。所以它能硬链接、能修复，但一键下载和检查更新仍只有官服，界面上不会再给你一个点了必报错的按钮。
+- 跨服硬链接补齐：一个服更到最新版之后，切到别的服点更新，会先拿已更新好的文件做硬链接，缺的才下差异。鸣潮和明日方舟（Yostar 三区）以前只能自己从头下，这版补上了；原神 / 星铁 / 绝区零 / 崩坏3 / 终末地 / 方舟国服 本来就有。
+- 预下载也走同一套：四条预下载链路（米哈游 ldiff 补丁包、米哈游分块、终末地 Diffs 分包、鸣潮暂存目录）以前都是纯联网下载，现在都会先去别的服找同名同内容的文件直接硬链接过来。终末地以前在应用阶段被特意排除在外，现在放开了。
+- 补回两个入口：崩坏3 的「硬链接生成一份」（上一版做渠道白名单时漏了，后端本来就支持）；鸣潮的「修复」（后端修复分支一直存在，只是界面上没入口）。另外「更新鸣潮」的 IPC 主进程早注册了，但 preload 没暴露，界面上根本调不到，一并补上。
+- 启动图不再黑屏：以前要先加载数据、补种子数据、扫四个游戏安装目录、判一次管理员权限（同步跑一次 PowerShell），全部做完才建启动图窗口，这段 1.4~1.6 秒里进程一个窗口都没有，看着就是「点了图标先黑屏，然后直接进界面」。现在启动图提到 whenReady 第一行，实测从 1.5 秒提前到 0.7 秒左右。
+- 异环国际服的路口留回来了：它没有官方渠道配置、做不了自动切服和预下载，但你真装了国际服客户端的话，至少要能选路径、能从花筱灵启动。点它会明确告诉你能做什么不能做什么。
+- 终末地没生成运行时的行现在是黄灯「需要生成」而不是绿灯，点主按钮直接弹和别的游戏一样的生成面板。
+- 其它：补了手动填写游戏 UID 的输入框（角色列表拉不出来时也能同步抽卡）；修了歌单链接或 QQ 音乐 cookie 带裸 % 直接报错；补了六个只存在于样式里却从没定义过的颜色变量。
+
+</details>
 
 <details>
 <summary><b>v2.11.0</b></summary>
