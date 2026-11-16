@@ -56,13 +56,14 @@ function installWuwaIpc(ctx) {
        * 「获取清单正常、下载 0 个文件、两分钟后失败」（2026-11-13 dock 更新实测）。
        */
       const updateAbort = new AbortController();
-      const kuroPending = await predownload.kuroPendingState(server.root);
+      const kuroRoot = predownload.kuroInstallRoot(server);
+      const kuroPending = await predownload.kuroPendingState(kuroRoot);
       if (kuroPending && kuroPending.completed && !kuroPending.applied) {
         try {
           const applied = await predownload.apply({
             gameKey: 'wutheringwaves',
             channel: server.channel,
-            installRoot: server.root,
+            installRoot: kuroRoot,
             signal: updateAbort.signal,
             onProgress: (progress) => emit(progress),
           });
@@ -92,7 +93,7 @@ function installWuwaIpc(ctx) {
       const result = await predownload.updateKuroGame({
         gameKey: 'wutheringwaves',
         channel: server.channel,
-        installRoot: server.root,
+        installRoot: predownload.kuroInstallRoot(server),
         signal: updateAbort.signal,
         onProgress: (progress) => emit(progress),
         /*

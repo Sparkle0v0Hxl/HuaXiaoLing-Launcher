@@ -468,14 +468,53 @@ function pickCdnUrl(body, predownload) {
  * {"appId":"10003","version":"","state":"","bundles":{"HD":{"version":"3.7.1","state":"","resourcePacks":["common","hd"]}}}
  * 顶层 version 为空，版本记在 bundles.HD.version；档位记在 bundles.HD.resourcePacks。
  */
-async function readLauncherConfig(installRoot) {
-  try {
-    const text = await fsp.readFile(path.join(String(installRoot), LAUNCHER_CONFIG_NAME), 'utf8');
-    const obj = JSON.parse(text);
-    return obj && typeof obj === 'object' ? obj : null;
-  } catch {
-    return null;
+/**
+ * 从给定目录往上找库洛官方客户端的「本体根目录」（最多 5 层）。
+ *
+ * 为什么要往上找：主程序在三层深的 `Client\Binaries\Win64` 下，而
+ * `launcherDownloadConfig.json` 只在本体根目录里。启动器记录的行里
+ * root 有时被填成了 exe 所在目录（手动选路径、自动扫描都踩过），
+ * 只读 root 这一层就会判定「这不是库洛官方客户端」而直接拒绝更新。
+ *
+ * 2026-11-17 用户报障：极致画质（UHD）的鸣潮客户端识别出来后，点「更新游戏」
+ * 报「这个目录不是库洛官方客户端」，但游戏其实已经是最新版了 —— 就是这里
+ * 只读一层导致的。
+ *
+ * @param {string} dirOrExe 目录或 exe 路径
+ * @returns {string} 找到的本体根目录；找不到返回空串
+ */
+function findKuroClientRoot(dirOrExe) {
+  let dir = String(dirOrExe || '').trim();
+  if (!dir) return '';
+  if (path.extname(dir).toLowerCase() === '.exe') dir = path.dirname(dir);
+  dir = path.normalize(dir);
+  for (let depth = 0; depth < 5 && dir; depth += 1) {
+    try {
+      if (fs.existsSync(path.join(dir, LAUNCHER_CONFIG_NAME))) return dir;
+    } catch {
+      /* 读不了就当这一层没有 */
+    }
+    const next = path.dirname(dir);
+    if (next === dir) break;
+    dir = next;
   }
+  return '';
+}
+
+async function readLauncherConfig(installRoot) {
+  // 先在本体根目录找（认得出就往上走），找不到再按原样读这一层。
+  const root = findKuroClientRoot(installRoot);
+  const targets = root && root !== String(installRoot) ? [root, String(installRoot)] : [String(installRoot)];
+  for (const dir of targets) {
+    try {
+      const text = await fsp.readFile(path.join(dir, LAUNCHER_CONFIG_NAME), 'utf8');
+      const obj = JSON.parse(text);
+      if (obj && typeof obj === 'object') return obj;
+    } catch {
+      /* 换下一层 */
+    }
+  }
+  return null;
 }
 
 function localVersionOf(config, bundle, override) {
@@ -1780,6 +1819,7 @@ module.exports = {
   clearPredownload,
   updateGameFromBundle,
   BUNDLE_PROFILES,
+  findKuroClientRoot,
 
   // ── 契约外的纯函数 / 工具导出：供自测直接验证拼接、版本比较、state 往返；
   //    lead 不必接入，也不影响上面 5 个键的用法。

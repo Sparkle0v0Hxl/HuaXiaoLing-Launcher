@@ -33,6 +33,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { segmentFetch } = require('./http-fetch');
+const runtime = require('./runtime');
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -1045,6 +1046,63 @@ async function planForGame({ profile, installRoot, fullVerify = false } = {}) {
  *
  * 三步走与 yostar buildCrossRuntime 同构：硬链（逐文件 md5 复核）→ 差异下载 → 写元数据。
  */
+/**
+ * 鸣潮跨渠道硬链接的「必须拷贝」补充判据（大小写不敏感）。
+ *
+ * 背景（2026-11-17）：硬链接 = 共享 inode。鸣潮官服 / B服 / WeGame 三份客户端
+ * 里有一批「运行时自己写」的文件（账号标识、画质档位、性能采样、崩溃上报），
+ * 被硬链接共享之后，游戏往其中一份写一次，另外两份也跟着变 —— 这正是
+ * 11-07 终末地官服污染事故的形状。
+ *
+ * 为什么必须在这里再判一次：buildCrossRuntime 走的是本文件自写的
+ * 「逐文件 md5 复核 → fsp.link」循环，**没有**经过 runtime.js 的
+ * mustCopyNotLink；只要 md5 对得上就会硬链接。
+ *
+ * 判据宁可多拷贝：命中的都是小文件，错判的代价是几 MB 盘；
+ * 而漏判一次就是整个客户端状态被就地改写、修不回来。
+ */
+const KURO_MUST_COPY_DIRS = [
+  'launcherdownload',
+  'launcherdownloadconfig',
+  'client/config',
+  'client/config/kuro',
+  '.quality',
+  'wesight',
+  'crashsight_data',
+  'kr_sdkres',
+];
+
+const KURO_MUST_COPY_NAMES = [
+  'launcherdownloadconfig.json',
+  'kr_sdkconfig.json',
+  'config.txt',
+  'uninstall.ini',
+  'cert.pem',
+  'key.pem',
+  'kurodata',
+  'distinctid',
+  'cos_perf.data',
+  'performance_data',
+  'crashsight_data',
+];
+
+/**
+ * 这个文件能不能硬链接。false = 必须拷贝（各渠道各留一份）。
+ */
+function mustCopyForCrossRuntime(rel) {
+  const relLower = String(rel || '').toLowerCase().replace(/\\/g, '/');
+  if (!relLower) return true;
+  const base = relLower.slice(relLower.lastIndexOf('/') + 1);
+  for (const dir of KURO_MUST_COPY_DIRS) {
+    if (relLower === dir || relLower.startsWith(dir + '/')) return true;
+  }
+  for (const name of KURO_MUST_COPY_NAMES) {
+    if (base.indexOf(name) >= 0) return true;
+  }
+  // 通用硬链接判据（runtime.js）：目录段 / 文件名片段 / 扩展名 + 实测清单
+  return runtime.mustCopyNotLink(relLower);
+}
+
 async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signal, onProgress } = {}) {
   const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (!target) throw new Error('没有对应的鸣潮渠道');
@@ -1135,6 +1193,16 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
     while (signal && signal.paused && !signal.cancelled) await new Promise((r) => setTimeout(r, 300));
     const dest = resolveInside(root, item.rel);
     await fsp.mkdir(path.dirname(dest), { recursive: true });
+    if (mustCopyForCrossRuntime(item.rel)) {
+      // 渠道身份 / 运行时状态：各渠道各留一份，绝不共享 inode
+      try {
+        await fsp.copyFile(item.src, dest);
+        linked += 1;
+      } catch (error) {
+        if (!error || (error.code !== 'EEXIST' && error.code !== 'ENOENT')) throw error;
+      }
+      continue;
+    }
     try {
       await fsp.link(item.src, dest);
       linked += 1;

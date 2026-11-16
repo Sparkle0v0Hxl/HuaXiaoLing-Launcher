@@ -247,6 +247,22 @@ function hoyoInstallRoot(server) {
   return server?.root || (server?.path ? path.dirname(server.path) : '');
 }
 
+/**
+ * 鸣潮（库洛）系的安装根目录。
+ *
+ * 库洛客户端的本体根目录靠根下的 `launcherDownloadConfig.json` 认，而主程序在
+ * 三层深的 `Client\Binaries\Win64` 下。行里的 root 有时被填成 exe 所在目录
+ * （手动选路径、自动扫描都踩过），只认这一层就会判成「不是库洛官方客户端」。
+ * 这里从 row 的 root/path 往上找本体根，找不到才回退原来的 root。
+ */
+function kuroInstallRoot(server) {
+  const fromRoot = kuroPredownload.findKuroClientRoot(server?.root || '');
+  if (fromRoot) return fromRoot;
+  const fromPath = kuroPredownload.findKuroClientRoot(server?.path || '');
+  if (fromPath) return fromPath;
+  return server?.root || (server?.path ? path.dirname(server.path) : '');
+}
+
 /** 鸣潮预下载暂存目录（与 kuro-predownload.js 的 STAGE_DIR_NAME 保持一致）。 */
 function kuroStageDir(installRoot) {
   return path.join(String(installRoot || ''), '_kuro_predownload');
@@ -612,5 +628,6 @@ module.exports = {
   updateKuroGame,
   endfieldInstallRoot,
   hoyoInstallRoot,
+  kuroInstallRoot,
   isRuntimeDir,
 };

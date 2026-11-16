@@ -597,7 +597,7 @@ function gachaView2() {
 
   const selection = gachaEnsureSelection();
   if (!selection) {
-    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('gacha')}</div><h3>还没有抽卡记录</h3><p>可以导入 UIGF / SRGF / 异环导出 JSON；终末地可以直接网页登录同步。</p><div class="empty-actions"><button class="btn btn-ghost" data-action="import-gacha">导入 UIGF / 异环</button><button class="btn btn-ghost" data-action="gacha-source" data-value="endfield">终末地同步</button></div></div></div>`;
+    return `<div class="page">${head}<div class="empty"><div class="empty-icon">${icon('gacha')}</div><h3>还没有抽卡记录</h3><p>可以导入 UIGF / SRGF / 异环导出 JSON；终末地可以直接网页登录同步；鸣潮在游戏里点一次「分享」后即可在线同步。</p><div class="empty-actions"><button class="btn btn-ghost" data-action="import-gacha">导入 UIGF / 异环</button><button class="btn btn-ghost" data-action="gacha-source" data-value="endfield">终末地同步</button></div></div></div>`;
   }
   const { games, game, user } = selection;
 

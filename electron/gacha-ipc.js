@@ -26,6 +26,7 @@ const qrLogin = require('./qr-login');
 const gachaIcons = require('./gacha-icons');
 const roster = require('./roster');
 const kuroGacha = require('./kuro-gacha');
+const kuroPredownload = require('./kuro-predownload');
 const renderApi = require('./render-api');
 
 /* 云备份密码 / 加密口令在 safeStorage 里的键名，与 main.js 里那份必须一致 */
@@ -111,9 +112,13 @@ function installGachaIpc(ctx) {
         // 鸣潮：分享链接路线。链接在 Client 日志里（ELog XOR 加密），
         // 一次分享可查 11 个卡池；没有米哈游那种缓存，必须用户点过一次分享。
         const server = (game.servers || []).find((item) => item.id === game.activeServerId);
-        let installRoot = server?.root;
-        if (!installRoot && game.target) installRoot = path.dirname(game.target);
-        if (!installRoot && server?.path) installRoot = path.dirname(server.path);
+        // 本体根（不是 exe 所在层）：鸣潮的分享日志在 <根>\Client\Saved\Logs，
+        // 老数据里 server.root 可能被填成 Client\Binaries\Win64，这里向上找回来。
+        const installRoot =
+          kuroPredownload.findKuroClientRoot(server?.root || '') ||
+          kuroPredownload.findKuroClientRoot(server?.path || '') ||
+          server?.root ||
+          '';
         if (!installRoot || !targetExists(server?.path)) {
           throw new Error('先配置鸣潮的客户端路径');
         }

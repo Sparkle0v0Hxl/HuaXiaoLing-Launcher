@@ -139,6 +139,17 @@ const MUTABLE_NAME_FRAGMENTS = [
   'save',
   'preference',
   'userdata',
+  // 鸣潮（库洛）运行时自己写的账号 / 画质 / 性能 / 崩溃上报状态。
+  // 硬链接 = 共享 inode：官服写一次，B服（或 WeGame）那份也跟着变。
+  // 命中的都是小文件，错判代价是几 MB 盘，漏判一次就是两个渠道互相污染。
+  'kurodata',
+  'distinctid',
+  'cos_perf.data',
+  'performance_data',
+  'crashsight_data',
+  'config.txt',
+  'cert.pem',
+  'key.pem',
 ];
 
 // 扩展名（Xel 原表 + 花筱灵实测需要的 .blc / .dat）
@@ -175,6 +186,10 @@ const MUTABLE_DIR_SEGMENTS = [
   'persistentdata',
   'crash',
   'crashes',
+  // 鸣潮：画质档位缓存、性能采样、崩溃上报目录（运行时可写）
+  '.quality',
+  'wesight',
+  'crashsight_data',
 ];
 
 // 顶层目录整棵拷贝（花筱灵实测：这些都是游戏运行时自己写的）

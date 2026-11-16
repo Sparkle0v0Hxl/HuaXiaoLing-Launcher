@@ -1,23 +1,23 @@
 {
-  "version": "2.12.0",
-  "title": "花筱灵启动器 2.12.0",
-  "date": "2026-11-16",
-  "notes": "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。\n2.12.0。这一版把「哪个服能干什么」收成一张权威表，七个游戏的下载 / 更新 / 预下载 / 硬链接全部对齐，并且更新和预下载都能拿别的服当硬链接源，只补差异文件。\n渠道能力统一：以前「这个渠道能不能一键下载、能不能检查更新、能不能预下载」散在十几处各写一份名单，改一个游戏要翻半天，还容易两边打架。现在后端一张表（electron/game-channels.js）统一算好，前端一律读它。\n崩坏3 补回「硬链接生成一份」：官方 HoYoPlay 接口实测只有官服（bh3_cn）有资源清单，B服 和国际服查不到分支，所以它能硬链接、能修复，但一键下载和检查更新仍只有官服。国际服 / B服 请用各自的官方启动器更新本体。\n鸣潮补回「修复」按钮：后端修复分支（走 bundle 清单逐文件校验，特意不用会覆盖回旧版的 legacy 清单）一直存在，只是界面上没入口。另外把「更新鸣潮」的 IPC 暴露给了界面，之前主进程注册了但 preload 没暴露，界面上根本调不到。\n更新能跨服硬链接补齐：鸣潮和明日方舟（Yostar 三区）的「更新本体」以前只能自己从头下，现在会先拿你别的服已经更新好的文件做硬链接，缺的再下差异。原神 / 星铁 / 绝区零 / 崩坏3 / 终末地 / 方舟国服 这条路本来就有，这版补齐最后两个。\n预下载也能跨服复用：这是这次改动最大的一块。四条预下载链路（米哈游 ldiff 补丁包、米哈游分块、终末地 Diffs 分包、鸣潮暂存目录）以前都是纯联网下载，现在都会先去别的服找同名同内容的文件直接硬链接过来。终末地以前在应用阶段被特意排除在外，现在也放开了。\n启动图不再黑屏一两秒：以前要先加载数据、补种子数据、扫四个游戏安装目录、判一次管理员权限（同步跑一次 PowerShell），全部做完才建启动图窗口，这段 1.4~1.6 秒里进程一个窗口都没有。现在启动图提到 whenReady 第一行，实测从 1.5 秒提前到 0.7 秒左右。\n异环国际服的路口留回来了：之前渠道表改窄把它删掉了，虽然异环国际服没有官方渠道配置、做不了自动切服和预下载，但你真装了国际服客户端的话，至少要能选路径、能从花筱灵启动。现在它回来了，点它会明确告诉你能做什么不能做什么。\n这一版还修了这些：崩铁 / 绝区零 B服 的「硬链接生成一份」、终末地没生成运行时却显示绿灯（现在黄灯提示「需要生成」，点主按钮直接弹和别的游戏一样的生成面板）、手动填写游戏 UID 的输入框（角色列表拉不出来时也能同步抽卡）、歌单链接或 QQ 音乐 cookie 带裸 % 会直接报错、几个只存在于样式里却从没定义过的颜色变量。",
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.0/HuaXiaoLing-2.12.0-Portable.zip",
+  "version": "2.12.1",
+  "title": "花筱灵启动器 2.12.1",
+  "date": "2026-11-17",
+  "notes": "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。\n2.12.1。\n新增：明日方舟台服（繁体中文服）。\n方舟台服可下载、可更新、可修复、可预下载。\n方舟台服能跟国服官服互相硬链接，约 35% 文件直接复用。\n方舟台服与日服韩服协议不同，不能互链。\n修复：鸣潮装在深层目录时被误判成「不是官方客户端」。\n修复：鸣潮硬链接会共享两个渠道都在改的文件，现改为各写各的。\n改进：鸣潮 WeGame 版转换按钮直接放在服务器那一行。\n补齐：崩坏3 国际服资源清单。\n修正：更新弹窗里的渠道能力表错配。",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.1/HuaXiaoLing-2.12.1-Portable.zip",
   "deltas": [
     {
-      "from": "2.10.2",
-      "to": "2.12.0",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.0/delta-2.10.2-to-2.12.0.zip",
-      "sha256": "b659e8c0e40dd295fe34edf0f5f5911090f9427d5fb834b565395efdadc2bf7c",
-      "size": 19272116
+      "from": "2.12.0",
+      "to": "2.12.1",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.1/delta-2.12.0-to-2.12.1.zip",
+      "sha256": "653d115babe9939676212f1b13326338cfb60865c33fb96966f21dfcd587eafb",
+      "size": 25031
     }
   ],
-  "sha256": "92a7692f64e0a74d26ba197d3145bbe6bfd384acbfbb5cf49abfe2dab9b31396",
-  "size": 214224786,
+  "sha256": "f42b3ee2493fd55930afc419a66bf24d8509be4b519301b4718842aa397225ab",
+  "size": 214238033,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "VJzbyEZqSzGVeUoE01ACOtxk7c+k3xQd52j1AMwCDCDXgsBb8HAX5Lcvp/MFzF9SaMxNfLS+uwBlE7iM9I80Ag=="
+    "value": "eRkIgrbPtz6luydsSiGdQlkD27cb0jMgvsMGUdUNqSdlgyGSYZzCLDeGWXz4Xc0T4RUlgamfVLeNAlBF/N+xBw=="
   }
 }

@@ -286,6 +286,17 @@ function installMiscIpc(ctx) {
           targetRoot,
           signal,
           onProgress: emit,
+          // WeGame 目录里的记账 / 渠道件 / 运行时状态必须各留一份：
+          // 硬链接共享 inode 会让 WeGame 版写一次就把官服那份也改了。
+          copyDirs: [
+            'launcherDownload',
+            'launcherDownloadConfig',
+            'Client/Config',
+            'Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland/KRSDKRes',
+            '.quality',
+            'wesight',
+            'crashsight_data',
+          ],
         });
         const done = { jobId, ok: true, ...result, phase: 'done' };
         // 任务面板只认 link:progress 的 done 帧（src/app.js 的 onLinkProgress

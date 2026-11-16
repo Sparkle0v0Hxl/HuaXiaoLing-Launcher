@@ -834,6 +834,30 @@ function serverRow(game, server) {
    */
   const canPrepare = game.builtinKey === 'endfield' && server.channel !== 'official';
   /*
+   * 「转换为 WeGame 版」直达按钮（用户 2026-11-17 报障：
+   * 「那官服怎么切换 wegame 服？不是还有一套教程吗」）。
+   *
+   * 那套四步教程一直都在（src/views/modals.js 的 openWeGameConvertModal：
+   * 在 WeGame 建下载任务 → 暂停并完全退出 WeGame → 回这里点开始转换 →
+   * 回 WeGame 点继续下载补渠道件），代码逐行保留，功能没丢。
+   * 但入口只挂在 openServerSetupDialog 面板里，而那个面板只有
+   * 「这一服不可用 → 点重建 / 生成」时才进得去 —— 官服明明是好的，
+   * 最该转换的就是它，反而没有入口。
+   *
+   * 所以在服务器行的工具条上直接给一个按钮，走 actions.js 里已有的
+   * case 'wegame-convert'（openWeGameConvertModal 直接可用）。
+   *
+   * 显示条件：
+   *   · 鸣潮；
+   *   · 这一行是官方体系渠道（官服 / B服）—— WeGame 版不用自己转自己；
+   *   · WeGame 那一行还没就绪（已经装好就不用再转一遍）。
+   */
+  const wegameServer = (game.servers || []).find((item) => item.channel === 'wegame');
+  const showWeGameConvert =
+    game.builtinKey === 'wutheringwaves' &&
+    ['official', 'bilibili'].includes(String(server.channel || '')) &&
+    !(wegameServer && wegameServer.exists);
+  /*
    * 「检查更新」= 游戏级 ∩ 渠道级。
    * 游戏级仍限这四款：只有它们的 Sophon 清单能按 chunk 逐块校验下载；
    * 终末地 / 方舟 / 鸣潮的更新链路不在 Sophon 上（各走自己的官方清单）。
@@ -921,6 +945,11 @@ function serverRow(game, server) {
         ${
           canPrepare
             ? `<button class="st-tool" data-action="open-server-setup" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="生成 / 重新生成这个渠道的独立运行时（以已装客户端为源硬链接相同文件，只下载差异分块；已下载的语音包会保留）">${icon('link')}</button>`
+            : ''
+        }
+        ${
+          showWeGameConvert
+            ? `<button class="st-tool" data-action="wegame-convert" data-game="${esc(game.id)}" title="把这一份官方版硬链接进 WeGame 的下载目录，WeGame 里补齐渠道件就能启动（不用重下 80G）">${icon('link')}</button>`
             : ''
         }
         <button class="st-tool" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
