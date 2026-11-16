@@ -616,15 +616,31 @@ function acctGachaBodyHtml() {
       const tokenOk = account.hasStoken === true;
       const cards = roles.length
         ? roles
-            .map((role) =>
-              acctGameCardHtml({
+            .map((role) => {
+              /*
+               * 每款游戏单独一个「立即同步」。
+               *
+               * 这套功能 2.10.2 在抽卡页底部那个折叠面板里，模块化时整块搬进账号中心，
+               * 但「立即同步」这个按钮漏掉了 —— 后端 gacha:stoken-sync 与 preload 的
+               * api.gacha.stokenSync 都还在，只是界面上没有入口，用户扫码绑定之后
+               * 没法把记录拉回来（抽卡页那四个菜单走的是另一条路，要开游戏刷链接）。
+               */
+              const syncing = acctState.busy === 'sync:' + account.id + ':' + role.game;
+              return acctGameCardHtml({
                 name: GACHA_TOKEN_GAME_NAMES[role.game] || role.game,
                 uid: role.uid,
                 tag: tokenOk ? '可同步' : '缺 SToken',
                 lines: [role.nickname || ''],
                 muted: !tokenOk,
-              }),
-            )
+                actions: tokenOk
+                  ? '<button class="btn btn-ghost btn-mini" data-action="acct-gacha-sync"' +
+                    ' data-value="' + esc(account.id) + '"' +
+                    ' data-game="' + esc(role.game) + '"' +
+                    (syncing ? ' disabled' : '') + '>' +
+                    icon('refresh') + (syncing ? '同步中…' : '立即同步') + '</button>'
+                  : '',
+              });
+            })
             .join('\n')
         : '<p class="acct-empty-line">这个账号还没读到角色</p>';
       const meta = [
@@ -897,11 +913,49 @@ async function acctPerfectLogout() {
 
 async function acctGachaSwitch(accountId) {
   try {
-    await api.gacha.stokenActive(accountId);
+    await api.gacha.stokenActive({ id: accountId });
     toast('已切换抽卡账号', 'success');
     await acctRefreshAll();
   } catch (error) {
     toast(humanError(error), 'error');
+  }
+}
+
+/**
+ * 立即同步：把这个账号在这款游戏下的抽卡记录增量拉回来。
+ *
+ * 后端 syncWithAccount 返回 { ok, game, uid, imported, total }，
+ * imported 是这次新导入的条数，total 是这个角色现在的总数。
+ * 没绑 SToken 时会返回 needStoken:true，转述成「去扫码」而不是「去开游戏」。
+ */
+async function acctGachaSync(accountId, game) {
+  const key = 'sync:' + accountId + ':' + game;
+  if (acctState.busy === key) return;
+  acctState.busy = key;
+  acctRender();
+  try {
+    const result = await api.gacha.stokenSync({ accountId, game });
+    if (!result || !result.ok) {
+      if (result?.needStoken) {
+        toast('这个账号还没绑 SToken，点「扫码绑定」扫一次码就能同步', 'info');
+      } else {
+        toast(result?.error || '同步失败', 'error');
+      }
+      return;
+    }
+    const imported = Number(result.imported) || 0;
+    const total = Number(result.total) || 0;
+    toast(
+      imported ? `同步完成，新导入 ${imported} 条抽卡记录` : '抽卡记录已经是最新的',
+      'success',
+    );
+    /* 同步完 lastSyncAt 会变，重拉一遍让「上次同步」那行跟着更新 */
+    if (imported || total) await acctRefreshAll();
+  } catch (error) {
+    toast(humanError(error), 'error');
+  } finally {
+    acctState.busy = '';
+    acctRender();
   }
 }
 
@@ -976,6 +1030,10 @@ function acctHandleClick(event) {
   }
   if (action === 'acct-gacha-switch') {
     acctGachaSwitch(value);
+    return;
+  }
+  if (action === 'acct-gacha-sync') {
+    acctGachaSync(value, button.dataset.game || '');
     return;
   }
   if (action === 'acct-gacha-manage') {

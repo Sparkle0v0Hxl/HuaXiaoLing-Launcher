@@ -115,6 +115,32 @@ function bindView() {
   }
 
   /*
+   * 直播间输入框：外面那个 .song-live-form 是 div 不是 form，粘完链接按回车不会提交，
+   * 之前按回车完全静默。这里补一条「回车 = 点连接」，元素照 #song-search-input 的写法取。
+   *
+   * input 那条只把值记回 state.live.roomUrl、不重绘：弹幕事件会整块重画点歌卡片，
+   * 输入框的 value 是用 state.live.roomUrl 渲染的，不同步的话刚粘进去的链接会被旧值盖掉。
+   */
+  const liveRoomInput = document.querySelector('#live-room-input');
+  if (liveRoomInput) {
+    liveRoomInput.addEventListener('input', () => {
+      // 只记值，不重渲染，否则输入框会丢焦点
+      state.live.roomUrl = liveRoomInput.value;
+    });
+    liveRoomInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        // 回车等价于点那颗「连接」按钮。最近连接的历史芯片也带 data-action="live-connect"，
+        // 但它们带 data-url，用 :not([data-url]) 排除掉，免得回车连到某条历史记录上。
+        const btn = liveRoomInput.parentElement?.querySelector('[data-action="live-connect"]:not([data-url])');
+        handleAction('live-connect', undefined, btn || liveRoomInput).catch((error) =>
+          toast(humanError(error), 'error')
+        );
+      }
+    });
+  }
+
+  /*
    * 队列过滤框：输入即过滤。这里只重绘 .song-list 这一小块，
    * 输入框和焦点原地不动；折叠状态在过滤时会被忽略（一律全展开）。
    */
@@ -228,6 +254,33 @@ function bindView() {
       state.settings = { ...(state.settings || {}), downloadLimitKBps: kb };
       const saved = await api.updateSettings({ downloadLimitKBps: kb });
       if (saved?.settings) state.settings = saved.settings;
+    });
+  }
+
+  // 音乐缓存上限：和下载限速同一套写法，拖动只改显示，松手才落盘。
+  const musicCacheLimit = document.querySelector('#music-cache-limit');
+  if (musicCacheLimit) {
+    const label = document.querySelector('#music-cache-limit-value');
+    const initial = musicCacheLimit.value;
+    const format = (mb) => {
+      const n = Number(mb) || 0;
+      if (n <= 0) return '不缓存';
+      return n >= 1024 ? `${(n / 1024).toFixed(n % 1024 === 0 ? 0 : 1)} GB` : `${n} MB`;
+    };
+    musicCacheLimit.addEventListener('input', () => {
+      if (label) label.textContent = format(musicCacheLimit.value);
+    });
+    musicCacheLimit.addEventListener('change', async () => {
+      if (musicCacheLimit.value === initial) return;
+      const mb = Number(musicCacheLimit.value) || 0;
+      state.settings = { ...(state.settings || {}), musicCacheLimitMB: mb };
+      const saved = await api.updateSettings({ musicCacheLimitMB: mb });
+      if (saved?.settings) state.settings = saved.settings;
+      try {
+        if (api.musicCacheConfig) await api.musicCacheConfig({ musicCacheLimitMB: mb });
+      } catch {
+        /* 模块自己的 config.json 同步失败也不影响主设置 */
+      }
     });
   }
 

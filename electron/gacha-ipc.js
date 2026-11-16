@@ -7,7 +7,11 @@ const fsp = require('node:fs/promises');
 
 const { loadSecret, saveSecret } = require('./secret-store');
 
-const { loadGachaHistory, loadGachaMeta } = require('./gacha');
+const { loadGachaHistory } = require('./gacha');
+// loadGachaMeta 在 gacha-meta.js，不在 gacha.js。
+// 模块化拆分时这里误写成从 gacha.js 解构，导致 gacha:refresh-meta 一调就
+// "loadGachaMeta is not a function"（图鉴刷新按钮点了没反应）。
+const { loadGachaMeta } = require('./gacha-meta');
 const { syncGacha, extractUrlFromCache } = require('./gacha-sync');
 const nteTool = require('./nte-tool');
 const nteCapture = require('./nte-capture');
@@ -87,8 +91,21 @@ function installGachaIpc(ctx) {
 
     ipcMain.handle('gacha:sync', async (_event, input = {}) => {
       const game = getStore().data.games.find((item) => item.id === input?.gameId);
-      if (!game || !['genshin', 'starrail', 'zzz', 'endfield', 'wutheringwaves'].includes(game.builtinKey)) {
+      if (!game || !['genshin', 'starrail', 'zzz', 'endfield', 'wutheringwaves', 'arknights'].includes(game.builtinKey)) {
         throw new Error('这个游戏没有接入官方抽卡同步');
+      }
+      /*
+       * 明日方舟：走鹰角账号通行证（hypergryph-accounts.json），和米哈游的
+       * SToken 完全是两套账号。以前白名单里没有 arknights，四项同步菜单里
+       * 「从鹰角账号获取 / 全量 / 增量」点了必然报「这个游戏没有接入官方抽卡同步」。
+       * 这里单独分流：syncAccount 自己认 activeId，没绑会回 needToken，
+       * 前端 runGachaSync 收到后弹鹰角账号绑定窗（openGachaAkModal）。
+       */
+      if (game.builtinKey === 'arknights') {
+        return arknightsGacha.syncAccount(app.getPath('userData'), {
+          accountId: input?.accountId,
+          full: input?.full === true,
+        });
       }
       if (game.builtinKey === 'wutheringwaves') {
         // 鸣潮：分享链接路线。链接在 Client 日志里（ELog XOR 加密），
@@ -212,49 +229,80 @@ function installGachaIpc(ctx) {
           full: input?.full === true,
         });
       }
-      try {
-        const store = stokenSync.listAccounts(userData);
-        /*
-         * 多账号时不能只看 activeId。
-         *
-         * 实测：activeId 是账号 B，但抽卡页停的是账号 A 的原神 UID，
-         * 拿着 B 的 SToken 去申 A 的 authkey，米哈游回
-         * 「角色还未绑定通行证账号」—— 用户看到这句只会以为 SToken 坏了。
-         * 有 uid 就先按 uid 反查归属账号，查不到才退回 activeId。
-         */
-        const targetUid = String(input?.uid || '');
-        const owner = targetUid
-          ? getStore().accounts.find((item) =>
-              (item.roles || []).some(
-                (role) => String(role.uid) === targetUid && (!role.game || role.game === game.builtinKey)
-              )
-            )
-          : null;
-        const account =
-          (accountId && getStore().accounts.find((item) => item.id === String(accountId))) ||
-          owner ||
-          getStore().accounts.find((item) => item.id === getStore().activeId);
-        if (account) {
-          /* 换成 owner 之后也要同步把 uid 定准，别再让两边对不上 */
-          const uid = targetUid || String(account.roles?.find((role) => role.game === game.builtinKey)?.uid || '');
-          const result = await stokenSync.syncWithAccount(userData, {
-            accountId: account.id,
-            game: game.builtinKey,
-            uid,
-            full: input?.full === true,
-          });
-          if (result.ok) return result;
+      /*
+       * 四项同步菜单里「从 SToken 获取」要真的只用 SToken，「从网页缓存获取」
+       * 要真的只用缓存。以前前端只有 allowCache（控制 SToken 失败后是否兜底），
+       * 绑了 SToken 时点「从网页缓存获取」仍会先走 SToken，等于骗用户。
+       *
+       * 这两个开关只影响米哈游三款：星铁 / 终末地 / 鸣潮 / 方舟在前面都已
+       * 各自分流，不经过这段。
+       */
+      const stokenOnly = input?.stokenOnly === true;
+      const cacheOnly = input?.cacheOnly === true;
+      if (!cacheOnly) {
+        try {
+          const store = stokenSync.listAccounts(userData);
           /*
-           * 没绑 SToken 是「缺凭据」，不是「链接过期」。
-           * 再走缓存只会拿到一句误导人的「抽卡链接已过期」，直接回给界面。
+           * 多账号时不能只看 activeId。
+           *
+           * 实测：activeId 是账号 B，但抽卡页停的是账号 A 的原神 UID，
+           * 拿着 B 的 SToken 去申 A 的 authkey，米哈游回
+           * 「角色还未绑定通行证账号」—— 用户看到这句只会以为 SToken 坏了。
+           * 有 uid 就先按 uid 反查归属账号，查不到才退回 activeId。
            */
-          if (result.needStoken) return { ...result, triedCache: false };
-          tokenError = result.error || 'SToken 同步失败';
-          if (!input?.allowCache) return { ...result, triedCache: false };
+          /*
+           * 账号库就在上面那行 listAccounts 的返回值里，不要再问 getStore() 要。
+           *
+           * getStore() 是 JsonStore 实例，账号挂在 getStore().data 上；写成
+           * getStore().accounts 恒为 undefined，后面一 .find 就抛
+           * 「Cannot read properties of undefined (reading 'find')」——
+           * 表现是点「从 SToken 获取」后整块菜单变灰、只留一行英文报错，
+           * 缓存兜底也走不到（异常被外层 catch 吞成 tokenError）。
+           * 而且这里要的本来就是 SToken 账号库（stoken-accounts.json），
+           * 和 JsonStore 里的 games 是两回事。
+           */
+          const knownAccounts = store.accounts || [];
+          const targetUid = String(input?.uid || '');
+          const owner = targetUid
+            ? knownAccounts.find((item) =>
+                (item.roles || []).some(
+                  (role) => String(role.uid) === targetUid && (!role.game || role.game === game.builtinKey)
+                )
+              )
+            : null;
+          const account =
+            (accountId && knownAccounts.find((item) => item.id === String(accountId))) ||
+            owner ||
+            knownAccounts.find((item) => item.id === store.activeId);
+          if (account) {
+            /* 换成 owner 之后也要同步把 uid 定准，别再让两边对不上 */
+            const uid = targetUid || String(account.roles?.find((role) => role.game === game.builtinKey)?.uid || '');
+            const result = await stokenSync.syncWithAccount(userData, {
+              accountId: account.id,
+              game: game.builtinKey,
+              uid,
+              full: input?.full === true,
+            });
+            if (result.ok) return result;
+            /*
+             * 没绑 SToken 是「缺凭据」，不是「链接过期」。
+             * 再走缓存只会拿到一句误导人的「抽卡链接已过期」，直接回给界面。
+             */
+            if (result.needStoken) return { ...result, triedCache: false };
+            tokenError = result.error || 'SToken 同步失败';
+            if (stokenOnly || !input?.allowCache) return { ...result, triedCache: false };
+          } else if (stokenOnly) {
+            /* 强制 SToken 但一个账号都没绑：别偷偷落到下面的缓存分支 */
+            return {
+              ok: false,
+              needStoken: true,
+              error: '还没绑 SToken。点左下角头像 →「抽卡账号」扫一次码，以后就不用开游戏了。',
+            };
+          }
+        } catch (error) {
+          tokenError = String(error?.message || error);
+          if (stokenOnly || !input?.allowCache) return { ok: false, error: tokenError, triedCache: false };
         }
-      } catch (error) {
-        tokenError = String(error?.message || error);
-        if (!input?.allowCache) return { ok: false, error: tokenError, triedCache: false };
       }
 
       const server = (game.servers || []).find((item) => item.id === game.activeServerId);

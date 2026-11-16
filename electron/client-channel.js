@@ -172,6 +172,25 @@ function channelFromInstallPath(exePath) {
   return configChannelFromPath(exePath) || pathChannelHint(exePath) || 'official';
 }
 
+/**
+ * 渠道 key → 界面上给用户看的名字。
+ *
+ * 只在「渠道体检」的提示文案里用（切服/启动时发现这一行指向了别的服的客户端）。
+ * 别拿它当渠道表的权威来源：哪个渠道存不存在由 main.js 的 builtinChannels 说了算。
+ */
+function channelLabel(channel) {
+  const key = String(channel || '').trim();
+  const map = {
+    official: '官服',
+    bilibili: 'B服',
+    global: '国际服',
+    wegame: 'WeGame 版',
+    custom: '自定义',
+    taiwan: '台服',
+  };
+  return map[key] || key || '未知渠道';
+}
+
 module.exports = {
   decodeIni,
   parseIni,
@@ -182,4 +201,5 @@ module.exports = {
   gameVersionFromPath,
   pathChannelHint,
   channelFromInstallPath,
+  channelLabel,
 };

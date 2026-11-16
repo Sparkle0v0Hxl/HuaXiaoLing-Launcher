@@ -30,6 +30,25 @@ const diskSpace = require('./disk-space');
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+/**
+ * 渠道 → 官方 CDN 目录名。
+ *
+ * 以前两处都是 `publish_ob${channel === 'bilibili' ? '_B' : ''}`：只要渠道不是
+ * bilibili 就**静默**落到官服的 publish_ob。异环只有官服 / B服 两条真渠道，
+ * 但老数据里可能残留一条「国际服」占位行（历史上渠道表误写成 official/global）；
+ * 万一它被填上路径，点预下载就会把**官服**的启动器资源铺进国际服目录 —— 既下错
+ * 东西又污染目录。这里改成显式枚举：认不出的渠道直接报错，让用户看到原因，
+ * 而不是悄悄拿错清单。
+ */
+function channelCdnDir(channel) {
+  if (channel === 'official') return 'publish_ob';
+  if (channel === 'bilibili') return 'publish_ob_B';
+  throw new Error(
+    `异环没有这个渠道的启动器资源清单：${channel || '(空)'}（只支持官服 / B服）`
+  );
+}
+
+
 /** 逐段比较版本号：a 比 b 新返回 1，一样返回 0，更旧返回 -1。 */
 function compareVersion(a, b) {
   const pa = String(a || '').replace(/^v/i, '').split(/[.\-+_]/).map((n) => parseInt(n, 10) || 0);
@@ -424,7 +443,7 @@ async function predownload({
     if (hit) iniUrl = hit[1].trim();
   }
   if (!iniUrl && channel) {
-    iniUrl = `https://yhcdn1.wmupd.com/hd/publish_ob${channel === 'bilibili' ? '_B' : ''}/launcher/Version.ini`;
+    iniUrl = `https://yhcdn1.wmupd.com/hd/${channelCdnDir(channel)}/launcher/Version.ini`;
   }
   if (!iniUrl) throw new Error('没有找到版本清单地址（VersionInfoFileURL）');
 
@@ -573,7 +592,7 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
     if (hit) iniUrl = hit[1].trim();
   }
   if (!iniUrl && channel) {
-    iniUrl = `https://yhcdn1.wmupd.com/hd/publish_ob${channel === 'bilibili' ? '_B' : ''}/launcher/Version.ini`;
+    iniUrl = `https://yhcdn1.wmupd.com/hd/${channelCdnDir(channel)}/launcher/Version.ini`;
   }
 
   const localVersion = (localIni.match(/^\[VERSION\][\s\S]*?^Version=(.+)$/m) || [])[1]?.trim() || '';

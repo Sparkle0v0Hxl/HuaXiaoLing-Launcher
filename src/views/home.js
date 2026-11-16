@@ -611,7 +611,9 @@ function startServerPanel(game) {
   const status = active ? serverState(active) : null;
   const fileName = active && active.path ? active.path.split(/[\\/]/).pop() : '';
   const activeBlock = active ? serverBlockHint(active) : null;
-  const ready = servers.filter((server) => server.exists && !server.incomplete).length;
+  // 「x / y 可用」只数真的能直接启动的：终末地那些「能切但独立运行时还没生成」的
+  // 行（needRuntime）不算，否则这一行永远写着全绿满额（用户 2026-11-16 报障）。
+  const ready = servers.filter((server) => server.exists && !server.incomplete && !server.needsRuntime).length;
   const open = Boolean(state.startServerMenu);
 
   const itemMarkup = (server) => {
@@ -626,7 +628,9 @@ function startServerPanel(game) {
     // （未选 exe / 告警块），有文件的行只留 渠道 tag，行高更矮
     const sub = file ? '' : (block ? block.short : '') || '';
     // 没装好的行点下去不是「切过去」，而是问「怎么把它补上」（硬链接 / 选路径 / 扫描）
-    const usable = server.exists && !server.incomplete;
+    // 终末地「能切但独立运行时还没生成」的行也算没装好：点下去要弹那个面板，
+    // 而不是直接切服自愈（用户 2026-11-16 要求「和别的游戏一样」）。
+    const usable = server.exists && !server.incomplete && !server.needsRuntime;
     return `
         <button class="start-server-item ${server.active ? 'is-active' : ''} ${
           usable ? '' : 'is-unavailable'
@@ -789,35 +793,44 @@ function openServerSetupDialog(gameId, serverId) {
   const game = state.games.find((item) => item.id === gameId);
   const server = game && (game.servers || []).find((item) => item.id === serverId);
   if (!game || !server) return;
-  // 能当硬链接源的：别的渠道、文件真的还在
+  /*
+   * 能当硬链接源的：别的渠道、文件真的还在。
+   *
+   * 2026-11-16 用户定规则（原话）：「这些硬链接，都可以互相为源，只要有一个服是全的，
+   * 就可以随便硬链接别的服和官服」。以前这里排掉了 `global`，等于认定国际服永远不能
+   * 当源 —— 那是我按「鸣潮国际服和国服差异 98%」的经验推的，推错了：复用率低不等于
+   * 不能当源。buildCrossRuntime / prepareSophon 都是「按清单逐文件比 hash，相同才链接」，
+   * 拿差异大的服当源最多是复用少、仍要从 CDN 下，结果依然正确。
+   * 所以这里只留「这个服自己是不是完整客户端」这一条判据。
+   */
   const bases = (game.servers || []).filter(
     (item) =>
-      item.id !== server.id && item.exists && !item.incomplete && item.channel !== server.channel && item.channel !== 'global'
+      item.id !== server.id && item.exists && !item.incomplete && item.channel !== server.channel
   );
   const canLink = bases.length > 0;
   const baseNames = bases.map((item) => item.name).join(' / ');
-  /* 硬链接切服不是所有游戏都支持：主进程 servers:activate 里只有
-   * 原神国际服 / 终末地全渠道 / 明日方舟全渠道三个分支会生成运行时，
-   * 其它（星铁、绝区零、崩3、异环…）点了「切换」只会走普通路径切换，
-   * 弹窗里就不该出现「硬链接生成一份」这一项，免得用户以为点了能用。
+  /*
+   * 能不能「硬链接生成一份」：一律读后端算好的 server.caps.link。
+   *
+   * 2026-11-16 用户把规则一次说清：「原神是全都可以硬链接的，星铁也是全都可以，
+   * 绝区零也是全都可以，崩坏三…应该也是全都可以的，终末地也是全都可以，
+   * 明日方舟是官服B服可以硬链接，然后国际服的三个可以硬链接，鸣潮官服B服wegame
+   * 都可以硬链接」。这张表统一放在 electron/game-channels.js，由 publicGame 挂到
+   * 每个 server 上 —— 前端不再自己维护一份，避免「后端支持、界面没入口」。
+   *
+   * 以前的写法是按引擎手抄一份渠道数组（原神只放 global、星铁绝区零漏掉、
+   * 鸣潮只放两个服），每次渠道有变化都要改这里，改漏就是用户看到的
+   * 「这个服的按钮怎么没了」。server.caps 缺失时（老渲染层缓存）退回 true，
+   * 宁可多显示一个入口，也不要让功能凭空消失。
    */
-  /* 硬链接切服：原神国际服 / 终末地 / 方舟，以及鸣潮官服↔B服（用户 m29016/m29018
-   * 「三个互相为源」）。鸣潮国际服差异约 98%、WeGame 版本身是完整客户端，都不在此列。 */
-  const canLinkByEngine =
-    (game.builtinKey === 'genshin' && server.channel === 'global') ||
-    game.builtinKey === 'endfield' ||
-    game.builtinKey === 'arknights' ||
-    (game.builtinKey === 'wutheringwaves' &&
-      ['official', 'bilibili'].includes(String(server.channel || ''))) ||
-    // 异环：官服 / B服能硬链接，国际服（global）不能（用户实测）
-    (game.builtinKey === 'neverness' &&
-      ['official', 'bilibili'].includes(String(server.channel || '')));
+  const canLinkByEngine = server.caps ? server.caps.link === true : true;
   /* 只要引擎支持就显示「硬链接生成一份」，无源时置灰（canLink=false 走 disabled），
    * 不再整个隐藏 —— 用户反馈「别的服没有硬链接可以切换，为啥全亮着」：亮着但点了
    * 没用比置灰更迷惑，置灰并说明原因才对。 */
   const showLink = canLinkByEngine;
   /* 下载引擎表与 modals.js 的 DOWNLOAD_GAME_ENGINES 同源：
-   * 有引擎的游戏可以直接进一键下载弹窗（真下载，不是 UI 摆设）。 */
+   * 有引擎的游戏可以直接进一键下载弹窗（真下载，不是 UI 摆设）。
+   * 渠道是否能下再看 server.caps.download（崩坏3 只有官服有官方清单）。 */
   const DOWNLOAD_SETUP_ENGINES = {
     genshin: 'sophon',
     starrail: 'sophon',
@@ -825,11 +838,13 @@ function openServerSetupDialog(gameId, serverId) {
     bh3: 'sophon',
     endfield: 'endfield',
     arknights: 'endfield',
-    // 鸣潮：库洛官方 bundle 清单引擎（三渠道都支持）。这里只判 truthy，
+    // 鸣潮：库洛官方 bundle 清单引擎（官服/B服/国际服都支持）。这里只判 truthy，
     // 真正的引擎分发在 modals.js 的 DOWNLOAD_GAME_ENGINES 里。
     wutheringwaves: 'kuro',
   };
-  const canDownload = Boolean(DOWNLOAD_SETUP_ENGINES[game.builtinKey]);
+  const canDownload =
+    Boolean(DOWNLOAD_SETUP_ENGINES[game.builtinKey]) &&
+    (server.caps ? server.caps.download === true : true);
   openModal(
     `<div class="modal-backdrop" data-backdrop>
       <div class="modal narrow modal-setup" role="dialog" aria-modal="true">

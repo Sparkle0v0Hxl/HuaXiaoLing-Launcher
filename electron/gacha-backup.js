@@ -285,7 +285,18 @@ async function propfind(config, url, depth = '1') {
       /<[^>]*:href>([^<]+)</i.exec(block)?.[1]?.trim() || /<href>([^<]+)</i.exec(block)?.[1]?.trim();
     if (!href) continue;
     const isCollection = /<[^>]*:?collection\s*\/?>/i.test(block);
-    const name = decodeURIComponent(href.split('/').filter(Boolean).pop() || '');
+    /*
+     * 文件名解码也要包 try：WebDAV 服务端返回的 href 百分号转义未必合法
+     * （有些网盘会把中文名转义成 xx%，或原样吐 %），
+     * 这时 decodeURIComponent 抛 URIError 会让整个目录都列不出来 ——
+     * 一个文件名坏掉不该拖垮「备份列表」。解不开就按原文。
+     */
+    let name = href.split('/').filter(Boolean).pop() || '';
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      /* 保持原文 */
+    }
     entries.push({
       name,
       href,

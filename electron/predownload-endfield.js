@@ -27,6 +27,7 @@ const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 
 const { PROFILES, findSevenZip, decryptManifest, encryptManifest } = require('./endfield-packs');
+const linkSource = require('./link-source');
 const netThrottle = require('./net-throttle');
 
 const UA =
@@ -383,7 +384,7 @@ async function downloadPack(pack, target, signal, onTick) {
   throw new Error(`预下载包下载失败 ${path.basename(target)}：${lastError?.message || '未知错误'}`);
 }
 
-async function startEndfieldPredownload({ channel, installRoot, signal, onProgress }) {
+async function startEndfieldPredownload({ channel, installRoot, signal, onProgress, linkSources = [] }) {
   const profile = profileFor(channel);
   if (!profile) throw new Error('没有这个终末地渠道');
   if (!supported(channel)) throw new Error('Steam 渠道的更新由 Steam 自己负责，没有预下载包');
@@ -436,6 +437,46 @@ async function startEndfieldPredownload({ channel, installRoot, signal, onProgre
         totalBytes,
       });
       continue;
+    }
+    /*
+     * 跨服复用：别的服已经预下载过同一个分包，直接硬链接过来。
+     *
+     * 分包名字是官方 URL 的最后一段，两个客户端下的是同一份字节（官方更新靠
+     * 「同名 + 同 size + 同 md5」命中来跳过下载，见文件头第 2 点），所以判定口径
+     * 必须和上面 reused 那段一模一样，不能放宽。
+     */
+    if (linkSources.length) {
+      const grabbed = await linkSource.reuseNamedFile({
+        target: file,
+        roots: linkSources,
+        subdir: DIFFS_DIR,
+        name,
+        match: async (candidate) => {
+          try {
+            const stat = await fsp.stat(candidate);
+            if (!stat.isFile()) return false;
+            if (pack.size && stat.size !== pack.size) return false;
+            return !pack.md5 || (await md5File(candidate)) === pack.md5;
+          } catch {
+            return false;
+          }
+        },
+      });
+      if (grabbed.ok) {
+        skipped += 1;
+        bytesDone += pack.size;
+        onProgress?.({
+          phase: 'download',
+          current: name,
+          processed,
+          total: packs.length,
+          downloaded,
+          skipped,
+          bytesDone,
+          totalBytes,
+        });
+        continue;
+      }
     }
     await downloadPack(pack, file, signal, (delta) => {
       bytesDone += delta;
@@ -503,11 +544,38 @@ function hpatchzPath() {
   return path.join(__dirname, 'vendor', 'hpatchz.exe');
 }
 
-async function applyPatchNode({ installRoot, tempDir, stageDir, vfsBase, item }) {
+async function applyPatchNode({ installRoot, tempDir, stageDir, vfsBase, item, linkSources = [] }) {
   const name = String(item.name || '').replace(/\\/g, '/');
   if (!name || name.includes('..')) throw new Error(`patch.json 里有非法文件名：${name}`);
   const target = path.join(stageDir, name);
   await fsp.mkdir(path.dirname(target), { recursive: true });
+
+  /*
+   * ⓪ 跨服复用：别的服更新完之后，这个文件在那边已经是目标版本了，直接硬链接过来，
+   *    连解压/打差分都省了（用户 2026-11-16「点更新游戏，就是重新硬链接，补齐差异文件」）。
+   *
+   *    判定口径只用目标 md5 —— patch.json 里给了 md5 才敢复用，没给就老老实实走原路。
+   *    路径按「安装根目录 + 清单里的相对路径」找候选；找不到就是找不到，reuseFromSources
+   *    内部 match 会逐个 md5 校验，不会误命中别的文件。
+   */
+  if (linkSources.length && item.md5) {
+    const reused = await linkSource.reuseFromSources({
+      file: { file: name },
+      target,
+      gameKey: 'endfield',
+      sources: linkSources,
+      match: async (candidate) => {
+        try {
+          const stat = await fsp.stat(candidate);
+          if (!stat.isFile()) return false;
+          return (await md5File(candidate)) === String(item.md5).toLowerCase();
+        } catch {
+          return false;
+        }
+      },
+    });
+    if (reused.ok) return 'reuse';
+  }
 
   // ① 包里带了完整文件：直接拷过去，按目标 md5 校验。
   if (item.local_path) {
@@ -610,7 +678,7 @@ async function moveDirContents(source, target) {
  * 顺序和鹰角官方一致：命中已下的包 → 解压（cd_key）→ patch.json 差分 → stage → commit → 删 Diffs。
  * 所有写入都先落在临时目录，任何一步校验失败就整体中止，绝不会把半成品写进游戏目录。
  */
-async function applyEndfieldPredownload({ channel, installRoot, signal, onProgress }) {
+async function applyEndfieldPredownload({ channel, installRoot, signal, onProgress, linkSources = [] }) {
   const profile = profileFor(channel);
   if (!profile) throw new Error('没有这个终末地渠道');
   if (!supported(channel)) throw new Error('Steam 渠道的更新由 Steam 自己负责');
@@ -703,6 +771,7 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
     let patched = 0;
     let copied = 0;
     let verified = 0;
+    let reusedFromSources = 0;
     for (let index = 0; index < items.length; index += 1) {
       throwIfCancelled(signal);
       const kind = await applyPatchNode({
@@ -711,9 +780,11 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
         stageDir,
         vfsBase,
         item: items[index],
+        linkSources,
       });
       if (kind === 'patch') patched += 1;
       else if (kind === 'copy') copied += 1;
+      else if (kind === 'reuse') reusedFromSources += 1;
       else verified += 1;
       onProgress?.({
         phase: 'patch',
@@ -723,6 +794,7 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
         patched,
         copied,
         verified,
+        reused: reusedFromSources,
       });
     }
 
@@ -767,6 +839,7 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
       patched,
       copied,
       verified,
+      reused: reusedFromSources,
       deleted,
       installRoot,
     };

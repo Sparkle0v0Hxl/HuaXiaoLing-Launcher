@@ -27,6 +27,18 @@
 function serverState(server) {
   if (server.incomplete) return { label: '需要重建', cls: 'missing' };
   if (server.active && server.exists) return { label: '当前服务器', cls: 'active' };
+  /*
+   * 终末地非官服渠道：能切，但这一服自己的独立硬链接运行时还没生成
+   * （server.needsRuntime，判据在主进程 publicGame 里）。主进程为了「老用户升级后
+   * 还切得回 B服」把这种行也算 exists，早先界面就一直显示绿灯 + 按钮「切换」，
+   * 用户点进去也弹不出面板（2026-11-16 报障：没弄硬链接也没路径却全绿）。
+   * 这里单独给黄灯档，让「生成」入口顶上来 —— 走和别的游戏一样的
+   * openServerSetupDialog（硬链接生成一份 → 只下差异分块 → 完成才变绿）。
+   * 连 exe 都没选过的行先要选路径，文案分开说。
+   */
+  if (server.needsRuntime) {
+    return { label: server.path || server.root ? '需要生成' : '未选 exe', cls: 'warn' };
+  }
   // 「已经就绪」是正常态，不用再写三个字：左边的点已经是绿的，
   // 状态徽标只留给「要用户动手」的那几种（需要重建 / 目录丢失 / 未配置）。
   if (server.exists) return { label: '', cls: 'ready' };
@@ -768,10 +780,13 @@ async function switchServerProfile(gameId, serverId, options = {}) {
      * 异环的「服务器」是同一个客户端的渠道，真正生效的是 Config.ini。
      * 这段以前只写在启动页下拉里，另外三个入口都没有，所以那几处切完、
      * 游戏里还是原渠道 —— 也是「操作不一样」最明显的一处。
+     *
+     * 国际服（global）也走这里：它不能改 Config.ini（官方没放第三套渠道配置），
+     * 但「选路径 + 从花筱灵启动」必须能用，所以只弹说明、不拦 activate。
      */
     if (
       game.builtinKey === 'neverness' &&
-      ['official', 'bilibili'].includes(String(server.channel || ''))
+      ['official', 'bilibili', 'global'].includes(String(server.channel || ''))
     ) {
       const switched = await switchNteChannel(game, server, server.channel);
       if (!switched) {
@@ -797,7 +812,13 @@ async function switchServerProfile(gameId, serverId, options = {}) {
 
 function serverRow(game, server) {
   const status = serverState(server);
-  const usable = server.exists && !server.incomplete;
+  /*
+   * usable 是「这一服现在点下去就能启动」。
+   * 终末地 needsRuntime 的行（能切、但独立运行时还没生成）不算 usable ——
+   * 否则按钮是「切换」，点下去直接去切服自愈，用户要的却是「先生成」。
+   * 判成不可用后主按钮自动落到 rebuild-server，文案另给「生成」（见下）。
+   */
+  const usable = server.exists && !server.incomplete && !server.needsRuntime;
   const shared = sharedRootWith(game, server);
   const block = serverBlockHint(server);
   /*
@@ -806,28 +827,63 @@ function serverRow(game, server) {
    * （只读大件走硬链接，几乎不占额外空间），再铺该渠道的差异文件。
    * 已下载的语音包（Endfield_Data\Persistent）会保留，不会被删。
    * 判定保持「非官服 + 目录可用」：官服直启本体，没有可重建的运行时可言。
+   *
+   * 2026-11-16 起放宽成「非官服就显示」：运行时还没生成的渠道也必须有这个入口，
+   * 而且和别的游戏一样走 openServerSetupDialog 那套面板（生成 → 下差异分块 →
+   * 完成变绿可切），不再直接闷头 prepare-endfield 只弹一条 toast。
    */
-  const canPrepare =
-    game.builtinKey === 'endfield' &&
-    server.channel !== 'official' &&
-    usable;
+  const canPrepare = game.builtinKey === 'endfield' && server.channel !== 'official';
+  /*
+   * 「检查更新」= 游戏级 ∩ 渠道级。
+   * 游戏级仍限这四款：只有它们的 Sophon 清单能按 chunk 逐块校验下载；
+   * 终末地 / 方舟 / 鸣潮的更新链路不在 Sophon 上（各走自己的官方清单）。
+   * 渠道级不再硬编码 —— 读后端按用户 2026-11-16 定的规则算好的 server.caps.update
+   * （权威表在 electron/game-channels.js；比如崩坏3 目前仍只有官服有清单）。
+   * 这里写 !== false 而不是 === true：老渲染层缓存里可能没有 caps 字段，
+   * 缺字段时宁可多给入口，也不要让按钮凭空消失。
+   */
   const canUpdateSophon =
-    ['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey) && usable;
-  // 修复入口统一挂到服务器卡片上：米哈游走 Sophon 逐 chunk 校验，终末地 / 方舟走官方逐文件清单。
-  // 异环没有常态修复（本体修复交给官方启动器，只在拉不到更新时才提示），所以不在列表里。
+    ['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey) &&
+    usable &&
+    (!server.caps || server.caps.update !== false);
+  /*
+   * 修复入口：米哈游走 Sophon 逐 chunk 校验、终末地 / 方舟走官方逐文件清单、
+   * 鸣潮走 bundle 清单逐文件 size+md5。以前这份游戏名单里漏了鸣潮 ——
+   * 后端 games:repair-game 的鸣潮分支一直存在（走 predownload.updateKuroGame，
+   * 不用 kuroPacks.updateGame 的 legacy 3.7.1 清单），只是界面上没有入口。
+   * 现在统一：游戏级只判「有没有修复实现」，渠道级读用户 2026-11-16 定的规则
+   * 算出来的 server.caps.repair（权威表在 electron/game-channels.js）。
+   * 异环仍不在列表里：没有常态修复，本体修复交给官方启动器，只在拉不到更新时才提示。
+   */
   const canRepairGame =
-    ['genshin', 'starrail', 'zzz', 'bh3', 'endfield', 'arknights'].includes(game.builtinKey) &&
-    usable;
+    ['genshin', 'starrail', 'zzz', 'bh3', 'endfield', 'arknights', 'wutheringwaves'].includes(
+      game.builtinKey
+    ) &&
+    usable &&
+    (!server.caps || server.caps.repair !== false);
   const fileName = server.path ? server.path.split(/[\\/]/).pop() : '';
   const primaryAction = usable
     ? server.active
       ? 'launch-game'
       : 'activate-server'
     : 'rebuild-server';
-  const primaryLabel = usable ? (server.active ? '启动' : '切换') : '重建';
+  // 未就绪的终末地渠道说「生成」而不是「重建」：它压根没有可重建的东西，
+  // 是先要生成一份（硬链接 + 差异分块下载），和别的游戏「重建」是两个意思
+  const primaryLabel = usable
+    ? server.active
+      ? '启动'
+      : '切换'
+    : server.needsRuntime
+      ? '生成'
+      : '重建';
+  const primaryIcon = usable ? (server.active ? 'play' : 'swap') : server.needsRuntime ? 'link' : 'refresh';
   // 一行只留一句能读的话：有 exe 就写文件名，没有才用「未选 exe」这种四字状态。
   // 以前这里叠着 状态胶囊 + 三个徽标 + 一句长提示，四行字挤在 250px 里。
-  const sub = fileName || (block ? block.short : '') || '未选择客户端';
+  const sub =
+    fileName ||
+    (block ? block.short : '') ||
+    (server.needsRuntime ? (server.path || server.root ? '缺独立运行时' : '未选 exe') : '') ||
+    '未选择客户端';
   return `
     <article class="server-tile ${server.active ? 'is-active' : ''} ${
       usable ? '' : 'is-broken'
@@ -864,7 +920,7 @@ function serverRow(game, server) {
         }
         ${
           canPrepare
-            ? `<button class="st-tool" data-action="prepare-endfield" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="重新生成这个渠道的硬链接运行时（从官服本体重建，保留已下载的语音包）">${icon('link')}</button>`
+            ? `<button class="st-tool" data-action="open-server-setup" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="生成 / 重新生成这个渠道的独立运行时（以已装客户端为源硬链接相同文件，只下载差异分块；已下载的语音包会保留）">${icon('link')}</button>`
             : ''
         }
         <button class="st-tool" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
@@ -891,7 +947,7 @@ function serverRow(game, server) {
         }
       </div>
       <button class="btn ${server.active ? 'btn-primary' : 'btn-ghost'} btn-sm st-go" data-action="${primaryAction}" data-id="${esc(game.id)}" data-game="${esc(game.id)}" data-server="${esc(server.id)}">
-        ${icon(usable ? (server.active ? 'play' : 'swap') : 'refresh')}${primaryLabel}
+        ${icon(primaryIcon)}${primaryLabel}
       </button>
     </article>`;
 }
@@ -907,6 +963,11 @@ function serverRow(game, server) {
  *
  * 异环和终末地 Steam 是明确不支持的，但后端给的 reason 必须显示出来 ——
  * 藏起来只会让用户以为功能坏了。
+ *
+ * 这份名单只回答「这款游戏有没有预下载链路」，**渠道级**判据在下面的
+ * predownloadChannelOk 里单独算（现在读 server.caps.predownload）。
+ * arknights 故意不在名单里：后端 electron/predownload.js 的
+ * SUPPORT.arknights.supported === false 是明确的产品决策，不是漏了。
  */
 const PREDOWNLOAD_GAMES = ['genshin', 'starrail', 'zzz', 'bh3', 'endfield', 'neverness', 'wutheringwaves'];
 
@@ -960,16 +1021,28 @@ function predownloadWired(game) {
 }
 
 /**
- * 崩坏3 只有官服在 HoYoPlay 分发体系里：B服走 B 站自有启动器，国际服在
- * sg-hyp-api 里有多条 bh3_global 无法唯一定位（见 sophon.js 的 CHANNELS）。
- * 别的渠道给了入口只会点开报「没有对应的官方渠道参数」，所以直接不渲染。
+ * 预下载的渠道判据统一读 server.caps.predownload —— 权威表在
+ * electron/game-channels.js，按用户 2026-11-16 定的规则算出来：
+ *   · 崩坏3 只有官服：B服走 B 站自有启动器，国际服在 sg-hyp-api 里有多条
+ *     bh3_global 无法唯一定位（见 sophon.js 的 CHANNELS），HoYoPlay 只给 bh3_cn；
+ *   · 异环只认官服（publish_ob）/ B服（publish_ob_B）：国际服没有对应 CDN 前缀
+ *     （见 neverness-predownload.js 的 channelCdnDir），给了入口只会报
+ *     「异环没有这个渠道的启动器资源清单」；
+ *   · 鸣潮四个渠道里只有 wegame 没有库洛 bundle 清单（SERVER_CAPS 里已排除）。
+ * 以前这里是三行硬编码，每加一个渠道就得同步改一次，改漏就是「按钮在但点了报错」。
+ * 注意兜底分支不是死代码：老渲染层缓存里的 server 对象可能还没有 caps 字段。
  */
 function predownloadChannelOk(game, server) {
   if (!game || !server) return false;
-  if (game.builtinKey === 'bh3') return String(server.channel || '') === 'official';
+  if (server.caps) return server.caps.predownload === true;
+  // 老渲染层缓存没有 caps：退回原来的判据，宁可多给入口也不让功能凭空消失
+  const channel = String(server.channel || '');
+  if (game.builtinKey === 'bh3') return channel === 'official';
+  // 异环：国际服留了渠道行，但预下载只认官服 / B服
+  if (game.builtinKey === 'neverness') return channel === 'official' || channel === 'bilibili';
   // WeGame 版没有库洛 bundle 协议的官方清单，更新走 WeGame 自己
   if (game.builtinKey === 'wutheringwaves') {
-    return ['official', 'bilibili', 'global'].includes(String(server.channel || ''));
+    return ['official', 'bilibili', 'global'].includes(channel);
   }
   return true;
 }
@@ -1833,6 +1906,7 @@ async function autoCheckPredownload(game) {
 function nteChannelLabel(channel) {
   if (channel === 'bilibili') return 'B服';
   if (channel === 'official') return '官服';
+  if (channel === 'global') return '国际服';
   return '未读取';
 }
 
@@ -1865,7 +1939,9 @@ function nteChannelMarkup(game, server) {
       <div class="nte-channel-cards">
         ${card('official', '官服', '完美世界账号 · 官方完整链路')}
         ${card('bilibili', 'B服', 'B站账号 · 与官服数据不互通')}
+        ${card('global', '国际服', '只能用官方启动器切换')}
       </div>
+      <p class="nte-notice is-reason"><span>国际服：花筱灵能帮你选路径、从这里启动，但没有对应的官方资源清单，切服和预下载请用异环官方启动器。</span></p>
       <p class="nte-notice">${icon('alert', 'xs')}<span>${esc(notice || '正在读取 NTELauncher 配置…')}</span></p>
       ${reason ? `<p class="nte-notice is-reason">${icon('info', 'xs')}<span>${esc(reason)}</span></p>` : ''}
       ${officialOnly ? `
@@ -1882,6 +1958,30 @@ function nteChannelMarkup(game, server) {
  * 返回是否成功（用户取消/失败都算 false，调用方据此决定要不要继续 activate）。
  */
 async function switchNteChannel(game, server, channel) {
+  /*
+   * 国际服：留入口但不假装能切。
+   *
+   * 异环官方只有 publish_ob（官服）与 publish_ob_B（B服）两套渠道配置和 CDN 前缀，
+   * 逆向出来的 Config.ini 字段里没有国际服那一档（见 electron/neverness-channels.js
+   * 的 CHANNEL_CONFIG）。所以这里不调 setChannel（它会直接抛「异环没有这个渠道」），
+   * 只把边界说清楚，然后**照常往下走 activate** —— 用户装了国际服客户端时，
+   * 选路径、从花筱灵启动这两件事仍然要能用，不能因为不能切服就整行废掉。
+   */
+  if (channel === 'global') {
+    await confirmDialog({
+      title: '异环 · 国际服',
+      message:
+        '异环的国际服渠道留在这里了：你可以给它选一个已装好的客户端路径，\n' +
+        '选完就能直接从花筱灵启动它。\n\n' +
+        '这两件事花筱灵做不了，得用异环官方启动器：\n' +
+        '· 改 Config.ini 自动切服（官方只放了官服 / B服 两套渠道配置）\n' +
+        '· 按官方清单预下载国际服资源\n\n' +
+        '要切国际服，请先完全退出异环官方启动器（含右下角薄荷托盘），在它里面切好后，\n' +
+        '回花筱灵点这一行的「编辑」把路径指过去即可。',
+      confirmText: '知道了',
+    });
+    return true;
+  }
   if (channel === 'bilibili') {
     const ok = await confirmDialog({
       title: '切换到异环 B服',

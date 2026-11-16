@@ -82,6 +82,14 @@ async function fetchEndfieldCharacters() {
   const html = await withRetry(() => fetchText(ENDFIELD_OPERATOR_PAGE), '终末地官网');
   const bySlug = {};
   let match;
+  /*
+   * 这个正则带 g 标志，是模块级共享的：exec 会把 lastIndex 往后推。
+   * 现在循环里没有任何 await/break，一定跑到 exec 返回 null 才结束，
+   * lastIndex 由 JS 自己清零，所以是安全的。但这行显式归零是保险 ——
+   * 以后谁在循环体里加一个 await 或 break，lastIndex 会停在半截，
+   * 下一次刷新就会从上次的位置往后找，前面的干员凭空消失。
+   */
+  ENDFIELD_OPERATOR_RE.lastIndex = 0;
   while ((match = ENDFIELD_OPERATOR_RE.exec(html))) {
     bySlug[match[1]] = {
       name: match[4].trim(),

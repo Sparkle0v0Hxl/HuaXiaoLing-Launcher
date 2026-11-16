@@ -19,6 +19,14 @@
   --accent-ink: #2b1219;
   --accent-soft: rgba(var(--accent-rgb), 0.14);
   --accent-line: rgba(var(--accent-rgb), 0.42);
+  /*
+   * 2.11.1 的伙伴包在追加的账号中心 / 抽卡面板样式里用了 --border 与 --text-soft，
+   * 但这两个名字在本项目里从来没有定义过（我们一直叫 --line / --text-2 / --muted）。
+   * 不补的话那 29 处 border / color 会整条失效（border 变 none、文字继承父色）。
+   * 这里做成别名指向既有变量，深色 / 浅色两套主题都自动跟随。
+   */
+  --border: var(--line);
+  --text-soft: var(--text-2);
 }
 
 :root[data-accent="rose"] {
@@ -10446,7 +10454,7 @@ body.start-mode .view {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 16px;
-  background: linear-gradient(165deg, var(--surface), var(--surface-soft));
+  background: linear-gradient(165deg, var(--surface), var(--surface-soft, var(--surface-2)));
   overflow: hidden;
   transition: border-color 0.18s ease, transform 0.18s ease;
 }
@@ -16003,7 +16011,7 @@ body.start-mode .start-games {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.03);
   font-size: 12.5px;
-  color: var(--text-dim);
+  color: var(--text-dim, var(--muted));
 }
 .nte-capture-status svg { width: 15px; height: 15px; flex: none; }
 .nte-capture-status.is-running { border-color: rgba(255, 122, 184, 0.32); color: var(--text); }
@@ -16013,7 +16021,7 @@ body.start-mode .start-games {
   margin: 8px 0 0;
   font-size: 11.5px;
   line-height: 1.6;
-  color: var(--text-faint);
+  color: var(--text-faint, var(--muted));
 }
 
 /* ---- 抽卡：五星记录（按月分组 / 角色武器筛选） ---- */
@@ -17524,7 +17532,7 @@ body.start-mode .start-games {
   padding: 9px 16px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
 }
 
 .tools-summary-count {
@@ -17569,7 +17577,7 @@ body.start-mode .start-games {
   padding: 14px 16px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -17652,7 +17660,7 @@ body.start-mode .start-games {
   padding: 14px 16px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
 }
 
 .tools-game-head {
@@ -19838,7 +19846,7 @@ body.has-backdrop .gfx-card {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
   text-align: left;
 }
@@ -22865,7 +22873,7 @@ body.sidebar-collapsed .brand {
   padding: 14px 16px;
   text-align: left;
   color: var(--text);
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
   border: 1px solid var(--line);
   border-radius: var(--radius);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
@@ -23052,7 +23060,7 @@ body.sidebar-collapsed .brand {
   flex-direction: column;
   gap: 14px;
   padding: 18px;
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -23151,7 +23159,7 @@ body.sidebar-collapsed .brand {
   align-items: flex-start;
   gap: 12px;
   padding: 28px 24px;
-  background: var(--panel);
+  background: var(--panel, var(--surface-2));
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius);
 }
@@ -23725,7 +23733,7 @@ body.sidebar-collapsed .brand {
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  background: color-mix(in srgb, var(--panel, var(--surface-2)) 60%, transparent);
   color: inherit;
   font: inherit;
   text-align: left;
@@ -26437,6 +26445,16 @@ body.charms-on .page-deco-sprite { display: block; }
 
 .sw-srv-state.missing {
   border-style: dashed;
+}
+
+/*
+ * 黄灯档（终末地待生成独立运行时）：虚线边框同 missing，但文字给琥珀色，
+ * 一眼能分出「要动手」和「它坏了」。用户 2026-11-16 要求这一档不能显示成绿灯。
+ */
+.sw-srv-state.warn {
+  border-style: dashed;
+  border-color: rgba(251, 207, 107, 0.42);
+  color: #fbcf6b;
 }
 
 .sw-srv-unusable .start-server-item-copy strong {
@@ -30909,6 +30927,16 @@ body.sidebar-collapsed .sidebar::after {
   box-shadow: 0 0 0 3px rgba(217, 105, 79, 0.16);
 }
 
+/*
+ * 「黄灯」：能用但还差一步（终末地某个渠道能切、独立硬链接运行时还没生成）。
+ * 和 missing 的红分开 —— 红是「坏了」，黄是「点一下就能补上」。用户 2026-11-16
+ * 明确要求这一档不能显示成绿灯。
+ */
+.st-dot.warn {
+  background: #e0b34a;
+  box-shadow: 0 0 0 3px rgba(224, 179, 74, 0.16);
+}
+
 .st-main {
   flex: 1;
   min-width: 0;
@@ -31264,17 +31292,23 @@ body.sidebar-collapsed .sidebar::after {
 .start-screen .start-dock.is-menu-open .start-server-menu {
   max-height: min(224px, 32vh);
   transform-origin: bottom right;
+  /*
+   * 菜单是功能性 UI：显隐靠上面的 display，这层入场动画只做轻微位移。
+   * 千万别把 opacity 交给动画 —— styles.css L34981 的 `body.is-idle *`
+   * 会 animation-play-state: paused !important，窗口失焦 / 最小化回来后
+   * 动画一旦冻在第 0 帧，opacity:0 就让菜单「加了 is-menu-open 却看不见」，
+   * 表现正是用户说的「所有游戏的服务器选择点击都没反应或者反应慢」(m02332)。
+   */
+  opacity: 1;
   animation: startDockMenuIn 0.15s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* 从按钮那一侧轻轻展开：不再是「啪」地出现一整块 */
 @keyframes startDockMenuIn {
   from {
-    opacity: 0;
     transform: translateY(6px) scaleY(0.96);
   }
   to {
-    opacity: 1;
     transform: translateY(0) scaleY(1);
   }
 }
@@ -33673,6 +33707,12 @@ body.sidebar-collapsed .sidebar::after {
   box-shadow: 0 0 0 3px rgba(250, 179, 101, 0.16);
 }
 
+/* 黄灯：能用但还差一步（终末地待生成独立运行时），和上面同一档色系 */
+.start-screen .start-dock .start-server-item-dot.warn {
+  background: #fbcf6b;
+  box-shadow: 0 0 0 3px rgba(251, 207, 107, 0.18);
+}
+
 /* 名字：官服框同款（白色粗体 13px），渠道标签跟在后面弱化 */
 .start-screen .start-dock .start-server-item-copy {
   display: flex;
@@ -36031,7 +36071,7 @@ body.is-idle .modal-backdrop {
 }
 
 .gacha-token-who small {
-  color: var(--text-dim);
+  color: var(--text-dim, var(--muted));
   font-size: 12px;
 }
 
@@ -36055,7 +36095,7 @@ body.is-idle .modal-backdrop {
 }
 
 .gacha-token-role small {
-  color: var(--text-dim);
+  color: var(--text-dim, var(--muted));
   font-size: 11px;
 }
 
@@ -36103,7 +36143,7 @@ body.is-idle .modal-backdrop {
 }
 
 .gacha-token-account-info small {
-  color: var(--text-dim);
+  color: var(--text-dim, var(--muted));
   font-size: 11px;
   overflow-wrap: anywhere;
 }
@@ -36145,7 +36185,7 @@ body.is-idle .modal-backdrop {
 
 .gacha-token-manual > summary {
   cursor: pointer;
-  color: var(--text-dim);
+  color: var(--text-dim, var(--muted));
   font-size: 13px;
   user-select: none;
 }
@@ -38494,9 +38534,9 @@ body.is-idle .modal-foot {
 }
 
 .acct-icon-btn:hover {
-  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger, #ff7b8a) 40%, transparent);
+  background: color-mix(in srgb, var(--danger, #ff7b8a) 12%, transparent);
+  color: var(--danger, #ff7b8a);
 }
 
 /* —— 角色胶囊 —— */

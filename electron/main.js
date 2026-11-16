@@ -48,6 +48,10 @@ const {
   screen,
 } = require('electron');
 const { loadSecret, saveSecret } = require('./secret-store');
+// 可取消信号：既是真 AbortSignal、又带 cancelled/paused 老字段。
+// 各 IPC 分片里手造 `{ cancelled: false }` 的对象传到 fetch 会 TypeError，
+// 统一用这个工厂造（详见 cancel-signal.js 文件头）。
+const { createCancelSignal } = require('./cancel-signal');
 const { installRosterIpc } = require('./roster-ipc');
 const { installPassportIpc } = require('./passport-ipc');
 const { installPostartIpc } = require('./postart-ipc');
@@ -61,6 +65,13 @@ const crypto = require('node:crypto');
 
 const { JsonStore } = require('./store');
 const clientChannel = require('./client-channel');
+/*
+ * 渠道能力表：某一款游戏的某个渠道「能不能硬链接 / 下载 / 修复 / 更新 / 预下载」
+ * 的唯一权威来源。以前这些白名单散在前端 home.js、servers.js 和后端
+ * servers-ipc.js、sophon.js 十几处，改漏一处就是「按钮没了 / 点了报错」。
+ * 详见 electron/game-channels.js 文件头（有用户 2026-11-16 定的原话规则）。
+ */
+const gameChannels = require('./game-channels');
 const { DownloadManager } = require('./downloads');
 const hgBackgrounds = require('./hg-backgrounds');
 const { ensureSeedData } = require('./seed');
@@ -174,6 +185,7 @@ const {
   validateCustomSource,
   clearResolveCache: clearMusicResolveCache,
   normalizeSourceFlags,
+  migrateLegacySourceFlags,
   disabledSourceOfUrl,
   pickBest,
   kugouSearch,
@@ -294,6 +306,11 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: 'hxl-shot',
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+  {
+    /* 播放过的音频字节缓存：corsEnabled 让音效链的 createMediaElementSource 能取样本 */
+    scheme: 'hxl-audio',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
   },
 ]);
 
@@ -982,6 +999,10 @@ function detectStarwardDbPath() {
 
 function defaultSettings() {
   return {
+    // 音乐缓存：播放过的音频字节落盘，同一首歌再播直接读本机，不再重新下载。
+    // 0 = 不缓存；关掉开关时已缓存的文件保留（只是不再写入 / 不再命中）。
+    musicCache: true,
+    musicCacheLimitMB: 2048,
     profileName: '大小姐',
     avatar: '',
     theme: 'dark',
@@ -6938,7 +6959,24 @@ function ensureServers(game) {
       ['play', 'Play'],
       ['steam', 'Steam'],
     ],
-    neverness: [['official', '官服'], ['global', '国际服']],
+    /*
+     * 异环三条渠道都要留：官服 / B服 / 国际服。
+     *
+     * 2026-11-16 修正（用户：「异环的国际服选项咋没了？就算做不了硬链接，也留个口吧」）。
+     * 之前这里被我改成只有官服 / B服，理由是国际服从头到尾没接过 —— 这个理由只对了
+     * 一半：国际服确实没有 CHANNEL_CONFIG、没有 CDN 前缀、没有硬链接，但它仍然是
+     * 异环的一个真渠道，玩家可能真的装了国际服客户端。渠道行不留，用户连「我有这份
+     * 客户端」都告诉不了启动器，等于把一个渠道整个删掉，太重了。
+     *
+     * 现在：三行都留。国际服是「能选路径、能启动、不能由花筱灵自动切服/预下载」，
+     * 界面点它会给明确说明（见 src/views/servers.js 的 nteChannelMarkup）。
+     * 真正做好的 B服 也一起保留（它以前不是内置渠道，老数据没有 builtinServer 标记）。
+     */
+    neverness: [
+      ['official', '官服'],
+      ['bilibili', 'B服'],
+      ['global', '国际服'],
+    ],
     // 2.4.0 合并自对方分支：崩坏3 与米家另外几款同构：官服 / B服 / 国际服
     bh3: [['official', '官服'], ['bilibili', 'B服'], ['global', '国际服']],
     // 2.4.0 合并自对方分支：明日方舟 国服（官服 / B服）+ 国际服（Yostar，EN/JP/KR）+ 台服
@@ -6978,6 +7016,30 @@ function ensureServers(game) {
         changed = true;
       }
     }
+    /*
+     * 清掉「已经下线的内置渠道」留下的空壳行。
+     *
+     * 渠道表改过之后（例：异环从「官服 / 国际服」改成「官服 / B服」），老数据里
+     * 那条旧渠道会一直留在列表里：它既不在 builtinChannels 里、不会再被补全，
+     * 也没有任何 UI / 后端分支认它，界面上就是一条永远点不亮、切了也没用的空行。
+     *
+     * 只删同时满足三条的：
+     *   ① 是内置占位（builtinServer === true，用户自己加的服务器绝不动）
+     *   ② 没配路径也没配目录（真装过客户端的，哪怕渠道下线也留着让用户能启动）
+     *   ③ 不在当前渠道表里
+     */
+    const keepChannels = new Set(builtinChannels.map(([channel]) => channel));
+    const beforeCount = game.servers.length;
+    game.servers = game.servers.filter(
+      (server) =>
+        !(
+          server.builtinServer === true &&
+          !String(server.path || '').trim() &&
+          !String(server.root || '').trim() &&
+          !keepChannels.has(String(server.channel || ''))
+        )
+    );
+    if (game.servers.length !== beforeCount) changed = true;
   }
 
   let active = game.servers.find((server) => server.id === game.activeServerId);
@@ -7062,22 +7124,55 @@ function publicGame(game) {
     // 更新弹窗的置顶图没配来源时，用它标注「图片来源」。
     officialSite: OFFICIAL_SITES[game.builtinKey] || '',
     activeServerId: game.activeServerId || null,
-    servers: (game.servers || []).map((server) => ({
-      ...server,
+    servers: (game.servers || []).map((server) => {
       // 判据见 serverExistsForView：光有 exe 不够，B服/国际服若还指着官服目录
       // （独立硬链接运行时没生成）就不算这一服可用。终末地那项「有官服本体
       // 当基础就算可切换」是自愈专用，helper 里原样保留了第二分支。
-      exists: serverExistsForView(game, server, endfieldHasBase),
+      const exists = serverExistsForView(game, server, endfieldHasBase);
       /*
-       * 目录本身还在不在。
+       * 终末地：能切（有本体当源，切服时后端会自愈重建），但这一服自己的独立
+       * 运行时还没生成 —— 此刻没有能直接启动的客户端。
        *
-       * 「exe 不在」有两种完全不同的原因：没选过路径，和「整个客户端目录被删/挪走了」。
-       * 界面靠这两个字段分开说人话，否则删完 B服 的人只会看到「还没选择启动程序」，
-       * 根本不知道是自己把共用的客户端目录删掉了。
+       * serverExistsForView 为了「老用户升级后还切得回 B服」把这种行也算 exists，
+       * 于是界面一直按 ready 显示绿灯、按钮写「切换」。用户 2026-11-16 报障：
+       * 「终末地没弄硬链接、也没路径时，对应的服务器不应该全绿，应该是黄灯、
+       * 未选 exe 的状态，点了要出来和别的游戏一样的面板」。
+       * 前端拿这个标记显示黄灯 + 「生成」入口，走 openServerSetupDialog 那套
+       * （硬链接生成一份 → sophon 面板下差异分块 → 完成后才变绿可切）。
+       * 官服直启本体，不算「缺运行时」。
        */
-      rootExists: Boolean(server.root) && targetExistsCached(server.root),
-      active: server.id === game.activeServerId,
-    })),
+      const needsRuntime =
+        game.builtinKey === 'endfield' &&
+        String(server.channel || '') !== 'official' &&
+        exists &&
+        !server.runtimeLinked &&
+        ENDFIELD_PACK_NAMES[server.channel] != null;
+      return {
+        ...server,
+        exists,
+        needsRuntime,
+        /*
+         * 这个渠道支持哪些能力，直接跟着 server 走。
+         *
+         * 前端不再自己维护一份「哪款游戏哪个渠道能怎么样」的白名单（那是
+         * 「界面上少一个按钮 / 点了报错」的根源），一律读这里。权威定义在
+         * electron/game-channels.js，按用户 2026-11-16 定的规则：
+         *   原神 / 星铁 / 绝区零 全渠道；崩坏3 硬链接全渠道（官方只有官服清单，
+         *   下载/更新/预下载仍限官服）；终末地全渠道；明日方舟 国服两服 + 国际三区 + 台服；
+         *   鸣潮 官服/B服/国际服/WeGame。
+         */
+        caps: gameChannels.capsForServer(game.builtinKey, server.channel),
+        /*
+         * 目录本身还在不在。
+         *
+         * 「exe 不在」有两种完全不同的原因：没选过路径，和「整个客户端目录被删/挪走了」。
+         * 界面靠这两个字段分开说人话，否则删完 B服 的人只会看到「还没选择启动程序」，
+         * 根本不知道是自己把共用的客户端目录删掉了。
+         */
+        rootExists: Boolean(server.root) && targetExistsCached(server.root),
+        active: server.id === game.activeServerId,
+      };
+    }),
   };
 }
 
@@ -9710,7 +9805,7 @@ function installIpc() {
   });
   installAppIpc({ snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore: () => store });
   installSettingsIpc({ snapshot, normalizeUiScale, clearMusicResolveCache, validateCustomSource, normalizeProxyRules, normalizeAudioLanguages, applyNativeTheme, applyLoginItem, applyTitlebar, applyUiScale, pushState, applyProxySettings, applyDownloadLimit, dataFile, win, getStore: () => store });
-  installDownloadsIpc({ ensureDownloadsDir, safeFileName, uniquePath, pushState });
+  installDownloadsIpc({ ensureDownloadsDir, safeFileName, uniquePath, pushState, getDownloads: () => downloads });
   installPluginIpc({ dialog, win, getPluginRoot: () => pluginRoot() });
   installUpdateIpc({ performUpdateCheck, readSystemProxy, probeProxy, startUpdate, dialog, win, updateBackupInfo, updateTempBase, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, getStore: () => store });
   installDialogIpc({ win });
@@ -9874,6 +9969,14 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     fetchSourceLyric,
     musicLooksExpired,
   });
+
+  // 音乐缓存的统计 / 清空 / 打开目录 IPC（协议 handler 已在创建窗口前注册）
+  try {
+    const { installMusicCacheIpc } = require('./music-cache');
+    installMusicCacheIpc({ store, pushState });
+  } catch (error) {
+    console.warn('[music-cache] IPC 注册失败:', error?.message || error);
+  }
 
 
   /*
@@ -10129,7 +10232,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target, mustCopyNotLink);
 
     const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
+    const signal = createCancelSignal();
     sophonJobs.set(jobId, signal);
     beginBackgroundTask();
     try {
@@ -10245,7 +10348,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     if (!isYostarTarget && input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
 
     const jobId = String(input?.jobId || crypto.randomUUID());
-    const signal = { cancelled: false };
+    const signal = createCancelSignal();
     sophonJobs.set(jobId, signal);
     beginBackgroundTask();
     try {
@@ -12616,6 +12719,20 @@ async function checkArknightsUpdateNotice() {
 }
 
 app.whenReady().then(async () => {
+  /*
+   * 启动图必须第一个建出来。
+   *
+   * 以前这一句在 store.load() / ensureSeedData() / detectBuiltins() / 提权检查
+   * 之后才执行，那几件事加起来要 1.4~1.6 秒（isElevated 还要同步跑一次
+   * PowerShell，detectBuiltins 要扫一遍 8 个游戏的安装目录）。这段时间里进程
+   * 一个窗口都没有，用户看到的就是「点了图标 → 黑屏一两秒 → 直接进主界面」，
+   * 启动图根本没机会露面 —— 2026-11-16 用户报的正是这个。
+   *
+   * createSplashWindow() 本身不依赖 store，也不 await 任何东西（loadFile 是
+   * fire-and-forget，show 在 ready-to-show 里），所以可以安全地提到最前面。
+   * 别把它挪回后面：挪回去黑屏就回来。
+   */
+  if (process.env.HX_CAPTURE !== '1') createSplashWindow();
   // 便携模式：Chromium 缓存也放进启动器目录（必须在 ready 之后设置）
   if (portableData && !process.env.HX_USER_DATA) {
     try {
@@ -12628,6 +12745,22 @@ app.whenReady().then(async () => {
   const freshStore = !fs.existsSync(dataFile());
   store = createStore();
   await store.load();
+  /*
+   * 音源开关一次性迁移。
+   *
+   * 旧版本把「网易云 + 咪咕」这组默认值写进了用户配置，可这两个现在都出不来声音
+   * （本地 NeteaseCloudMusicApi 没部署、咪咕 listen-url 回 201007），默认配置下
+   * 点歌必然失败。migrateLegacySourceFlags 只在「整组值还等于老默认」时才动手，
+   * 用户自己改过的配置一律不动。
+   */
+  if (store.data.settings) {
+    const migrated = migrateLegacySourceFlags(store.data.settings.musicSources);
+    if (migrated) {
+      store.data.settings.musicSources = migrated;
+      await store.saveNow();
+      console.log('[音源] 已把老默认的开关组合升级为当前默认（新增酷我）');
+    }
+  }
   // 歌单缓存单独一个文件：它是可丢的派生数据，不该和 launcher-data.json 共命运
   await playlistCache().load();
   await ensureSeedData(store, app.getPath('userData'));
@@ -12753,6 +12886,14 @@ app.whenReady().then(async () => {
 
   // 协议必须在创建任何窗口之前注册好，否则首帧里的 <img src="hxl-shot:..."> 会 404
   installShotProtocol();
+  // 音乐缓存协议：同样必须在创建窗口之前注册，否则 hxl-audio:// 的 <audio> 会静默不播
+  try {
+    const musicCache = require('./music-cache');
+    musicCache.setSettingsProvider(() => store?.data?.settings);
+    musicCache.installMusicCacheProtocol();
+  } catch (error) {
+    console.warn('[music-cache] 协议注册失败:', error?.message || error);
+  }
 
   /*
    * 顺序很重要，别调回去：
@@ -12768,8 +12909,10 @@ app.whenReady().then(async () => {
    * 「收进托盘」那条分支永远走不到。
    *
    * 所以：先把窗口和托盘建出来，再注册 IPC。
+   *
+   * 注意 splash 不在这里建 —— 它已经提到 whenReady 的最开头了（那里一个
+   * await 都还没开始）。这里只建主窗和托盘。
    */
-  if (process.env.HX_CAPTURE !== '1') createSplashWindow();
   createWindow();
   installTray();
 

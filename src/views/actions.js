@@ -237,7 +237,10 @@ case 'music-accounts':
     }
     case 'music-account-login': {
       const platform = element.dataset.platform || 'qq';
-      const label = platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '酷狗';
+      // 兜底不写「酷狗」：酷狗已从音源与账号入口整条移除，
+      // 真有未知平台走到这里就只显示「音乐」，别给用户一个不存在的入口名。
+      const label =
+        platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : platform === 'netease' ? '网易云' : '音乐';
       closeModal();
       toast(`${label} 登录窗口已打开，扫码后会自动保存`, 'info');
       try {
@@ -261,7 +264,7 @@ case 'music-accounts':
     }
     case 'music-account-logout': {
       const platform = element.dataset.platform || 'qq';
-      const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '酷狗';
+      const label = platform === 'netease' ? '网易云' : platform === 'qq' ? 'QQ 音乐' : platform === 'kuwo' ? '酷我' : '音乐';
       try {
         await api.musicLogout(platform);
         await refreshMusicLogin();
@@ -279,7 +282,7 @@ case 'music-accounts':
       openMusicAccountsModal('netease');
       break;
     case 'import-playlist-link': {
-      // 从别的弹窗（比如酷狗登录面板那条兜底说明）点进来时，先把那层收掉，别叠两个
+      // 从别的弹窗（比如音乐账号那条兜底说明）点进来时，先把那层收掉，别叠两个
       if (document.body.classList.contains('modal-open')) closeModal();
       openImportPlaylistModal();
       break;
@@ -538,19 +541,37 @@ case 'music-accounts':
       // 点榜单里的一首 = 从这首开始，把榜单剩下的歌一起排进队列：
       // 这样播完一首会自动接下一首（原来只加被点的那一首，播完就停）。
       const rest = chartSongs.slice(index);
-      const base = state.songs.length;
+      /*
+       * 去重之后下标不能再用「点之前队列有多长」推算：中间被跳过几首，
+       * 那个值就不再指向被点的这一首。改成记住第一条真正落位的 entry，
+       * 播之前用 indexOf 现算下标；整条榜单都已在队列里时也照样跳到它。
+       */
+      const seen = buildQueuedKeySet();
       let added = 0;
+      let firstEntry = null;
       for (const item of rest) {
-        if (await addChartSongToQueue(item, { silent: true, platform: item.platform || chartPlatform })) added += 1;
+        const beforeLength = state.songs.length;
+        const entry = await addChartSongToQueue(item, {
+          silent: true,
+          platform: item.platform || chartPlatform,
+          seenSet: seen,
+        });
+        if (!entry) continue;
+        if (!firstEntry) firstEntry = entry;
+        // 长度变长才是真新插进去的；命中已有条目时长度不变，不计入「连播 N 首」
+        if (state.songs.length > beforeLength) added += 1;
       }
-      if (added) {
-        state.songIndex = base;
+      if (firstEntry) {
+        const at = state.songs.indexOf(firstEntry);
+        state.songIndex = at >= 0 ? at : 0;
         render({ preserveScroll: true });
         playCurrentSong();
         toast(
           added > 1
             ? `已从「${song.title || '这首'}」开始连播 ${added} 首`
-            : `已加入：${song.title || '这首'}`,
+            : added === 1
+              ? `已加入：${song.title || '这首'}`
+              : `队列里已有这首，直接播放：${song.title || '这首'}`,
           'success'
         );
       } else {
@@ -618,10 +639,30 @@ case 'music-accounts':
     case 'song-search-add': {
       const item = state.songSearch.list?.[Number(element.dataset.index)];
       if (!item) break;
-      element.disabled = true;
-      const ok = await addChartSongToQueue(item, { silent: true });
-      element.disabled = false;
-      toast(ok ? `已加入：${item.title}` : `「${item.title}」暂时找不到可播放版本`, ok ? 'success' : 'info');
+      /*
+       * 忙锁不能再用 element.disabled：被禁用的按钮第二次 click 根本不派发，
+       * 浏览器也就拼不出 dblclick —— 双击播放这条路会被自己堵死。
+       * 改成 class 忙锁：只做一个「正在解析」的标记 + 防重入，按钮照常派发事件。
+       */
+      if (element.classList.contains('is-busy')) break;
+      element.classList.add('is-busy');
+      const lengthBefore = state.songs.length;
+      try {
+        const entry = await addChartSongToQueue(item, { silent: true });
+        if (!entry) {
+          toast(`「${item.title}」暂时找不到可播放版本`, 'info');
+        } else if (state.songs.length > lengthBefore) {
+          toast(`已加入：${item.title}`, 'success');
+        } else {
+          /*
+           * 判重命中返回的是队列里已有的那条：说清楚是「已经有了」，
+           * 别让用户以为又加了一首（顺便告诉他双击能直接放）。
+           */
+          toast(`队列里已有这首：${item.title}（双击那一行可直接播放）`, 'info');
+        }
+      } finally {
+        element.classList.remove('is-busy');
+      }
       break;
     }
     case 'song-mute':
@@ -647,7 +688,9 @@ case 'music-accounts':
       const headLabel = document.querySelector('#fx-pop .fx-pop-head small');
       if (headLabel) headLabel.textContent = audioFxLabel();
       // 播放条上的音效按钮文字跟着变（弹窗开着时主界面不重绘，手动同步）
-      syncAudioFxUi();
+      // 注意：同步函数在 services/audio-fx.js 里叫 syncVolumeUi（连音量图标一起刷），
+      // 以前这里写成 syncAudioFxUi()，一选预设就抛 ReferenceError，后面的重绘也不执行。
+      syncVolumeUi();
       if (state.route === 'settings') render({ preserveScroll: true });
       break;
     }
@@ -1257,8 +1300,9 @@ case 'music-accounts':
     case 'gacha-source': {
       const source = element.dataset.value;
       if (source === 'endfield') {
+        /* 空态里「终末地同步」也走同一个四项菜单，不再用旧下拉弹窗 */
         state.gachaGameKey = 'endfield';
-        openGachaSyncModal();
+        openGachaSyncMenu();
       } else if (source && source !== 'all') {
         // 从具体游戏的「+」芯片进来，直接预选该游戏，导入教程立即可见
         state.gachaGameKey = source;
@@ -1269,7 +1313,12 @@ case 'music-accounts':
       break;
     }
     case 'sync-gacha':
-      openGachaSyncModal();
+      /*
+       * 点「同步」弹四项菜单（SToken / 网页缓存 / 全量 / 增量），按当前页面
+       * 选中的游戏取数，不再弹旧的下拉选游戏弹窗。四项的函数、样式、后端
+       * options 早已齐备，以前只是没接过来。
+       */
+      openGachaSyncMenu();
       break;
     case 'import-gacha':
       openGachaImportModal();
@@ -1410,17 +1459,16 @@ case 'music-accounts':
       const game = state.games.find((item) => item.id === element.dataset.game);
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
       if (!game || !server) break;
-      if (game.builtinKey === 'endfield' && server.channel !== 'official') {
-        // 终末地：只有非官服渠道才「生成」运行时（官服直接指定官服客户端即可，见下）
-        await handleAction('prepare-endfield', element.dataset.server, element);
-      } else {
-        /*
-         * 其余情况统一先问一句「怎么补上这份客户端」（硬链接 / 选路径 / 扫描）。
-         * 以前这里替用户猜：有别的渠道就直接开硬链接安装，没有就开文件选择框 ——
-         * 猜错的代价是白等一场安装，或者对着文件框不知道要选什么。
-         */
-        openServerSetupDialog(game.id, server.id);
-      }
+      /*
+       * 2026-11-16：终末地不再单独走「直接 prepare-endfield」那条闷头路径。
+       * 那条路径只有一条不会动的 toast、没有空间估算、没有分阶段进度，
+       * 和别的游戏点「重建」弹出面板（硬链接生成一份 / 下载游戏 / 选路径 / 扫描）
+       * 的手感完全不一样。统一进 openServerSetupDialog —— 里面的「硬链接生成一份」
+       * 对终末地本来就走 openSophonModal（servers:prepare-sophon 按引擎分发到
+       * prepareEndfieldRuntimeJob，有 estimate + sophon:progress 字节进度）。
+       * 生成完 pushState → runtimeLinked=true → needsRuntime 归零 → 这一行变绿可切。
+       */
+      openServerSetupDialog(game.id, server.id);
       break;
     }
     /**
@@ -1439,6 +1487,11 @@ case 'music-accounts':
       // 服务器行上的「切换」= 只换服（切完按钮会变成「启动」）。以前这里点一下
       // 游戏自己就起来了，而启动页下拉里点同一行只切换，两处手感对不上。
       await switchServerProfile(element.dataset.game, element.dataset.server, { launch: false });
+      break;
+    case 'open-server-setup':
+      // 卡片上的「生成 / 重新生成独立运行时」小按钮：和「重建」同一个面板，
+      // 只是入口不同（终末地渠道专属，图标是链接）。
+      openServerSetupDialog(element.dataset.game, element.dataset.server);
       break;
     case 'prepare-endfield': {
       const game = state.games.find((item) => item.id === element.dataset.game);
@@ -2621,6 +2674,35 @@ case 'music-accounts':
       break;
     case 'clean-storage-all':
       await cleanStorageGroup('all');
+      break;
+    /* ── 音乐缓存：清空 / 打开目录 ────────────────────────────────── */
+    case 'music-cache-clear': {
+      const ok = await confirmDialog({
+        title: '清空音乐缓存',
+        message: '会删掉本机已经缓存的全部音频文件。不影响账号、设置和抽卡记录；下次播放这些歌会重新下载一次。',
+        confirmText: '清空',
+      });
+      if (!ok) break;
+      try {
+        // 先记下清空前的占用，clear() 返回的 stats 已经是空目录了
+        let before = 0;
+        try {
+          const prev = await api.musicCacheStats();
+          before = Number(prev?.bytes || 0);
+        } catch {
+          /* 取不到就只报「已清空」 */
+        }
+        await api.musicCacheClear();
+        if (typeof invalidateMusicCacheStats === 'function') invalidateMusicCacheStats();
+        if (typeof refreshStorageUsage === 'function') refreshStorageUsage(true);
+        toast(before ? `缓存已清空，释放 ${storageSize(before)}` : '缓存已清空', 'success');
+      } catch (error) {
+        toast(`清空缓存失败：${error.message}`, 'error');
+      }
+      break;
+    }
+    case 'music-cache-open':
+      await api.musicCacheOpen().catch((error) => toast(`打开失败：${error.message}`, 'error'));
       break;
     /* ── 抽卡记录云备份 ──────────────────────────────────────────── */
     /*

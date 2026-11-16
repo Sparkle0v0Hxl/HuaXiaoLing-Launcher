@@ -476,7 +476,12 @@ function gachaOverview(user, game, scope = 'all') {
   const standardNames = game.key === 'arknights'
     ? null
     : new Set(GACHA_STANDARD_FIVE[game.key] || []);
-  if (bucket && bucket.standard) {
+  /*
+   * standardNames 在方舟那里是 null（见上一行：它不做名字估算）。
+   * 下面这段自校准是给米哈游那几款用的，必须先判空 ——
+   * 否则方舟一旦有常驻池记录，就会撞上 null.add() 直接抛错。
+   */
+  if (bucket && bucket.standard && standardNames) {
     for (const item of bucket.standard.fiveHistory || []) {
       if (item.name) standardNames.add(item.name);
     }
@@ -656,14 +661,27 @@ function gachaView2() {
   const bucket = user.breakdown || null;
   const scope = state.gachaScope || 'all';
   const view = scope === 'all' ? user : (bucket && bucket[scope]) || user;
+  /*
+   * 顶部这排范围切换（全部 / 角色池 / 武器池 …）也要按游戏分口径。
+   * 方舟没有角色池和武器池，它的三类是限定 / 常驻 / 中坚 —— 沿用米哈游
+   * 那套标签会出现「角色池 256」这种对不上号的说法（那 256 其实是限定池）。
+   */
   const scopes = bucket
-    ? [
+    ? (game.key === 'arknights'
+      ? [
+        ['all', '全部', user.total],
+        ['limited', '限定寻访', (bucket.limited && bucket.limited.total) || 0],
+        ['standard', '常驻寻访', (bucket.standard && bucket.standard.total) || 0],
+        ['classic', '中坚寻访', (bucket.classic && bucket.classic.total) || 0],
+      ]
+      : [
         ['all', '全部', user.total],
         ['character', '角色池', (bucket.character && bucket.character.total) || 0],
         ['weapon', '武器池', (bucket.weapon && bucket.weapon.total) || 0],
         ['standard', '常驻池', (bucket.standard && bucket.standard.total) || 0],
         ['bangboo', '邦布池', (bucket.bangboo && bucket.bangboo.total) || 0],
-      ].filter(([key, , total]) => key === 'all' || total > 0)
+      ]
+    ).filter(([key, , total]) => key === 'all' || total > 0)
     : [];
   const scopeTabs =
     scopes.length > 2
@@ -762,8 +780,13 @@ const GACHA_IMPORT_GUIDES = {
 
   arknights: {
     name: '明日方舟',
-    format: '社区工具导出的 JSON',
-    tool: '明日方舟没有公开的抽卡接口，需要用第三方工具（如 PRTS 系工具）导出 JSON 再导入。',
+    format: 'UIGF / 社区工具导出的 JSON',
+    /*
+     * 别再写「没有公开的抽卡接口」—— 鹰角账号那条路已经打通了
+     * （左下角头像 →「鹰角账号」登录一次，之后点同步就能直接取）。
+     * 还留着这句会让人以为只能用第三方工具导出，白绕一大圈。
+     */
+    tool: '推荐直接在「同步」里用鹰角账号取（左下角头像 →「鹰角账号」登录一次即可）；也可以导入社区工具导出的 JSON。',
   },
   wutheringwaves: {
     name: '鸣潮',
@@ -1208,7 +1231,7 @@ function gachaTokenScanSection(onBound) {
     stopWatch();
     try {
       off = api.gacha.onStokenScan(showQr);
-      const result = await api.gacha.stokenScanStart();
+      const result = await api.gacha.stokenScanStart({ game: 'genshin' });
       if (!result || !result.ok) {
         qrNote.textContent = (result && result.error) || '发起扫码失败';
         qrBox.hidden = false;
@@ -1323,7 +1346,10 @@ function gachaTokenLoginSection(onBound) {
     useBtn.textContent = '读取中…';
     note.textContent = '';
     try {
-      const result = await api.gacha.stokenBindLogin(provider.value, account.value);
+      const result = await api.gacha.stokenBindLogin({
+        providerId: provider.value,
+        accountId: account.value,
+      });
       if (result && result.ok) {
         toast('好了，以后同步直接用这个登录态');
         if (result.warning) toast(result.warning, 'error');
@@ -1721,7 +1747,7 @@ function openGachaTokenModal(onChanged) {
     useBtn.textContent = account.id === store.activeId ? '使用中' : '设为默认';
     useBtn.disabled = account.id === store.activeId;
     useBtn.addEventListener('click', async () => {
-      await api.gacha.stokenActive(account.id);
+      await api.gacha.stokenActive({ id: account.id });
       await reload();
     });
 
@@ -1732,7 +1758,7 @@ function openGachaTokenModal(onChanged) {
       refreshBtn.disabled = true;
       refreshBtn.textContent = '刷新中…';
       try {
-        const result = await api.gacha.stokenRefresh(account.id);
+        const result = await api.gacha.stokenRefresh({ id: account.id });
         if (result && result.ok) toast('角色列表已更新');
         else toast((result && result.error) || '刷新失败', 'error');
       } catch (error) {
@@ -1746,7 +1772,7 @@ function openGachaTokenModal(onChanged) {
     removeBtn.className = 'btn btn-ghost btn-mini';
     removeBtn.textContent = '解绑';
     removeBtn.addEventListener('click', async () => {
-      await api.gacha.stokenRemove(account.id);
+      await api.gacha.stokenRemove({ id: account.id });
       await reload();
     });
 
@@ -1784,7 +1810,10 @@ function openGachaTokenModal(onChanged) {
     bindBtn.textContent = '校验中…';
     feedback.textContent = '';
     try {
-      const result = await api.gacha.stokenBindBundle(value, { region: regionSelect.value });
+      const result = await api.gacha.stokenBindBundle({
+        raw: value,
+        region: regionSelect.value,
+      });
       if (result && result.ok) {
         input.value = '';
         /*
@@ -1957,26 +1986,36 @@ function gachaSyncHintText(builtinKey, ready) {
 }
 
 /*
- * 四项同步菜单。
+ * 四项同步菜单（点抽卡页「同步」按钮弹出的那个窗）。
  *
  * 参考胡桃的交互：不先问「从哪个游戏同步」，而是直接按当前页面选中的游戏
- * 给出四条取数路径。四条路对应四件不同的事，用户点哪条就是明确要那个结果：
+ * 给出四条取数路径，弹窗里没有任何下拉 / 选项让用户重选游戏。四条路：
  *
- *   stoken  —— 用已绑定的 SToken 直接申 authkey。原神 / 绝区零走这条，
- *               不需要开游戏、不会 24 小时过期。
- *   cache   —— 读游戏自己写进缓存的抽卡链接。星铁只能走这条（它的 key
- *               服务端只发给游戏客户端，外部拿 SToken 签不出来）。
- *   manual  —— 用户自己粘一条链接。缓存读不到、SToken 又失效时的兜底。
- *   full    —— 全量重拉。本地记录缺了一截、或者换了新设备时用。
+ *   stoken —— 从 SToken 获取：强制用已绑定账号申 authkey，不读缓存。
+ *   cache  —— 从网页缓存获取：强制读游戏写进本地的抽卡链接，不碰 SToken。
+ *   full   —— 全量刷新：忽略本地已有记录，完整重拉（来源用默认：SToken 优先、缓存兜底）。
+ *   import —— 导入记录：从 UIGF / SRGF / 异环导出 JSON 等本地文件导入。
+ *
+ * 前两项定「凭据从哪来」，第三项定「拉多少」，第四项是本地文件导入。
+ * 底部按钮另有「增量刷新」（只补新记录）和「手动输入 URL」，以及账号中心入口。
+ * 用户要求「导入和增量更新互换位置」后就是这个布局。
  *
  * 游戏是页面当前选中的那款，所以这里不再摆下拉 —— 以前那个下拉会让用户
  * 以为「要同步哪个游戏得在弹窗里重新选」，跟正在看的页面脱节。
  */
 function openGachaSyncMenu() {
-  const selection = gachaEnsureSelection();
-  const key = selection?.game?.key || state.gachaGameKey || "";
+  /*
+   * 空态（第一次进来、还没读出记录）时 gachaEnsureSelection() 会因为
+   * state.gacha 为 null 直接返回 null。以前四项菜单没人调用所以没暴露，
+   * 现在「同步」直接接过来，必须兜底：按当前页面选中的 key，再没有就
+   * 默认原神，保证菜单永远能显示当前游戏、四项不会一起变灰。
+   */
+  let selection = gachaEnsureSelection();
+  let key = selection?.game?.key || state.gachaGameKey || "genshin";
+  if (!GACHA_SYNC_MODES[key]) key = "genshin";
   const mode = GACHA_SYNC_MODES[key] || "import";
-  const gameName = selection?.game?.name || "当前游戏";
+  const gameName =
+    selection?.game?.name || GACHA_GAMES.find((item) => item.key === key)?.name || "当前游戏";
   const uid = selection?.user?.uid || "";
 
   /*
@@ -2008,16 +2047,20 @@ function openGachaSyncMenu() {
    */
   const onlyImport = key === "neverness";
 
+  /*
+   * 四项主菜单：SToken / 网页缓存 / 全量 / 导入。
+   * 「增量刷新」和「手动输入 URL」挪到底部按钮组（用户要求导入与增量互换位置）。
+   */
   const items = [
     {
       id: "stoken",
       icon: "key",
-      title: credential === "hyf" ? "鹰角账号同步" : "SToken 刷新",
+      title: credential === "hyf" ? "从鹰角账号获取" : "从 SToken 获取",
       note:
         credential === "hyf"
-          ? "用绑定的鹰角账号直接取寻访记录，不用开游戏。"
+          ? "用左下角账号中心里登录的鹰角账号直接取寻访记录，只补新增。"
           : onlineOk
-            ? "用绑定的 SToken 直接取，不用开游戏，不受 24 小时限制。"
+            ? "用绑定的 SToken 直接申 authkey 取记录，只补新增，不用开游戏、不受缓存 24 小时限制。"
             : key === "starrail"
               ? "星铁不支持这条路 —— 它的抽卡 key 只发给游戏客户端本身。"
               : "这款没有在线抽卡接口，只能读缓存或导入。",
@@ -2026,31 +2069,50 @@ function openGachaSyncMenu() {
     {
       id: "cache",
       icon: "file-text",
-      title: "网页缓存刷新",
+      title: "从网页缓存获取",
       note: credential === "hyf"
-        ? "明日方舟不写抽卡缓存 —— 用上面那条「鹰角账号同步」。"
+        ? "明日方舟不写抽卡缓存 —— 用上面那条「从鹰角账号获取」。"
         : cacheOk
-          ? "读游戏写在本地的抽卡链接。星铁请先在游戏里打开一次跃迁记录。"
+          ? "读游戏写进本地缓存的抽卡链接，只补新增。星铁请先在游戏里打开一次跃迁记录。"
           : "这款游戏不写抽卡缓存。",
       enabled: cacheOk,
     },
     {
+      id: "full",
+      icon: "refresh",
+      title: "全量刷新",
+      note: credential === "hyf"
+        ? "用绑定的鹰角账号把寻访记录完整重取一遍，忽略本地已有记录。"
+        : "忽略本地已有记录，把完整历史重新拉一遍，补上缺的部分。会多花一些时间。",
+      enabled: cacheOk || onlineOk,
+    },
+    {
+      id: "import",
+      icon: "download",
+      title: "导入记录",
+      note: "从 UIGF / SRGF / 异环导出 JSON 等本地文件导入抽卡记录，不联网。",
+      enabled: true,
+    },
+  ];
+  /*
+   * 手动粘 URL 挪进列表、跟在「导入记录」后面。
+   *
+   * 它原来在底部按钮组里，和「账号中心 / 增量刷新」挤在一起；但它的性质
+   * 其实是第五种取数方式（缓存读不到、SToken 又签不出时唯一的活路），
+   * 和上面四项是并列关系，放进列表里用户才看得懂它是「换一条路拿数据」，
+   * 而不是一个次要开关。
+   *
+   * 异环（只能导入）和鹰角（没有可粘的链接）不显示这一项。
+   */
+  if (mode !== "import" && credential !== "hyf") {
+    items.push({
       id: "manual",
       icon: "type",
       title: "手动输入 URL",
-      note: "粘一条浏览器里复制出来的抽卡链接。缓存读不到时用这个。",
-      enabled: mode !== "import" && credential !== "hyf",
-    },
-    {
-      id: "full",
-      icon: "refresh",
-      title: credential === "hyf" ? "全量重取" : "全量刷新",
-      note: credential === "hyf"
-        ? "用左下角账号中心里登录的鹰角账号，把寻访记录完整取一遍。"
-        : "把完整历史重新拉一遍，补上本地缺的记录。会多花一些时间。",
-      enabled: cacheOk || onlineOk,
-    },
-  ].filter((item) => (credential === "hyf" ? item.id === "full" : true));
+      note: "把游戏里「抽卡记录」页面复制出来的链接粘进来，按这条链接取一次。",
+      enabled: true,
+    });
+  }
 
   openModal(
     [
@@ -2068,7 +2130,7 @@ function openGachaSyncMenu() {
       items
         .map((item) =>
           [
-            '        <button class="sync-menu-item' +
+            '        <button class="sync-menu-item gacha-sync-choice' +
               (item.enabled ? '' : ' is-disabled') +
               '" data-action="gacha-sync-run" data-value="' +
               esc(item.id) +
@@ -2087,7 +2149,7 @@ function openGachaSyncMenu() {
       onlyImport
         ? '      <div class="sync-menu-note">' +
           icon("info") +
-          '<span>异环没有公开的抽卡接口（日志是加密的），四条路都走不通。要统计只能先用社区抓包工具导出 JSON，再点下面的「改用导入」。</span>' +
+          '<span>异环没有公开的抽卡接口（日志是加密的），在线取数三条路都走不通。要统计只能先用社区抓包工具导出 JSON，再点上面那条「导入记录」。</span>' +
           "</div>"
         : "",
       /*
@@ -2096,21 +2158,30 @@ function openGachaSyncMenu() {
        */
       '<div data-gacha-token-slot></div>',
       '      <p class="form-hint" id="gacha-sync-hint"></p>',
-      '      <p class="form-hint">同步只新增记录，不会覆盖或删除本地已有的数据。</p>',
+      '      <p class="form-hint">SToken / 网页缓存 / 底部「增量刷新」只补新记录；「全量刷新」会忽略本地已有记录重拉一遍，但都不会覆盖或删除本地数据。</p>',
       '      <div class="field-error" id="gacha-sync-menu-error"></div>',
       "    </div>",
       '    <div class="modal-foot">',
       '      <button class="btn btn-ghost" data-close>取消</button>',
       /*
        * 所有通行证（米游社 / HoYoLAB / 鹰角）的账号管理都收进了左下角头像里的
-       * 账号中心。这个弹窗只负责「用哪种方式取数」，不再提供绑定入口。
+       * 账号中心。点「账号中心」登录后回来，四项同步按钮直接就能点 ——
+       * 菜单每次打开都会重读账号状态，不用重启、不用再进一次这个弹窗。
        */
       '      <button class="btn btn-ghost" data-action="open-account-center">' +
         icon("user") +
         "账号中心</button>",
-      '      <button class="btn btn-ghost" data-action="import-gacha">' +
-        icon("download") +
-        "改用导入</button>",
+      /*
+       * 增量刷新：和四项主菜单里的「导入记录」互换位置后挪到这里。
+       * 只补新记录，来源用默认（SToken 优先、缓存兜底）。
+       */
+      '      <button class="btn btn-ghost" data-action="gacha-sync-run" data-value="incremental">' +
+        icon("refresh") +
+        "增量刷新</button>",
+      /*
+       * 「手动输入 URL」已经挪到上面四项列表里，跟在「导入记录」后面
+       * （用户要求：放到导入记录下面）。这里不再重复摆一个按钮。
+       */
       "    </div>",
       "  </div>",
       "</div>",
@@ -2260,24 +2331,70 @@ function gachaManualUrlModal(gameKey) {
  */
 async function runGachaSync(kind) {
   const selection = gachaEnsureSelection();
-  const key = selection?.game?.key || state.gachaGameKey || "";
+  /* 和 openGachaSyncMenu 用同一套兜底：空态时也能定位到当前游戏 */
+  let key = selection?.game?.key || state.gachaGameKey || "genshin";
+  if (!GACHA_SYNC_MODES[key]) key = "genshin";
   const game = (state.games || []).find((item) => item.builtinKey === key);
   if (!game) {
     toast("没找到这款游戏的配置", "error");
     return;
   }
   const errorBox = document.querySelector("#gacha-sync-menu-error");
+  /*
+   * 四条主菜单 + 底部的「增量刷新」都算同步入口，跑的时候一起禁掉
+   * （以前只禁 .gacha-sync-choice，底部那颗还能连点，等于并发触发两次同步）。
+   */
   const buttons = Array.from(document.querySelectorAll('[data-action="gacha-sync-run"]'));
   const disable = (flag) => buttons.forEach((btn) => { btn.disabled = flag; });
+  /*
+   * 同步期间的可见反馈。
+   *
+   * 鹰角那条链没有「一次拿完」的接口：要先走一遍完整认证
+   * （OAuth → 绑定列表 → U8 token → 角色登录 → ak-user-center），
+   * 实测光认证就要 8~9 秒，之后三个寻访类别各翻一遍才出结果。
+   * 以前这段时间只做了 disable(true)，按钮全灰、文字一个都不变，
+   * 用户完全看不出来是在跑还是死了 —— 这就是「点了没反应」。
+   *
+   * 所以：被点的那一条换成「正在同步…」+ 一句进度说明，同步结束再换回来。
+   */
+  const clicked = buttons.find((btn) => btn.dataset.value === kind) || null;
+  /*
+   * 只改这一条里的 title / note，别整块 innerHTML 重写 ——
+   * 那会把图标和右侧箭头一起冲掉，按钮宽度跳一下很像界面坏了。
+   * 底部那颗「增量刷新」没有 strong / small，拿不到就跳过，不算错。
+   */
+  const clickedTitle = clicked ? clicked.querySelector('strong') : null;
+  const clickedNote = clicked ? clicked.querySelector('small') : null;
+  const originalTitle = clickedTitle ? clickedTitle.textContent : '';
+  const originalNote = clickedNote ? clickedNote.textContent : '';
+  const progressTitle = '正在同步…';
+  const progressNote =
+    key === 'arknights'
+      ? '要先登录一次鹰角，通常十几秒，别关窗口。'
+      : kind === 'cache'
+        ? '正在读游戏写下的抽卡缓存…'
+        : '正在向服务器取抽卡记录，请稍等…';
+  const setBusy = (busy) => {
+    disable(busy);
+    if (clickedTitle) clickedTitle.textContent = busy ? progressTitle : originalTitle;
+    if (clickedNote) clickedNote.textContent = busy ? progressNote : originalNote;
+  };
 
   /*
-   * full 走的是「缓存 + 全量」；如果这款游戏根本不写缓存（星铁以外没绑 SToken），
-   * 就退回在线。判断顺序和 syncGacha 内部保持一致，避免两边说法不一样。
+   * 主菜单四项：stoken / cache 定「凭据从哪来」（互斥），full 定「拉多少」，
+   * import 是本地文件导入。底部按钮的 incremental 只补新记录，来源统一走
+   * 后端默认（SToken 优先、缓存兜底）。星铁后端本来就直接读缓存，不经过
+   * SToken 段，四项都不会走错路。
    */
   /*
-   * 手动输入不是「再试一次同步」，而是换一个输入框 ——
-   * 直接在这里开弹窗并返回，别走到下面的 api.gacha.sync。
+   * 导入和手动输入都不是「再跑一次同步」，而是换一个弹窗 ——
+   * 直接在这里打开对应弹窗并返回，别走到下面的 api.gacha.sync。
    */
+  if (kind === "import") {
+    closeModal();
+    openGachaImportModal(key);
+    return;
+  }
   if (kind === "manual") {
     gachaManualUrlModal(key);
     return;
@@ -2285,12 +2402,20 @@ async function runGachaSync(kind) {
 
   const options = {};
   if (kind === "stoken") {
+    /* 强制只用 SToken，不读缓存；后端 stokenOnly=true 保证不偷偷兜底 */
+    options.stokenOnly = true;
     options.allowCache = false;
   } else if (kind === "cache") {
+    /* 强制只读网页缓存，不碰 SToken；绑了账号也一样 */
+    options.cacheOnly = true;
     options.allowCache = true;
   } else if (kind === "full") {
+    /* 全量重拉，来源用默认：SToken 优先、失败兜底读缓存 */
     options.allowCache = true;
     options.full = true;
+  } else if (kind === "incremental") {
+    /* 只补新增，来源同样用默认 */
+    options.allowCache = true;
   }
   /*
    * UID 的优先级：菜单里点过的角色卡 > 当前抽卡页选中的角色。
@@ -2300,7 +2425,7 @@ async function runGachaSync(kind) {
   if (menuUid) options.uid = menuUid;
   else if (selection?.user?.uid) options.uid = selection.user.uid;
 
-  disable(true);
+  setBusy(true);
   if (errorBox) errorBox.textContent = "";
   try {
     const result = await api.gacha.sync(game.id, undefined, options);
@@ -2326,7 +2451,7 @@ async function runGachaSync(kind) {
   } catch (error) {
     if (errorBox) errorBox.textContent = humanError(error);
   } finally {
-    disable(false);
+    setBusy(false);
   }
 }
 
@@ -2369,6 +2494,20 @@ function openGachaSyncModal() {
           </label>
           <div class="gacha-sync-mode" id="gacha-sync-mode"></div>
           <div data-gacha-token-slot></div>
+          <!--
+            手动填 UID 的入口（可留空）。
+
+            为什么需要它：SToken 能申到 authkey，但有些账号的角色列表拉不出来
+            （新号、被风控、接口改版），此时不知道 uid 就同步不了。用户自己知道
+            UID，填一次就能取 —— stoken-sync.js:549 的注释也写了这条路径。
+            默认隐藏，只有「米游社三款 + online 模式」才露出来（方舟走鹰角 token，
+            UID 由鹰角账号带出来，不需要手填）。
+          -->
+          <label class="field" id="gacha-sync-uid-field" hidden>
+            <span>游戏 UID（可留空）</span>
+            <input id="gacha-sync-uid" placeholder="留空时用账号里记的角色 UID" spellcheck="false" inputmode="numeric" autocomplete="off" />
+            <span class="hint">角色列表拉不出来（新号 / 被风控）时，填上 UID 也能同步。</span>
+          </label>
           <div class="form-note">${icon('info')}<span id="gacha-sync-hint"></span></div>
           <p class="form-hint">同步只会新增记录，不会覆盖或删除本地已有的数据。</p>
           <div class="field-error" id="gacha-sync-error"></div>
@@ -2432,6 +2571,18 @@ function openGachaSyncModal() {
           bindGachaAkEvents(switchAkAccount);
         }
       }
+    }
+    /*
+     * 手填 UID 的输入框：只有米游社三款（genshin/starrail/zzz）在 online 模式下露出来。
+     *
+     * 方舟虽然也是 online，但走的是鹰角账号 token，UID 由账号自己带出来，
+     * 这里再让人手填一遍只会困惑「填哪个」。log / import 模式根本不走 SToken，
+     * 更用不上。用 hidden 属性而不是 display，是因为样式表里有全局
+     * `[hidden] { display: none !important; }`（styles.css:15053）兜底。
+     */
+    const uidField = document.querySelector('#gacha-sync-uid-field');
+    if (uidField) {
+      uidField.hidden = !(mode === 'online' && key !== 'arknights');
     }
     const hint = document.querySelector('#gacha-sync-hint');
     if (hint) {
@@ -2572,7 +2723,7 @@ function openGachaSyncModal() {
   async function switchAccount(id) {
     if (!id) return;
     try {
-      const result = await api.gacha.stokenActive(id);
+      const result = await api.gacha.stokenActive({ id });
       if (result && result.ok === false) {
         toast((result && result.error) || '切不过去', 'error');
         return;
@@ -2647,7 +2798,15 @@ function openGachaSyncModal() {
         tokenOptions.accountId = tokenStore.activeId || tokenStore.accounts[0].id;
         tokenOptions.allowCache = true;
         const uidInput = document.querySelector('#gacha-sync-uid');
-        const claimed = uidInput ? uidInput.value.trim() : '';
+        const uidField = document.querySelector('#gacha-sync-uid-field');
+        /*
+         * 输入框被藏起来时不读它的值。
+         *
+         * 不然会出现这种串味：用户先在原神填了 UID，再切到终末地（log 模式，
+         * 输入框隐藏），DOM 里那个值还留着，就会被当成终末地的 uid 传给主进程。
+         * hidden 是唯一判据 —— 显隐逻辑全在 applySyncMode 里，两边必须一致。
+         */
+        const claimed = uidInput && uidField && !uidField.hidden ? uidInput.value.trim() : '';
         const claimedOk = picked && picked.game === (syncGame.builtinKey || '') ? picked.uid : '';
         const uid = claimed || claimedOk;
         if (uid) tokenOptions.uid = uid;

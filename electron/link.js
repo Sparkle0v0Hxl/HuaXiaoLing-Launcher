@@ -5,6 +5,14 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+/*
+ * 默认取消信号用真 AbortSignal（带 cancelled/paused 兼容字段）。
+ * 这两个函数本身只做本地文件系统操作、不发网络请求，但调用方可能把同一个
+ * 信号一路递进下载链（servers-ipc 的切服流程就是），所以默认值也用同一套，
+ * 避免哪天这里接上网络调用就踩「手造对象不是 AbortSignal」的坑。
+ */
+const { createCancelSignal } = require('./cancel-signal');
+
 const SKIP_DIRS = new Set([
   '.git',
   'node_modules',
@@ -245,7 +253,7 @@ async function previewTrees({
   targetRoot,
   mode = 'full',
   onProgress = () => {},
-  signal = { cancelled: false },
+  signal = createCancelSignal(),
 }) {
   const roots = resolveRoots(sourceRoot, targetRoot);
   const sourceStat = await fsp.stat(roots.sourceRoot);
@@ -356,7 +364,7 @@ async function linkTrees({
   targetRoot,
   mode = 'full',
   onProgress = () => {},
-  signal = { cancelled: false },
+  signal = createCancelSignal(),
 }) {
   const roots = resolveRoots(sourceRoot, targetRoot);
   const sourceStat = await fsp.stat(roots.sourceRoot);

@@ -157,6 +157,16 @@ function ensureAudioFxGraph(audio) {
   if (audioFxGraph && audioFxGraph.audio === audio) return audioFxGraph;
   const AudioCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioCtor) return null;
+  /*
+   * 只对「这次加载已经带 crossorigin 且成功出数据」的元素建图。
+   * createMediaElementSource 是元素级的永久捕获：一旦把一个没带 CORS 或
+   * CORS 被拒的元素抓进图里，跨域污染会让 destination 输出全零 —— 表现为
+   * 进度条照常走、耳机里没声，而且之后移除 crossorigin / 拆链都救不回来
+   * （污染跟着元素走）。canplay + crossorigin 同时成立，说明这次加载
+   * CORS 已经通过，抓进图是安全的。
+   */
+  if (String(audio.getAttribute('crossorigin') || '') !== 'anonymous') return null;
+  if (audio.readyState < 2) return null;
   try {
     const context = new AudioCtor();
     const source = context.createMediaElementSource(audio);
@@ -579,7 +589,20 @@ function disableAudioFxOnError() {
   saveAudioFx();
   const audio = document.querySelector('#song-audio');
   if (audio) audio.removeAttribute('crossorigin');
-  if (audioFxGraph) buildAudioFxChain(audioFxGraph, 'off', 0);
+  /*
+   * 丢弃旧图。注意不能只是拆链：如果旧元素已经被 createMediaElementSource
+   * 捕获过（比如它曾经带着 crossorigin 加载成功、后来这次换源没带 CORS），
+   * 污染跟着元素走，图输出会永远静音。这里靠换一个全新的 <audio> 兜底。
+   */
+  if (audioFxGraph) {
+    try {
+      audioFxGraph.context.close().catch(() => {});
+    } catch {
+      /* already closed */
+    }
+    audioFxGraph = null;
+  }
+  replaceTaintedAudioElement();
   document.body.dataset.audioFx = 'off';
   reloadSongForFx();
   /*
@@ -587,4 +610,27 @@ function disableAudioFxOnError() {
    * 用户听到的就是原声，没有需要他做判断的事。留在控制台里方便排查。
    */
   console.info('[音效] 当前音源不支持跨域读取，已自动切回原声');
+}
+
+/*
+ * 用一个全新的 <audio> 换掉可能已被 Web Audio 捕获（跨域污染）的旧元素：
+ * - 属性 / dataset 全部照搬，唯独 chromeBound / fxErrorBound 摘掉，
+ *   让 bindSongLyrics 在下一次调用时把播放进度、错误收口等监听重新挂上；
+ * - 播放位置交给随后 reloadSongForFx() 的 loadedmetadata 恢复。
+ */
+function replaceTaintedAudioElement() {
+  const old = document.querySelector('#song-audio');
+  if (!old) return;
+  if (String(old.dataset.fxReplaced || '') === '1') return;
+  try {
+    const fresh = old.cloneNode(false);
+    fresh.removeAttribute('crossorigin');
+    delete fresh.dataset.chromeBound;
+    delete fresh.dataset.fxErrorBound;
+    fresh.dataset.fxReplaced = '1';
+    fresh.removeAttribute('src');
+    old.replaceWith(fresh);
+  } catch {
+    /* DOM 替换失败就退回旧行为（拆链 + 原声） */
+  }
 }

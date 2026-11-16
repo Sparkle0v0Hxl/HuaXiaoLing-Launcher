@@ -815,6 +815,8 @@ async function startHoyoPredownload({
   onProgress,
   // 只给自检 / 真机验证脚本用来「只下前 N 个补丁包」；正式链路不传 = 下全部
   maxPatches = 0,
+  // 别的服已经预下载过的同类文件可以直接硬链接复用（用户 2026-11-16「预下载功能也是」）
+  linkSources = [],
 }) {
   if (!supported(gameKey)) throw new Error('这个游戏不支持米哈游预下载');
   const base = await inspect({
@@ -871,6 +873,7 @@ async function startHoyoPredownload({
       signal,
       onProgress,
       maxPatches,
+      linkSources,
     });
   } catch (error) {
     onProgress?.({ phase: 'manifest', current: `补丁包下载不了，改走分块：${error.message}` });
@@ -1018,6 +1021,43 @@ async function startHoyoPredownload({
       processed += 1;
       pushProgress(chunk);
       return;
+    }
+    /*
+     * 跨服复用：别的服已经预下载过同一个块，就直接硬链接过来。
+     *
+     * 块是按压缩态内容寻址的（chunk/<chunk.id>，id 就是压缩后字节的 sha256），
+     * 不同渠道只要下的是同一份官方数据，文件名与内容完全一致。所以判定口径
+     * 必须和上面那段「本地是否已就位」完全相同（size + compressedMd5），
+     * 不能放宽一丝，否则会出现「这里说命中、apply 时整文件 md5 对不上」。
+     *
+     * 这里不走 usableSources 的同卷过滤：预下载本来就要去网上下载，
+     * 跨卷复制一遍也比走网络快，宁可退化成 copyFile。
+     */
+    if (linkSources.length && chunk.compressedMd5) {
+      const grabbed = await linkSource.reuseNamedFile({
+        target,
+        roots: linkSources,
+        subdir: CHUNK_DIR,
+        name: chunk.id,
+        match: async (candidate) => {
+          try {
+            const stat = await fsp.stat(candidate);
+            if (!stat.isFile()) return false;
+            if (chunk.compressedSize && stat.size !== chunk.compressedSize) return false;
+            return (await md5File(candidate)) === chunk.compressedMd5;
+          } catch {
+            return false;
+          }
+        },
+      });
+      if (grabbed.ok) {
+        // 复用来的块和本地已就位一样，记进 skipped（界面上的「复用 n」）
+        skipped += 1;
+        bytesDone += chunk.compressedSize || 0;
+        processed += 1;
+        pushProgress(chunk);
+        return;
+      }
     }
     await downloadChunkFile(chunk.url, target, chunk.compressedSize, chunk.compressedMd5, signal, (delta) => {
       bytesDone += delta;

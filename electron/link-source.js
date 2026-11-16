@@ -137,10 +137,61 @@ async function reuseFromSources({ file, target, gameKey, sources, match }) {
   return { ok: false };
 }
 
+/**
+ * 按「固定名字」在别的客户端目录下复用同一个文件。
+ *
+ * 与 reuseFromSources 的区别：那边处理的是「游戏清单里的相对路径」，这边处理的是
+ * 「我们自己的暂存目录」（预下载的 chunk/、ldiff/、终末地的 Diffs/）。
+ * 这些目录里的文件名是内容寻址的（chunk id、补丁包 id、分包名），两个客户端
+ * 只要指向同一个官方构建，文件名就一样、内容也一样，所以可以按名字直接找。
+ *
+ * 命中判定仍由调用方给（自带 size + md5/hash 校验），这里只负责定位与建链接。
+ * 同卷用硬链接，跨卷退复制 —— 预下载本来就是「要从网上拉一份」，本地复制一遍
+ * 无论如何都比走网络快，所以这边**不**像 usableSources 那样按卷过滤。
+ */
+async function reuseNamedFile({ target, roots, subdir = '', name, match }) {
+  if (!target || !Array.isArray(roots) || !roots.length || !name) return { ok: false };
+  const parts = String(name).replace(/\\/g, '/').split('/').filter(Boolean);
+  if (!parts.length) return { ok: false };
+  const subParts = String(subdir || '').replace(/\\/g, '/').split('/').filter(Boolean);
+  const targetKey = norm(target);
+  for (const root of roots) {
+    if (!root) continue;
+    const candidate = path.join(path.resolve(String(root)), ...subParts, ...parts);
+    if (norm(candidate) === targetKey) continue;
+    let hit = false;
+    try {
+      hit = Boolean(await match(candidate));
+    } catch {
+      hit = false;
+    }
+    if (!hit) continue;
+    try {
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    } catch {
+      /* 目录建不出来就让下面的 link 去失败 */
+    }
+    try {
+      await fs.promises.unlink(target).catch(() => {});
+      await fs.promises.link(candidate, target);
+      return { ok: true, source: candidate, linked: true };
+    } catch {
+      try {
+        await fs.promises.copyFile(candidate, target);
+        return { ok: true, source: candidate, linked: false };
+      } catch {
+        /* 换下一个源 */
+      }
+    }
+  }
+  return { ok: false };
+}
+
 module.exports = {
   candidatesUnder,
   usableSources,
   reuseFromSources,
+  reuseNamedFile,
   driveOf,
   DATA_DIR_ALIASES,
 };

@@ -10,6 +10,7 @@ const { loadSecret, saveSecret } = require('./secret-store');
 
 const predownload = require('./predownload');
 const predownloadSim = require('./predownload-sim');
+const { createCancelSignal } = require('./cancel-signal');
 
 /**
  * 预下载（官方分卷 / 模拟 / 剧情资源）。
@@ -32,13 +33,29 @@ function installPredownloadIpc(ctx) {
       const { game, server, base } = resolvePredownload(input);
       if (getRunning().has(game.id)) throw new Error('游戏正在运行，先结束进程再预下载');
       const jobId = String(input?.jobId || crypto.randomUUID());
-      const signal = { cancelled: false };
+      /*
+       * 必须是真 AbortSignal（见 cancel-signal.js）：这条链最终走到
+       * kuro-packs.downloadOne → segmentFetch，手造 { cancelled: false }
+       * 会被 fetch 直接拒绝（TypeError: Expected signal to be an instance of
+       * AbortSignal），鸣潮预下载就一直是坏的。用混合信号后，
+       * 下面 cancel/pause 处理器的 `job.cancelled = true` 写法照旧有效。
+       */
+      const signal = createCancelSignal();
       getPredownloadJobs().set(jobId, signal);
       beginBackgroundTask();
       send('predownload:progress', { jobId, phase: 'start', current: '正在读取官方清单…' });
+      /*
+       * 跨服复用（用户 2026-11-16「预下载功能也是」）：别的服已经预下载过的
+       * 分块 / 补丁包 / 分包，直接硬链接过来，不必再从网上拉一遍。
+       *
+       * 与 predownload:apply 不同，这里**不排除 endfield** —— 终末地预下载的
+       * Diffs/ 分包同样是内容寻址的，别的服下过就能复用。
+       */
+      const linkSources = externalLinkSources(game, server, base.installRoot);
       try {
         const result = await predownloadSim.start({
           ...base,
+          linkSources,
           signal,
           onProgress: (progress) => sendProgress('predownload:progress', jobId, progress),
         });
@@ -68,7 +85,8 @@ function installPredownloadIpc(ctx) {
       // 异环更新会改写 NTELauncher 下的文件，官方启动器开着会锁文件 / 退出时回写配置
       if (game.builtinKey === 'neverness') await nevernessChannels.assertLauncherClosed();
       const jobId = String(input?.jobId || crypto.randomUUID());
-      const signal = { cancelled: false };
+      // 同 predownload:start：这条链也会走到 kuro-packs.downloadOne / segmentFetch
+      const signal = createCancelSignal();
       getPredownloadJobs().set(jobId, signal);
       beginBackgroundTask();
       send('predownload:progress', { jobId, phase: 'start', current: '正在校验并应用预下载内容…' });
@@ -78,9 +96,11 @@ function installPredownloadIpc(ctx) {
          * 同机另一渠道客户端里已经有同内容的文件时，直接硬链接过来，别再下/解压一遍。
          * 「更新游戏」那条路一直是这么做的，应用预下载这条以前没接上：assembleFile 里的
          * 复用逻辑一直在，但没人把源递进来，等于白写。
+         *
+         * 终末地以前被这里排除掉了（那会儿 applyEndfieldPredownload 不收 linkSources）。
+         * 现在它每条 patch.json 条目都会先按目标 md5 去别的服找一遍，所以一并放开。
          */
-        const linkSources =
-          game.builtinKey === 'endfield' ? [] : externalLinkSources(game, server, base.installRoot);
+        const linkSources = externalLinkSources(game, server, base.installRoot);
         const result = await predownloadSim.apply({
           ...base,
           linkSources,

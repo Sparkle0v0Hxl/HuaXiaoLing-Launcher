@@ -24,9 +24,21 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
+/**
+ * 异环的三个渠道。
+ *
+ * 2026-11-16（用户：「异环的国际服选项咋没了？就算做不了硬链接，也留个口吧」）：
+ * 国际服重新登记到这里，但它只有「能选路径 + 能启动」这一半能力 —— 没有
+ * CHANNEL_CONFIG、没有对应 CDN 前缀，所以「由花筱灵改 Config.ini 自动切服」
+ * 和「由花筱灵按清单预下载」这两件事对国际服不成立，界面会明确说明。
+ *
+ * 保留它的价值：玩家真装了国际服客户端时，能选路径、能从这里启动，
+ * 而不是连一行能填路径的渠道都没有。
+ */
 const NEVERNESS_CHANNELS = [
   ['official', '官服'],
   ['bilibili', 'B服'],
+  ['global', '国际服'],
 ];
 
 /**

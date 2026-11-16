@@ -45,7 +45,10 @@ const {
   resolveSourceUrl,
   validateCustomSource,
   disabledSourceOfUrl,
+  probeAudioUrl,
 } = require('./music-source');
+/* 播放过的音频字节缓存（hxl-audio:// 协议由 main.js 注册） */
+const musicCache = require('./music-cache');
 
 /* 登录辅助 */
 const {
@@ -790,6 +793,58 @@ function installMusicIpc(ctx) {
       const apiBase = normalizeNeteaseBase(input?.apiBase || '');
       const settings = store?.data?.settings || {};
       const attempts = [];
+      /*
+       * 缓存命中：同一首歌（同名 + 同歌手 + 同音质）之前已经把音频字节落盘了，
+       * 直接把稳定的 hxl-audio:// 地址交回去，不再解析、不再 Range 探测、不再下载。
+       * 关掉开关或上限设为 0 时跳过；sidecar 校验不通过（大小对不上）也会自然回源。
+       */
+      if (settings.musicCache !== false && Number(settings.musicCacheLimitMB) !== 0) {
+        try {
+          const cachedUrl = musicCache.getCached(song, level);
+          if (cachedUrl) {
+            return {
+              ok: true,
+              url: cachedUrl,
+              title: song.title || '',
+              artist: song.artist || '',
+              album: song.album || '',
+              cover: song.cover || '',
+              level,
+              source: 'cache',
+              cachedFile: true,
+            };
+          }
+        } catch {
+          /* 缓存读失败不影响正常解析 */
+        }
+      }
+      /*
+       * 探测没过、但确实拿到了地址的那一条。留着当最后的保底：探测本身也会误杀
+       * （对方 CDN 不认 Range、要特殊 referer、或者刚好网络抖一下），真到回退链
+       * 也一无所获时，宁可把这条交给播放器再试一次，也不要直接回「没有可播放版本」。
+       */
+      let unproven = null;
+      /*
+       * 解析成功的地址后台落盘（fire-and-forget，绝不阻塞首播）。
+       * 只缓存「已经探测通过」的直链；试听片段、探测失败的保底地址、
+       * 关掉开关 / 上限为 0 一律跳过。
+       */
+      const maybeCache = (result) => {
+        if (!result?.url || result.probeFailed || result.cachedFile) return;
+        if (settings.musicCache === false || Number(settings.musicCacheLimitMB) === 0) return;
+        if (result.trialOnly || result.freeTrialInfo) return; // 约 30 秒的试听片段不入库
+        if (!/^https?:\/\//i.test(String(result.url))) return;
+        try {
+          musicCache.saveFromUrl(result.url, {
+            title: result.title || song.title || '',
+            artist: result.artist || song.artist || '',
+            album: result.album || song.album || '',
+            duration: result.duration || 0,
+          }, level);
+        } catch {
+          /* 缓存是附加功能，失败不影响播放 */
+        }
+      };
       try {
         const direct = await resolveSourceUrl(song, {
           apiBase,
@@ -797,14 +852,48 @@ function installMusicIpc(ctx) {
           sources: settings.musicSources,
           customSources: settings.musicCustomSources,
         });
-        if (direct?.url) return { ok: true, ...direct };
+        /*
+         * resolveSourceUrl 内部已经把各家地址探测过一遍了，但缓存命中、
+         * probeFailed 降级、或 CDN 在这几分钟里失效这些情况仍可能拿到一条放不出的
+         * 地址。这里再当面验一次：能放就直接用；放不出就往下走网易云回退链，
+         * 而不是让界面拿到一条点了没声的 URL。
+         *
+         * 唯一跳过的情况是「本次解析刚刚探测通过」：那条结果就是几秒前验过的，
+         * 再验一遍只是白发一次 Range 请求、多等一个往返。缓存回放的（cached）
+         * 不算——它可能是二十分钟前的结论，地址说不定已经死了。
+         */
+        if (direct?.url) {
+          const justVerified = direct.probe?.ok === true && !direct.cached;
+          if (justVerified) {
+            maybeCache(direct);
+            return { ok: true, ...direct };
+          }
+          const probe = await probeAudioUrl(direct.url, 3000);
+          if (probe.ok) {
+            const verified = {
+              ok: true,
+              ...direct,
+              probeFailed: false,
+              probe: { ok: true, contentType: probe.contentType || '', magic: probe.magic || '' },
+            };
+            maybeCache(verified);
+            return verified;
+          }
+          attempts.push(`首选地址探测未通过（${probe.reason || '原因未知'}），继续回退`);
+          console.warn('[music] 首选地址探测未通过，改走回退链:', direct.id || direct.source || '', probe.reason);
+          unproven = direct;
+        }
       } catch (error) {
         attempts.push(String(error.message || '解析失败'));
       }
       /*
        * 回退路径走的是本地网易云 API（unblock 会在服务端偷偷换成酷我等平台的
        * 直链），这里同样要认音源开关：网易云被停用就整条跳过；拿回来的地址
-       * 宿主撞上被停用的音源（比如酷我）就丢弃，不能因为「能放」就绕过开关。
+       * 宿主撞上被停用的音源（比如酷我、以及已删除的酷狗）就丢弃，
+       * 不能因为「能放」就绕过开关。
+       *
+       * 这里不再对回退地址做一次探测：回退链只有这一条路，探不探测都不会改变
+       * 选择，只会白等最多 3 秒。真要放不出，播放器的 error 事件照样会兜底。
        */
       try {
         const flags = currentMusicSourceFlags();
@@ -814,10 +903,11 @@ function installMusicIpc(ctx) {
           if (banned) {
             attempts.push(`回退地址来自已停用的音源（${banned}），已丢弃`);
           } else {
+            maybeCache(resolved);
             return { ok: true, ...resolved };
           }
         }
-        if (!resolved) {
+        if (!resolved && !unproven) {
           return {
             ok: false,
             reason: attempts.join('；') || '没有找到可播放的版本',
@@ -825,6 +915,15 @@ function installMusicIpc(ctx) {
         }
       } catch (error) {
         attempts.push(String(error.message || '解析失败'));
+      }
+      // 回退也没拿到东西：把探测没过的那条交出去，让播放器自己再试一次
+      if (unproven?.url) {
+        return {
+          ok: true,
+          ...unproven,
+          probeFailed: true,
+          reason: attempts.join('；'),
+        };
       }
       return { ok: false, reason: attempts.join('；') || '解析失败' };
     });

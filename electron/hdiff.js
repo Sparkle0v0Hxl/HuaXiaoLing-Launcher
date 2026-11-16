@@ -270,7 +270,7 @@ function foreignPatchDirs(installRoot) {
   ];
 }
 
-async function ensurePatchPackage(prefix, patch, cacheDir, patchRoot = '', installRoot = '') {
+async function ensurePatchPackage(prefix, patch, cacheDir, patchRoot = '', installRoot = '', linkSources = []) {
   const candidates = [];
   if (patchRoot) candidates.push(patchPackageFile(patchRoot, patch));
   candidates.push(patchPackageFile(cacheDir, patch));
@@ -308,6 +308,35 @@ async function ensurePatchPackage(prefix, patch, cacheDir, patchRoot = '', insta
   // 一处都没有：下到第一个候选位置（有 patchRoot 就落 patchRoot，预下载的语义）
   const file = candidates[0];
   await fsp.mkdir(path.dirname(file), { recursive: true });
+  /*
+   * 跨服复用：别的服已经预下载过同一个补丁包的话，直接从它那儿硬链接过来。
+   *
+   * 补丁包是内容寻址的（ldiff-<patch.id>），两个客户端下的是同一份字节，
+   * 所以「同文件名 + 同尺寸 + 同 md5」就能确认是同一个包 —— 判定口径和上面
+   * candidates 那圈 valid 判定完全一致，不能放宽，否则会出现「这里说命中、
+   * 正式更新时又校验失败」的鬼打墙。
+   *
+   * 这里不走 usableSources 的同卷过滤：预下载本来就是要去网上下载一份的，
+   * 就算跨卷复制一遍也比走网络快。
+   */
+  if (linkSources.length) {
+    const reused = await linkSource.reuseNamedFile({
+      target: file,
+      roots: linkSources,
+      subdir: 'ldiff',
+      name: `ldiff-${patch.id}`,
+      match: async (candidate) => {
+        try {
+          const stat = await fsp.stat(candidate);
+          if (stat.size !== patch.patchFileSize) return false;
+          return (await md5File(candidate)) === patch.patchFileMd5.toLowerCase();
+        } catch {
+          return false;
+        }
+      },
+    });
+    if (reused.ok) return file;
+  }
   const url = `${prefix.replace(/\/$/, '')}/${patch.id}`;
   const response = await fetch(url, {
     headers: { 'user-agent': UA },
@@ -397,6 +426,7 @@ async function downloadPatchPackages({
   maxPatches = 0,
   onProgress,
   signal,
+  linkSources = [],
 }) {
   const info = CHANNELS[gameKey]?.[channel];
   if (!info) throw new Error('没有对应的补丁渠道');
@@ -488,7 +518,7 @@ async function downloadPatchPackages({
     // ensurePatchPackage 会先查 patchRoot 里已有的包，命中就不再下（断点续传）；
     // 也会去 Collapse 留下的 chunk_collapse/ 与 ldiff/ 里按内容找一遍
     const before = doneBytes;
-    await ensurePatchPackage(entry.prefix, entry.patch, cacheDir, root, installRoot);
+    await ensurePatchPackage(entry.prefix, entry.patch, cacheDir, root, installRoot, linkSources);
     doneBytes += entry.patch.patchFileSize || 0;
     index += 1;
     onProgress?.({

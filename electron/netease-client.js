@@ -23,10 +23,9 @@ const { app } = require('electron');
  */
 const {
   normalizeSourceFlags,
+  DEFAULT_SOURCE_FLAGS,
   disabledSourceOfUrl,
   pickBest,
-  kugouSearch,
-  kugouSongUrl,
   qqSearch,
   qqSongUrl,
 } = require('./music-source');
@@ -176,8 +175,10 @@ async function startNeteaseService(apiBase) {
 const NETEASE_URL_BATCH = 200;
 
 function currentMusicSourceFlags() {
+  /* 用 music-source 里那份 DEFAULT_SOURCE_FLAGS，别再抄一份硬编码的默认值 —— 抄了就会各改各的 */
   return Object.assign(
-    { netease: true, migu: true, kuwo: false, kugou: false, qq: false },
+    {},
+    DEFAULT_SOURCE_FLAGS,
     normalizeSourceFlags(storeRef()?.data?.settings?.musicSources) || {}
   );
 }
@@ -189,18 +190,7 @@ async function crossSourceFallbackUrl(title, artist, flags) {
   const tried = [];
   const wants = { title: name, artist: String(artist || '') };
   const tries = [];
-  if (flags.kugou !== false) {
-    tries.push([
-      '酷狗',
-      async () => {
-        const best = pickBest(await kugouSearch(keyword, 5), wants);
-        if (!best) throw new Error('没搜到同名曲');
-        if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
-        const info = await kugouSongUrl(best.hash);
-        return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
-      },
-    ]);
-  }
+  /* 酷狗音源已整体移除（不再搜、不再取链），跨平台兜底只剩 QQ 音乐一家 */
   if (flags.qq !== false) {
     tries.push([
       'QQ 音乐',
@@ -213,7 +203,7 @@ async function crossSourceFallbackUrl(title, artist, flags) {
       },
     ]);
   }
-  if (!tries.length) throw new Error('酷狗和 QQ 音乐音源都已被停用');
+  if (!tries.length) throw new Error('QQ 音乐音源已被停用');
   for (const [label, run] of tries) {
     try {
       return await run();
@@ -334,7 +324,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     }
   }
 
-  // 4) 酷狗 / QQ 音乐上免费的那一份（谁被停用就跳过谁）
+  // 4) QQ 音乐上免费的那一份（被停用就跳过）
   if (title) {
     try {
       const alt = await crossSourceFallbackUrl(title, artist, flags);
@@ -344,13 +334,13 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
         br: alt.br || 0,
         size: 0,
         type: '',
-        // 换到酷狗 / QQ 的那份：歌名歌手单独放 matched* 上，渲染层据此核「还是不是这首」
+        // 换到 QQ 的那份：歌名歌手单独放 matched* 上，渲染层据此核「还是不是这首」
         matchedTitle: alt.title || title,
         matchedArtist: alt.artist || artist,
         otherSource: { source: alt.source, matched: alt.matched || '' },
       };
     } catch {
-      /* 两家都要付费，落到最后统一报错 */
+      /* QQ 那份也没拿到（付费或被停用），落到最后统一报错 */
     }
   }
 

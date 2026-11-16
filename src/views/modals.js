@@ -8,7 +8,7 @@
  *     uninstallDialog / field（表单行）
  *   · 游戏与服务器：openGameModal / openDownloadModal / openServerModal
  *   · 游戏下载：DOWNLOAD_GAME_ENGINES / DOWNLOAD_UNSUPPORTED_SITES /
- *     DOWNLOAD_CHANNELS_OK / defaultDownloadDir / openGameDownloadModal
+ *     downloadChannelOk / defaultDownloadDir / openGameDownloadModal
  *   · Sophon 差异更新：SOPHON_STAGES / SOPHON_PHASE_STAGE / sophonStageText /
  *     sophonProgressStats / stashTaskModal / restoreTaskModal / dropStashedTaskModal /
  *     renderTaskDock / pruneSophonHistory / startNextSophonJob / openSophonModal
@@ -666,17 +666,40 @@ const DOWNLOAD_UNSUPPORTED_SITES = {
 };
 
 /*
- * 接入了一键下载、但只实测过部分渠道的游戏 → 允许下载的渠道白名单。
- * 崩坏3 只有官服在 HoYoPlay 分发体系里（B服走 B 站自有启动器、国际服 game_id
- * 无法唯一定位）；明日方舟国服走鹰角清单，国际服 EN / JP / KR 走 Yostar
- * 自己那套 CRC64 清单（三区协议已实网跑通），台服协议未验证所以仍不列出。
- * 渠道行本身还在，只是下载弹窗里不列出，避免用户选了才在 estimate 阶段报错。
- * 鸣潮三渠道（官服/B服/国际服）全部走库洛官方 index.json，无白名单限制。
+ * 某个渠道能不能走「一键下载」—— 判据只有后端一份。
+ *
+ * 以前这里是一张手抄的 DOWNLOAD_CHANNELS_OK 白名单（崩坏3 只 official、明日方舟
+ * 只官服 + Yostar 三区），跟后端 electron/game-channels.js 的 DOWNLOADABLE_KEYS
+ * 和 main.js 的 engineFor 各写一份；后端改了渠道能力，前端这份不会跟着变，于是
+ * 「界面给了入口、点下去在 estimate 阶段才报错」。现在后端在 publicGame 里给每个
+ * server 挂上 caps: { link, download, repair, update, predownload, switchIni }，
+ * 前端直接读 server.caps.download，界面入口跟后端能力永远同源。
+ *
+ * 第二个参数既接受服务器对象（下载弹窗的正常路径，手上就是这个对象，直接读它的
+ * caps 最准），也接受裸 channel 字符串（按渠道名回 game.servers 里找那一条）。
+ * 读不到 caps 时（缓存里的旧 games 快照、手写的测试数据）退回下面这张老白名单，
+ * 行为跟改造前逐字一致，不会凭空多出入口 —— 尤其不能把 arknights 的 bilibili /
+ * taiwan 放进来：后端 main.js 的 downloadPackProfile 对这两个渠道会直接抛错。
  */
-const DOWNLOAD_CHANNELS_OK = {
+const DOWNLOAD_FALLBACK_CHANNELS_OK = {
   bh3: ['official'],
   arknights: ['official', 'global-en', 'global-jp', 'global-kr'],
 };
+
+function downloadChannelOk(game, channel) {
+  // 形参既可能是渠道名，也可能是 server 对象（下载弹窗手上就是对象，直接读它最准）
+  const isServer = Boolean(channel) && typeof channel === 'object';
+  const ch = String((isServer ? channel.channel : channel) || '');
+  const server = isServer
+    ? channel
+    : ((game && game.servers) || []).find((item) => String((item && item.channel) || '') === ch);
+  const caps = server && server.caps;
+  // 后端明确给了布尔值就以它为准（包括 false —— 那是后端说「这个渠道下不了」）
+  if (caps && typeof caps.download === 'boolean') return caps.download;
+  const allowed = DOWNLOAD_FALLBACK_CHANNELS_OK[game && game.builtinKey];
+  if (!allowed) return true;
+  return allowed.includes(ch);
+}
 
 /*
  * 明日方舟的 EN / JP / KR 是三套独立客户端（主程序、平台库、资源包都不同），
@@ -983,11 +1006,12 @@ function openGameDownloadModal(gameId) {
 
   const servers = (game.servers || []).filter((server) => !server.exists || server.incomplete);
   const allChoices = servers.length ? servers : game.servers || [];
-  // 只实测过的渠道才列进下载弹窗（崩坏3 / 明日方舟只有官服），其余渠道不出现
-  const allowedChannels = DOWNLOAD_CHANNELS_OK[game.builtinKey];
-  const choices = allowedChannels ? allChoices.filter((server) => allowedChannels.includes(server.channel)) : allChoices;
+  // 渠道能不能下载由后端 caps.download 说了算（downloadChannelOk 里做兜底）：
+  // 崩坏3 只有官服、明日方舟只有官服 + Yostar 三区有清单，其余渠道在这里就被滤掉，
+  // 不会出现「选了才在 estimate / download 阶段报错」的情况。
+  const choices = allChoices.filter((server) => downloadChannelOk(game, server));
   if (!choices.length) {
-    // 有服务器记录、但都被渠道白名单滤掉了 → 是「只有没实测过的渠道」；
+    // 有服务器记录、但都被后端 caps.download=false 滤掉了 → 是「只有下不了的渠道」；
     // 一条记录都没有 → 是游戏没被识别全，两种说法差很多。
     const hasAnyServer = (game.servers || []).length > 0;
     openDownloadNotice({

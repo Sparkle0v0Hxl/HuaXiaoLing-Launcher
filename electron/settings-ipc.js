@@ -81,6 +81,9 @@ function installSettingsIpc(ctx) {
         // 点歌台音源：内置音源的开关 + 用户自己导入的第三方音源
         'musicSources',
         'musicCustomSources',
+        // 音乐缓存：播放过的音频字节落盘，同一首歌再播直接读本机
+        'musicCache',
+        'musicCacheLimitMB',
       ];
       for (const key of allowed) {
         if (!(key in patch)) continue;
@@ -160,17 +163,19 @@ function installSettingsIpc(ctx) {
         } else if (key === 'backgroundRotate') {
           settings.backgroundRotate = patch.backgroundRotate !== false;
         } else if (key === 'musicSources') {
-          // 内置音源开关：只认已知的五个键，值只认布尔
+          // 内置音源开关：只认下面这几个已知键，值只认布尔。
+          // 数组顺序就是换源优先级：洛雪 → 网易云 → 咪咕 → 酷我 → QQ。
+          // 酷狗已整条移除，老设置里遗留的 kugou 键在这里被丢掉，不再写回。
           const incoming = patch.musicSources;
           const next = {};
           if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
-            for (const name of ['netease', 'kuwo', 'migu', 'kugou', 'qq']) {
+            for (const name of ['lx', 'netease', 'migu', 'kuwo', 'qq']) {
               if (typeof incoming[name] === 'boolean') next[name] = incoming[name];
             }
           }
           settings.musicSources = next;
-          // 开关变了必须清换源缓存：否则酷我开着时赢下的地址还会缓存 20 分钟，
-          // 关掉后同一首歌"仍然识别到酷我音源"，用户以为停用没生效
+          // 开关变了必须清换源缓存：否则某平台开着时赢下的地址还会缓存 20 分钟，
+          // 关掉后同一首歌"仍然识别到那个音源"，用户以为停用没生效
           clearMusicResolveCache();
         } else if (key === 'musicCustomSources') {
           const list = Array.isArray(patch.musicCustomSources) ? patch.musicCustomSources : [];
@@ -216,6 +221,12 @@ function installSettingsIpc(ctx) {
           settings.downloadLimitKBps = Number.isFinite(value)
             ? Math.max(0, Math.min(102400, Math.round(value)))
             : 0;
+        } else if (key === 'musicCacheLimitMB') {
+          // 音乐缓存上限（MB）：0 = 不缓存，51200 = 50 GB 封顶
+          const value = Number(patch.musicCacheLimitMB);
+          settings.musicCacheLimitMB = Number.isFinite(value)
+            ? Math.max(0, Math.min(51200, Math.round(value)))
+            : 2048;
         } else if (key === 'downloadDir') {
           const dir = String(patch.downloadDir || '').trim();
           if (dir) {

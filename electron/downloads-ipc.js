@@ -2,7 +2,6 @@
 
 const { ipcMain, app, shell } = require('electron');
 const path = require('node:path');
-const downloads = require('./downloads');
 const gameFeatures = require('./game-features');
 const pluginHost = require('./plugin-host');
 const fsp = require('node:fs/promises');
@@ -16,12 +15,24 @@ const { loadSecret, saveSecret } = require('./secret-store');
  *
  * 从 main.js 的 installIpc() 里整段搬出来（那个函数一度有 11300 多行、
  * 两百多个 IPC）。搬运时逻辑未改，外层依赖通过 ctx 注入。
+ *
+ * ⚠ 下载队列实例（DownloadManager 的实例）在 main.js 里是 `let downloads`，
+ * 要等 store 就绪、在启动流程后段才 new 出来，而 installIpc() 更早跑。
+ * 所以这里**不能**在模块顶层 `require('./downloads')` 然后直接调 .add() ——
+ * 那样拿到的是模块对象（只有 { DownloadManager } 这个类），
+ * 一调 .add() 就 TypeError。必须通过 ctx.getDownloads() 每次现取实例。
  */
 
 function installDownloadsIpc(ctx) {
   const { ensureDownloadsDir, safeFileName, uniquePath, pushState } = ctx;
+  const getDownloads = () => {
+    const dm = typeof ctx.getDownloads === 'function' ? ctx.getDownloads() : null;
+    if (!dm) throw new Error('下载队列还没准备好，请稍后再试');
+    return dm;
+  };
 
     ipcMain.handle('downloads:add', async (_event, input) => {
+      const downloads = getDownloads();
       const dir = await ensureDownloadsDir();
       const rawUrl = String(input && input.url ? input.url : '').trim();
       let parsed;
@@ -60,12 +71,12 @@ function installDownloadsIpc(ctx) {
       return item;
     });
 
-    ipcMain.handle('downloads:pause', (_event, id) => downloads.pause(id));
-    ipcMain.handle('downloads:resume', (_event, id) => downloads.resume(id));
-    ipcMain.handle('downloads:cancel', async (_event, id) => downloads.cancel(id));
-    ipcMain.handle('downloads:remove', async (_event, id) => downloads.remove(id));
-    ipcMain.handle('downloads:open', async (_event, id) => downloads.open(id));
-    ipcMain.handle('downloads:open-folder', async (_event, id) => downloads.openFolder(id));
+    ipcMain.handle('downloads:pause', (_event, id) => getDownloads().pause(id));
+    ipcMain.handle('downloads:resume', (_event, id) => getDownloads().resume(id));
+    ipcMain.handle('downloads:cancel', async (_event, id) => getDownloads().cancel(id));
+    ipcMain.handle('downloads:remove', async (_event, id) => getDownloads().remove(id));
+    ipcMain.handle('downloads:open', async (_event, id) => getDownloads().open(id));
+    ipcMain.handle('downloads:open-folder', async (_event, id) => getDownloads().openFolder(id));
 
     /* ---------------- 游戏能力注册表 ---------------- */
     /*

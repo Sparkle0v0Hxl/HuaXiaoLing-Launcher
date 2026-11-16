@@ -34,6 +34,10 @@ const hoyo = require('./predownload-hoyo');
 const endfield = require('./predownload-endfield');
 const neverness = require('./neverness-predownload');
 const kuroPredownload = require('./kuro-predownload');
+// 渠道能力表 + 渠道中文名：预下载在哪些渠道有官方清单，统一由 game-channels.js 定，
+// 不要在下面 SUPPORT 里再写死渠道（用户 2026-11-16 定的规则）。
+const gameChannels = require('./game-channels');
+const clientChannel = require('./client-channel');
 
 /** 各游戏的预下载能力表。 */
 const SUPPORT = {
@@ -91,9 +95,38 @@ const SUPPORT = {
 function describe(gameKey, channel = '') {
   const entry = SUPPORT[String(gameKey || '')];
   if (!entry) return { supported: false, kind: 'none', reason: '这个游戏没有接入预下载' };
+  // 终末地要单独判：Steam 渠道官方根本没有 GameInstaller，连 Diffs/ 都不会生成，
+  // 同一款游戏、同一份协议，只有这一条渠道的预下载包在 Valve 手里。
   if (entry.kind === 'endfield' && channel) {
     if (!endfield.supported(channel)) {
       return { supported: false, kind: 'endfield', reason: 'Steam 渠道的更新由 Steam 自己负责，官方协议里没有预下载包' };
+    }
+  }
+  /*
+   * 统一的渠道判据（用户 2026-11-16 定的规则）：预下载要看官方有没有对这个渠道发清单，
+   * 这件事 game-channels.js 的能力表里已经写好了，这里不再各游戏各写一套。
+   *   崩坏3  —— 只有官服有 Hoyoverse 预下载清单（bh3_cn），B服 / 国际服得用对应官方启动器；
+   *   鸣潮   —— official / bilibili / global / wegame 四个渠道都在表里（用户 2026-11-16 定的是全渠道）；
+   *   原神 / 星铁 / 绝区零 —— 三个渠道都有。
+   * 三个前提缺一不可：
+   *   1. channel 非空 —— describe() 还被 hasCache / clear 这类只关心「有没有缓存」的
+   *      地方以 empty channel 调用，能力表对空渠道恒为 false，不排除的话会把状态读坏；
+   *   2. entry.supported —— 方舟（supported:false）已经带着自己那句更具体的 reason，
+   *      不能被这里覆盖成通用文案；
+   *   3. kind !== 'nte' —— 异环的「预下载」其实是启动器侧资源检测 + 引导官方启动器，
+   *      走的是 neverness-predownload 自己那套渠道判定，本轮明确不动。
+   */
+  if (channel && entry.supported && entry.kind !== 'nte') {
+    const key = String(gameKey || '');
+    if (!gameChannels.can(key, channel, 'predownload')) {
+      // 文案里的游戏名 / 渠道名都从表里取，避免每个游戏再写一份中文对照。
+      const gameName = gameChannels.capsOf(key).label || '这个游戏';
+      const channelName = clientChannel.channelLabel(channel);
+      return {
+        supported: false,
+        kind: entry.kind,
+        reason: `${gameName}的${channelName}没有官方预下载清单，请用对应官方客户端更新`,
+      };
     }
   }
   return { ...entry };
@@ -357,6 +390,8 @@ async function start(options) {
       installRoot: options.installRoot,
       signal: options.signal,
       onProgress: options.onProgress,
+      // 跨服复用：同机别的鸣潮客户端预下载过同一份差量文件就直接硬链接过来
+      linkSources: Array.isArray(options.linkSources) ? options.linkSources : [],
     });
     // 底层把「没渠道 / 没放包 / 读不到版本」都收敛成 ok:false + 中文 reason；
     // 不抛出去的话主进程会当成下载成功，界面直接显示「预下载完成」。
@@ -378,6 +413,12 @@ async function updateKuroGame(options) {
     installRoot: options.installRoot,
     signal: options.signal,
     onProgress: options.onProgress,
+    /*
+     * 跨服硬链接复用（2026-11-16 用户要求）：同机别的鸣潮客户端已经在目标版本时，
+     * 内容相同的文件直接硬链接过来，只下真正缺的差异文件。调用方传 ctx 的
+     * externalLinkSources(game, server, server.root) 结果；不传就当没有源。
+     */
+    linkSources: Array.isArray(options.linkSources) ? options.linkSources : [],
   });
   if (!result || !result.ok) throw new Error((result && result.reason) || '鸣潮更新失败');
   // 只清掉「不比本次升级的目标版本更新」的暂存；用户可能已经预下载了更新的版本，

@@ -1219,6 +1219,91 @@ async function refreshMusicLogin() {
  */
 async function addChartSongToQueue(song, options = {}) {
   if (!song) return false;
+  /*
+   * 入队前先判重，**命中就返回队列里已有的那条 entry**（不是 true / false）。
+   * 调用方拿它去 state.songs.indexOf(entry) 就能定位到那一首，
+   * 于是「点第二次」等于「跳到已经在队列里的这首」，队列不会越点越长。
+   *
+   * 返回对象而不是布尔：老调用点全是 if (ok) 判断，对象天然 truthy，兼容；
+   * 想区分「新插进去的」和「本来就在队列里的」就比 state.songs.length 有没有变长。
+   */
+  const seen = options.seenSet instanceof Set ? options.seenSet : buildQueuedKeySet();
+  const existing = findQueuedSong(song, seen);
+  if (existing) {
+    const index = state.songs.indexOf(existing);
+    if (options.focusExisting && index >= 0) state.songIndex = index;
+    if (!options.silent) {
+      // 非静默调用（例如以后从弹窗里点一首已经在队列里的歌）也要真的出声
+      if (index >= 0) state.songIndex = index;
+      render({ preserveScroll: true });
+      playCurrentSong();
+      toast(`队列里已有这首，直接播放：${existing.title || song.title}`, 'info');
+    }
+    return existing;
+  }
+  /*
+   * 正在解析中的同一首歌：双击时第一下的网络解析还没回来，队列里当然还没有它，
+   * 光靠队列判重挡不住第二次，于是同一首会被插两条。
+   * 这里按「这首歌」的键复用同一个 Promise，两次点击共用一次解析、只插一条。
+   */
+  const key = queuedAddKeyOf(song);
+  if (key) {
+    const pending = queuedAdds.get(key);
+    if (pending) {
+      return pending.then((entry) => {
+        if (entry) rememberQueuedKey(seen, entry);
+        return entry;
+      });
+    }
+  }
+  const task = insertChartSongToQueue(song, options, seen);
+  if (key) {
+    queuedAdds.set(key, task);
+    // 解析结束（成功或失败）就把键放掉，别让下一次点击永远粘在旧结果上
+    task
+      .finally(() => {
+        if (queuedAdds.get(key) === task) queuedAdds.delete(key);
+      })
+      .catch(() => {});
+  }
+  return task;
+}
+
+/** 正在解析中的入队请求，键见 queuedAddKeyOf。 */
+const queuedAdds = new Map();
+
+/** 入队去重用的「这首歌」键，和 rememberQueuedKey 写进集合的键一一对应。 */
+function queuedAddKeyOf(song) {
+  if (!song) return '';
+  if (song.neteaseId) return `id:${song.neteaseId}`;
+  const name = songCoreName(song.title);
+  if (!name) return '';
+  const artists = artistNameList(song.artist);
+  return artists.length ? `na:${name}|${artists[0]}` : `n:${name}`;
+}
+
+/**
+ * 队列里已经有这首歌就返回那条 entry，没有返回 null。
+ *
+ * 先用键集合做 O(1) 快判（几百首的队列不能每首都扫一遍），
+ * 命中之后再逐条比对一次，好把「到底哪一条」找出来给调用方定位下标。
+ */
+function findQueuedSong(song, seen) {
+  if (!song || !songAlreadyQueued(seen, song)) return null;
+  const direct = state.songs.find((entry) => sameSongKey(song, entry));
+  if (direct) return direct;
+  // 键集说命中、逐条比对却没对上（换源后标题被改写过之类）：退一步按网易云 id 认
+  if (song.neteaseId) {
+    return state.songs.find((entry) => String(entry.neteaseId || '') === String(song.neteaseId)) || null;
+  }
+  return null;
+}
+
+/**
+ * 真正解析音源、插进队列的那一段（addChartSongToQueue 的下半身）。
+ * 判重 / 并发合并在外面那道口子上做，这里只管「解析 + 插入」。
+ */
+async function insertChartSongToQueue(song, options = {}, seen = null) {
   const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
   try {
     await api.netease.startService(apiBase).catch(() => {});
@@ -1277,14 +1362,17 @@ async function addChartSongToQueue(song, options = {}) {
       ? Math.max(0, Math.min(Number(options.insertAt), state.songs.length))
       : state.songs.length;
     state.songs.splice(at, 0, entry);
+    // 插进去了就把它的键记进共享集合，批量循环里后面的歌立刻能判到这一条
+    if (seen) rememberQueuedKey(seen, entry);
     saveSongs();
     if (!options.silent) {
-      state.songIndex = state.songs.length - 1;
+      state.songIndex = at;
       render({ preserveScroll: true });
       playCurrentSong();
       toast(`已加入：${result.title || song.title}`, 'success');
     }
-    return true;
+    // 返回新插进去的那条 entry（和「已存在」那条一样是 entry，调用方统一用 indexOf 定位）
+    return entry;
   } catch (error) {
     if (!options.silent) toast(`转换失败：${humanError(error)}`, 'error');
     return false;

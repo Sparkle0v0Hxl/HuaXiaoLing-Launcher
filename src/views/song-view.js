@@ -114,14 +114,14 @@ async function runPlaylistLinkImport(url, { apiBase, parsed } = {}) {
     };
   }
 
-  // QQ 音乐 / 酷狗 / 酷我：走各自的公开详情
+  // QQ 音乐 / 酷我：走各自的公开详情
   const result = await api.musicPlaylistSongs({ platform: info.platform, playlistId: info.playlistId });
   const songs = result?.detail?.songs || [];
   if (!result?.ok || !songs.length) {
     return { ok: false, reason: result?.reason || '这张歌单里没有读到曲目，换一张试试' };
   }
   const name = result.detail.name || info.name || info.playlistName || info.title || '';
-  // 链接导入的歌单也并进「我的歌单」：酷狗账号同步已被官方关掉，导入是唯一入口
+  // 链接导入的歌单也并进「我的歌单」：账号同步常年不稳，导入是最稳的入口
   mergeImportedPlaylist(info.platform, {
     id: info.playlistId || info.id,
     name,
@@ -156,7 +156,7 @@ function openImportPlaylistModal() {
               placeholder="https://music.163.com/#/playlist?id=…&#10;也可以粘一整段「分享文案」，多余的说明文字会自动忽略"></textarea>
             <div class="kr-imp-box-foot">
               <button type="button" class="kr-imp-paste" id="kr-imp-paste">${icon('file-text', 'xs')}从剪贴板粘贴</button>
-              <span class="kr-imp-hint">网易云 / QQ 音乐 / 酷狗 / 酷我</span>
+              <span class="kr-imp-hint">网易云 / QQ 音乐 / 酷我</span>
             </div>
           </div>
           <div class="kr-imp-state" id="kr-imp-state"></div>
@@ -211,13 +211,13 @@ function openImportPlaylistModal() {
     const cover = String(data?.cover || '').trim();
     const id = String(data?.playlistId || data?.id || '');
     /*
-     * playlistId 是不透明字符串（酷狗自建歌单是 collect:用户:…:签名），
+     * playlistId 是不透明字符串（有的平台自建歌单是 collect:用户:…:签名），
      * 只用来原样透传给后端，不要拆不要转数字。
      * 界面上也只在它是纯数字（网易云 / QQ 那种）时才当「歌单号」露出来，
      * 免得把一长串签名糊到用户脸上。
      */
     const showId = /^\d+$/.test(id) ? id : '';
-    // 有歌单名就把名字当主标题（分享短链能解析出名字），没有就退回「酷狗歌单 + 歌单号」
+    // 有歌单名就把名字当主标题（分享短链能解析出名字），没有就退回「平台歌单」
     const title = name || `${label}歌单`;
     const sub = [
       name ? label : showId ? `歌单号 ${showId}` : '',
@@ -493,23 +493,41 @@ function openAddSongLinkModal() {
  * 等于把人挡在门外。改成常驻左栏后，进歌单只要一次点击；窄屏（<1100px）由 CSS 把它折成顶部横向 tab。
  */
 /* ── 点歌台「音源」卡片：内置音源勾选 + 第三方音源导入 ──────────
- * 内置五家里酷狗 / QQ 的匿名接口对付费曲目一律要会员，酷我常把人往手机端引，
- * 所以默认只开网易云和咪咕；用户想开哪家自己点 chip。
+ * 数组顺序就是换源优先级：洛雪 → 网易云 → 咪咕 → 酷我 → QQ。
+ * 播放前会按这个顺序并发验证一遍地址，第一个真能放出声音的胜出，
+ * 所以这里排的是「先试谁」，不是「只能试谁」。
+ * QQ / 酷我的匿名接口对付费曲目一律要会员，所以默认只开洛雪 / 网易云 / 咪咕，
+ * 用户想开哪家自己点 chip。
+ * 酷狗已经从内置音源里整条移除（不再显示、不再参与换源）。
  * 第三方音源是一份 JSON，描述「怎么搜」和「怎么取地址」两个接口，
  * 可以从文件导入，也可以用订阅地址导入。
  */
 
 const MUSIC_SOURCE_LABELS = [
+  ['lx', '洛雪音源'],
   ['netease', '网易云'],
   ['migu', '咪咕'],
   ['kuwo', '酷我'],
-  ['kugou', '酷狗'],
   ['qq', 'QQ 音乐'],
 ];
-const MUSIC_SOURCE_DEFAULTS = { netease: true, migu: true, kuwo: false, kugou: false, qq: false };
+const MUSIC_SOURCE_DEFAULTS = { lx: true, netease: true, migu: true, kuwo: true, qq: false };
+/** 内置音源的合法键（顺序 = 优先级）：不在这个表里的平台一律视为已下线。 */
+const MUSIC_SOURCE_KEYS = MUSIC_SOURCE_LABELS.map(([key]) => key);
 
+/**
+ * 归一化后的音源开关。
+ *
+ * 只认 MUSIC_SOURCE_LABELS 里的键：老设置里遗留的 kugou（以及任何未知键）
+ * 一律不进结果 —— 既不显示、也不会在下次保存时被写回去，等于自然消失。
+ * 缺失的键用默认值补齐，所以「用户从没动过设置」和「存了半截」都能正常渲染。
+ */
 function musicSourceFlags() {
-  return Object.assign({}, MUSIC_SOURCE_DEFAULTS, (state.settings && state.settings.musicSources) || {});
+  const stored = (state.settings && state.settings.musicSources) || {};
+  const flags = {};
+  for (const [key] of MUSIC_SOURCE_LABELS) {
+    flags[key] = typeof stored[key] === 'boolean' ? stored[key] : MUSIC_SOURCE_DEFAULTS[key];
+  }
+  return flags;
 }
 
 function musicCustomSources() {
@@ -517,8 +535,13 @@ function musicCustomSources() {
   return Array.isArray(list) ? list : [];
 }
 
-/** 音源开关里被停用的平台，点歌台里的平台标签也跟着隐藏（酷我停了就不再显示酷我 tab）。 */
+/**
+ * 音源开关里被停用的平台，点歌台里的平台标签也跟着隐藏（酷我停了就不再显示酷我 tab）。
+ * 不在 MUSIC_SOURCE_KEYS 里的平台（酷狗已整条移除）恒为不可用：
+ * 否则「未定义的键不等于 false」会让它照样冒出来。
+ */
 function musicPlatformEnabled(key) {
+  if (!MUSIC_SOURCE_KEYS.includes(key)) return false;
   return musicSourceFlags()[key] !== false;
 }
 
@@ -537,6 +560,8 @@ function musicSourceCardMarkup() {
         `<button class="song-source-chip active" data-action="toggle-music-source" data-id="${key}" title="点击停用">${esc(label)}</button>`
     )
     .join('');
+  // 说明行只写顺序，不写「只有这几家」：关掉某一家只是跳过它，顺序本身不变
+  const orderNote = '按顺序试：洛雪 → 网易云 → 咪咕 → 酷我 → QQ；播放前先验证地址真能出声，自动选可用的那条';
   const list = customs.length
     ? customs
         .map(
@@ -555,6 +580,7 @@ function musicSourceCardMarkup() {
         <small>${on ? `已启用 ${on} 个第三方` : '点标签切换'}</small>
       </div>
       <div class="song-source-chips">${chips}</div>
+      <p class="song-source-empty">${esc(orderNote)}</p>
       <div class="song-source-custom">${list}</div>
       <div class="song-source-url" id="song-source-url-row" hidden>
         <input class="song-source-input" id="music-source-url" type="text" placeholder="粘贴音源 JSON 的订阅地址" />
@@ -774,7 +800,7 @@ function karaokeViewMarkup() {
           ${musicAccountEntryMarkup()}
           <div class="song-app-actions">
             <button class="song-app-btn" data-action="add-song-file" title="添加本地歌曲（mp3 / flac 等文件）">${icon('plus')}</button>
-            <button class="song-app-btn" data-action="import-playlist-link" title="链接导入歌单（网易云 / QQ 音乐 / 酷狗）：粘贴歌单链接或整段分享文案">${icon('download')}</button>
+            <button class="song-app-btn" data-action="import-playlist-link" title="链接导入歌单（网易云 / QQ 音乐 / 酷我）：粘贴歌单链接或整段分享文案">${icon('download')}</button>
             <button class="song-app-btn" data-action="add-song-link" title="添加音频链接">${icon('link')}</button>
           </div>
         </div>
@@ -874,7 +900,9 @@ function songView() {
 
 /* ── 我的歌单：按平台分区，登录统一走「音乐账号」面板 ─────────────── */
 
-const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kugou: '酷狗', kuwo: '酷我' };
+/* 账号歌单只覆盖这三家；酷狗已整条移除（不在 MUSIC_SOURCE_KEYS 里，
+   它的分组即便主进程还回来也会被 musicPlatformEnabled 拦掉）。 */
+const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kuwo: '酷我' };
 
 function musicPlatformLabel(platform) {
   return MUSIC_PLATFORM_LABELS[platform] || '音乐';
@@ -987,11 +1015,7 @@ function myPlaylistGroupMarkup(group) {
   // 只有这个平台自己在同步时才转圈；别的平台同步不影响这一行
   const syncing = playlistSyncing(platform) || loading;
   const when = playlistSyncWhen(group, { withCost: true });
-  /*
-   * 酷狗的报错一概不显示：账号同步被官方关掉，同步失败的标记永远挂在那，
-   * 把它当「登录失效」让用户反复重登只会误导。它有导入的歌单就显示个数。
-   */
-  const showError = error && platform !== 'kugou';
+  const showError = Boolean(error);
   const meta = syncing
     ? '同步中…'
     : showError
@@ -1014,20 +1038,9 @@ function myPlaylistGroupMarkup(group) {
   if (loading && !list.length) {
     return `<section class="playlists-group">${head}<p class="playlists-group-note">正在读取 ${esc(label)} 账号里的歌单…</p></section>`;
   }
-  /*
-   * 酷狗分组空态：账号歌单接口官方已关。2026-10-31 按用户要求
-   * 「直接改成描述需要通过链接导入，这个链接导入按钮可以去掉的」——
-   * 只留说明文字，导入入口统一走页首那颗下载图标（和左栏酷狗行一个口径）。
-   * 有歌单（哪怕只是导入的）就照常走下面的卡片墙。
-   */
-  if (platform === 'kugou' && !list.length) {
-    return `<section class="playlists-group is-kugou">${head}
-      <p class="playlists-group-note">酷狗的账号歌单接口官方已经关掉了，这里的歌单只能靠链接导入：在酷狗里「分享歌单 → 复制链接」，点右上角下载图标粘进来就行，<code>t1.kugou.com/xxxx</code> 这种短链也认。</p>
-    </section>`;
-  }
-  if (error && !list.length && platform !== 'kugou') {
+  if (error && !list.length) {
     /*
-     * 分类处理：登录态过期（QQ 音乐 500003、酷狗 Access Deny）时，
+     * 分类处理：登录态过期（QQ 音乐 500003）时，
      * 用户真正要做的是重新登录，不是「再读一次」。
      * 所以这种情况直接把登录按钮递到手上，别让他反复刷新对着报错看。
      */
@@ -1069,7 +1082,10 @@ function myPlaylistGroupMarkup(group) {
  */
 function allPlaylistsMarkup() {
   const groups = state.myPlaylists.groups || [];
-  const logged = ['netease', 'qq', 'kugou'].filter(musicLoggedIn);
+  // 酷狗已整条移除；酷我的账号歌单入口也早已下线（只保留链接导入的歌单），
+  // 所以这里只剩网易云和 QQ 两家需要「登录态」。
+  const ACCOUNT_PLATFORMS = ['netease', 'qq'];
+  const logged = ACCOUNT_PLATFORMS.filter(musicLoggedIn);
 
   /*
    * 钻取态：点开某张歌单后整块主区只显示这张歌单的曲目。
@@ -1092,7 +1108,7 @@ function allPlaylistsMarkup() {
   }
 
   /*
-   * 酷狗账号歌单同步已被官方关掉，导入的歌单可能落在未登录（或没同步成功）的分组里。
+   * 账号歌单同步可能失败或未登录，导入的歌单会落在未登录（或没同步成功）的分组里。
    * 已登录平台照常显示；没登录但分组里有歌单（只可能是链接导入的）也要画出来，
    * 不然导入完一刷新歌单就「消失」，用户会以为导入失败了。
    */
@@ -1106,7 +1122,10 @@ function allPlaylistsMarkup() {
       (group.list || []).length
   );
   const shown = [...logged, ...extra.map((group) => group.platform)]
-    .filter(musicPlatformEnabled)
+    // 只按登录态显示，不再吃音源开关：音源开关管的是「解析地址时用不用这个平台的直链」，
+    // 和「账号里同步到的歌单要不要显示」是两回事。以前挂在同一张表上，
+    // QQ 音源默认停用就会把已登录的 QQ 歌单整组藏掉（表现为「QQ音乐 已同步 10 个歌单」但列表里没有）。
+    .filter(Boolean)
     .map((key) => {
       const found = groups.find((group) => group.platform === key);
       if (found) return found;
@@ -1114,7 +1133,8 @@ function allPlaylistsMarkup() {
     });
   const total = shown.reduce((sum, group) => sum + (group.list || []).length, 0);
   const syncing = Boolean(state.myPlaylists.loadingAll) || shown.some((group) => playlistSyncing(group.platform) || group.loading);
-  const idle = ['netease', 'qq', 'kugou'].filter((key) => !logged.includes(key) && musicPlatformEnabled(key));
+  // 未登录平台的「去登录」提示：同样不再吃音源开关，按平台能力决定
+  const idle = ACCOUNT_PLATFORMS.filter((key) => !logged.includes(key));
 
   /*
    * 平台 tab：登录的平台多了以后，四组卡片纵向堆叠要把页面滚很久。
@@ -1174,26 +1194,36 @@ function allPlaylistsMarkup() {
 
 function chartPanelMarkup() {
   const c = state.charts;
+  // 酷狗已整条移除：榜单 tab 和合并计数都只保留网易云与 QQ。
   const platforms = [
     ['all', '全部榜单'],
-    ['qq', 'QQ 音乐'],
-    ['kugou', '酷狗'],
     ['netease', '网易云'],
+    ['qq', 'QQ 音乐'],
   ];
   const chartList = c.list || [];
+  const counts = c.counts || {};
+  // 老会话里可能还存着已下线平台的 tab 值，落到「全部榜单」上，别让按钮一个都不高亮
+  const activePlatform = platforms.some(([key]) => key === c.platform) ? c.platform : 'all';
+  /*
+   * 单平台 tab 也带着 { [platform]: 0, merged: 0 } 回来，照直显示就是「QQ 0 · 网易云 0，
+   * 去重后 0」——纯噪音。只有同时有两家以上计数时才认为是真的合并结果才显示。
+   */
+  const countedPlatforms = ['netease', 'qq'].filter((key) => Number.isFinite(counts[key]));
+  const countLine =
+    Number.isFinite(counts.merged) && countedPlatforms.length > 1
+      ? `QQ ${counts.qq || 0} · 网易云 ${counts.netease || 0}，去重后 ${counts.merged}`
+      : '';
   return `
     <section class="song-charts">
       <div class="song-panel-head">
         <span>${icon('star')}榜单 <em>${chartList.length}</em>${
-          c.counts && Number.isFinite(c.counts.merged)
-            ? `<small>QQ ${c.counts.qq || 0} · 酷狗 ${c.counts.kugou || 0} · 网易云 ${c.counts.netease || 0}，去重后 ${c.counts.merged}</small>`
-            : ''
+          countLine ? `<small>${countLine}</small>` : ''
         }</span>
         <span class="song-chart-tabs">
           ${platforms
             .map(
               ([key, label]) =>
-                `<button class="song-chart-tab ${c.platform === key ? 'active' : ''}" data-action="chart-platform" data-value="${key}">${label}</button>`
+                `<button class="song-chart-tab ${activePlatform === key ? 'active' : ''}" data-action="chart-platform" data-value="${key}">${label}</button>`
             )
             .join('')}
         </span>

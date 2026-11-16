@@ -190,6 +190,17 @@ const GROUPS = [
     collect: (ctx) => children(path.join(ctx.userData, 'sophon-cache')),
   },
   {
+    id: 'music',
+    label: '音乐缓存',
+    note: '播放过的音频字节。清掉不影响账号和设置，下次播放这些歌会重新下载一次。',
+    risk: 'safe',
+    collect: (ctx) =>
+      children(path.join(ctx.userData, 'music-cache')).filter((full) => {
+        const name = path.basename(full).toLowerCase();
+        return name !== 'config.json';
+      }),
+  },
+  {
     id: 'logs',
     label: '日志与崩溃记录',
     note: '启动日志、崩溃栈和更新日志。反馈问题时才用得上，平时清掉不影响任何功能。',

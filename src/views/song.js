@@ -895,6 +895,18 @@ function setupStartDrawerSync() {
  * - 箭头按滚动位置自动显隐（到头的一侧不显示）；
  * - 鼠标滚轮在列表上直接横向滚，不用按住 Shift。
  */
+/*
+ * 启动页导轨的 window resize 回调只能挂一次。
+ *
+ * 导轨整块在每次重绘时被 innerHTML 换掉（home.js 的 startView 模板），
+ * 元素上那个 dataset.railBound 幂等标记跟着旧节点一起消失 —— 用元素标记
+ * 拦得住元素自己的监听（新节点本来就没绑），但拦不住 window 级监听：
+ * 每重绘一次就多一个 resize 回调，旧回调还攥着已经脱离文档的 rail/list。
+ * 所以 window 那条改成模块级只挂一次，回调转手给最新一次的 sync。
+ */
+let startRailResizeHandler = null;
+let startRailResizeBound = false;
+
 function setupStartGameRail() {
   const rail = document.querySelector('.start-game-rail');
   const list = rail?.querySelector('.start-game-list');
@@ -922,7 +934,14 @@ function setupStartGameRail() {
     { passive: false }
   );
   list.addEventListener('scroll', sync, { passive: true });
-  window.addEventListener('resize', sync);
+  /* window 级只挂一次，见 startRailResizeHandler 上方注释 */
+  startRailResizeHandler = sync;
+  if (!startRailResizeBound) {
+    startRailResizeBound = true;
+    window.addEventListener('resize', () => {
+      if (typeof startRailResizeHandler === 'function') startRailResizeHandler();
+    });
+  }
   sync();
 }
 
@@ -1751,6 +1770,31 @@ function findBiliRoom(biliRoomId) {
   return state.liveRooms.find((r) => r.platform === 'bilibili' && String(r.roomId) === String(biliRoomId));
 }
 
+/**
+ * 未开播（0）/ 轮播（2）的房间本来就不会推弹幕，卡片状态固定停在这两句提示上，
+ * 别被「已连接 / 弹幕推送中 / 连接直播间…」这类正常链路状态覆盖掉——
+ * 否则用户看到「已连接」却一条弹幕都收不到，又回头怀疑点歌坏了。
+ * 直播中（1）和没给状态（undefined / NaN）返回 null，调用方走原来的状态流转，一字不改。
+ * 文案只在这里定义一次：初始赋值和后面所有覆盖点都从这里取，避免两处措辞跑偏。
+ */
+function abnormalLiveStatusText(room) {
+  if (room.liveStatus === 0) return '房间未开播，开播后才能收到弹幕';
+  if (room.liveStatus === 2) return '轮播中，通常没有弹幕';
+  return null;
+}
+
+/**
+ * 所有会覆盖卡片状态的分支统一走这里：未开播 / 轮播的房间把状态钉死在提示文案上，
+ * 其余房间照原样写入。返回「状态是否真的变了」，轮询那条据此决定要不要重绘，
+ * 免得固定文案和主进程推来的 payload.status 不相等时每 900ms 重画一次。
+ */
+function setLiveRoomStatus(room, text) {
+  const next = abnormalLiveStatusText(room) || text;
+  if (room.status === next) return false;
+  room.status = next;
+  return true;
+}
+
 /** 点歌页才重绘卡片，避免别的页面无谓刷新。 */
 function renderLiveIfNeeded() {
   if (state.route !== 'song') return;
@@ -1771,7 +1815,8 @@ function handleBiliDanmuEvent(payload) {
   switch (payload.type) {
     case 'pushing':
       // 服务器对 auth 包回了确认：从这刻起才真的在推弹幕（之前"已连接"只是 TCP 握手）
-      room.status = '弹幕推送中';
+      // 未开播 / 轮播的房间 WS 一样会握手成功，别把提示冲成「弹幕推送中」
+      setLiveRoomStatus(room, '弹幕推送中');
       renderLiveIfNeeded();
       break;
     case 'danmu': {
@@ -1796,16 +1841,17 @@ function handleBiliDanmuEvent(payload) {
       room.connected = true;
       room.connecting = false;
       if (room.lastRetryAt && Date.now() - room.lastRetryAt > 5 * 60 * 1000) room.retryCount = 0;
-      room.status = payload.status || '已连接';
-      // 只在第一次连上弹提示，换服务器 / 自动重连成功不重复弹
-      if (!room.toastedLive) {
+      setLiveRoomStatus(room, payload.status || '已连接');
+      // 只在第一次连上弹提示，换服务器 / 自动重连成功不重复弹；
+      // 未开播 / 轮播的房间别弹「已连接」，和卡片上的提示文案自相矛盾
+      if (!room.toastedLive && !abnormalLiveStatusText(room)) {
         room.toastedLive = true;
         toast(`已连接直播间：${room.roomTitle}`, 'success');
       }
       renderLiveIfNeeded();
       break;
     case 'status':
-      room.status = payload.status || room.status;
+      setLiveRoomStatus(room, payload.status || room.status);
       renderLiveIfNeeded();
       break;
     case 'reconnecting': {
@@ -1817,7 +1863,7 @@ function handleBiliDanmuEvent(payload) {
       const waitText = wait > 0
         ? `，${Math.max(1, Math.round(wait / 1000))} 秒后重试`
         : '，正在按退避策略重试';
-      room.status = `连接中断（code ${payload.code ?? '未知'}），第 ${payload.tries || 1} 次重连${waitText}…`;
+      setLiveRoomStatus(room, `连接中断（code ${payload.code ?? '未知'}），第 ${payload.tries || 1} 次重连${waitText}…`);
       renderLiveIfNeeded();
       break;
     }
@@ -1825,7 +1871,7 @@ function handleBiliDanmuEvent(payload) {
       room.connected = false;
       room.connecting = false;
       if (payload.code != null) room.lastCloseCode = payload.code;
-      room.status = payload.status || '已断开';
+      setLiveRoomStatus(room, payload.status || '已断开');
       renderLiveIfNeeded();
       break;
     default:
@@ -1922,10 +1968,14 @@ function disconnectBiliLive() {
 async function connectLiveRoom(rawUrl) {
   const url = String(rawUrl || '').trim();
   if (!url) return;
-  // 同一个链接重复连接：先把旧的顶掉；这个链接还在连接中就直接忽略（防连点重复建卡）
+  // 同一个链接重复连接：先把旧的顶掉；这个链接还在连接中就不重复建卡，只提示一下（防连点）
   const dup = state.liveRooms.find((r) => r.url === url);
   if (dup) {
-    if (dup.connecting) return;
+    // 静默返回会让用户以为按钮坏了（点了没反应），这里给个提示
+    if (dup.connecting) {
+      toast('这个直播间正在连接中…', 'info');
+      return;
+    }
     disconnectLiveRoom(dup.id);
   }
 
@@ -1959,7 +2009,16 @@ async function connectLiveRoom(rawUrl) {
     room.roomId = info.roomId;
     room.roomTitle = info.title || `房间 ${info.roomId}`;
     room.danmaku = info.danmaku || '';
-    room.status = info.note || '';
+    /*
+     * api.live.room() 只回 platform / platformLabel / roomId / title / liveStatus / danmaku，
+     * 没有 note 字段 —— 以前读那个不存在的字段，等于每次都把状态清成空串，卡片上一片空白。
+     * 把开播状态存进房间对象，后面所有会覆盖 room.status 的地方（连接中 / 已连接 /
+     * 弹幕推送中 / 轮询状态）都要据此让路，别把「未开播」冲成「已连接」。
+     * 0 = 没开播，2 = 轮播；1（直播中）和其它情况留空，交给后面的弹幕 / 状态事件去写。
+     */
+    const liveStatus = Number(info.liveStatus);
+    room.liveStatus = liveStatus;
+    room.status = abnormalLiveStatusText(room) || '';
     // 连接成功就记进历史（去重、最新在前、最多 5 个），重启后一键重连
     state.liveHistory = [url, ...(state.liveHistory || []).filter((item) => item !== url)].slice(0, 5);
     localStorage.setItem('vela:live-room-history', JSON.stringify(state.liveHistory));
@@ -2006,7 +2065,7 @@ async function connectLiveRoom(rawUrl) {
      */
     room.connecting = true;
     room.connected = false;
-    room.status = '连接直播间…';
+    setLiveRoomStatus(room, '连接直播间…');
     renderLiveIfNeeded();
     api.live.danmuConnect({ roomId: room.roomId, token: authKey, hosts });
   } catch (error) {
@@ -2034,7 +2093,7 @@ async function startBridgeLive(room) {
     room.connected = true;
     room.connecting = false;
     room.danmaku = 'bridge';
-    room.status = started?.status || '已连接';
+    setLiveRoomStatus(room, started?.status || '已连接');
     if (started?.pageTitle && !room.roomTitle) room.roomTitle = started.pageTitle;
     toast(`已连接${label}直播间：${room.roomTitle}`, 'success');
     if (state.route === 'song') render({ preserveScroll: true });
@@ -2050,8 +2109,8 @@ async function startBridgeLive(room) {
       }
       if (!payload) return;
       room.captured = payload.captured ?? room.captured;
-      if (payload.status && payload.status !== room.status) {
-        room.status = payload.status;
+      // 未开播 / 轮播时 setLiveRoomStatus 会返回 false（状态没变），别每 900ms 空重绘
+      if (payload.status && setLiveRoomStatus(room, payload.status)) {
         if (state.route === 'song') render({ preserveScroll: true });
       }
       if (!payload.alive) {

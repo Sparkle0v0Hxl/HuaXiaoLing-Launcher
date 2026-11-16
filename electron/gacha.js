@@ -112,6 +112,38 @@ const GAME_DEFS = [
     standard: [2],
     weaponBanners: [],
   },
+  /*
+   * 明日方舟。
+   *
+   * 它一直没能出现在抽卡页，不是因为同步没跑通，而是因为这里根本没有它：
+   * arknights-gacha.js 把记录写进 gacha-imports.json 之后，loadGachaHistory
+   * 只遍历 GAME_DEFS，方舟不在表里 —— 数据躺在文件里，界面上一栏都没有。
+   *
+   * 和米哈游那套的区别：
+   *   - 没有本机 sqlite 库（table 空），记录全部来自导入/同步的那份 JSON；
+   *   - 六星制（fiveRank 6 / fourRank 5），保底 99 抽；
+   *   - 池子不分「角色/武器」，而是常驻 / 限定 / 中坚三类，且三类的保底
+   *     各自独立。分类靠 GachaType，值来自 arknights-gacha.js 的 poolType()：
+   *     1 = 常驻、2 = 限定（含联动）、3 = 中坚。
+   */
+  {
+    key: 'arknights',
+    name: '明日方舟',
+    table: '',
+    infoTable: '',
+    infoId: 'Id',
+    infoName: 'Name',
+    infoIcon: 'Icon',
+    fiveRank: 6,
+    fourRank: 5,
+    banners: {
+      1: '常驻寻访',
+      2: '限定寻访',
+      3: '中坚寻访',
+    },
+    standard: [1],
+    weaponBanners: [],
+  },
 ];
 
 let sqlModule = null;
@@ -316,6 +348,22 @@ function isStandardRow(def, row) {
 }
 
 function categoryOf(def, row) {
+  /*
+   * 明日方舟是另一套分类口径：没有角色池 / 武器池的概念，池子按
+   * 常驻 / 限定 / 中坚分，三类的保底各自独立。GachaType 由
+   * arknights-gacha.js 的 poolType() 逐条按 poolId 判定：
+   *   1 = 常驻（NORM / SINGLE / DOUBLE / ATTAIN / SPECIAL / RETURN）
+   *   2 = 限定（LIMITED / LINKAGE）
+   *   3 = 中坚（CLASSIC / FESCLASSIC）
+   * 前端 gachaOverview 的 POOLS 用的就是 limited / standard / classic 这三个键，
+   * 必须同名返回，否则 breakdown 里查不到、三张卡全是空的。
+   */
+  if (def.key === 'arknights') {
+    const type = Number(row.GachaType);
+    if (type === 2) return 'limited';
+    if (type === 3) return 'classic';
+    return 'standard';
+  }
   const type = Number(row.GachaType);
   if (isStandardRow(def, row)) return 'standard';
   // 邦布频段是独立抽卡池，优先于武器判断
@@ -330,6 +378,42 @@ function categoryOf(def, row) {
 function buildBreakdown(def, list, infoMap) {
   const pick = (kind) =>
     summarize(def, list.filter((row) => categoryOf(def, row) === kind), infoMap, false)[0] || null;
+  if (def.key === 'arknights') {
+    /*
+     * 方舟三类池子；前端三张卡永远都摆（哪怕 0 抽），所以这里也要给全。
+     * 没抽过的池子给一个空壳而不是 null —— 前端 gachaPoolCard 会读
+     * poolData.total / five / four，null 会在那块直接抛错。
+     */
+    const empty = () => ({
+      total: 0,
+      five: 0,
+      four: 0,
+      low: 0,
+      currentPity: 0,
+      fiveRate: 0,
+      fourRate: 0,
+      averagePity: 0,
+      luckiest: 0,
+      fivePulls: 0,
+      weaponFive: 0,
+      bangbooFive: 0,
+      charFive: 0,
+      firstTime: null,
+      lastTime: null,
+      pities: [],
+      pityExact: false,
+      fiveHistory: [],
+      fourHistory: [],
+      recentFive: [],
+      breakdown: null,
+    });
+    const pickOr = (kind) => pick(kind) || empty();
+    return {
+      limited: pickOr('limited'),
+      standard: pickOr('standard'),
+      classic: pickOr('classic'),
+    };
+  }
   return {
     character: pick('character'),
     weapon: pick('weapon'),
@@ -436,11 +520,25 @@ function summarize(def, rows, infoMap, withBreakdown = true) {
           // row.icon 是给原神补的：那边 ItemId 恒为空串，infoMap 永远查不到
           icon: (info && info.icon) || row.icon || null,
           time: row.Time,
-          banner: bannerName(def, type),
+          /*
+           * 方舟的卡池有具体池名（「石白深蓝之夜」这种），比只写「限定寻访」
+           * 有用得多 —— 用户看图就是想知道这个六星是哪个池出的。
+           * 其它游戏没有 poolName，照旧回落到 GachaType 对应的卡池名。
+           */
+          banner: row.poolName || bannerName(def, type),
           pity: counter,
           gachaType: type,
           // 与 categoryOf 保持同一口径（绝区零的邦布/音擎是中文名，直接看记录）
           itemType: categoryOf(def, row),
+          /*
+           * 方舟的 UP / 首次获得是鹰角服务端判定好的，记录里自带 up / isNew。
+           * 前端 gachaJudgeBadges 直接读这两个字段打「UP / 歪 / NEW」标签 ——
+           * 不把它们带到 fiveDetails 上，方舟的六星就永远没有欧非标记。
+           * 其它游戏没有这两个字段，带过去是 undefined，前端也不会画。
+           */
+          up: row.up === true ? true : row.up === false ? false : null,
+          isNew: row.isNew === true,
+          poolName: row.poolName || '',
         });
         counter = 0;
       }

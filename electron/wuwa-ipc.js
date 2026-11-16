@@ -16,7 +16,7 @@ const { loadSecret, saveSecret } = require('./secret-store');
  */
 
 function installWuwaIpc(ctx) {
-  const { targetExists, send, pushState, writeLaunchLog, getStore, getRunning, invalidateRuntimesAfterUpdate } = ctx;
+  const { targetExists, send, pushState, writeLaunchLog, getStore, getRunning, invalidateRuntimesAfterUpdate, externalLinkSources } = ctx;
 
     ipcMain.handle('wutheringwaves:update-game', async (_event, options) => {
       const game = getStore().data.games.find((item) => item.builtinKey === 'wutheringwaves');
@@ -95,6 +95,13 @@ function installWuwaIpc(ctx) {
         installRoot: server.root,
         signal: updateAbort.signal,
         onProgress: (progress) => emit(progress),
+        /*
+         * 别的鸣潮客户端（官服 / B服 / 国际服）已经在目标版本时，同内容文件
+         * 直接硬链接过来，只下真正缺的差异文件（2026-11-16 用户要求）。
+         */
+        linkSources: typeof externalLinkSources === 'function'
+          ? externalLinkSources(game, server, server.root)
+          : [],
       });
       if (result?.ok) {
         const tag = String(result.tag || result.version || '');

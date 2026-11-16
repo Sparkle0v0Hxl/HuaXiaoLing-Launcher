@@ -10,6 +10,20 @@ const fs = require('node:fs');
 const { loadSecret, saveSecret } = require('./secret-store');
 
 const gameFeatures = require('./game-features');
+const clientChannel = require('./client-channel');
+const { createCancelSignal } = require('./cancel-signal');
+// 渠道能力表：哪个游戏在哪个渠道能修 / 能更新 / 能硬链接，全在 game-channels.js 里定，
+// 这里的 handler 只查表，不再自己写死渠道数组（用户 2026-11-16 定的规则）。
+const gameChannels = require('./game-channels');
+
+/*
+ * 渠道体检（2026-11-16 报障）：只有这几款米哈游游戏的客户端目录里带 config.ini
+ * （或者 exe 名本身能区分 YuanShen.exe / GenshinImpact.exe），判出来的渠道才可信。
+ * 终末地 play/steam、方舟 global-en/global-jp/taiwan 这些渠道 key 与 ini 判定不同名，
+ * 一律不参与体检，免得把正常的配置误报成「指错了目录」。
+ */
+const MIHOYO_CHANNEL_KEYS = ['genshin', 'starrail', 'zzz', 'bh3'];
+const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
 
 /**
  * 游戏增删改、封面、自动探测、启动停止、官网同步。
@@ -87,6 +101,11 @@ function installGamesIpc(ctx) {
             allowDelete: false,
             fullVerify: true,
             onProgress: (progress) => send('repair:progress', progress),
+            /*
+             * 修复时也复用同机别的方舟区（EN/JP/KR 三区互为源），
+             * 同 CRC64 的文件硬链接过来，只下真缺的（2026-11-16 用户要求）。
+             */
+            linkSources: externalLinkSources(game, server, server.root),
           });
           if (result?.ok) {
             game.version = String(result.version || game.version || '');
@@ -124,6 +143,11 @@ function installGamesIpc(ctx) {
           installRoot: server.root,
           signal: new AbortController().signal,
           onProgress: (progress) => send('repair:progress', progress),
+          /*
+           * 修复也复用同机别的鸣潮客户端（同内容文件硬链接过来，只下缺的），
+           * 2026-11-16 用户要求「没更新的服点更新可以直接硬链接补齐」。
+           */
+          linkSources: externalLinkSources(game, server, server.root),
         });
         if (result?.ok) {
           const tag = String(result.tag || result.version || '');
@@ -138,7 +162,20 @@ function installGamesIpc(ctx) {
         return { ...result, repaired: true };
       }
       if (['genshin', 'starrail', 'zzz', 'bh3'].includes(key)) {
-        const signal = { cancelled: false };
+        /*
+         * 修复要重新拉官方清单校验分块，所以它跟「更新」一样受渠道限制，不能只看游戏。
+         * 用户 2026-11-16 定的规则：原神 / 星铁 / 绝区零三渠道都能修（官方 HoYoPlay
+         * 对 hk4e / hkrpg / nap 都发 *_global 清单）；崩坏3 只有官服能修 ——
+         * 官方只给 bh3_cn 清单，B服 / 国际服的本体得交给对应官方启动器。
+         * 硬链接（link）虽然三渠道全开，但那是本地文件操作，跟这里的远端校验不是一回事。
+         */
+        if (!gameChannels.can(key, server.channel, 'repair')) {
+          const channelName = clientChannel.channelLabel(server.channel);
+          throw new Error(
+            `${game.name || '这个游戏'}的${channelName}没有官方修复清单，这个渠道不支持在启动器内修复，请用对应官方启动器`
+          );
+        }
+        const signal = createCancelSignal();
         const result = await prepareSophon({
           gameKey: key,
           channel: server.channel,
@@ -628,6 +665,47 @@ function installGamesIpc(ctx) {
             args: args.join(' '),
           });
           if (signed.handled) return signed.result;
+        }
+
+        /*
+         * 渠道体检（2026-11-16 报障：原神从国际服切回官服后，账号「上次登录」从 11-13
+         * 变回 11-04 并要求重新登录）。
+         *
+         * 那次把 2.10.1 → 2.10.2 的改动面和所有会写游戏目录 / 注册表的代码都翻了一遍：
+         * 启动器没有写过原神目录里的任何账号文件，也没有整项导入注册表的能力。所以最可能
+         * 的成因是「选了官服那一行，实际拉起的却是国际服客户端」——两边的账号态不在同一处，
+         * 表现就像账号被回滚了。以前 launch.log 只有 target= 一行，看不出这层错配。
+         *
+         * 这里补一条渠道对照：所选渠道 vs 客户端自己声明的渠道（config.ini 优先，
+         * 其次 exe 名/目录名）。不一致就落日志 + 明确提示，用户至少知道该去改哪一行。
+         * 体检失败一律吞掉 —— 它绝不能挡住启动。
+         */
+        try {
+          const chosenChannel = String((activeServer && activeServer.channel) || '');
+          const iniChannel = clientChannel.configChannelFromPath(target) || '';
+          const hintChannel = clientChannel.pathChannelHint(target) || '';
+          const actualChannel = iniChannel || hintChannel;
+          const mismatch =
+            MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0 &&
+            CHANNEL_PROBE_KEYS.indexOf(chosenChannel) >= 0 &&
+            Boolean(actualChannel) &&
+            chosenChannel !== actualChannel;
+          writeLaunchLog(
+            `launch ${id}: server=${(activeServer && activeServer.name) || '(未配置)'} ` +
+              `chosen=${chosenChannel || '-'} ini=${iniChannel || '-'} hint=${hintChannel || '-'}` +
+              (mismatch ? ` MISMATCH actual=${actualChannel}` : '')
+          );
+          if (mismatch) {
+            send('toast', {
+              type: 'error',
+              message:
+                `「${(activeServer && activeServer.name) || game.name || '这一行'}」标的是${clientChannel.channelLabel(chosenChannel)}，` +
+                `但那个目录里是${clientChannel.channelLabel(actualChannel)}客户端 —— 账号会串到另一个服。` +
+                '请点这一行的“编辑”重新选目录。',
+            });
+          }
+        } catch {
+          /* 体检只是体检，不许影响启动 */
         }
 
         getLaunching().set(id, Date.now());

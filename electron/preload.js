@@ -218,6 +218,19 @@ contextBridge.exposeInMainWorld('launcher', {
     onPackProgress: (callback) => subscribe('endfield:pack-progress', callback),
   },
 
+  /*
+   * 鸣潮（Wuthering Waves）本体更新。
+   *
+   * 主进程 electron/wuwa-ipc.js 早就注册了 wutheringwaves:update-game 与
+   * wutheringwaves:game-progress，但这里一直没暴露 → 渲染层根本调不到，
+   * 等于这条链路是死的（界面上只能靠启动页 dock 走 predownload:apply 绕）。
+   * 补上之后，服务器卡片与 dock 都能走同一套「先应用预下载暂存、否则逐文件刷」。
+   */
+  wutheringwaves: {
+    updateGame: (options) => ipcRenderer.invoke('wutheringwaves:update-game', options),
+    onProgress: (callback) => subscribe('wutheringwaves:game-progress', callback),
+  },
+
   games: {
     add: (input) => ipcRenderer.invoke('games:add', input),
     update: (id, input) => ipcRenderer.invoke('games:update', id, input),
@@ -297,6 +310,11 @@ contextBridge.exposeInMainWorld('launcher', {
   /* 删掉一张链接导入的歌单：按 id 精确从缓存剔除（合并写遇到空列表会跳过，救不了删除） */
   musicRemovePlaylist: (payload) => ipcRenderer.invoke('music:playlist-remove', payload || {}),
   musicResolve: (input) => ipcRenderer.invoke('music:resolve', input),
+  /* 音乐缓存：统计 / 清空 / 打开缓存目录 / 同步开关与上限 */
+  musicCacheStats: () => ipcRenderer.invoke('music-cache:stats'),
+  musicCacheClear: () => ipcRenderer.invoke('music-cache:clear'),
+  musicCacheOpen: () => ipcRenderer.invoke('music-cache:open'),
+  musicCacheConfig: (patch) => ipcRenderer.invoke('music-cache:config', patch || {}),
   musicLyric: (input) => ipcRenderer.invoke('music:lyric', input),
   musicPlaylistSongs: (input) => ipcRenderer.invoke('music:playlist-songs', input),
   musicParsePlaylistLink: (url) => ipcRenderer.invoke('music:parse-playlist-link', { url }),

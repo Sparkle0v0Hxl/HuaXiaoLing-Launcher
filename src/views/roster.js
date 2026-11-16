@@ -311,9 +311,9 @@ function rosterShellHtml() {
         <div class="roster-main" style="--rc:${esc(game.accent)}">${body}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn ghost" data-action="roster-refresh">${icon('refresh', 'xs')}重新读取</button>
+        <button class="btn btn-ghost" data-action="roster-refresh">${icon('refresh', 'xs')}重新读取</button>
         <span style="flex:1"></span>
-        <button class="btn ghost" data-close>关闭</button>
+        <button class="btn btn-ghost" data-close>关闭</button>
       </div>
     </div>
   </div>`;

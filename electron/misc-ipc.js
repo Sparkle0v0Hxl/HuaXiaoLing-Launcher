@@ -8,6 +8,7 @@ const diagnostics = require('./diagnostics');
 const fs = require('node:fs');
 
 const { loadSecret, saveSecret } = require('./secret-store');
+const { createCancelSignal } = require('./cancel-signal');
 
 
 /**
@@ -275,7 +276,7 @@ function installMiscIpc(ctx) {
         return { ok: true, already: true, message: 'WeGame 版已经装好并能启动，不需要再转换' };
       }
       const jobId = crypto.randomUUID();
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       getLinkJobs().set(jobId, signal);
       const emit = (progress) => sendProgress('link:progress', jobId, { gameId: 'builtin-wutheringwaves', ...progress });
       emit({ phase: 'scan', processed: 0, total: 0, bytesDone: 0, totalBytes: 0, current: '正在把官方版客户端硬链接进 WeGame 目录…' });
@@ -505,7 +506,18 @@ function installMiscIpc(ctx) {
         await fsp.writeFile(cachePath, buffer);
         sourcePath = cachePath;
       } else if (/^file:/i.test(relative)) {
-        sourcePath = decodeURIComponent(relative.replace(/^file:\/\/\/?/i, ''));
+        /*
+         * 路径解码要包 try：动态背景是我们自己记下的 file:// 路径，
+         * 但用户的文件夹名里本来就可能带 %（比如「100%」这类），
+         * 解不开时 decodeURIComponent 抛 URIError，导出就直接失败了。
+         * 解不开就按去掉前缀的原文用，Windows 路径本来就允许 %。
+         */
+        const rawPath = relative.replace(/^file:\/\/\/?/i, '');
+        try {
+          sourcePath = decodeURIComponent(rawPath);
+        } catch {
+          sourcePath = rawPath;
+        }
       } else {
         sourcePath = path.join(app.getPath('userData'), relative);
       }

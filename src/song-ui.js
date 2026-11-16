@@ -372,15 +372,32 @@ function bindNeteaseQr() {
 
   let timer = null;
   let qrKey = '';
+  let checking = false;
+  let checkFailures = 0;
+  const MAX_CHECK_FAILURES = 5;
   const stop = () => {
     if (timer) clearInterval(timer);
     timer = null;
   };
 
+  /*
+   * 扫码轮询是每 2 秒一次的高频外网请求，网络抖动、内置服务转发卡住
+   * 都可能让单次 qrCheck 抛 TimeoutError。以前 catch 里直接 stop()，
+   * 一次超时就把整个登录流程判死（用户看到「登录检查失败」后二维码再也不动）。
+   * 现在：瞬时网络错误容错重试，连续失败到上限才真正停；checking 锁
+   * 避免 2 秒间隔里堆叠出多个并发请求，把本地服务越压越慢。
+   */
+  const isTransientCheckError = (error) =>
+    /timeout|aborted|fetch failed|ECONNREFUSED|ENOTFOUND|net::|Failed to fetch|HTTP 5\d\d/i.test(
+      String(error?.message || error || '')
+    );
+
   const check = async () => {
-    if (!qrKey) return;
+    if (!qrKey || checking) return;
+    checking = true;
     try {
       const result = await api.netease.qrCheck({ apiBase: apiInput.value.trim(), key: qrKey });
+      checkFailures = 0;
       if (result.loggedIn) {
         stop();
         status.textContent = '登录成功';
@@ -404,15 +421,25 @@ function bindNeteaseQr() {
         hint.textContent = result.message || '等待扫码…';
       }
     } catch (error) {
+      checkFailures += 1;
+      if (isTransientCheckError(error) && checkFailures < MAX_CHECK_FAILURES) {
+        status.textContent = '网络有点慢，正在重试…';
+        hint.textContent = `检查登录状态暂时没连上（${checkFailures}/${MAX_CHECK_FAILURES}），会自动继续。`;
+        return;
+      }
       stop();
       status.textContent = '登录检查失败';
       hint.textContent = qrErrorText(error);
+    } finally {
+      checking = false;
     }
   };
 
   refresh.addEventListener('click', async () => {
     stop();
     qrKey = '';
+    checking = false;
+    checkFailures = 0;
     refresh.disabled = true;
     status.textContent = '正在获取二维码…';
     hint.textContent = '连接本地 API';

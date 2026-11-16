@@ -27,6 +27,15 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { segmentFetch } = require('./http-fetch');
+/*
+ * 跨客户端硬链接复用（2026-11-16 用户要求）。
+ * 「所有服只要有其中一个更新到最新版，没更新的那个点更新应该能靠硬链接补齐，
+ *   缺的再下差异文件」—— 方舟 EN/JP/KR 三区本来就互为源（见本文件末尾
+ * planCrossRuntime / buildCrossRuntime），但那条路只在「切服生成运行时」时用，
+ * 「更新本体」这条链路一直没接，导致一区更完再更另一区又要重下一遍。
+ * 判定口径必须与「本地是否已就位」一致：size + CRC64（shouldKeepExisting 同款）。
+ */
+const linkSource = require('./link-source');
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -1154,7 +1163,7 @@ async function installGame({ profile, installRoot, signal, onProgress } = {}) {
  *   几千个文件，宁可让用户手动处理，也不能一键清空半个游戏。
  * - 删除失败逐个记录、不中断（删不掉的多余文件不影响游戏能跑）。
  */
-async function updateGame({ profile, installRoot, allowDelete = false, fullVerify = false, signal, onProgress } = {}) {
+async function updateGame({ profile, installRoot, allowDelete = false, fullVerify = false, signal, onProgress, linkSources = [] } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
   if (!target) throw new Error('没有对应的 Yostar 渠道');
   const root = path.resolve(String(installRoot || ''));
@@ -1243,10 +1252,49 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
   });
 
   let done = 0;
+  let linkedFromSources = 0;
+  /*
+   * 同机另一份方舟（官服 + EN/JP/KR 三区常常并存）已经在目标版本时，
+   * 内容相同的文件直接硬链接过来。usableSources 会丢掉跨卷的源。
+   * 注意：这里**不跨 CN↔Yostar**（国服与三区是不同构建，同路径不同 CRC64 的
+   * 文件很多 —— 老注释记录过 EN↔JP 就有 421 个），到底能不能当源由调用方
+   * externalLinkSources 决定，本函数只按 CRC64 判命中，命中才链。
+   */
+  const usableSources = linkSource.usableSources(linkSources, { targetRoot: root });
   await runPool(downloadJson, DOWNLOAD_CONCURRENCY, async (file) => {
     if (signal && signal.cancelled) throw new Error('已取消');
     const dest = resolveInside(root, file.path);
     const url = file.url || buildDownloadUri(domain, pkg.source, file.path);
+    if (usableSources.length) {
+      const linked = await linkSource.reuseFromSources({
+        file,
+        target: dest,
+        gameKey: 'arknights',
+        sources: usableSources,
+        match: async (candidate) => {
+          const info = await fsp.stat(candidate).catch(() => null);
+          if (!info || !info.isFile()) return false;
+          if (Number(file.size) > 0 && info.size !== Number(file.size)) return false;
+          try {
+            return (await crc64File(candidate, { signal })) === String(file.hash == null ? '' : file.hash).trim();
+          } catch {
+            return false;
+          }
+        },
+      });
+      if (linked.ok) {
+        linkedFromSources += 1;
+        done += 1;
+        onProgress?.({
+          phase: 'link',
+          current: `${done}/${downloadJson.length} ${path.basename(file.path)}`,
+          processed: done,
+          total: downloadJson.length,
+          totalBytes: Number(pkg.totalBytes) || 0,
+        });
+        return;
+      }
+    }
     await downloadOne({ url, dest, expectedSize: file.size, expectedHash: file.hash, signal });
     done += 1;
     onProgress?.({
@@ -1286,6 +1334,7 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
     executable: executionNameOf(remote.config, target),
     files: pkg.files.length,
     downloaded: downloadJson.length,
+    linked: linkedFromSources,
     unchanged: plan.unchanged,
     verifiedKeep,
     deleted: willDelete.length,

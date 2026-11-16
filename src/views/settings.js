@@ -422,6 +422,48 @@ function storageSize(bytes) {
   return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/* ------------------------------------------------------------------ */
+/* 音乐缓存：开关、上限、占用与清空                                        */
+/* ------------------------------------------------------------------ */
+
+let musicCacheUsageText = '统计中…';
+let musicCacheUsageLoading = false;
+
+function musicCacheLimitLabel(mb) {
+  const n = Number(mb) || 0;
+  if (n <= 0) return '不缓存';
+  return n >= 1024 ? `${(n / 1024).toFixed(n % 1024 === 0 ? 0 : 1)} GB` : `${n} MB`;
+}
+
+/*
+ * 占用统计要扫目录，走「先渲染空态 → 下一帧拉回来只改这一行文字」，
+ * 不整页重绘（重绘会打断滑块动画、把用户正在拖的值弹回去）。
+ */
+function invalidateMusicCacheStats() {
+  musicCacheUsageText = '统计中…';
+  ensureMusicCacheStats(true);
+}
+
+function ensureMusicCacheStats(force = false) {
+  if (musicCacheUsageLoading) return;
+  if (!force && musicCacheUsageText !== '统计中…') return;
+  if (!api.musicCacheStats || typeof api.musicCacheStats !== 'function') return;
+  musicCacheUsageLoading = true;
+  const run = async () => {
+    try {
+      const s = await api.musicCacheStats();
+      musicCacheUsageText = `${storageSize(s?.bytes || 0)} / ${Number(s?.files || 0)} 首`;
+    } catch {
+      musicCacheUsageText = '—';
+    } finally {
+      musicCacheUsageLoading = false;
+      const el = document.querySelector('#music-cache-usage');
+      if (el) el.textContent = musicCacheUsageText;
+    }
+  };
+  setTimeout(run, 0);
+}
+
 /** 统计结果回来之前不重复发请求；失败一次就不再自动重试，交给用户点「重新统计」。 */
 function ensureStorageUsage() {
   if (storageUsage || storageLoading || storageError) return;
@@ -736,6 +778,24 @@ function settingsView() {
             </div>
           </div>
           <p class="setting-hint">继续播放：启动器一打开就自动播放上次听到的那首歌，关掉后要手动点播放键。小播放器：放歌时在侧栏旁挂一个可拖动的小窗，关掉后即使还在放歌、来回切界面也不再出现。</p>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>缓存播放过的音频</strong><span>同一首歌（同名、同歌手、同音质）再次播放时直接读本机缓存，不再重新解析和下载。关掉开关只是不再写入、不再命中，之前已经缓存的文件会保留。</span></div>
+            <div class="setting-control">${switchMarkup('musicCache', settings.musicCache !== false)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>缓存上限</strong><span>拉到最左边＝不缓存。超出上限后自动删除最久没听过的那几首。<strong>试听片段（约 30 秒）不会入库。</strong></span></div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="music-cache-limit" type="range" min="0" max="51200" step="512" value="${Math.min(51200, Math.max(0, Number(settings.musicCacheLimitMB ?? 2048) || 0))}" aria-label="音乐缓存上限" />
+              <span class="volume-value" id="music-cache-limit-value">${musicCacheLimitLabel(settings.musicCacheLimitMB ?? 2048)}</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>已用缓存</strong><span id="music-cache-usage">${(() => { ensureMusicCacheStats(); return musicCacheUsageText; })()}</span></div>
+            <div class="setting-control">
+              <button class="btn btn-ghost" data-action="music-cache-clear">${icon('trash')}清空缓存</button>
+              <button class="btn btn-icon btn-ghost" data-action="music-cache-open" title="打开缓存文件夹">${icon('external')}</button>
+            </div>
+          </div>
         </section>
 
         <section class="${group('behavior', true)}" ${groupAttr('behavior')}>
@@ -776,9 +836,14 @@ function settingsView() {
             用户常常是先想绑定账号、过几天才去看记录。以前只有抽卡页的同步弹窗里有这个按钮，
             不在那个弹窗里就完全找不到入口，看起来像「绑定不了」。
 
-            openGachaTokenModal 定义在 src/views/gacha.js 里（全局函数），这里直接调。
-            它不在时（比如某个精简构建没带 gacha.js）按钮就不渲染，不会报错。
+            2.11.1 模块化把这段只剩注释、按钮被删了，这里补回来。
+            走账号中心（openAccountCenter）而不是旧的 openGachaTokenModal：
+            账号中心里已经有「抽卡账号」分区，扫码绑定、切账号、立即同步都在那儿。
           -->
+          <div class="setting-row">
+            <div class="setting-copy"><strong>抽卡账号（SToken）</strong><span>用手机米游社扫一次码，之后原神 / 星穹铁道 / 绝区零 / 崩坏3 的抽卡记录都能直接取，不用再开游戏刷那条 24 小时就过期的链接。支持绑定多个账号。</span></div>
+            <div class="setting-control"><button class="btn btn-ghost" data-action="open-account-center">${icon('shield')}管理账号</button></div>
+          </div>
 </section>
 
 

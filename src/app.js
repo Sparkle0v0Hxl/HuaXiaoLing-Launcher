@@ -1207,6 +1207,16 @@ document.addEventListener(
 );
 
 document.addEventListener('click', async (event) => {
+  /*
+   * 双击的第二下空转，交给下面的 dblclick 委托。
+   *
+   * 不挡的话，双击歌曲行会先在第一次 click 里跑一遍「加入队列」，
+   * 第二次 click 再跑一遍 —— 两路异步各自解析同一首歌，正是队列里
+   * 冒出重复条目的老问题。detail === 0 是键盘激活（Enter / Space），
+   * 没有第二下，照常往下走。
+   */
+  if (event.detail >= 2) return;
+
   const feedback = event.target.closest('button, [data-nav], [data-action]');
   if (
     feedback &&
@@ -1300,6 +1310,99 @@ document.addEventListener('click', async (event) => {
   if (actionElement.tagName === 'INPUT') return;
   try {
     await handleAction(action, id, actionElement, event);
+  } catch (error) {
+    toast(humanError(error), 'error');
+  }
+});
+
+/*
+ * 双击歌曲行 = 直接从这首开始播。
+ *
+ * 搜索行单击只是「加入队列」，不出声 —— 用户很自然会再点一下想让它响，
+ * 以前第二下又照原样插一条，队列里就堆了同一首歌好几个副本。
+ * 现在第二下（dblclick）走这里：入队统一交给 addChartSongToQueue，
+ * 它自带判重，命中时返回队列里**已有的那条** entry，所以反复双击
+ * 只会跳到那一条开始播，不会再长出新条目。
+ *
+ * 队列行（song-select）故意不纳入：单击本来就播，而且第一次 click
+ * 就整页重绘，节点被换掉之后 dblclick 不会再冒泡到 document。
+ *
+ * chart-to-netease 单击已经是「从这首开始连播整条榜单」，这里只补
+ * 播放语义；my-playlist-song 单击走 playPlaylistFromIndex 会续排整张
+ * 歌单，双击时按同一套 origin/from/insertAt 入队，落点与它保持一致。
+ */
+function songRowPlayTarget(action, element) {
+  const index = Number(element.dataset.index) || 0;
+
+  if (action === 'song-search-add') {
+    const song = state.songSearch.list?.[index];
+    return song ? { song, options: { silent: true } } : null;
+  }
+
+  if (action === 'my-playlist-song') {
+    const detail = state.myPlaylists.detail;
+    const song = (detail?.songs || [])[index];
+    if (!song || !detail) return null;
+    /*
+     * 插入点与 playPlaylistFromIndex 用同一套算法：已经有这张歌单的连续一段
+     * 就接在段末，还没有就插在当前这首之后。origin/from 也必须一致，
+     * 否则会插成一条 origin 不同的副本，歌单那一段里找不到它。
+     */
+    const fromName = detail.name || '歌单';
+    const block = playlistBlockRange(fromName);
+    const insertAt =
+      block.start >= 0 ? block.end : Math.min(state.songs.length, (Number(state.songIndex) || 0) + 1);
+    return {
+      song,
+      options: {
+        silent: true,
+        platform: element.dataset.platform || detail.platform || '',
+        origin: 'playlist',
+        from: fromName,
+        insertAt,
+      },
+    };
+  }
+
+  if (action === 'chart-to-netease') {
+    const song = (state.charts.detail?.songs || [])[index];
+    if (!song) return null;
+    const chartPlatform =
+      state.charts.platform && state.charts.platform !== 'all'
+        ? state.charts.platform
+        : state.charts.detail?.platform || element.dataset.platform || '';
+    return { song, options: { silent: true, platform: song.platform || chartPlatform } };
+  }
+
+  return null;
+}
+
+document.addEventListener('dblclick', async (event) => {
+  const element = event.target.closest('[data-action]');
+  if (!element) return;
+  const row = songRowPlayTarget(element.dataset.action || '', element);
+  if (!row) return;
+  event.preventDefault();
+  try {
+    /*
+     * 第一下 click 可能还在解析同一首（搜索行的 class 忙锁不会拦事件），
+     * addChartSongToQueue 里的 in-flight 合并会让这里拿到同一个 Promise，
+     * 结果是同一条 entry —— 不会播成两条。
+     */
+    const entry = await addChartSongToQueue(row.song, row.options);
+    if (!entry) {
+      toast(`「${row.song.title || '这首'}」暂时找不到可播放版本`, 'info');
+      return;
+    }
+    const at = state.songs.indexOf(entry);
+    if (at < 0) return;
+    state.songIndex = at;
+    /*
+     * 这里不再弹「正在播放」：第一下 click 的 handleAction 已经提示过
+     * 「已加入 / 队列里已有这首」，再补一条只会叠成两层 toast。
+     * 播放条切过去、声音起来本身就是反馈。
+     */
+    await playSongAt(at, { preserveScroll: true });
   } catch (error) {
     toast(humanError(error), 'error');
   }

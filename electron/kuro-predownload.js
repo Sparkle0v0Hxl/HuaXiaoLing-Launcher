@@ -63,6 +63,14 @@ const kuroPacks = require('./kuro-packs');
 // krpdiff（库洛改过的 DirHDiff）应用器：纯 JS 解析 + 仓库自带 hpatchz。
 // 见 kuro-krpdiff.js 文件头 —— 库洛在 headData 里多插了一个 oldRefSizeList。
 const krpdiff = require('./kuro-krpdiff');
+/*
+ * 跨客户端硬链接复用（2026-11-16 用户要求）。
+ * 「所有服只要有其中一个更新到最新版，没更新的那个点更新应该能靠硬链接补齐，
+ *   缺的再下差异文件」——米哈游（sophon / predownload-hoyo）、终末地、方舟国服
+ * 早就接了 link-source；鸣潮这边一直缺，导致官服更完再更国际服又要重下一遍。
+ * 判定口径与「本地文件是否已就位」完全一致：size + 整份 md5。
+ */
+const linkSource = require('./link-source');
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -676,7 +684,7 @@ async function checkPredownload({ channel, installRoot, localVersion } = {}) {
  * 断点续传由 downloadOne 的 .kuro-tmp + Range 天然支持；本模块额外跳过
  * size+md5 都已对的文件，省一次全文件 md5。
  */
-async function downloadPredownload({ channel, installRoot, signal, onProgress } = {}) {
+async function downloadPredownload({ channel, installRoot, signal, onProgress, linkSources = [] } = {}) {
   const result = { ok: false, stageDir: '', downloadedFiles: 0, bytes: 0, reason: '' };
   try {
     const key = String(channel || 'official');
@@ -825,6 +833,43 @@ async function downloadPredownload({ channel, installRoot, signal, onProgress } 
           ok = got === job.hash;
         }
         if (ok) {
+          bytesDone += job.size;
+          processed += 1;
+          emit(onProgress, {
+            phase: 'download', bytesDone, totalBytes,
+            current: path.basename(job.rel), processed, total,
+          });
+          continue;
+        }
+      }
+
+      /*
+       * 跨服复用：别的服已经预下载过同一个差量文件，直接硬链接过来。
+       *
+       * 暂存目录结构是 _kuro_predownload/<目标版本>/<包名>/<rel>，两边的
+       * 版本、包名、相对路径都必须一致才会撞上同一个 dest —— 而这三个恰好
+       * 都是官方清单里的字段，不同渠道只要下的是同一份资源就是同名同内容。
+       * 判定口径和上面断点续传那段完全一致（size + md5），不能放宽。
+       */
+      if (linkSources.length && job.hash) {
+        const grabbed = await linkSource.reuseNamedFile({
+          target: job.dest,
+          roots: linkSources,
+          subdir: `${targetVersion}/${job.packName}`,
+          name: job.rel,
+          match: async (candidate) => {
+            try {
+              const info2 = await fsp.stat(candidate);
+              if (!info2.isFile()) return false;
+              if (job.size && info2.size !== job.size) return false;
+              const got = await kuroPacks.md5File(candidate, { signal }).catch(() => null);
+              return got === job.hash;
+            } catch {
+              return false;
+            }
+          },
+        });
+        if (grabbed.ok) {
           bytesDone += job.size;
           processed += 1;
           emit(onProgress, {
@@ -1298,7 +1343,9 @@ async function clearPredownload(installRoot) {
  * 既不用重下 82GB 全量，也不会因为版本号被提前改写而跳过校验；中途失败
  * 不改写记账，下次可重续（downloadOne 自带 .kuro-tmp + Range 断点续传）。
  */
-async function updateGameFromBundle({ channel, installRoot, signal, onProgress, allowMissingConfig = false } = {}) {
+async function updateGameFromBundle({
+  channel, installRoot, signal, onProgress, allowMissingConfig = false, linkSources = [],
+} = {}) {
   const result = {
     ok: false, version: '', tag: '', downloaded: 0, reused: 0, deleted: 0, bytes: 0, reason: '',
   };
@@ -1494,8 +1541,15 @@ async function updateGameFromBundle({ channel, installRoot, signal, onProgress, 
     //    两次 emit 之间零事件会让弹窗冻在 0%；每 25 个文件报一次 compare 进度。
     const jobs = [];
     let reused = 0;
+    let linkedFromSources = 0;
     let scanned = 0;
     const remoteTotal = remote.size;
+    /*
+     * 同机另一份鸣潮（官服 / B服 / 国际服三份并存很常见）已经在目标版本时，
+     * 内容相同的文件直接硬链接过来，不必再为同一份字节走一遍网络。
+     * usableSources 会丢掉跨卷的源（跨卷既不能硬链接，复制反而双份 IO）。
+     */
+    const usableSources = linkSource.usableSources(linkSources, { targetRoot: root });
     for (const file of remote.values()) {
       scanned += 1;
       if (scanned % 25 === 0 || scanned === remoteTotal) {
@@ -1520,6 +1574,30 @@ async function updateGameFromBundle({ channel, installRoot, signal, onProgress, 
           }
         } catch {
           /* 校验失败按「需要重下」处理 */
+        }
+      }
+      /*
+       * 本地这份不在目标版本 → 先问同机别的鸣潮客户端有没有同一个文件。
+       * 命中就 unlink + link（同卷秒完成），源那份不受影响。
+       * match 口径必须和上面「本地是否已就位」一致：size + 整份 md5，
+       * 否则会出现「这里说命中、那边又重新下」。
+       */
+      if (usableSources.length) {
+        const linked = await linkSource.reuseFromSources({
+          file: { ...file, file: file.path },
+          target: abs,
+          gameKey: 'wutheringwaves',
+          sources: usableSources,
+          match: async (candidate) => {
+            const info = await fsp.stat(candidate).catch(() => null);
+            if (!info || !info.isFile() || info.size !== file.size) return false;
+            return (await kuroPacks.md5File(candidate, { signal })) === file.hash;
+          },
+        });
+        if (linked.ok) {
+          linkedFromSources += 1;
+          reused += 1;
+          continue;
         }
       }
       jobs.push({
@@ -1658,6 +1736,7 @@ async function updateGameFromBundle({ channel, installRoot, signal, onProgress, 
     result.tag = targetVersion;
     result.downloaded = downloaded;
     result.reused = reused;
+    result.linked = linkedFromSources;
     result.deleted = deleted;
     result.bytes = bytesDone;
     emit(onProgress, {

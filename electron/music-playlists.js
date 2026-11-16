@@ -338,7 +338,13 @@ function qqLoginKeys(session) {
   }
   const header = String(bag.__cookieHeader || '');
   const match = header.match(/(?:^|;\s*)(?:qm_keyst|qqmusic_key)=([^;]+)/);
-  return match ? decodeURIComponent(match[1]).trim() : '';
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]).trim();
+  } catch {
+    /* cookie 值里带裸 % 就按原文用，别为这个抛 URIError */
+    return match[1].trim();
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1551,8 +1557,19 @@ async function parseSharedPlaylistLink(rawInput) {
     throw new Error('这个链接看起来不完整，请重新复制一次完整的歌单链接');
   }
   const host = url.hostname.toLowerCase();
-  // 网易云的 playlist?id= 写在 hash 里，必须连 hash 一起找
-  const haystack = decodeURIComponent(url.pathname + url.search + url.hash);
+  /*
+   * 网易云的 playlist?id= 写在 hash 里，必须连 hash 一起找。
+   * 解码要包 try：new URL() 不校验百分号转义，用户粘的链接尾巴带个裸 %
+   * （或中文被编码坏掉）时 decodeURIComponent 会抛 URIError「URI malformed」，
+   * 这句是在 try 外面的，抛出去界面只能看到一坨英文报错，
+   * 而不是下面那些「认不出歌单 ID」的中文提示。解不开就按原文找。
+   */
+  let haystack = url.pathname + url.search + url.hash;
+  try {
+    haystack = decodeURIComponent(haystack);
+  } catch {
+    /* 解不开就按原样匹配，后面的正则对 %xx 不敏感 */
+  }
   const query = new URLSearchParams(url.search);
   const firstParam = (...names) => {
     for (const name of names) {

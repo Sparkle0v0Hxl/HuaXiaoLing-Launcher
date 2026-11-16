@@ -55,6 +55,13 @@ function installArknightsIpc(ctx) {
           installRoot: server.root,
           allowDelete: true,
           onProgress: (progress) => emit(progress),
+          /*
+           * 更新本体时复用同机别的方舟区（EN/JP/KR 互为源），同 CRC64 的文件
+           * 直接硬链接，只下真缺的差异文件（2026-11-16 用户要求）。
+           */
+          linkSources: typeof externalLinkSources === 'function'
+            ? externalLinkSources(game, server, server.root)
+            : [],
         });
         if (result?.ok) {
           game.version = String(result.version || game.version || '');

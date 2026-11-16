@@ -250,9 +250,9 @@ function hoyolabLoginCard() {
           ${
             isActive
               ? ''
-              : `<button class="btn ghost xs" data-action="hoyolab-switch" data-value="${esc(account.id)}">切换</button>`
+              : `<button class="btn btn-ghost btn-sm" data-action="hoyolab-switch" data-value="${esc(account.id)}">切换</button>`
           }
-          <button class="btn ghost xs" data-action="hoyolab-remove" data-value="${esc(account.id)}" title="移除这个账号">${icon('trash', 'xs')}</button>
+          <button class="btn btn-ghost btn-sm" data-action="hoyolab-remove" data-value="${esc(account.id)}" title="移除这个账号">${icon('trash', 'xs')}</button>
         </div>
       </div>`;
     })
@@ -272,7 +272,7 @@ function hoyolabLoginCard() {
                 accounts.length > 1 ? ` ${accounts.length} 个账号` : ''
               }</span>
                <button class="btn accent" data-action="hoyolab-login" data-value="miyoushe" data-mode="add">${icon('plus', 'xs')}添加账号</button>
-               <button class="btn ghost" data-action="hoyolab-logout" data-value="miyoushe">全部退出</button>`
+               <button class="btn btn-ghost" data-action="hoyolab-logout" data-value="miyoushe">全部退出</button>`
             : `<span class="miyo-state">${status.loading ? '读取中' : '未登录'}</span>
                <button class="btn accent" data-action="hoyolab-login" data-value="miyoushe">${icon('link', 'xs')}打开米游社登录</button>`
         }
@@ -417,9 +417,9 @@ function shotsView() {
   if (state.shotsLoading && !data) {
     body = `<div class="tools-empty">${icon('refresh')}<strong>正在扫描截图目录</strong><p>第一次扫描会遍历图片文件夹，稍等一下。</p></div>`;
   } else if (state.shotsError) {
-    body = `<div class="tools-empty">${icon('info')}<strong>${esc(state.shotsError)}</strong><p>可以在设置里手动补充截图目录。</p><button class="btn ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button></div>`;
+    body = `<div class="tools-empty">${icon('info')}<strong>${esc(state.shotsError)}</strong><p>可以在设置里手动补充截图目录。</p><button class="btn btn-ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button></div>`;
   } else if (!data || !data.total) {
-    body = `<div class="tools-empty">${icon('image')}<strong>没有找到截图</strong><p>把游戏截图放在图片文件夹里，或在设置里添加自定义目录。</p><button class="btn ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button></div>`;
+    body = `<div class="tools-empty">${icon('image')}<strong>没有找到截图</strong><p>把游戏截图放在图片文件夹里，或在设置里添加自定义目录。</p><button class="btn btn-ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button></div>`;
   } else {
     body = `
       <div class="shots-tabs">
@@ -462,7 +462,7 @@ function shotsView() {
         <h1>截图管理</h1>
         <p class="page-desc">各游戏的截图统一浏览，按游戏分组、按时间倒序。</p>
       </div>
-      <button class="btn ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button>
+      <button class="btn btn-ghost" data-action="shots-refresh">${icon('refresh', 'xs')}重新扫描</button>
     </div>
       ${body}
     </div>`;
@@ -663,7 +663,7 @@ function pluginCardMarkup(plugin) {
         <div class="plugin-broken-file">${esc(plugin.file || '未知文件')}</div>
         <p class="plugin-broken-why">${esc(plugin.error)}</p>
       </div>
-      <button class="btn ghost plugin-broken-remove" data-action="plugin-remove" data-file="${esc(plugin.file || '')}" data-id="${esc(plugin.id || '')}">
+      <button class="btn btn-ghost plugin-broken-remove" data-action="plugin-remove" data-file="${esc(plugin.file || '')}" data-id="${esc(plugin.id || '')}">
         ${icon('trash', 'xs')}删除
       </button>
     </div>`;
@@ -713,7 +713,7 @@ function pluginPanelMarkup(plugin) {
       <div class="plugin-panel-name">${esc(plugin.name || plugin.id)}</div>
       <div class="plugin-panel-meta">${esc(plugin.file || plugin.id)} · 权限 ${(plugin.permissions || []).length} 项</div>
     </div>
-    <button class="btn ghost" data-action="plugin-reload" data-id="${esc(plugin.id)}">${icon('refresh', 'xs')}重新运行</button>
+    <button class="btn btn-ghost" data-action="plugin-reload" data-id="${esc(plugin.id)}">${icon('refresh', 'xs')}重新运行</button>
   </div>`;
 
   let body = '';
@@ -768,9 +768,9 @@ function pluginsView() {
       </div>
       <div class="plugin-actions">
         <button class="btn btn-primary" data-action="plugin-import">${icon('plus', 'xs')}导入插件</button>
-        <button class="btn ghost" data-action="plugin-open-dir">${icon('folder', 'xs')}打开插件目录</button>
-        <button class="btn ghost" data-action="plugin-refresh">${icon('refresh', 'xs')}刷新</button>
-        <button class="btn ghost" data-action="plugin-doc" title="打开插件开发说明">${icon('info', 'xs')}开发说明</button>
+        <button class="btn btn-ghost" data-action="plugin-open-dir">${icon('folder', 'xs')}打开插件目录</button>
+        <button class="btn btn-ghost" data-action="plugin-refresh">${icon('refresh', 'xs')}刷新</button>
+        <button class="btn btn-ghost" data-action="plugin-doc" title="打开插件开发说明">${icon('info', 'xs')}开发说明</button>
       </div>
     </div>
     <div class="plugin-layout">
@@ -1495,7 +1495,7 @@ function graphicsView() {
         <h1>画质配置</h1>
         <p class="page-desc">读写游戏写在注册表里的画质 / 分辨率设置，每一项都可以直接改。</p>
       </div>
-      <button class="btn ghost" data-action="graphics-refresh">${icon('refresh', 'xs')}重新读取</button>
+      <button class="btn btn-ghost" data-action="graphics-refresh">${icon('refresh', 'xs')}重新读取</button>
     </div>
       <div class="shots-tabs">
         ${games
@@ -1641,7 +1641,7 @@ function gameWikiGroup(game) {
     <p class="tg-wiki-intro">${esc(site.intro || site.desc || '')}</p>
     <div class="tg-wiki-row">
       <span class="tg-wiki-site">${esc(site.name)}</span>
-      <button class="btn ghost" data-action="tools-wiki" data-url="${esc(site.url)}">
+      <button class="btn btn-ghost" data-action="tools-wiki" data-url="${esc(site.url)}">
         ${icon('external', 'xs')}在浏览器打开
       </button>
     </div>
@@ -1844,7 +1844,7 @@ const TOOLS_CATEGORY_ORDER = ['record', 'gacha', 'local', 'system', 'info'];
 function toolsBackBar() {
   if (!state.fromTools || state.route === 'tools') return '';
   return `<div class="tools-back-bar">
-    <button class="btn ghost" data-action="nav-tools">${icon('chevron-left', 'xs')}返回工具页</button>
+    <button class="btn btn-ghost" data-action="nav-tools">${icon('chevron-left', 'xs')}返回工具页</button>
   </div>`;
 }
 const TOOLS_CATEGORY_SHORT = {
@@ -2022,11 +2022,11 @@ function toolsView() {
         <p class="page-desc">${totalGames} 个游戏 · ${totalFeatures} 项能力，左边选游戏，右边直接进对应功能</p>
       </div>
       <div class="tools-head-actions">
-        <button class="btn ghost" data-action="roster-open" data-value="${esc(activeGame ? activeGame.key : '')}">
+        <button class="btn btn-ghost" data-action="roster-open" data-value="${esc(activeGame ? activeGame.key : '')}">
           ${icon('gacha', 'xs')}角色图鉴
         </button>
-        <button class="btn ghost" data-action="nav-plugins">${icon('sparkle', 'xs')}自定义插件</button>
-        <button class="btn ghost" data-action="tools-refresh">${icon('refresh', 'xs')}重新读取</button>
+        <button class="btn btn-ghost" data-action="nav-plugins">${icon('sparkle', 'xs')}自定义插件</button>
+        <button class="btn btn-ghost" data-action="tools-refresh">${icon('refresh', 'xs')}重新读取</button>
       </div>
     </div>
 
@@ -2834,15 +2834,15 @@ function recordView() {
       }
       <p class="record-url">${esc(cache.url || '')}</p>
       <div class="record-error-actions">
-        <button class="btn ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? '冷却中' : '重试'}</button>
+        <button class="btn btn-ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? '冷却中' : '重试'}</button>
         ${
           cache.needVerify
-            ? `<button class="btn ghost" data-action="record-open-web">${icon('external', 'xs')}打开官方战绩页</button>`
+            ? `<button class="btn btn-ghost" data-action="record-open-web">${icon('external', 'xs')}打开官方战绩页</button>`
             : ''
         }
         ${
           cache.needLogin && viaSkland
-            ? `<button class="btn ghost" data-action="skland-login">${icon('login', 'xs')}重新登录森空岛</button>`
+            ? `<button class="btn btn-ghost" data-action="skland-login">${icon('login', 'xs')}重新登录森空岛</button>`
             : ''
         }
       </div></div>`;
@@ -2863,10 +2863,10 @@ function recordView() {
       <div class="record-head-actions">
         ${
           viaSkland && feature === 'daily-note'
-            ? `<button class="btn ghost" data-action="skland-sign">${icon('check', 'xs')}签到</button>`
+            ? `<button class="btn btn-ghost" data-action="skland-sign">${icon('check', 'xs')}签到</button>`
             : ''
         }
-        <button class="btn ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? `冷却中 ${recordWaitText(cooling)}` : '刷新'}</button>
+        <button class="btn btn-ghost" data-action="record-refresh"${cooling ? ' disabled' : ''}>${icon('refresh', 'xs')}${cooling ? `冷却中 ${recordWaitText(cooling)}` : '刷新'}</button>
       </div>
     </div>
 
@@ -2992,11 +2992,11 @@ function sklandLoginCard() {
     : '';
 
   const actions = view.loggedIn
-    ? `<button class="btn ghost" data-action="skland-login" data-value="add">${icon('link', 'xs')}添加账号</button>
-       <button class="btn ghost" data-action="skland-logout">退出当前</button>`
+    ? `<button class="btn btn-ghost" data-action="skland-login" data-value="add">${icon('link', 'xs')}添加账号</button>
+       <button class="btn btn-ghost" data-action="skland-logout">退出当前</button>`
     : adopt
       ? `<button class="btn accent" data-action="skland-login">${icon('link', 'xs')}接管已有登录</button>
-         <button class="btn ghost" data-action="skland-login" data-value="relogin">换个账号</button>`
+         <button class="btn btn-ghost" data-action="skland-login" data-value="relogin">换个账号</button>`
       : `<button class="btn accent" data-action="skland-login">${icon('link', 'xs')}打开森空岛登录</button>`;
 
   return `<div class="page glass-panel miyo-card miyo-alt">

@@ -10,6 +10,19 @@ const { loadSecret, saveSecret } = require('./secret-store');
 const sophon = require('./sophon');
 const installManager = require('./install-manager');
 const predownload = require('./predownload');
+const { createCancelSignal } = require('./cancel-signal');
+// 渠道能力表：哪些游戏在哪些渠道支持 link/repair/update/predownload 全在这里定义，
+// 不要在下面各 handler 里再写死渠道数组（用户 2026-11-16 定的规则）。
+const gameChannels = require('./game-channels');
+
+/*
+ * 渠道体检（2026-11-16 报障）：只有这几款米哈游游戏的客户端目录里带 config.ini
+ * （或者 exe 名本身能区分 YuanShen.exe / GenshinImpact.exe），判出来的渠道才可信。
+ * 终末地 play/steam、方舟 global-en/global-jp/taiwan 这些渠道 key 与 ini 判定不同名，
+ * 一律不参与体检，免得把正常的配置误报成「指错了目录」。
+ */
+const MIHOYO_CHANNEL_KEYS = ['genshin', 'starrail', 'zzz', 'bh3'];
+const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
 
 /**
  * 服务器/渠道管理：增删改、硬链接、端末地运行时、渠道包、Sophon 增量。
@@ -253,6 +266,44 @@ function installServersIpc(ctx) {
         game.versionName = clientVersion;
       }
       /*
+       * 切服后的渠道体检（同一桩 2026-11-16 报障：原神 官服 ↔ 国际服）。
+       *
+       * 这一行声明的渠道 vs 目标客户端自己声明的渠道。不一致说明这一行的路径指到了
+       * 另一个服的客户端：两边账号态不在同一处，切过去就会看到「上次登录退回到很久以前、
+       * 还要重新登录」。不阻断切换（用户可能就是想把这一行改指向别的目录），
+       * 但必须落日志 + 说明白，否则下次还是只能猜。
+       *
+       * 只体检米哈游四款、只认 official/bilibili/global 三个 key：
+       * 其它游戏的渠道 key 与 ini/目录名判定不同名，硬比会误报。
+       */
+      try {
+        const chosenChannel = String(server.channel || '');
+        const iniChannel = clientChannel.configChannelFromPath(server.path) || '';
+        const hintChannel = clientChannel.pathChannelHint(server.path) || '';
+        const actualChannel = iniChannel || hintChannel;
+        const mismatch =
+          MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0 &&
+          CHANNEL_PROBE_KEYS.indexOf(chosenChannel) >= 0 &&
+          Boolean(actualChannel) &&
+          chosenChannel !== actualChannel;
+        writeLaunchLog(
+          `activate ${game.id}: ${server.name || server.id} chosen=${chosenChannel || '-'} ` +
+            `ini=${iniChannel || '-'} hint=${hintChannel || '-'}` +
+            (mismatch ? ` MISMATCH actual=${actualChannel}` : '')
+        );
+        if (mismatch) {
+          send('toast', {
+            type: 'error',
+            message:
+              `「${server.name || '这一行'}」标的是${clientChannel.channelLabel(chosenChannel)}，` +
+              `但那个目录里是${clientChannel.channelLabel(actualChannel)}客户端 —— ` +
+              '切过去账号会串到另一个服（表现为登录记录退回、要重新登录）。请点“编辑”重新选目录。',
+          });
+        }
+      } catch {
+        /* 体检不许影响切换 */
+      }
+      /*
        * 切成功了：记下「用过切服」，并在这个用户还没表过态（null）时把对应游戏的
        * 渠道包自动更新打开。两个游戏各一个开关：只切过终末地的人，不该被顺手打开
        * 明日方舟那条。手动关掉的（false）保持关着 —— 用户明确表过态就不替他改。
@@ -289,7 +340,7 @@ function installServersIpc(ctx) {
       const { sourceRoot, targetRoot, sourceName, targetName } = resolveLinkRoots(game, input);
 
       const jobId = crypto.randomUUID();
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       getLinkJobs().set(jobId, signal);
       send('link:progress', {
         jobId,
@@ -340,7 +391,7 @@ function installServersIpc(ctx) {
       const { sourceRoot, targetRoot, sourceName, targetName } = resolveLinkRoots(game, input);
 
       const jobId = crypto.randomUUID();
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       getLinkJobs().set(jobId, signal);
       const sendPreview = (payload) => send('link:preview-progress', { jobId, gameId: game.id, sourceName, targetName, ...payload });
 
@@ -410,20 +461,32 @@ function installServersIpc(ctx) {
       if (!game) throw new Error('没有找到这个游戏');
       if (game.builtinKey === 'endfield') return prepareEndfieldRuntimeJob(game, input);
       if (game.builtinKey === 'arknights') return prepareArknightsRuntimeJob(game, input);
-      if (!['genshin', 'starrail', 'zzz'].includes(game.builtinKey)) {
+      /*
+       * 崩坏3 也要能「生成差异客户端」：用户 2026-11-16 定的规则是崩坏3 的 link（硬链接）
+       * 对 official / bilibili / global 三个渠道全开 —— 硬链接只是本地文件操作，
+       * 不依赖官方远端清单，所以不必像 download/update 那样限死在官服。
+       */
+      if (!['genshin', 'starrail', 'zzz', 'bh3'].includes(game.builtinKey)) {
         throw new Error('这个游戏没有接入 Sophon 清单');
       }
       if (getRunning().has(game.id)) throw new Error('游戏正在运行，先结束进程再准备服务器');
       const server = game.servers.find((item) => item.id === input?.serverId);
       if (!server) throw new Error('没有找到这个服务器');
       /*
-       * 放开官服作为「生成」目标：没有官服客户端、但装了 B服 / 国际服的玩家，
-       * 也能以 B服 / 国际服 当基础，硬链接相同的文件、只下载官服独有的差异分块，
-       * 省下一次完整下载。原来这里只允许 bilibili / global，官服点「重建」只会让你选路径，
-       * 而没官服客户端的人根本没路径可选，死循环。
-       * play / steam 这些没接入 Sophon 清单的渠道仍然不支持。
+       * 渠道判据统一从 game-channels.js 的能力表拿，不再在这里写死 official/bilibili/global：
+       * 用户 2026-11-16 定的规则里，「生成差异客户端」这件事其实同时要求两件事，缺一不可：
+       *   1. link     —— 要把基础客户端里的同内容文件硬链接过去（本地文件操作，所以崩坏3 三渠道全开）；
+       *   2. download —— 剩下的差异分块只能从**该渠道自己的**官方 CDN 清单拉，没有清单就下不到东西。
+       * 只看 link 是不够的：崩坏3 的 link 三渠道全开，但官方 HoYoPlay 只给 bh3_cn 清单
+       * （见 game-channels.js 里 bh3 的注释），B服 / 国际服的差异分块根本无处可下。
+       * 不加 download 这一条的话，崩坏3 B服 会一路走到 prepareSophon 内部，
+       * 再被 CHANNELS 守卫拦成一句「这个服务器没有 Sophon 清单」—— 对用户毫无指向性。
+       * 两句用同一个错误文案，界面和文档都按这句话写过。
        */
-      if (!['official', 'bilibili', 'global'].includes(server.channel)) {
+      if (!gameChannels.can(game.builtinKey, server.channel, 'link')) {
+        throw new Error('这个渠道暂时不支持生成差异客户端');
+      }
+      if (!gameChannels.can(game.builtinKey, server.channel, 'download')) {
         throw new Error('这个渠道暂时不支持生成差异客户端');
       }
       // 基础客户端优先取官服、其次 B服（都是国服系，本地分块能复用得最多），
@@ -461,7 +524,7 @@ function installServersIpc(ctx) {
       }
 
       const jobId = String(input?.jobId || crypto.randomUUID());
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       sophonJobs.set(jobId, signal);
       beginBackgroundTask();
       send('sophon:progress', {
@@ -472,8 +535,16 @@ function installServersIpc(ctx) {
         total: 0,
       });
       try {
+        /*
+         * 崩坏3 不能走 prepareBilibiliRuntime：那条路最后要读 CHANNELS[gameKey].bilibili
+         * 装渠道 SDK 并改写 config.ini，而 sophon.js 的 CHANNELS.bh3 只有 official 一项
+         * （HoYoPlay 体系里没有崩坏3 B服），走进去就是 undefined.bilibili 直接崩。
+         * 用户 2026-11-16 的规则是崩坏3 的 link（硬链接）三渠道全开，但 download/update
+         * 只官服 —— 所以崩坏3 的 B服 / 国际服只做本地文件层面的生成，落到 prepareSophon 分支，
+         * 由它自己的清单守卫给出明确报错，而不是在这里伪造渠道 SDK。
+         */
         const result =
-          server.channel === 'bilibili' && base.channel === 'official'
+          server.channel === 'bilibili' && base.channel === 'official' && game.builtinKey !== 'bh3'
             ? await prepareBilibiliRuntime({
                 gameKey: game.builtinKey,
                 baseRoot: base.root,
@@ -537,8 +608,20 @@ function installServersIpc(ctx) {
       if (!server || !server.root || !server.path || !targetExists(server.path)) {
         throw new Error('这个服务器还没有可更新的客户端');
       }
-      if (game.builtinKey === 'bh3' && server.channel && server.channel !== 'official') {
-        throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
+      /*
+       * 渠道判据交给能力表的 update 能力，不再写死「bh3 只认 official」。
+       * 用户 2026-11-16 定的规则：原神 / 星铁 / 绝区零三渠道都能更新（官方 HoYoPlay
+       * 对 hk4e / hkrpg / nap 都发 *_global 清单，已实网验证）；崩坏3 的 download/update
+       * 只官服 —— 因为官方 HoYoPlay 只给 bh3_cn 清单，B服 / 国际服的本体得用对应官方启动器。
+       * 崩坏3 保留原来那句专属文案，其它游戏给通用文案，方便用户直接看懂该去哪儿更新。
+       */
+      if (server.channel && !gameChannels.can(game.builtinKey, server.channel, 'update')) {
+        if (game.builtinKey === 'bh3') {
+          throw new Error('崩坏3 本体更新仅支持官服（B服 / 国际服请使用对应官方启动器）');
+        }
+        throw new Error(
+          `${game.name || '这个游戏'}的${clientChannel.channelLabel(server.channel)}没有官方 Sophon 更新清单，请用对应官方启动器更新`
+        );
       }
       /*
        * 动手之前先探一下「这个目录到底让不让我们写」。
@@ -565,7 +648,7 @@ function installServersIpc(ctx) {
         }
       }
       const jobId = String(input?.jobId || crypto.randomUUID());
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       sophonJobs.set(jobId, signal);
       beginBackgroundTask();
       /*
@@ -811,7 +894,7 @@ function installServersIpc(ctx) {
       await assertDirWritable(installDir);
 
       const jobId = String(input?.jobId || crypto.randomUUID());
-      const signal = { cancelled: false };
+      const signal = createCancelSignal();
       // 信号登记进 sophonJobs：现有的 servers:pause-sophon / servers:cancel-sophon 直接生效
       sophonJobs.set(jobId, signal);
       beginBackgroundTask();
