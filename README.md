@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.0**（正式版）
+**当前版本：v2.12.1**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,34 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.1</b></summary>
+
+明日方舟繁体中文服（台服）接进来了。
+
+
+**方舟台服**
+
+- 明日方舟繁体中文服（台服）接进来了。它是鹰角海外品牌 Gryphline 直营的繁中服，实测确认跟国服官服走同一套接口、同一把加密钥匙，所以能和国服互相硬链接：比对下来 35% 的文件（约 7.5 GB）可以直接硬链接复用，其余按台服自己的清单逐个文件核对补齐，差多少补多少，不会整包重下。
+- 一键下载、检查更新、修复本体都通了，界面上和其它渠道一样。（预下载那项方舟官方至今没开放，界面不会给你一个点了只报不支持的假入口。）
+
+**不能互链的原因**
+
+- 台服跟日服 / 韩服 / 国际服不能互相硬链接——那三个区是 Yostar 自家的一套签名与校验方式，发行商和 CDN 都不同，同名文件内容对不上。硬链过去会做出「壳是国服、资源是别的区」的混合体，反而坏。这不是偷懒，是两边本来就不是同一套东西。日韩国际三区互相为源的功能早就有了，这次一并保留。
+
+**鸣潮三处修复**
+
+- 硬链接安全线：硬链接等于两个渠道共用同一份文件。运行时自己会改的那些文件（战绩、崩溃上报、账号相关、各渠道自己的 SDK 配置）以前可能被两个渠道一起改了，现在一律拷贝不共享。
+- 本体根目录认错：游戏装在三层深的目录里时，客户端记账文件找不到，启动器就误判「不是官方客户端」，点更新直接报错。现在会自己往上找本体根目录，更新和抽卡日志都认得对了。
+- WeGame 转换入口：原来那个四步转换教程只能从很深的地方点进来，最该用的官服反而没入口。现在服务器那一行直接多一个转换按钮。
+
+**其它**
+
+- 崩坏3 国际服的资源清单补上了（实测国际服有五个发行区，之前以为没有）；抽卡页空状态里少的那句鸣潮同步提示补回；几个只写了测试目的的校验脚本改成动态判断，不再误报失败；两处「界面给了入口、点了却报错」的能力表错配也修了。
+
+</details>
 
 <details>
 <summary><b>v2.12.0</b></summary>

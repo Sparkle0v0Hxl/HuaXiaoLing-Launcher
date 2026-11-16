@@ -40,6 +40,37 @@ async function api(method, url, body, raw) {
   throw lastErr || new Error('api failed');
 }
 
+/*
+ * 发布页正文。清单里的 notes 是唯一事实来源：打包脚本（pack.js）把
+ * build/latest.json 的 notes 原样写进正式清单，这里再原样排版成发布页。
+ * 所以改了 notes 重跑一次发布，页面的「这一版改了什么」就跟着变。
+ */
+function buildBody(VER, m) {
+  return [
+    `## 花筱灵启动器 ${VER}`,
+    '',
+    '### 这一版改了什么',
+    '',
+    ...String(m.notes || '').split('\n').filter(Boolean).map(l => `- ${l}`),
+    '',
+    '### 下载',
+    `- 安装版：\`HuaXiaoLing-${VER}-Setup.exe\`（向导安装，推荐）`,
+    `- 便携版：\`HuaXiaoLing-${VER}-Portable.zip\`（解压即用，数据在 \`data\\\` 里，覆盖升级不会丢）`,
+    `- 更新清单：\`latest.json\``,
+    ...(Array.isArray(m.deltas) && m.deltas.length
+      ? [`- 增量包：${m.deltas.map((d) => `\`delta-${d.from}-to-${d.to}.zip\`（${(d.size / 1048576).toFixed(2)} MB）`).join('、')}——启动器自动用，不用手动下`]
+      : []),
+    '',
+    `SHA-256（便携包）：\`${m.sha256 || ''}\``,
+    '',
+    '### 手动更新',
+    '旧版本可以直接用本仓库的 releases 覆盖，也可以把 `latest.json` 地址填到启动器「设置 → 启动器更新 → 更新源」。',
+    '',
+    '---',
+    '感谢 **Starward** 与 **XelLauncher** 两个开源项目。',
+  ].join('\n');
+}
+
 (async () => {
   const zip = path.join(BUILD, `HuaXiaoLing-${VER}-Portable.zip`);
   const setup = path.join(BUILD, `HuaXiaoLing-${VER}-Setup.exe`);
@@ -61,41 +92,45 @@ async function api(method, url, body, raw) {
 
   // 1. 找/建 release
   let rel = await api('GET', `/repos/${REPO}/releases/tags/${TAG}`);
+  const body = buildBody(VER, m);
   if (!rel.ok) {
     console.log('release 不存在，创建…');
     rel = await api('POST', `/repos/${REPO}/releases`, {
       tag_name: TAG,
       target_commitish: 'main',
       name: `花筱灵启动器 ${VER}`,
-      body: [
-        `## 花筱灵启动器 ${VER}`,
-        '',
-        '### 这一版改了什么',
-        '',
-        ...String(m.notes || '').split('\n').filter(Boolean).map(l => `- ${l}`),
-        '',
-        '### 下载',
-        `- 安装版：\`HuaXiaoLing-${VER}-Setup.exe\`（向导安装，推荐）`,
-        `- 便携版：\`HuaXiaoLing-${VER}-Portable.zip\`（解压即用，数据在 \`data\\\` 里，覆盖升级不会丢）`,
-        `- 更新清单：\`latest.json\``,
-        ...(Array.isArray(m.deltas) && m.deltas.length
-          ? [`- 增量包：${m.deltas.map((d) => `\`delta-${d.from}-to-${d.to}.zip\`（${(d.size / 1048576).toFixed(2)} MB）`).join('、')}——启动器自动用，不用手动下`]
-          : []),
-        '',
-        `SHA-256（便携包）：\`${m.sha256 || ''}\``,
-        '',
-        '### 手动更新',
-        '旧版本可以直接用本仓库的 releases 覆盖，也可以把 `latest.json` 地址填到启动器「设置 → 启动器更新 → 更新源」。',
-        '',
-        '---',
-        '感谢 **Starward** 与 **XelLauncher** 两个开源项目。',
-      ].join('\n'),
+      body,
       draft: false,
       prerelease: false,
     });
     if (!rel.ok) { console.error('建 release 失败', rel.status, JSON.stringify(rel.json).slice(0, 300)); process.exit(1); }
   } else {
     console.log('release 已存在:', rel.json.html_url);
+    /*
+     * 已存在的发布页要**改正文和标题**。
+     * 以前这里只管传资产，正文永远停在第一次创建时写的内容 —— 清单的 notes 改了
+     * （比如补渠道、改错配）发布页也不会跟着变，页面上写的还是旧文案。
+     * 现在每次发布都把正文对齐当前清单，资产照常重传。
+     */
+    const oldName = String(rel.json.name || '');
+    const oldBody = String(rel.json.body || '');
+    const newName = `花筱灵启动器 ${VER}`;
+    if (oldName !== newName || oldBody !== body) {
+      console.log('更新发布页正文/标题…');
+      const upd = await api('PATCH', `/repos/${REPO}/releases/${rel.json.id}`, {
+        tag_name: TAG,
+        name: newName,
+        body,
+      });
+      if (!upd.ok) {
+        console.error('更新发布页失败', upd.status, JSON.stringify(upd.json).slice(0, 300));
+        process.exitCode = 1;
+      } else {
+        console.log('  ok 正文已对齐当前清单');
+      }
+    } else {
+      console.log('  正文与标题已是最新，跳过');
+    }
   }
   const rid = rel.json.id;
   const existing = new Map(((rel.json.assets) || []).map(a => [a.name, a.id]));
