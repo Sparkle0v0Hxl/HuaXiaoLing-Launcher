@@ -284,6 +284,13 @@ const yostarPacks = require('./yostar-packs');
  * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
  */
 const kuroPacks = require('./kuro-packs');
+/**
+ * 鸣潮启动参数：客户端断言「必须由启动器启动」，缺 -krqlv=<画质档位> 就自杀
+ * （Fatal error: kuro: Use launcher to start game!）。详见 electron/wuwa-launch.js。
+ *
+ * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ */
+const wuwaLaunch = require('./wuwa-launch');
 // 进度计量器：给各条下载/更新链路补速度与剩余时间（纯计算，无 IO、无依赖）
 const progressMeter = require('./progress-meter');
 
@@ -9700,6 +9707,7 @@ function installIpc() {
     resolveLinkRoots,
     prepareEndfieldRuntimeJob,
     prepareArknightsRuntimeJob,
+    prepareKuroRuntimeJob,
     estimateRuntimeSpace,
     probeUpdateWritable,
     invalidateRuntimesAfterUpdate,
@@ -9766,6 +9774,7 @@ function installIpc() {
     trackGameProcess,
     autoClickNtePredownload,
     autoClickNteStart,
+    wuwaLaunch,
   });
 
   installEndfieldIpc({ BrowserWindow, win, targetExists, send, pushState, writeLaunchLog, updateEndfieldGame, externalLinkSources, endfieldPackWritableRoot, ENDFIELD_PACK_NAMES, updateEndfieldPacks, refreshPackChannels, describePackUsage, ARKNIGHTS_PACK_DIRS, ENDFIELD_PACK_DIRS, builtinPackRoot, dirSize, refreshArknightsPackChannels, channelPackStatus, downloadChannelPack, cancelChannelPack, ARKNIGHTS_PACK_CHANNELS, channelPackSpec, endfieldPackCandidateRoots, channelPackReady, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
@@ -10187,6 +10196,153 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
       partial,
       targetRoot,
     };
+  }
+
+  /*
+   * 鸣潮走自己的链路（库洛官方 index.json 清单 + 整树硬链接），
+   * 不读 Sophon 清单，所以以前点「硬链接生成一份」只能走 servers:activate 那条闷头路径：
+   * 一条不会动的 toast、没有空间估算、没有分阶段进度，和别的游戏手感完全不一样
+   * （用户 2026-11-16 报障「鸣潮内联面板点开的窗口，没和别的游戏统一」）。
+   *
+   * 这一版统一成和终末地 / 明日方舟同一套：
+   *   · estimate 分支先给出目标盘剩余、可复用上限、空间判断；
+   *   · 真跑时走 sophon:progress 频道，弹窗与启动页那块统一面板都能拿到字节进度；
+   *   · 完成后由弹窗自己写回状态并收起（前端那一屏负责）。
+   */
+  async function prepareKuroRuntimeJob(game, input = {}) {
+    const server = (game.servers || []).find((item) => item.id === input?.serverId);
+    if (!server) throw new Error('没有找到这个服务器');
+    if (await pruneStaleRunning()) pushState(true);
+    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再切换服务器');
+    const channel = String(server.channel || '');
+    if (!['official', 'bilibili'].includes(channel)) {
+      throw new Error(
+        channel === 'global'
+          ? '鸣潮国际服与国服内容几乎完全不同，不支持硬链接互切；请用「下载游戏」直接安装国际服'
+          : '这个渠道暂时不支持生成差异客户端'
+      );
+    }
+
+    /*
+     * 基础客户端：官服 / B服 / WeGame 任意互相为源（用户 m27540 / m29016 / m29017 / m29018）。
+     * 国际服差异太大排除（kuro-packs.js 的 buildCrossRuntime 也会拒）。
+     */
+    const candidates = (game.servers || []).filter(
+      (item) =>
+        ['official', 'bilibili'].includes(String(item.channel || '')) &&
+        item.channel !== channel &&
+        item.root &&
+        !String(item.root).includes('VelaRuntimes') &&
+        wuwaExeAt(item.root)
+    );
+    const wegameRoot = findWeGameWuwaRoot();
+    if (wegameRoot && wuwaExeAt(wegameRoot)) {
+      candidates.push({ channel: 'wegame', root: wegameRoot, name: 'WeGame 版', isWeGame: true });
+    }
+    if (!candidates.length) {
+      throw new Error(
+        `还没有另一个鸣潮渠道的安装目录可以当源（需要官服、B服 或 WeGame 的完整客户端）。请先用「下载游戏」或官方启动器装一个，再回来生成${
+          channel === 'bilibili' ? 'B服' : '官服'
+        }运行时。`
+      );
+    }
+    // WeGame 版排在最后：优先用官方体系内的源（渠道件差异最小），WeGame 兜底
+    candidates.sort((a, b) => (a.isWeGame ? 1 : 0) - (b.isWeGame ? 1 : 0));
+
+    const baseRoot = candidates[0].root;
+    const runtime = runtimePaths(baseRoot, 'wutheringwaves', channel, input?.runtimeRoot);
+    if (!runtime.sameDrive) {
+      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改“运行时目录”`);
+    }
+    /*
+     * 判据是「不得互相嵌套」而不是「不得相等」：和终末地 / 明日方舟用同一个
+     * pathsOverlap，运行时目录嵌进基础客户端里会把官服本体原地改写。
+     */
+    if (pathsOverlap(baseRoot, runtime.target)) {
+      throw new Error('运行时目录不能和基础客户端是同一个目录，也不能互相嵌套，请换个“运行时目录”再试');
+    }
+
+    if (input?.estimate) {
+      /*
+       * 空间判断先走本地统计（离线、只读）：目标盘剩余 + 基础客户端体积。
+       * 库洛自己的清单能给「还要下多少字节」，但那要联网读远端 index.json，
+       * 断网时不该把整个估算卡死 —— 拿不到就退成 copyBytes=null，界面显示「按默认目录继续」。
+       */
+      const space = await estimateRuntimeSpace(baseRoot, runtime.target);
+      let plan = null;
+      try {
+        plan = await kuroPacks.planCrossRuntime({ sourceRoot: baseRoot, targetProfile: channel });
+      } catch (error) {
+        writeLaunchLog(`kuro estimate: 读官方清单失败（${error.message}），只给本地空间信息`);
+      }
+      return {
+        ok: true,
+        estimate: true,
+        drive: space.drive,
+        freeBytes: space.freeBytes,
+        baseBytes: space.baseBytes,
+        copyBytes: plan ? Number(plan.downloadBytes) || 0 : null,
+        copyFiles: plan ? Number(plan.downloadCount) || 0 : null,
+        partial: space.partial,
+        targetRoot: runtime.target,
+        plan,
+      };
+    }
+
+    const jobId = String(input?.jobId || crypto.randomUUID());
+    const signal = createCancelSignal();
+    sophonJobs.set(jobId, signal);
+    beginBackgroundTask();
+    try {
+      const emit = (progress) => sendProgress('sophon:progress', jobId, progress);
+      emit({ phase: 'start', processed: 0, total: 0, current: '正在准备鸣潮运行时…' });
+      const result = await kuroPacks.buildCrossRuntime({
+        sourceRoot: baseRoot,
+        targetProfile: channel,
+        installRoot: runtime.target,
+        signal,
+        onProgress: emit,
+      });
+      if (signal.cancelled) return { ok: false, cancelled: true };
+      /*
+       * 主程序在 Client\Binaries\Win64\ 下；写回必须用真实路径，否则下次启动会因
+       * server.path 不存在把这一行标成「需要重建」（与 ensureKuroRuntime 同一套写法）。
+       */
+      const exe =
+        wuwaExeAt(runtime.target) ||
+        path.join(runtime.target, 'Client', 'Binaries', 'Win64', result.executable || 'Client-Win64-Shipping.exe');
+      server.path = exe;
+      server.rootDir = server.root;
+      server.root = runtime.target;
+      server.runtimeLinked = true;
+      server.legacyRuntime = false;
+      server.incomplete = false;
+      game.activeServerId = server.id;
+      game.target = exe;
+      game.workDir = runtime.target;
+      ensureServers(game);
+      await store.saveNow();
+      pushState(true);
+      send('sophon:progress', {
+        jobId,
+        phase: 'done',
+        processed: 1,
+        total: 1,
+        current: '完成',
+      });
+      return {
+        ok: true,
+        tag: result.version || server.name,
+        linked: result.linked || 0,
+        downloaded: result.downloaded || 0,
+        files: result.files || 0,
+        totalBytes: result.totalBytes || 0,
+        targetRoot: runtime.target,
+      };
+    } finally {
+      endBackgroundTask();
+      sophonJobs.delete(jobId);
+    }
   }
 
   /**

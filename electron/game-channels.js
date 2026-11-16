@@ -29,6 +29,18 @@
  */
 
 /** 全部渠道（含 wegame，它是独立平台不是国际服）。 */
+/*
+ * 明日方舟：台服（taiwan）由第三个发行商发行，协议未验证，
+ * 生成运行时 / 更新本体 / 修复本体 / 一键下载四条链路都会直接抛错，
+ * 所以它不在可用渠道里（渠道行仍然保留，玩家能选路径、能启动）。
+ * B服（bilibili）只有渠道包（ArkBilibili 增量载荷）没有完整客户端整包清单，
+ * 所以它能硬链接、能更新、能修复，但不能「一键下载整包」。
+ */
+const CH_ARKNIGHTS_USABLE = ['official', 'bilibili', 'global-en', 'global-jp', 'global-kr'];
+/** 方舟里「能一键下载整包」的渠道：官服用鹰角整包清单，Yostar 三区用自己的清单。 */
+const CH_ARKNIGHTS_DOWNLOAD = ['official', 'global-en', 'global-jp', 'global-kr'];
+/** 鸣潮里「库洛官方清单存在」的渠道（WeGame 是独立平台，没有这一档清单）。 */
+const CH_KURO = ['official', 'bilibili', 'global'];
 const CH_GENSHIN = ['official', 'bilibili', 'global'];
 const CH_SR = ['official', 'bilibili', 'global'];
 const CH_ZZZ = ['official', 'bilibili', 'global'];
@@ -81,6 +93,16 @@ const GAME_CHANNEL_CAPS = {
      * 铺一份 B服 / 国际服 目录（再补对应 SDK 文件）在技术上是成立的，所以 link 放全渠道。
      * 但「一键下载」和「检查更新」依赖 HoYoPlay 清单，官方只给 bh3_cn，放不开。
      */
+    /*
+     * 硬链接保留全渠道 —— 用户 2026-11-16 定的规则是「崩坏三也应该全都可以硬链接」。
+     * 但要如实记着：现在还差一块。官服的客户端是 HoYoPlay 发的一套，
+     * B服走 B站 自有启动器、国际服的 game_id 在 sg-hyp-api 里有好几条，
+     * 官服以外那两个渠道**没有官方清单**，也就拿不到「差异分块」。
+     * 所以现在这条只能做到「整树硬链接官服」，
+     * 而渠道专属的 SDK 载荷（让登录界面切到 B站 / 国际服的那几件）我们手上没有来源，
+     * 点下去会明确提示「这条渠道没有官方清单」。
+     * 要真正做通，得先把那几件载荷的来源找齐（参考 Xel-Launcher 的 BiliArknightsPayload 做法）。
+     */
     link: CH_BH3,
     download: ['official'],
     /*
@@ -102,11 +124,16 @@ const GAME_CHANNEL_CAPS = {
   },
   arknights: {
     label: '明日方舟',
-    link: CH_ARKNIGHTS,
-    download: CH_ARKNIGHTS,
-    repair: CH_ARKNIGHTS,
-    update: CH_ARKNIGHTS,
-    predownload: CH_ARKNIGHTS,
+    link: CH_ARKNIGHTS_USABLE,
+    /*
+     * 一键下载：官服用鹰角整包清单，Yostar 三区（global-en/jp/kr）用 Yostar 自己的清单。
+     * B服只有渠道包（增量载荷）不是完整客户端，所以不在这张表里；
+     * 台服协议未验证，也不给入口。渠道行照旧保留，只是没有这两个按钮。
+     */
+    download: CH_ARKNIGHTS_DOWNLOAD,
+    repair: CH_ARKNIGHTS_USABLE,
+    update: CH_ARKNIGHTS_USABLE,
+    predownload: CH_ARKNIGHTS_USABLE,
   },
   wutheringwaves: {
     label: '鸣潮',
@@ -118,11 +145,19 @@ const GAME_CHANNEL_CAPS = {
      * 下载 / 更新 / 修复 全通；硬链接也放行（用户定的「互相为源」），
      * 只是与国服差异 98%，复用率低但结果正确。
      */
-    link: CH_WUWA,
-    download: CH_WUWA,
-    repair: CH_WUWA,
-    update: CH_WUWA,
-    predownload: CH_WUWA,
+    /*
+     * link（能作为「硬链接生成」的目标）只放官服 / B服：
+     *   kuroPacks.buildCrossRuntime 对 global 直接抛「不支持硬链接互切」，
+     *   wegame 没有目标清单 —— 这两个渠道只能当「源」（externalLinkSources 与
+     *   ensureKuroRuntime 的 candidates 都收它们），不能当生成目标。
+     * download / repair / update / predownload 读库洛官方清单：官方 / B服 / 国际服三档有，
+     *   wegame 没有这一档清单，所以不在表里。
+     */
+    link: ['official', 'bilibili'],
+    download: CH_KURO,
+    repair: CH_KURO,
+    update: CH_KURO,
+    predownload: CH_KURO,
   },
   neverness: {
     label: '异环',
@@ -196,6 +231,9 @@ module.exports = {
   CH_BH3,
   CH_ENDFIELD,
   CH_ARKNIGHTS,
+  CH_ARKNIGHTS_USABLE,
+  CH_ARKNIGHTS_DOWNLOAD,
+  CH_KURO,
   CH_WUWA,
   CH_NTE,
   capsOf,

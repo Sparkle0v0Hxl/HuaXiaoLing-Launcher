@@ -48,7 +48,7 @@ function installServersIpc(ctx) {
     findSevenZip, downloadAndExtractSplit, updateEndfieldGame,
     // 同一批漏掉的其余依赖
     resetServerState, refreshPredownloadAfterSwitch, resolveLinkRoots,
-    prepareEndfieldRuntimeJob, prepareArknightsRuntimeJob, estimateRuntimeSpace,
+    prepareEndfieldRuntimeJob, prepareArknightsRuntimeJob, prepareKuroRuntimeJob, estimateRuntimeSpace,
     probeUpdateWritable, invalidateRuntimesAfterUpdate,
     serverForDownload, engineFor, estimateDownloadBytes,
     driveFreeBytes, assertDirWritable, downloadPackProfile,
@@ -461,6 +461,12 @@ function installServersIpc(ctx) {
       if (!game) throw new Error('没有找到这个游戏');
       if (game.builtinKey === 'endfield') return prepareEndfieldRuntimeJob(game, input);
       if (game.builtinKey === 'arknights') return prepareArknightsRuntimeJob(game, input);
+      /*
+       * 鸣潮同样有自己的清单（库洛 index.json），走自己的硬链接生成，
+       * 但对外的表现要和别的游戏一致：estimate 给空间判断，真跑走 sophon:progress，
+       * 界面那一屏（openSophonModal）自己负责阶段条与完成后收起。
+       */
+      if (game.builtinKey === 'wutheringwaves') return prepareKuroRuntimeJob(game, input);
       /*
        * 崩坏3 也要能「生成差异客户端」：用户 2026-11-16 定的规则是崩坏3 的 link（硬链接）
        * 对 official / bilibili / global 三个渠道全开 —— 硬链接只是本地文件操作，

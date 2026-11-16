@@ -1767,6 +1767,18 @@ async function boot() {
     if (typeof api.onEndfieldProgress === 'function') {
       api.onEndfieldProgress((progress) => {
         if (!progress) return;
+        /*
+         * 结束帧要把启动页那块内联面板收掉。
+         *
+         * 以前这条订阅只 setTaskState，从不处理 done：任务跑完了，面板还停在
+         * 「第 5/5 步 · 完成」那一屏不消失（用户 2026-11-16 报障「硬链接完成，
+         * 内联面板不会自己收起来吗？」）。sophon / link 两条订阅都有这句「没任务
+         * 就不显示」，这里补齐，三条进度频道的行为就一致了。
+         */
+        if (progress.phase === 'done') {
+          setTaskState(null);
+          return;
+        }
         // 这条频道没有 gameId，只有 serverName（终末地/方舟的服务器名各不相同），按名字反查
         const gameId = progress.gameId || gameIdForServerName(progress.serverName) || currentDockGameId();
         const game = state.games.find((item) => item.id === gameId);

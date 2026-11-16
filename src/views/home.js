@@ -939,19 +939,19 @@ function openServerSetupDialog(gameId, serverId) {
       const choice = btn.dataset.setup;
       closeModal();
       if (choice === 'link') {
-        if (game.builtinKey === 'wutheringwaves') {
-          // 鸣潮：直接走 servers:activate 的生成链 —— 未配置的渠道会由
-          // ensureKuroRuntime 以「其它任意已装渠道」为源生成硬链接运行时并切过去
-          // （用户 m29016/m29017/m29018 三渠道互相为源）。
-          toast(`正在生成${server.name}的硬链接运行时…`, 'info');
-          try {
-            await api.servers.activate({ gameId, serverId });
-            toast(`${server.name} 已生成并切换完成`, 'success');
-          } catch (error) {
-            toast(String((error && error.message) || error), 'error');
-          }
-          return;
-        }
+        /*
+         * 2026-11-16：鸣潮不再走「直接 activate + 一条 toast」那条特判。
+         *
+         * 以前鸣潮在这一步是特例：点了只有一句「正在生成…」的 toast，然后几十秒
+         * 什么反馈都没有，也没有空间估算、没有分阶段进度，面板也不会自己收起
+         * （用户报障「鸣潮内联面板点开的窗口，没和别的游戏统一」、
+         * 「硬链接完成，内联面板不会自己收起来吗？」）。
+         *
+         * 现在和终末地 / 明日方舟 / 米哈游三游走同一套：openSophonModal 里
+         * 有目标版本、可复用上限、目标盘剩余、空间判断、目标目录选择、
+         * 五段阶段条与字节进度，完成后那一屏自己写回并收起。
+         * 后端 servers:prepare-sophon 按引擎分发到 prepareKuroRuntimeJob。
+         */
         openSophonModal(gameId, serverId, 'prepare');
         return;
       }

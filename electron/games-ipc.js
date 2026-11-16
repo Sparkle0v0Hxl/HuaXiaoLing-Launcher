@@ -49,6 +49,7 @@ function installGamesIpc(ctx) {
     ensureEndfieldChannelRuntime, launchPreflightNotice, findNteGame, findNteLauncher,
     listRunningImages, activateWindowByImage, clearNteLingeringLauncher, splitArgs,
     startWithShellExecute, spawn, trackGameProcess, autoClickNtePredownload, autoClickNteStart,
+    wuwaLaunch,
   } = ctx;
 
     ipcMain.handle('game:notices', async (_event, gameId) => {
@@ -620,6 +621,32 @@ function installGamesIpc(ctx) {
           !args.some((item) => /^\/?launcher$/i.test(item))
         ) {
           args = [...nteDirectArgs, ...args];
+        }
+
+        /*
+         * 鸣潮：客户端启动后会做一条 UE4 断言
+         *   Fatal error: [File:Unknown] [Line: 54] kuro: Use launcher to start game!
+         * 缺了启动器给的上下文（画质档位 -krqlv=）就自杀，进程十几秒后自己退掉，
+         * 表现就是「点了开始游戏，弹一下就没了」（用户 2026-11-16 报障「提示要官方启动器」）。
+         *
+         * 本机 A/B 实测（_wuwa-ab-test.ps1）：同一个父进程、同一个 exe，
+         * 不带参数 → 退出；带 -krqlv=hd → 存活。客户端二进制里也没有读父进程路径的
+         * API，所以它并不在乎父进程是谁，缺的是这个参数。
+         * 画质档位取自本体根的 launcherDownloadConfig.json 的 bundles 键（官服/B服都是 HD）。
+         */
+        if (game.builtinKey === 'wutheringwaves' && !/^wegame:/i.test(target)) {
+          try {
+            const wuwa = wuwaLaunch.resolveLaunchArgs(target, args);
+            if (wuwa.args.length) {
+              args = [...args, ...wuwa.args];
+              writeLaunchLog(
+                `launch ${id}: 鸣潮补启动参数 ${wuwa.args.join(' ')}（${wuwa.source}：${wuwa.note}）`
+              );
+            }
+          } catch (error) {
+            /* 算不出参数也不能挡住启动：客户端顶多自己断言退出，用户还能用官方启动器 */
+            writeLaunchLog(`launch ${id}: 鸣潮启动参数计算失败 ${error.message}`);
+          }
         }
 
         if (lower.endsWith('.lnk') || lower.endsWith('.url')) {
