@@ -2506,6 +2506,38 @@ case 'music-accounts':
       navigate('news');
       break;
     }
+    case 'open-changelog-file': {
+      // 完整更新说明（更新说明.md，打包进来的那份）
+      let text = '';
+      try {
+        text = await api.readChangelog();
+      } catch (error) {
+        toast(`读取更新说明失败：${humanError(error)}`, 'error');
+        break;
+      }
+      if (!String(text || '').trim()) {
+        toast('这个版本里没有带更新说明文件', 'error');
+        break;
+      }
+      openModal(`
+        <div class="modal-backdrop" data-backdrop>
+          <div class="modal chg-modal" role="dialog" aria-modal="true">
+            <div class="modal-head">
+              <div>
+                <h2>完整更新说明</h2>
+                <p class="chg-path">更新说明.md</p>
+              </div>
+              <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+            </div>
+            <div class="modal-body chg-body">${changelogMarkup(text)}</div>
+            <div class="modal-foot">
+              <button class="btn btn-primary" data-close>关闭</button>
+            </div>
+          </div>
+        </div>`);
+      break;
+    }
+
     case 'pick-update-source': {
       try {
         const result = await api.pickUpdateSource();

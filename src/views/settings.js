@@ -1216,6 +1216,7 @@ function settingsView() {
               </details>
               <div class="about-links">
                 <button class="link-btn" data-action="open-changelog">${icon('file-text')}版本更新日志</button>
+                <button class="link-btn" data-action="open-changelog-file">${icon('file-text')}完整更新说明</button>
                 <button class="link-btn" data-action="install-update">${icon('download')}导入更新包</button>
                 <button class="link-btn" data-action="quit-app">退出启动器</button>
               </div>

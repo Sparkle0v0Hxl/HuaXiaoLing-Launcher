@@ -32,6 +32,47 @@ function splitNotes(notes) {
     .filter(Boolean);
 }
 
+/**
+ * 把「更新说明.md」的正文渲染成 HTML。
+ *
+ * 只支持这份文件自己用到的那几种写法：## / ### 标题、- 列表、> 引用、
+ * 行内 **粗体**、以及段落。别的（表格、代码块、链接）不解析，原样当文字显示，
+ * 免得写错一点就把排版弄乱。
+ *
+ * 全部内容都先 esc() 再拼标签 —— 文件是我们自己写的，但没理由让人能往里塞标签。
+ */
+function changelogMarkup(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const out = [];
+  let list = null;
+  const inline = (text) => esc(text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const closeList = () => {
+    if (!list) return;
+    out.push('</ul>');
+    list = null;
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { closeList(); continue; }
+    let m = /^##\s+(.+)$/.exec(line);
+    if (m) { closeList(); out.push('<h3 class="chg-h3">' + inline(m[1]) + '</h3>'); continue; }
+    m = /^###\s+(.+)$/.exec(line);
+    if (m) { closeList(); out.push('<h4 class="chg-h4">' + inline(m[1]) + '</h4>'); continue; }
+    m = /^>\s?(.*)$/.exec(line);
+    if (m) { closeList(); out.push('<blockquote class="chg-quote">' + inline(m[1]) + '</blockquote>'); continue; }
+    m = /^[-*]\s+(.+)$/.exec(line);
+    if (m) {
+      if (!list) { out.push('<ul class="chg-list">'); list = true; }
+      out.push('<li>' + inline(m[1]) + '</li>');
+      continue;
+    }
+    closeList();
+    out.push('<p class="chg-p">' + inline(line.trim()) + '</p>');
+  }
+  closeList();
+  return out.join('');
+}
+
 function notesMarkup(notes) {
   const clean = splitNotes(notes);
   if (!clean.length) return '<p>没有附带更新说明。</p>';

@@ -38,6 +38,7 @@
       "build/icon.ico",
       "LICENSE",
       "README.md",
+    "更新说明.md",
       "package.json"
     ],
     "asarUnpack": [

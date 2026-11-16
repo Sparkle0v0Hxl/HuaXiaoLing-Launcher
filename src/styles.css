@@ -38714,3 +38714,32 @@ body.is-idle .modal-foot {
     width: auto; height: 3px;
   }
 }
+
+/* 「完整更新说明」弹窗的排版：更新说明.md 只有标题 / 列表 / 引用几种写法，
+   样式跟着内容走，别让正文挤成一坨。 */
+.chg-modal { max-width: 760px; }
+.chg-body { max-height: 66vh; overflow-y: auto; line-height: 1.75; }
+.chg-body .chg-h3 {
+  margin: 22px 0 10px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+.chg-body .chg-h3:first-child { margin-top: 0; }
+.chg-body .chg-h4 {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.chg-body .chg-list { margin: 0 0 12px; padding-left: 20px; }
+.chg-body .chg-list li { margin: 6px 0; }
+.chg-body .chg-p { margin: 8px 0; }
+.chg-body .chg-quote {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent-line, var(--line));
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-2);
+  color: var(--text-2);
+}

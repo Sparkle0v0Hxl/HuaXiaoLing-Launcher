@@ -550,6 +550,22 @@ function installMiscIpc(ctx) {
       return { ok: true, path: result.filePath, bytes: stat.size };
     });
 
+    /*
+     * 完整更新说明（更新说明.md）。
+     *
+     * 这个文件以前只躺在源码目录里，程序内读不到 —— 用户想看「这一版到底改了什么」，
+     * 只能去仓库里翻。现在它跟着 asar 一起打包，设置页「关于」里能直接打开看。
+     * 读不到就返回空字符串，界面自己给一句提示，不弹错。
+     */
+    ipcMain.handle('app:changelog', async () => {
+      try {
+        const file = path.join(ROOT, '更新说明.md');
+        return await fsp.readFile(file, 'utf8');
+      } catch {
+        return '';
+      }
+    });
+
     ipcMain.handle('news:list', async () => {
       try {
         const file = path.join(ROOT, 'src', 'data', 'news.json');

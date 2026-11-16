@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('launcher', {
   getState: () => ipcRenderer.invoke('state:get'),
   getInfo: () => ipcRenderer.invoke('app:info'),
   gameNotices: (gameId) => ipcRenderer.invoke('game:notices', gameId),
+  // 完整更新说明（打包进来的 更新说明.md）
+  readChangelog: () => ipcRenderer.invoke('app:changelog'),
   allGameNotices: (force = false) => ipcRenderer.invoke('games:notices', force),
   // 更新弹窗的配图（米游社同人图，取不到时前端退回官网美术图）
   postArt: (force = false) => ipcRenderer.invoke('postart:list', force),
