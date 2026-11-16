@@ -118,12 +118,13 @@ function installGamesIpc(ctx) {
         }
         // 修复带 force:true 会整盘重扫、逐文件 in-place 覆盖；台服由第三个发行商发行、
         // 协议未验证，绝不能被国服全量清单刷坏。'arknights' 是国服清单专用哨兵值，保持原样不动。
-        if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
-          throw new Error('明日方舟台服暂不支持在此修复本体，请前往对应官网');
+        if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel) && server.channel !== 'taiwan') {
+          throw new Error('这个渠道暂不支持在此修复本体，请前往对应官网');
         }
         const result = await updateEndfieldGame({
           root: server.root,
-          channel: 'arknights',
+          // 台服用自己的 Gryphline 清单
+          channel: server.channel === 'taiwan' ? 'taiwan' : 'arknights',
           force: true,
           linkSources: externalLinkSources(game, server, server.root),
           onProgress: (progress) => send('repair:progress', progress),
@@ -141,7 +142,7 @@ function installGamesIpc(ctx) {
         const result = await predownload.updateKuroGame({
           gameKey: 'wutheringwaves',
           channel: server.channel,
-          installRoot: server.root,
+          installRoot: predownload.kuroInstallRoot(server),
           signal: new AbortController().signal,
           onProgress: (progress) => send('repair:progress', progress),
           /*

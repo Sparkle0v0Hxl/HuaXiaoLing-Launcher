@@ -22,6 +22,10 @@
  *     bilibili launcher 与 global host 查 osvnlOc0S8 都返回空分支），没有清单就没法按
  *     文件级 hash 硬链接，也没法一键下载。这两个渠道仍保留渠道行（能选路径、能启动、
  *     能修复——修复走的是本地已有文件的清单比对，不依赖远端渠道清单）。
+ *   · 方舟台服（繁中）： Gryphline 直营，走 batch_proxy + md5 清单，与国服同协议同密钥
+ *     （2026-11-17 实测：接口 200、清单 12678 文件 / 21.51GB、与国服 35% 文件 md5 相同）。
+ *     所以台服能下载、能更新、能修复，也能以国服客户端为源硬链接生成一份；
+ *     但它与 Yostar 三区（EN/JP/KR）不能互源 —— 那三区是 CRC64 清单、不同 CDN、不同发行商。
  *   · 异环的国际服：官方 Config.ini 只有 publish_ob / publish_ob_B 两套渠道配置与 CDN
  *     前缀，没有第三套。用户要求「国际服要能下载」——能做的部分是「以已装的官服/B服
  *     客户端为源，硬链接相同文件、把国际服目录铺出来」（不需要官方清单，走 linkTrees），
@@ -36,9 +40,9 @@
  * B服（bilibili）只有渠道包（ArkBilibili 增量载荷）没有完整客户端整包清单，
  * 所以它能硬链接、能更新、能修复，但不能「一键下载整包」。
  */
-const CH_ARKNIGHTS_USABLE = ['official', 'bilibili', 'global-en', 'global-jp', 'global-kr'];
+const CH_ARKNIGHTS_USABLE = ['official', 'bilibili', 'global-en', 'global-jp', 'global-kr', 'taiwan'];
 /** 方舟里「能一键下载整包」的渠道：官服用鹰角整包清单，Yostar 三区用自己的清单。 */
-const CH_ARKNIGHTS_DOWNLOAD = ['official', 'global-en', 'global-jp', 'global-kr'];
+const CH_ARKNIGHTS_DOWNLOAD = ['official', 'global-en', 'global-jp', 'global-kr', 'taiwan'];
 /** 鸣潮里「库洛官方清单存在」的渠道（WeGame 是独立平台，没有这一档清单）。 */
 const CH_KURO = ['official', 'bilibili', 'global'];
 const CH_GENSHIN = ['official', 'bilibili', 'global'];
@@ -128,13 +132,22 @@ const GAME_CHANNEL_CAPS = {
     link: CH_ARKNIGHTS_USABLE,
     /*
      * 一键下载：官服用鹰角整包清单，Yostar 三区（global-en/jp/kr）用 Yostar 自己的清单。
-     * B服只有渠道包（增量载荷）不是完整客户端，所以不在这张表里；
-     * 台服协议未验证，也不给入口。渠道行照旧保留，只是没有这两个按钮。
+     * B服只有渠道包（增量载荷）不是完整客户端，所以不在这张表里。
+     * 台服（繁中，Gryphline 直营）：2026-11-17 实测确认它跟国服官服同协议同密钥
+     * （batch_proxy + AES-256-CBC，密钥与 Hi3Helper.Plugin.Arknights 逐字节一致），
+     * 清单 12678 文件 / 74.0.1，与国服 35% 的文件 md5 相同 → 可下载、可更新、可修复，
+     * 也能拿国服官服当源硬链接生成。它跟 Yostar 三区不能互源（协议与 CDN 都不同）。
      */
     download: CH_ARKNIGHTS_DOWNLOAD,
     repair: CH_ARKNIGHTS_USABLE,
     update: CH_ARKNIGHTS_USABLE,
-    predownload: CH_ARKNIGHTS_USABLE,
+    /*
+     * 预下载：方舟官方至今没开放预下载分支（协议里有 pre_patch 字段，只是没放包），
+     * 后端 predownload.js 里 SUPPORT.arknights.supported 一直是 false。
+     * 这里必须留空数组 —— 之前跟着 USABLE 一起放开的话，界面会给台服挂一个
+     * 「预下载」入口，点进去只能得到一句「不支持」，属于典型的假入口。
+     */
+    predownload: [],
   },
   wutheringwaves: {
     label: '鸣潮',

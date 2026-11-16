@@ -162,7 +162,9 @@ function pathChannelHint(exePath) {
    * 这些游戏没有米哈游式的 config.ini，目录名往往就是唯一线索。
    */
   if (/bh3_cn/i.test(folder)) return 'official';
-  if (/taiwan|台服|繁中/i.test(folder)) return 'taiwan';
+  // 崩坏3 国际服目录是 bh3_global：上面第一条 /global|国际服/ 已经能命中（2026-11-17 实测确认）
+  // 台服（繁中）官方目录名是 Arknights_TC，公司名 Gryphline
+  if (/taiwan|台服|繁中|Arknights_TC|Gryphline/i.test(folder)) return 'taiwan';
   if (/yostar/i.test(folder)) return 'global';
   return '';
 }

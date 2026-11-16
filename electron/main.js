@@ -240,6 +240,8 @@ const {
   ARKNIGHTS_BILIBILI_READY,
   ARKNIGHTS_OFFICIAL_PROFILE,
   ARKNIGHTS_OFFICIAL_READY,
+  ARKNIGHTS_TW_PROFILE,
+  ARKNIGHTS_TW_READY,
   PROFILES: ENDFIELD_PACK_PROFILES,
   updateEndfieldGame,
   checkEndfieldGame,
@@ -5628,6 +5630,8 @@ async function ensureEndfieldOfficialRuntime(game, server) {
  */
 function channelFromArknightsRoot(root) {
   if (!root) return 'official';
+  // 台服（繁中，Gryphline 直营）自带 gfsdk.dll / glfoundation.dll，和官服/B服都不一样
+  if (fs.existsSync(path.join(root, 'gfsdk.dll'))) return 'taiwan';
   const hasBilibiliSdk =
     fs.existsSync(path.join(root, 'PCGameSDK.dll')) || fs.existsSync(path.join(root, 'BLPlatform64'));
   return hasBilibiliSdk ? 'bilibili' : 'official';
@@ -5777,6 +5781,87 @@ async function ensureArknightsYostarRuntime(game, server, options = {}) {
   return true;
 }
 
+/**
+ * 明日方舟台服运行时：整树硬链接国服客户端，再按台服官方清单逐文件核对补齐。
+ *
+ * 为什么不能套 Yostar 三区那套（三区互为源、逐文件 CRC64）：
+ *   台服是 Gryphline 直营的第三套发行，走 batch_proxy + md5 清单（与国服同协议），
+ *   和 Yostar 区的 CRC64 清单口径完全不同 —— 拿对方的清单去核对只会全量下载。
+ *
+ * 为什么不能套「官服目录 + 渠道小包覆盖」那套：
+ *   实测台服与国服同名不同内容的文件有 48 个根级 dll，差异面一直覆盖到
+ *   GameAssembly.dll 与 Arknights_Data 资源 —— 不是几件 SDK 能盖住的。
+ *   所以走「整树硬链（先白拿 35% 一模一样的文件）→ 再按台服清单逐文件 md5 核对，
+ *   不一致的从台服 CDN 补下」这条路。
+ */
+async function ensureArknightsTaiwanRuntime(game, server, options = {}) {
+  if (game.builtinKey !== 'arknights') return false;
+  /*
+   * 源只能是国服官服 / B服 已装客户端：台服清单里 Arknights.exe 与国服
+   * 同名不同 md5，整树硬链过来的是国服那份，必须靠后面的清单核对替换掉。
+   */
+  const source = (game.servers || []).find((item) => {
+    if (item.id === server.id) return false;
+    if (!['official', 'bilibili'].includes(String(item.channel || ''))) return false;
+    if (!item.root || !fs.existsSync(item.root)) return false;
+    return fs.existsSync(path.join(item.root, 'Arknights.exe'));
+  });
+  if (!source) return false;
+  const runtime = runtimePaths(source.root, 'arknights', 'taiwan', options.runtimeRoot || '');
+  if (!runtime.sameDrive) return false;
+  const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  await fsp.mkdir(runtime.target, { recursive: true });
+  const entries = await fsp.readdir(source.root, { withFileTypes: true });
+  let index = 0;
+  for (const entry of entries) {
+    if (entry.name === '.vela-runtime') continue;
+    index += 1;
+    emit({ phase: 'link', processed: index, total: entries.length, current: `正在准备 ${entry.name}` });
+    const target = path.join(runtime.target, entry.name);
+    if (fs.existsSync(target)) continue;
+    const from = path.join(source.root, entry.name);
+    if (entry.isDirectory()) {
+      await hardlinkTree({
+        sourceRoot: from,
+        targetRoot: target,
+        signal: options.signal,
+        onProgress: (progress) => emit({ ...progress, current: `${entry.name}\\${progress.current || ''}` }),
+      }).catch(() => {});
+    } else if (entry.isFile()) {
+      await fsp.link(from, target).catch(() => fsp.copyFile(from, target).catch(() => {}));
+    }
+  }
+  /*
+   * 清掉国服专属件：台服用的是 gfsdk.dll / glfoundation.dll / sdk_glsdk_config.*，
+   * 国服的 hgsdk.dll 与 sdk_hgsdk_config.* 留着会让客户端走错发行商。
+   */
+  for (const name of ['hgsdk.dll', 'sdkdata']) {
+    await fsp.rm(path.join(runtime.target, ...arknightsSegments(name)), {
+      recursive: true,
+      force: true,
+    });
+  }
+  /*
+   * 按台服官方清单逐文件核对：md5 相同的就是硬链过来那份（省下 35%），
+   * 不同的从 ak-tw.hg-cdn.com 补下；台服独有的文件（AntiCheatExpert/ 等）也会在这里补齐。
+   */
+  await updateEndfieldGame({
+    root: runtime.target,
+    channel: 'taiwan',
+    force: true,
+    linkSources: [source.root],
+    onProgress: emit,
+  });
+  const executable = path.join(runtime.target, 'Arknights.exe');
+  if (!fs.existsSync(executable)) return false;
+  server.path = executable;
+  server.rootDir = source.root;
+  server.root = runtime.target;
+  server.runtimeLinked = true;
+  server.legacyRuntime = false;
+  return true;
+}
+
 async function ensureArknightsRuntime(game, server, options = {}) {
   if (game.builtinKey !== 'arknights') return false;
   if (!server.root || server.root.includes('VelaRuntimes')) return false;
@@ -5789,6 +5874,10 @@ async function ensureArknightsRuntime(game, server, options = {}) {
    */
   if (yostarPacks.isYostarChannel(server.channel)) {
     return ensureArknightsYostarRuntime(game, server, options);
+  }
+  // 台服（繁中）：整树硬链国服客户端 + 按台服清单逐文件核对
+  if (server.channel === 'taiwan') {
+    return ensureArknightsTaiwanRuntime(game, server, options);
   }
   if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) return false;
   const runtime = runtimePaths(server.root, 'arknights', server.channel, options.runtimeRoot || '');
@@ -6334,6 +6423,8 @@ function exeCompanyChannel(exePath) {
          * 所以这里判不出来 —— 那种情况交给目录名与用户手动选，不硬猜。
          */
         if (/cognosphere|hoyoverse|yostar/i.test(company)) channel = 'global';
+        // 台服是 Gryphline（鹰角海外品牌）直营的繁中服，公司名与国服不同
+        else if (/gryphline/i.test(company)) channel = 'taiwan';
         else if (/mihoyo|米哈游|hypergryph|鹰角/i.test(company)) channel = 'official';
         exeCompanyChannelCache.set(exePath, channel);
         resolve(channel);
@@ -6690,7 +6781,14 @@ async function discoverBuiltinServers() {
       }
       if (server.path && targetExists(server.path)) continue;
       server.path = exePath;
-      server.root = exeDir;
+      /*
+       * 鸣潮的本体根不是 exe 目录（主程序在 Client\Binaries\Win64 下），
+       * 靠根目录的 launcherDownloadConfig.json 认。填 exeDir 会让「点更新」
+       * 判成「不是库洛官方客户端」（2026-11-17 报障）。
+       */
+      server.root = game.builtinKey === 'wutheringwaves'
+        ? (wuwaClientRootOf(exeDir) || exeDir)
+        : exeDir;
       server.incomplete = false;
       server.packPath = '';
       changed += 1;
@@ -6900,7 +6998,19 @@ function ensureServers(game) {
     if (!server.channel) server.channel = 'custom';
     if (!server.path) server.path = '';
     if (server.path && !server.root) {
-      server.root = path.dirname(server.path);
+      /*
+       * 鸣潮 / 异环的本体根不是 exe 所在目录：主程序在三层深的
+       * `Client\Binaries\Win64` 下，根目录才是本体（鸣潮靠
+       * launcherDownloadConfig.json、异环靠 NTELauncher.exe 那些标记）。
+       * 这里一律按 dirname(path) 填会把 root 指到 Binaries 层，后面
+       * 「点更新」就会判「这不是官方客户端」（用户 2026-11-17 报障）。
+       */
+      if (game.builtinKey === 'wutheringwaves') {
+        const kuroRoot = wuwaClientRootOf(server.path);
+        server.root = kuroRoot || path.dirname(server.path);
+      } else {
+        server.root = path.dirname(server.path);
+      }
       changed = true;
     }
     if (!server.root) server.root = '';
@@ -10463,10 +10573,25 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
      * 从另一个区生成）；国服 / B服 仍要求 root 已存在（硬链接基础客户端的旧链路）。
      */
     const isYostarTarget = yostarPacks.isYostarChannel(server.channel);
-    if (!isYostarTarget && !ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
-      throw new Error('国际服 / 台服是各自独立的客户端，请直接指到它们自己的安装目录，不能用国服生成');
+    const isTaiwanTarget = server.channel === 'taiwan';
+    if (!isYostarTarget && !isTaiwanTarget && !ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
+      throw new Error('国际服是各自独立的客户端，请直接指到它们自己的安装目录，不能用国服生成');
     }
-    const baseRoot = String(server.root || '').trim();
+    let baseRoot = String(server.root || '').trim();
+    if (isTaiwanTarget && !baseRoot) {
+      // 台服可以没有自己的目录：以国服官服 / B服 已装客户端为源生成一份
+      const source = (game.servers || []).find(
+        (item) =>
+          item.id !== server.id &&
+          ['official', 'bilibili'].includes(String(item.channel || '')) &&
+          item.root &&
+          fs.existsSync(path.join(item.root, 'Arknights.exe'))
+      );
+      if (!source) {
+        throw new Error('还没有国服明日方舟的安装目录可以当源：先用官方启动器装一份国服，台服就能从它硬链接生成');
+      }
+      baseRoot = String(source.root || '').trim();
+    }
     if (!isYostarTarget && (!baseRoot || !fs.existsSync(baseRoot))) {
       throw new Error('这个服务器还没有客户端目录，先在它那一行点“编辑”把目录指到明日方舟的安装目录');
     }
@@ -10504,6 +10629,16 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     }
     if (path.resolve(baseRoot).toLowerCase() === path.resolve(runtime.target).toLowerCase()) {
       throw new Error('运行时目录不能和基础客户端是同一个目录，请换个“运行时目录”再试');
+    }
+    if (isTaiwanTarget && input?.estimate) {
+      return {
+        estimate: true,
+        needBytes: 0,
+        hardlinkBytes: 0,
+        downloadCount: 0,
+        hardlinkCount: 0,
+        note: '台服与国服同协议，可从国服客户端硬链接生成：内容相同的直接复用，不一致的按台服官方清单补下',
+      };
     }
     if (!isYostarTarget && input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target);
 
@@ -10591,6 +10726,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
    */
   function downloadPackProfile(gameKey, channel) {
     if (gameKey === 'arknights') {
+      if (channel === 'taiwan') return ARKNIGHTS_TW_PROFILE;
       if (channel !== 'official') {
         throw new Error('明日方舟这个渠道暂不支持自动下载，请前往官网下载安装');
       }
@@ -10785,7 +10921,9 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     const installRoot =
       game.builtinKey === 'endfield'
         ? predownload.endfieldInstallRoot(game, server)
-        : predownload.hoyoInstallRoot(server);
+        : game.builtinKey === 'wutheringwaves'
+          ? predownload.kuroInstallRoot(server)
+          : predownload.hoyoInstallRoot(server);
     if (!installRoot) throw new Error('还没有配置这个游戏的客户端目录');
     /*
      * 渠道以客户端自己的 config.ini 为准（2.9.1）。

@@ -243,6 +243,66 @@ const ARKNIGHTS_BILIBILI_PROFILE = {
   entry: 'Arknights.exe',
 };
 
+/*
+ * 明日方舟台服（繁中，Gryphline 直营）。
+ *
+ * 2026-11-17 用户要求「台服也能弄」，实测后确认它**不是** Yostar 服：
+ *   · 接口：POST https://launcher.gryphline.com/api/proxy/batch_proxy
+ *     body 与国服官服同构：{seq:'3', proxy_reqs:[{kind:'get_latest_game',
+ *     get_latest_game_req:{appcode:'uiCaUeGDB2htwXSv', launcher_appcode:'TiaytKBUIEdoEwRT',
+ *     channel:'6', sub_channel:'6', version:''}}]}
+ *     实测 HTTP 200 → version 74.0.1 / client_version 37.7.41 /
+ *     pkg.file_path=https://ak-tw.hg-cdn.com/uiCaUeGDB2htwXSv/74.0/update/6/6/Windows/74.0.1_05JOH824MXgrhO6w/files
+ *     / total_size 42.68 GB
+ *   · 清单加密：AES-256-CBC，密钥与国服完全相同（与 Hi3Helper.Plugin.Arknights 的
+ *     ArknightsCrypto.cs 逐字节核对一致）→ 同一把钥匙解台服的 game_files
+ *   · 实测清单 12678 文件 / 21.51 GB（与官服官服 14020 文件 / 79.0.0 比：
+ *     仅 4788 文件 md5 相同 = 7.53 GB 可硬链，复用率 35%）
+ *   · 目录名 Arknights_TC，exe Arknights.exe，公司名 Gryphline
+ *     注册表键 HKCU\Software\Gryphline\Arknights_TC
+ *
+ * 与 Yostar 三区（EN/JP/KR）**不能互为源**：那三区走 Yostar 自有签名 + CRC64 校验，
+ * 清单口径、CDN、发行商都不同，md5 对不上。本条与国服官服同协议，可互为源。
+ *
+ * 渠道差异（实测台服清单与国服官服清单逐项比对）：
+ *   台服独有：gfsdk.dll、glfoundation.dll、AntiCheatExpert/、sdkdata/sdk_glsdk_config.*
+ *   国服独有：hgsdk.dll、sdkdata/sdk_hgsdk_config.*
+ *   同名不同内容：47 个根级 dll（Arknights.exe / GameAssembly.dll / Qt5* / U8SDK.dll
+ *     / u8_channel.dll / webviewsdk.dll / PlatformProcess.* 等）
+ *   → 差异面覆盖到 Arknights_Data 资源与 GameAssembly，不能用「渠道小包」那套，
+ *     必须走「整树硬链 + 按台服清单逐文件 md5 复核覆盖」。
+ */
+const ARKNIGHTS_TW_PROFILE = {
+  iconName: 'ArkTaiwan',
+  directory: 'ArkTaiwan',
+  api: 'https://launcher.gryphline.com/api/proxy/batch_proxy',
+  appcode: 'uiCaUeGDB2htwXSv',
+  launcherAppcode: 'TiaytKBUIEdoEwRT',
+  channel: '6',
+  subChannel: '6',
+  seq: '3',
+  rootFiles: [
+    ...COMMON_ROOT,
+    'gfsdk.dll',
+    'glfoundation.dll',
+    'PlatformProcess.dll',
+    'PlatformProcess.exe',
+    'webviewsdk.dll',
+  ],
+  dirs: [...COMMON_DIRS, 'sdkdata/', 'WebviewConfig/'],
+  entry: 'Arknights.exe',
+};
+
+/** 台服「算齐了」判定：通用三件 + 台服专属两件 + 配置目录。 */
+const ARKNIGHTS_TW_READY = [
+  'U8CoreUI.dll',
+  'U8SDK.dll',
+  'u8_channel.dll',
+  'gfsdk.dll',
+  'glfoundation.dll',
+  'U8Data/config/config.bin',
+];
+
 /** 判定某个方舟渠道包已经完整落盘：渠道专属件和通用件都得在。 */
 const ARKNIGHTS_BILIBILI_READY = [
   'PCGameSDK.dll',
@@ -990,6 +1050,8 @@ function profileForChannel(channel) {
   if (channel === 'global') return PROFILES.find((item) => item.directory === 'EndGlobal');
   if (channel === 'play') return PROFILES.find((item) => item.directory === 'EndPlay');
   if (channel === 'steam') return PROFILES.find((item) => item.directory === 'EndSteam');
+  // 台服（繁中，Gryphline 直营）：与国服官服同协议同密钥，单独一份 profile
+  if (channel === 'taiwan') return ARKNIGHTS_TW_PROFILE;
   return PROFILES.find((item) => item.directory === 'EndOfficial');
 }
 
@@ -1167,6 +1229,7 @@ function profileByDirectory(directory) {
   const name = String(directory || '');
   if (name === ARKNIGHTS_OFFICIAL_PROFILE.directory) return ARKNIGHTS_OFFICIAL_PROFILE;
   if (name === ARKNIGHTS_BILIBILI_PROFILE.directory) return ARKNIGHTS_BILIBILI_PROFILE;
+  if (name === ARKNIGHTS_TW_PROFILE.directory) return ARKNIGHTS_TW_PROFILE;
   return PROFILES.find((profile) => profile.directory === name) || null;
 }
 
@@ -1582,6 +1645,8 @@ module.exports = {
   ARKNIGHTS_BILIBILI_READY,
   ARKNIGHTS_OFFICIAL_PROFILE,
   ARKNIGHTS_OFFICIAL_READY,
+  ARKNIGHTS_TW_PROFILE,
+  ARKNIGHTS_TW_READY,
   updateEndfieldGame,
   checkEndfieldGame,
   fetchLatest,

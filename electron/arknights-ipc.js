@@ -74,8 +74,8 @@ function installArknightsIpc(ctx) {
       // profileForChannel('arknights') 是国服全量清单（13749 文件/25.4GB）的专用哨兵值，
       // 绝不能换成 server.channel（那会误拉终末地清单）。台服由第三个发行商发行、
       // 协议未验证，在发起任何网络请求或写盘之前先挡住，避免被国服清单 in-place 覆盖刷坏。
-      if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel)) {
-        throw new Error('明日方舟台服暂不支持在此更新本体，请前往对应官网');
+      if (!ARKNIGHTS_CN_CHANNELS.includes(server.channel) && server.channel !== 'taiwan') {
+        throw new Error('这个渠道暂不支持在此更新本体，请前往对应官网');
       }
       /*
        * 明日方舟本体走的是鹰角同一套加密逐文件清单（GET {base}/game_files），
@@ -85,7 +85,8 @@ function installArknightsIpc(ctx) {
        */
       const result = await updateEndfieldGame({
         root: server.root,
-        channel: 'arknights',
+        // 台服用自己的 Gryphline 清单（与国服同协议同密钥，但不是同一份清单）
+        channel: server.channel === 'taiwan' ? 'taiwan' : 'arknights',
         linkSources: externalLinkSources(game, server, server.root),
         onProgress: (progress) => emit(progress),
       });

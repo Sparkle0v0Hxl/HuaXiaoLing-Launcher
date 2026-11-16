@@ -133,7 +133,15 @@ function installServersIpc(ctx) {
         if (!rootStat || !rootStat.isDirectory()) throw new Error('自定义根目录不存在，请重新选择');
         server.root = serverRoot;
       } else if (serverPath) {
-        server.root = path.dirname(serverPath);
+        /*
+         * 手动选的是 exe，本体根往往在上面几层（鸣潮靠根下的
+         * launcherDownloadConfig.json 认）。一律按 dirname 填会把 root 指到
+         * Binaries 层，后面「点更新」就会判「不是官方客户端」（2026-11-17 报障）。
+         */
+        const kuroRoot = game.builtinKey === 'wutheringwaves'
+          ? predownload.kuroInstallRoot({ path: serverPath })
+          : '';
+        server.root = kuroRoot || path.dirname(serverPath);
       }
       if (game.activeServerId === server.id && server.path) {
         game.target = server.path;
@@ -195,11 +203,14 @@ function installServersIpc(ctx) {
         game.builtinKey === 'wutheringwaves' &&
         ['official', 'bilibili'].includes(String(server.channel || '')) &&
         !targetExists(server.path);
-      if (server.incomplete && game.builtinKey !== 'endfield' && !kuroCanGenerate) {
+      // 方舟台服：没配目录也允许「先生成一份」（以国服客户端为源）
+      const arknightsTaiwanCanGenerate =
+        game.builtinKey === 'arknights' && server.channel === 'taiwan';
+      if (server.incomplete && game.builtinKey !== 'endfield' && !kuroCanGenerate && !arknightsTaiwanCanGenerate) {
         throw new Error('这个目录是资源替换包，不是完整客户端；请点这一行的下载按钮生成国际服客户端');
       }
       if (!server.path || !targetExists(server.path)) {
-        if (game.builtinKey !== 'endfield' && !kuroCanGenerate) {
+        if (game.builtinKey !== 'endfield' && !kuroCanGenerate && !arknightsTaiwanCanGenerate) {
           throw new Error('这个服务器还没有配置启动程序，先点“编辑”选择客户端');
         }
       }
@@ -1003,7 +1014,12 @@ function installServersIpc(ctx) {
            * 没有 7-Zip 退回逐文件全量下载。渠道合法性在 downloadPackProfile 里先校验。
            */
           const packProfile = downloadPackProfile(game.builtinKey, server.channel);
-          const packChannel = game.builtinKey === 'arknights' ? 'arknights' : server.channel;
+          const packChannel =
+            game.builtinKey === 'arknights'
+              ? server.channel === 'taiwan'
+                ? 'taiwan'
+                : 'arknights'
+              : server.channel;
           if (findSevenZip()) {
             await downloadAndExtractSplit({
               profile: packProfile,
