@@ -1,33 +1,28 @@
 {
-  "version": "2.12.3",
-  "title": "花筱灵启动器 2.12.3",
+  "version": "2.12.4",
+  "title": "花筱灵启动器 2.12.4",
   "date": "2026-11-18",
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
-    "改进：鸣潮 SD / UHD 客户端不再按 HD 处理，SD 少下约 42.6 GiB，UHD 不再被降级。",
-    "改进：鸣潮更新、修复、跨服硬链接都按本机已装画质档位处理。",
-    "改进：鸣潮转 WeGame 版跳过未完成下载和着色器缓存，少占约 3.9 GiB。",
-    "新增：弹幕点歌支持轮播和未开播房间（要先登录 B 站）。",
-    "新增：弹幕点歌卡片常驻显示 B 站登录状态，可一键登录/切换账号。",
-    "新增：底部播放条可以展开当前播放列表，直接切歌。",
-    "改进：QQ 音乐大歌单加载提速约 8 倍，1297 首约 1 秒。",
-    "修复：鸣潮记账文件改为原子替换，中途退出也不会丢配置。"
+    "音乐页重做：三栏布局 + 平台标签歌单列表，我的队列和播放列表分开。",
+    "新增本地歌单、批量选择和 Shift 刷选，播放位置下次自动恢复。",
+    "直链和本地歌曲自动搜歌词，换源不再覆盖歌名。"
   ],
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.3/HuaXiaoLing-2.12.3-Portable.zip",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.4/HuaXiaoLing-2.12.4-Portable.zip",
   "deltas": [
     {
-      "from": "2.12.2",
-      "to": "2.12.3",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.3/delta-2.12.2-to-2.12.3.zip",
-      "sha256": "ba35db6a959c89c26d125162243e7168c83d1e7e9f9a99549af40e7688a1942a",
-      "size": 54633
+      "from": "2.12.3",
+      "to": "2.12.4",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.4/delta-2.12.3-to-2.12.4.zip",
+      "sha256": "f7de062d7089ea2c3db6e113211c8bed68b68bd9d316255016cb9e7683b9ee8d",
+      "size": 84520
     }
   ],
-  "sha256": "ce62f0cda4388edb9305f817e867bec045a5be5710f2e2b6370d55c98da02252",
-  "size": 214310852,
+  "sha256": "f7ce80d65dd2f5fd583b242566db647717c7d96fd2f01e2fa8e0a6200ed70b56",
+  "size": 214333997,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "hsDqaSv83mHdTvD74wHb6tQUbU9++yUhQHFyGkKM3VvhPpTMscFULOEEFbsGyxO0XON14KLjzym8ye7S1GaZCg=="
+    "value": "/DiBSECYD7k5tdOG8CWkVNhZag7uOuXEv4tYmh40RZW+dB0JHADqVhl83pV2CeHRU0XzBRRVupmIGw35D8jqCA=="
   }
 }
