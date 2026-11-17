@@ -419,7 +419,31 @@ async function placeOneFile({ rel, full, destination, shouldCopy }) {
   }
 }
 
-async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, signal, copyDirs = [] }) {
+/** 下载中间态后缀：这些文件永远不该被硬链或复制（半成品，链过去就是共享一个残缺 inode）。 */
+const SKIP_LINK_SUFFIXES = ['.kuro-tmp', '.part', '.partial', '.download', '.crdownload'];
+
+/** 转换时「根本不处理」的文件判断：临时文件后缀 + 调用方指定的目录前缀。 */
+function shouldSkipLink(rel, skipPrefixes, skipSuffixes) {
+  const relLower = String(rel || '').toLowerCase().replace(/\\/g, '/');
+  const base = relLower.slice(relLower.lastIndexOf('/') + 1);
+  for (const suffix of skipSuffixes) {
+    if (base.endsWith(suffix)) return true;
+  }
+  for (const prefix of skipPrefixes) {
+    if (relLower === prefix || relLower.startsWith(`${prefix}/`)) return true;
+  }
+  return false;
+}
+
+async function hardlinkTree({
+  sourceRoot,
+  targetRoot,
+  onProgress = () => {},
+  signal,
+  copyDirs = [],
+  skipPrefixes = [],
+  skipSuffixes = SKIP_LINK_SUFFIXES,
+}) {
   const files = await walkFiles(sourceRoot, signal, (progress) =>
     onProgress({
       phase: 'scan',
@@ -428,6 +452,33 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
       current: `扫描基础客户端：${progress.current}`,
     })
   );
+  /*
+   * 2026-11-18：转换时「不处理」的文件先剔掉。
+   *
+   * 实测（本机官服 108.13 GiB / 1804 个文件）转换 WeGame：
+   *   · 两个没下完的可选包 `.pak.kuro-tmp` 合计 2.85 GiB；
+   *   · 两个 PSO 着色器缓存 1.03 GiB（`Client/Saved/PSO`，游戏端自己会重建）。
+   * 这两类就占了「必须复制」4.75 GiB 里的 82%，复制过去没有任何用处，
+   * 只会让 WeGame 目录白占 3.88 GiB。
+   *
+   * 处理方式：临时后缀一律跳过（对任何调用都安全 —— 半成品文件本来就不该被链）；
+   * PSO 这类目录由调用方通过 skipPrefixes 指定（名字因游戏而异，不能写死在这里）。
+   */
+  const skipPrefixesNorm = skipPrefixes
+    .map((dir) => String(dir).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, ''))
+    .filter(Boolean);
+  const effective = [];
+  let skipped = 0;
+  let skippedBytes = 0;
+  for (const file of files) {
+    if (shouldSkipLink(file.rel, skipPrefixesNorm, skipSuffixes)) {
+      skipped += 1;
+      skippedBytes += Number(file.size) || 0;
+      continue;
+    }
+    effective.push(file);
+  }
+
   let processed = 0;
   let linked = 0;
   let copied = 0;
@@ -436,9 +487,10 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
    * 字节量：walkFiles 已经把每个文件的 size 存下来了，这里直接累加，零额外 IO。
    * 之前只报文件个数，界面上「整理文件 4200/11300」用户根本判断不了还要多久
    * （一个大 .chk 和一个小 .ini 在计数里长得一样）。
+   * 跳过的文件不计入 totalBytes，否则进度条会卡在 96% 再猛地跳满。
    */
   let bytesDone = 0;
-  const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  const totalBytes = effective.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
   /*
    * copyDirs 统一成小写、正斜杠的无尾斜杠形式，支持「多段路径」。
    *
@@ -450,7 +502,7 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
   const copyPrefixes = copyDirs.map((dir) =>
     String(dir).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '')
   );
-  for (const file of files) {
+  for (const file of effective) {
     if (signal && signal.cancelled) break;
     // 暂停检查点：放在每个文件开头。fsp.link 是原子的，不会留半个文件，
     // 所以暂停后从同一个文件继续是安全的。
@@ -496,7 +548,7 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
       onProgress({
         phase: 'link',
         processed,
-        total: files.length,
+        total: effective.length,
         linked,
         copied,
         bytesDone,
@@ -506,11 +558,11 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
     }
   }
   // 收尾强推一帧满进度：别让界面停在最后一个节流点（比如 99%）
-  if (files.length) {
+  if (effective.length) {
     onProgress({
       phase: 'link',
-      processed: files.length,
-      total: files.length,
+      processed: effective.length,
+      total: effective.length,
       linked,
       copied,
       bytesDone: totalBytes,
@@ -518,7 +570,7 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
       current: '',
     });
   }
-  return { total: files.length, processed, linked, copied, totalBytes };
+  return { total: effective.length, processed, linked, copied, totalBytes, skipped, skippedBytes };
 }
 
 async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, signal }) {

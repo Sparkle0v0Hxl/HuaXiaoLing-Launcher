@@ -1456,6 +1456,13 @@ function parseSongRequest(message) {
     .replace(/[\s:：,，、.。!！~～】\]）)]+$/, '')
     .trim()
     .slice(0, 60);
+  /*
+   * 2026-11-18：单个语气词不算歌名。
+   * 「点歌了」「点歌吧」这类闲聊会被 `点歌` + 捕获组拿到一个孤零零的「了/吧」，
+   * 正好又是真实歌名（极其罕见），导致搜一次毫无意义还弹一句"找不到"。
+   * 单字中文歌名本来就少，宁可放过也不要误报。
+   */
+  if (keyword.length === 1 && '了吧啊呀呢吗哦哈嘛喔呗喽嘞'.indexOf(keyword) >= 0) return '';
   return keyword || '';
 }
 
@@ -1482,8 +1489,31 @@ const LIVE_NOTE_GAP_MS = 4000;        // 可观测提示节流，避免刷屏
 const liveRequestQueues = new Map();  // roomKey -> { running, items, recent }
 let lastLiveNoteAt = 0;
 
+/**
+ * 点歌链路日志：同时写 console 与主进程 launch.log。
+ *
+ * 2026-11-18：用户报「弹幕点歌没效果」时，主进程日志里只有「已连上」一条，
+ * 后面解析、搜索、兜底全在渲染层，DevTools 之外看不到。现在每个关键节点都落盘，
+ * reopen 一次日志就能看出是「没解析出歌名」「网易云没起来」还是「多平台都没结果」。
+ */
+function liveLog(message) {
+  const text = String(message == null ? '' : message);
+  try {
+    console.log('[点歌] ' + text);
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (typeof api !== 'undefined' && api && typeof api.logClient === 'function') {
+      api.logClient('[点歌] ' + text);
+    }
+  } catch {
+    /* 日志失败不能反过来把点歌搞挂 */
+  }
+}
+
 function liveNote(text, level = 'info') {
-  console.log(`[点歌] ${text}`);
+  liveLog(text);
   const now = Date.now();
   if (now - lastLiveNoteAt < LIVE_NOTE_GAP_MS) return;
   lastLiveNoteAt = now;
@@ -1535,7 +1565,7 @@ async function runLiveSongRequest(keyword, user) {
   } catch (neteaseErr) {
     // 网易云通道失败（服务没起 / 没结果 / 会员曲扑空）：退回多平台搜索 + 解析，
     // 避免弹幕点歌整条静默失败。手动点歌也是走这条多平台路，已经验证可靠。
-    console.warn('[点歌] 网易云搜索失败，退回多平台：', neteaseErr && neteaseErr.message);
+    liveLog('网易云搜索失败，退回多平台：' + ((neteaseErr && neteaseErr.message) || neteaseErr));
     try {
       const res = await api.musicSearch({ platform: 'all', keyword, apiBase, limit: 8 });
       const first = (res && res.songs && res.songs[0]) || null;
@@ -1567,7 +1597,7 @@ async function runLiveSongRequest(keyword, user) {
         }
       }
     } catch (fallbackErr) {
-      console.error('[点歌] 多平台兜底也失败：', fallbackErr && fallbackErr.message);
+      liveLog('多平台兜底也失败：' + ((fallbackErr && fallbackErr.message) || fallbackErr));
     }
   }
   if (!song) {
@@ -1624,14 +1654,14 @@ function handleLiveDanmaku(message, user, roomKey) {
   const key = String(roomKey || 'default');
   const q = liveRoomQueue(key);
   if (liveSongDuplicate(q, keyword)) {
-    console.log('[点歌] 重复点歌，已跳过：', keyword, '房间', key);
+    liveLog('重复点歌，已跳过：' + keyword + '（房间 ' + key + '）');
     return;
   }
   if (q.items.length >= LIVE_SONG_QUEUE_MAX) {
     liveNote(`点歌排队已满（${LIVE_SONG_QUEUE_MAX} 条），「${clipDanmaku(keyword, 20)}」暂跳过`, 'info');
     return;
   }
-  console.log('[点歌] 收到弹幕点歌：', keyword, 'by', user || '观众', '房间', key);
+  liveLog('收到弹幕点歌：' + keyword + ' / by ' + (user || '观众') + ' / 房间 ' + key);
   q.items.push({ keyword, user: user || '观众' });
   drainLiveQueue(key);
 }

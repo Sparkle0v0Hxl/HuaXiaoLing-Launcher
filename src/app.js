@@ -186,10 +186,18 @@ const state = {
   /* 已连接的直播间列表（支持同时连多个平台）：每项
    * { id, url, connected, connecting, roomTitle, roomId, platform, platformLabel, danmaku, status, captured } */
   liveRooms: [],
+  /*
+   * B 站账号状态（2026-11-18）：轮播/未开播房间的点歌依赖登录态
+   * （未登录时聊天区接口返回空），所以卡片头部要常驻显示登录没登录。
+   * checked=false 表示还没问过主进程，避免首屏闪一下"未登录"。
+   */
+  biliAccount: { loggedIn: false, uname: '', checked: false },
   charts: { platform: 'all', loading: false, list: [], detail: null, error: '' },
   musicLogin: { qq: null, kugou: null, kuwo: null, loading: false },
   neteaseLogin: { loggedIn: false, apiBase: '' },
   songTab: localStorage.getItem('vela:song-tab') || 'queue',
+  // 底部播放条「播放列表」浮层是否展开（会话内状态，不落盘）
+  dockListOpen: false,
   // 点歌台搜索：无状态输入放在 input 里，结果只在内存
   songSearch: { keyword: '', platform: 'all', loading: false, list: [], errors: [], done: false },
   /*

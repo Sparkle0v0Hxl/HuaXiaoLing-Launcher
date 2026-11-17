@@ -308,6 +308,61 @@ const BUNDLE_SOURCES = {
 /** 默认档位（与官方启动器一致）：HD = common + hd 两个包。 */
 const BUNDLE_DEFAULT = 'HD';
 
+/** 官方 bundles 里的三个画质档位（顺序只用于兜底挑选，不代表优先级）。 */
+const BUNDLE_NAMES = ['HD', 'SD', 'UHD'];
+
+/**
+ * 把外部传入的档位名规范化；不安全的一律当「没传」。
+ *
+ * 2026-11-18：不再只认 HD/SD/UHD 三档。官方 `bundles` 里将来若新增档位
+ * （4K / ULTRA 之类），这里丢掉的话就会静默回退 HD、把玩家降级；
+ * 真正的「官方到底有没有这一档」由 index.json 的 `bundles` 决定，
+ * loadBundleIndex 找不到时再回退默认。这里只做「安全标识符」过滤。
+ */
+function normalizeBundleName(name) {
+  const want = String(name || '').trim().toUpperCase();
+  if (!want || !/^[A-Z0-9_-]+$/.test(want)) return '';
+  return want;
+}
+
+/**
+ * 从 launcherDownloadConfig.json 认出这份客户端装的是哪一档画质。
+ *
+ * 与 kuro-predownload.localBundleOf 是同一套判据，但这里**不能** require 那边
+ * （kuro-predownload 反过来依赖本文件，会循环）。
+ *
+ * 2026-11-18 三档贯通：以前本文件全程只认 BUNDLE_DEFAULT（HD），SD/UHD 客户端
+ * 做「更新 / 修复 / 跨服硬链接」都会被按 HD 清单处理 —— SD 用户白下 42 GB HD
+ * 资源、UHD 用户直接被降级成 HD 并丢掉 60 GB 超清资源。
+ *
+ * 判据：优先「记着版本号」的档位（＝真装过）；同分时 HD → SD → UHD 优先，
+ * 官方新加的未知档位排在已知档之后（但不会被丢，仍会被选中）。
+ */
+function localBundleOfConfig(config, fallback) {
+  const def = normalizeBundleName(fallback) || BUNDLE_DEFAULT;
+  const bundles = config && config.bundles;
+  if (!bundles || typeof bundles !== 'object') return def;
+  const pairs = Object.keys(bundles)
+    .filter((key) => bundles[key] && typeof bundles[key] === 'object')
+    .map((key) => ({ raw: key, name: normalizeBundleName(key) }))
+    .filter((item) => item.name);
+  if (!pairs.length) return def;
+  const ranked = [
+    ...BUNDLE_NAMES.map((name) => pairs.find((item) => item.name === name)).filter(Boolean),
+    ...pairs.filter((item) => BUNDLE_NAMES.indexOf(item.name) < 0),
+  ];
+  const withVersion = ranked.filter((item) => String((bundles[item.raw] && bundles[item.raw].version) || '').trim());
+  const pool = withVersion.length ? withVersion : ranked;
+  const hit = pool.find((item) => item.name === def);
+  return hit ? hit.name : pool[0].name;
+}
+
+/** 读某个安装目录实际装的画质档位（读不到就回退）。 */
+async function readLocalBundle(installRoot, fallback) {
+  const config = await readGameConfig(installRoot).catch(() => null);
+  return localBundleOfConfig(config, fallback);
+}
+
 function bundleIndexUrl(target) {
   const src = BUNDLE_SOURCES[target.channel];
   if (!src) return '';
@@ -325,11 +380,12 @@ function bundleIndexUrl(target) {
  *     所以整份清单可以共用一个 baseUrl，`planUpdate` 的签名不用动；
  *   - `indexFile` 记 common 的清单（校验用），实际清单由 `loadBundleManifest` 合并。
  */
-async function loadBundleIndex(profile) {
+async function loadBundleIndex(profile, bundle) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
   if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const url = bundleIndexUrl(target);
   if (!url) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
+  const wantBundle = normalizeBundleName(bundle) || BUNDLE_DEFAULT;
   const hosts = [target.indexHost, ...INDEX_HOST_BACKUPS];
   let lastError = null;
   for (const host of hosts) {
@@ -339,7 +395,10 @@ async function loadBundleIndex(profile) {
       const packs = body && body.resourcePacks && typeof body.resourcePacks === 'object' ? body.resourcePacks : {};
       const cdnList = Array.isArray(body && body.cdnList) ? body.cdnList : [];
       const cdnUrl = cdnList.length && cdnList[0] && typeof cdnList[0].url === 'string' ? cdnList[0].url : '';
-      const bundleDef = body && body.bundles && body.bundles[BUNDLE_DEFAULT];
+      /* 档位以调用方请求的为准；官方万一撤了某一档才回退默认（不能静默当成 HD 装上，
+         但也不能让整个清单直接崩掉）。实际生效的档位随 indexInfo.bundle 带出去。 */
+      const picked = body && body.bundles && body.bundles[wantBundle] ? wantBundle : BUNDLE_DEFAULT;
+      const bundleDef = body && body.bundles && body.bundles[picked];
       const packNames =
         bundleDef && Array.isArray(bundleDef.resourcePacks) && bundleDef.resourcePacks.length
           ? bundleDef.resourcePacks.map((name) => String(name))
@@ -353,6 +412,7 @@ async function loadBundleIndex(profile) {
       if (!version) throw new Error('bundle index.json 里没有正式版本号');
       return {
         channel: target.channel,
+        bundle: picked,
         version,
         indexFile: String(packs.common.indexFile),
         indexFileMd5: String(packs.common.indexFileMd5 || '').toLowerCase(),
@@ -410,11 +470,12 @@ async function loadBundleManifest(profile, indexInfo) {
   return { source: cdnUrl, baseUrl: indexInfo.baseUrl, files, totalBytes, version: indexInfo.version };
 }
 
-/** 一次拿齐 index + 清单（bundle 协议；legacy 端点已冻结在 3.7.1，只用它做兜底）。 */
-async function loadRemoteTargetPackage(profile) {
-  const index = await loadBundleIndex(profile);
+/** 一次拿齐 index + 清单（bundle 协议；legacy 端点已冻结在 3.7.1，只用它做兜底）。
+ *  bundle 为 HD / SD / UHD，省略时用默认档（BUNDLE_DEFAULT）。 */
+async function loadRemoteTargetPackage(profile, bundle) {
+  const index = await loadBundleIndex(profile, bundle);
   const manifest = await loadBundleManifest(profile, index);
-  return { index, manifest, totalBytes: manifest.totalBytes, version: index.version };
+  return { index, manifest, totalBytes: manifest.totalBytes, version: index.version, bundle: index.bundle };
 }
 
 // ── 本地元数据 ───────────────────────────────────────────────────────────────
@@ -754,6 +815,56 @@ function executableFor(profile) {
 }
 
 /**
+ * 原子替换一个小 JSON 文件，**保证目标文件在任何时刻都不会「消失」**。
+ *
+ * 2026-11-18 加固：以前 `launcherDownloadConfig.json` 的写法是
+ *   写 .tmp → rm 正式文件 → rename(.tmp → 正式文件)
+ * 中间那几毫秒里正式文件是不存在的：如果这时进程被强杀、机器断电、或者
+ * 安全软件把文件锁住导致 rename 失败，目录里就只剩一个 `.tmp`，
+ * 官方启动器/游戏会把这台机器当成「记账损坏」重新校验资源。
+ *
+ * 现在改成：
+ *   ① 先写 .tmp（新内容完整落盘）；
+ *   ② 直接 rename 覆盖 —— Windows 上走 MoveFileExW(MOVEFILE_REPLACE_EXISTING)，
+ *      没有「删完还没改名」的空窗，旧文件要么是旧的、要么是新的，不会没有；
+ *   ③ 只有 rename 覆盖被拒（目标被独占、文件系统不支持覆盖式改名）时，
+ *      才退回「备份 → 删 → 改名」，且任何一步失败都把备份复制回去。
+ */
+async function replaceFileAtomic(target, text) {
+  const tmp = `${target}.tmp`;
+  await fsp.writeFile(tmp, text, 'utf8');
+  try {
+    await fsp.rename(tmp, target);
+    return true;
+  } catch (error) {
+    const code = error && error.code;
+    if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES') {
+      await fsp.rm(tmp, { force: true }).catch(() => {});
+      throw error;
+    }
+    const bak = `${target}.bak-tmp`;
+    let hadOld = false;
+    try {
+      await fsp.copyFile(target, bak);
+      hadOld = true;
+    } catch {
+      /* 目标本来就不存在（首次安装），没有可备份的 */
+    }
+    try {
+      await fsp.rm(target, { force: true });
+      await fsp.rename(tmp, target);
+      return true;
+    } catch (second) {
+      // 关键兜底：改名失败也要把原有内容恢复回来，绝不留一个空目录
+      if (hadOld) await fsp.copyFile(bak, target).catch(() => {});
+      throw second;
+    } finally {
+      if (hadOld) await fsp.rm(bak, { force: true }).catch(() => {});
+    }
+  }
+}
+
+/**
  * 写**官方启动器的记账文件**：`launcherDownloadConfig.json` + `launcherDownloadConfig/<pack>.json`。
  *
  * 为什么必须写：官方客户端目录里除了游戏文件，还有这套记账（实测官服本体
@@ -785,10 +896,8 @@ async function writeLauncherConfig({ installRoot, channel, version, bundle = BUN
   cfg.bundles[bundle].version = String(version || '');
   if (cfg.bundles[bundle].state == null) cfg.bundles[bundle].state = '';
   cfg.bundles[bundle].resourcePacks = packNames;
-  const tmp = `${cfgPath}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(cfg), 'utf8');
-  await fsp.rm(cfgPath, { force: true });
-  await fsp.rename(tmp, cfgPath);
+  // 原子替换：rename 覆盖优先，绝不出现「旧文件已删、新文件未到」的空窗（见 replaceFileAtomic）
+  await replaceFileAtomic(cfgPath, JSON.stringify(cfg));
 
   const packDir = path.join(root, 'launcherDownloadConfig');
   await fsp.mkdir(packDir, { recursive: true });
@@ -803,10 +912,7 @@ async function writeLauncherConfig({ installRoot, channel, version, bundle = BUN
     }
     one.packName = one.packName || name;
     one.version = String(version || '');
-    const t = `${file}.tmp`;
-    await fsp.writeFile(t, JSON.stringify(one), 'utf8');
-    await fsp.rm(file, { force: true });
-    await fsp.rename(t, file);
+    await replaceFileAtomic(file, JSON.stringify(one));
   }
   return true;
 }
@@ -815,14 +921,14 @@ async function writeLauncherConfig({ installRoot, channel, version, bundle = BUN
  * 空目录全新安装。三条约束与 yostar installGame 一致：
  * 无 allowDelete（全新安装不做删除）、只下需要下的、全部到位才写元数据。
  */
-async function installGame({ profile, installRoot, signal, onProgress } = {}) {
+async function installGame({ profile, installRoot, bundle, signal, onProgress } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
   if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
   if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
 
   onProgress?.({ phase: 'manifest', current: '正在读取库洛官方清单…' });
-  const remote = await loadRemoteTargetPackage(target);
+  const remote = await loadRemoteTargetPackage(target, normalizeBundleName(bundle) || BUNDLE_DEFAULT);
   const pkg = remote.manifest;
 
   await fsp.mkdir(root, { recursive: true });
@@ -870,6 +976,7 @@ async function installGame({ profile, installRoot, signal, onProgress } = {}) {
     installRoot: root,
     channel: target.channel,
     version: remote.index.version,
+    bundle: remote.index.bundle,
     packs: remote.index.packNames,
   }).catch((error) => {
     console.warn(`kuro writeLauncherConfig(install) failed: ${error.message}`);
@@ -893,7 +1000,7 @@ async function installGame({ profile, installRoot, signal, onProgress } = {}) {
  * 1 allowDelete === true；2 本地元数据可信；3 channel 严格相等；4 待删路径过 resolveInside。
  * 执行顺序＝下载校验全过 → 安装 → 最后才删（下载阶段任何失败都不删任何东西）。
  */
-async function updateGame({ profile, installRoot, allowDelete = false, fullVerify = false, signal, onProgress } = {}) {
+async function updateGame({ profile, installRoot, allowDelete = false, fullVerify = false, bundle, signal, onProgress } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
   if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
@@ -909,7 +1016,10 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
   const localManifest = await readManifest(root);
 
   onProgress?.({ phase: 'manifest', current: '正在读取库洛官方清单…' });
-  const remote = await loadRemoteTargetPackage(target);
+  /* 档位跟这份客户端实际装的一致：SD/UHD 机器点更新不该被拉去下 HD 清单
+     （否则 SD 白下 42 GB HD 资源、UHD 直接降级）。显式传了 bundle 才覆盖。 */
+  const wantBundle = normalizeBundleName(bundle) || localBundleOfConfig(localConfig, BUNDLE_DEFAULT);
+  const remote = await loadRemoteTargetPackage(target, wantBundle);
   const pkg = remote.manifest;
 
   const plan = planUpdate({ installRoot: root, remoteManifest: pkg, localManifest, fullVerify, cdnUrl: remote.index.cdnUrl, baseUrl: remote.index.baseUrl });
@@ -1001,6 +1111,7 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
     installRoot: root,
     channel: target.channel,
     version: remote.index.version,
+    bundle: remote.index.bundle,
     packs: remote.index.packNames,
   }).catch((error) => {
     console.warn(`kuro writeLauncherConfig(update) failed: ${error.message}`);
@@ -1024,14 +1135,16 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
 }
 
 /** 只读预演：算「这次会下多少」，不下载不删除不写盘。 */
-async function planForGame({ profile, installRoot, fullVerify = false } = {}) {
+async function planForGame({ profile, installRoot, fullVerify = false, bundle } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
   if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
   if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
   const localConfig = await readGameConfig(root);
   const localManifest = localConfig ? await readManifest(root) : null;
-  const remote = await loadRemoteTargetPackage(target);
+  // 预演也必须按这份客户端实际装的档位算，否则「会下多少」和真下时的口径不一致。
+  const wantBundle = normalizeBundleName(bundle) || localBundleOfConfig(localConfig, BUNDLE_DEFAULT);
+  const remote = await loadRemoteTargetPackage(target, wantBundle);
   const plan = planUpdate({ installRoot: root, remoteManifest: remote.manifest, localManifest, fullVerify, cdnUrl: remote.index.cdnUrl, baseUrl: remote.index.baseUrl });
   return {
     ok: true,
@@ -1098,6 +1211,18 @@ const KURO_MUST_COPY_SEGMENTS = [
   'krsdkres',
   'krsdkconfig.json',
   'bilibili',
+  /*
+   * 2026-11-17 接手审计：KrPcSdk_Mainland **根目录**下的渠道 SDK 核心库
+   * （libcrypto-3-x64.dll / libcurl.dll / libssl-3-x64.dll / sqlite3.dll /
+   *  mfc140u.dll / msvcp140.dll / vcruntime140.dll / thinkingdata.dll /
+   *  krsdk_zlib.dll / zlibwapi.dll / libkrsdkcurl.dll + 字体 TTF/OTF，共 16 个）
+   * 走通用 mustCopyNotLink 判据时全部漏网被**硬链接**（B 服实测 nlink=2、
+   * 与官服共享 inode）。它们虽在当前版本内容完全一致（无实际污染），但位于
+   * 渠道 SDK 目录，未来任一渠道升级这些库就会顺着 inode 写穿另一侧。
+   * 这里把整个 krpcsdk_mainland 段列为强制复制，宁可多复制几十 MB，
+   * 不冒渠道污染风险（与 krsdkres 同意图）。
+   */
+  'krpcsdk_mainland',
 ];
 
 /*
@@ -1154,7 +1279,7 @@ function mustCopyForCrossRuntime(rel) {
   return runtime.mustCopyNotLink(relLower);
 }
 
-async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signal, onProgress } = {}) {
+async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, bundle, signal, onProgress } = {}) {
   const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (!target) throw noKuroChannelError(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (target.channel === 'global') {
@@ -1173,7 +1298,11 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
   }
 
   onProgress?.({ phase: 'manifest', current: '正在读取库洛官方清单…' });
-  const remote = await loadRemoteTargetPackage(target);
+  /* 目标档位默认跟随源客户端（硬链接出来的就是「同一份客户端换个渠道」）。
+     从前这里死认 HD：源是 SD/UHD 时，HD 独有的 104 个 pak 在源里 md5 对不上，
+     于是整包重下 42.64 GiB 的 HD 资源，UHD 还会把 62.28 GiB 超清资源整份丢掉。 */
+  const wantBundle = normalizeBundleName(bundle) || (await readLocalBundle(src));
+  const remote = await loadRemoteTargetPackage(target, wantBundle);
   const pkg = remote.manifest;
 
   // 扫源目录（跳过我方元数据与缓存目录）
@@ -1331,6 +1460,7 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
     installRoot: root,
     channel: target.channel,
     version: remote.index.version,
+    bundle: remote.index.bundle,
     packs: remote.index.packNames,
   }).catch((error) => {
     console.warn(`kuro writeLauncherConfig(cross) failed: ${error.message}`);
@@ -1340,6 +1470,7 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
     ok: true,
     channel: target.channel,
     version: remote.index.version,
+    bundle: remote.index.bundle,
     installRoot: root,
     executable: target.defaultExe,
     files: pkg.files.length,
@@ -1352,7 +1483,7 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
 }
 
 /** 估算官B互切的空间与下载量（确认弹窗用；global 传入直接拒绝）。 */
-async function planCrossRuntime({ sourceRoot, targetProfile } = {}) {
+async function planCrossRuntime({ sourceRoot, targetProfile, bundle } = {}) {
   const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (!target) throw noKuroChannelError(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (target.channel === 'global') {
@@ -1361,7 +1492,9 @@ async function planCrossRuntime({ sourceRoot, targetProfile } = {}) {
   const src = String(sourceRoot || '');
   if (!src || !fs.existsSync(src)) throw new Error('源目录不存在');
 
-  const remote = await loadRemoteTargetPackage(target);
+  // 与 buildCrossRuntime 同一口径：估算的档位必须跟真生成时一致。
+  const wantBundle = normalizeBundleName(bundle) || (await readLocalBundle(src));
+  const remote = await loadRemoteTargetPackage(target, wantBundle);
   const pkg = remote.manifest;
 
   const sourceFileMap = new Map();
@@ -1420,6 +1553,7 @@ async function planCrossRuntime({ sourceRoot, targetProfile } = {}) {
     ok: true,
     channel: target.channel,
     version: remote.index.version,
+    bundle: remote.index.bundle,
     files: pkg.files.length,
     hardlinkCount,
     hardlinkBytes,
@@ -1502,4 +1636,9 @@ module.exports = {
   planCrossRuntime,
   detectChannelOf,
   detectChannelOfSync,
+  // 三档画质（2026-11-18）：外部可复用同一套档位判据
+  BUNDLE_NAMES,
+  normalizeBundleName,
+  localBundleOfConfig,
+  readLocalBundle,
 };

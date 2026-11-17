@@ -1778,8 +1778,8 @@ function findBiliRoom(biliRoomId) {
  * 文案只在这里定义一次：初始赋值和后面所有覆盖点都从这里取，避免两处措辞跑偏。
  */
 function abnormalLiveStatusText(room) {
-  if (room.liveStatus === 0) return '房间未开播，开播后才能收到弹幕';
-  if (room.liveStatus === 2) return '轮播中，通常没有弹幕';
+  if (room.liveStatus === 0) return '未开播 · 正在读取聊天区（可点歌）';
+  if (room.liveStatus === 2) return '轮播中 · 正在读取聊天区（可点歌）';
   return null;
 }
 
@@ -1801,6 +1801,67 @@ function renderLiveIfNeeded() {
   // 右栏弹幕段能就地换的就别整页重绘：整页重绘会打断正在输入的直播间链接
   if (refreshLiveRoomsPanel()) return;
   render({ preserveScroll: true });
+}
+
+/**
+ * 弹幕去重表：room.id → Map<`user|text`, 时间戳>。
+ *
+ * 2026-11-18：未开播 / 轮播房间改成「WS + 聊天区轮询」双通道后，同一条弹幕
+ * 可能两路各来一次。这里做统一闸门，一分钟内同一个人同一句话只喂一次点歌。
+ */
+const liveSeenTexts = new Map();
+
+/*
+ * B 站账号状态（2026-11-18）。
+ *
+ * 轮播 / 未开播房间的点歌依赖聊天区接口，未登录时它返回空数组，用户完全看不出
+ * 「是功能坏了还是没登录」。这里把登录态拉回来，卡片头部常驻显示。
+ * 60 秒节流 + 防重入：render 每次都会调，不能变成请求风暴。
+ */
+let biliAccountBusy = false;
+let biliAccountAt = 0;
+
+async function refreshBiliAccount(force) {
+  if (biliAccountBusy) return;
+  if (!force && Date.now() - biliAccountAt < 60000) return;
+  if (!api?.live?.biliLoginStatus) return;
+  biliAccountBusy = true;
+  biliAccountAt = Date.now();
+  try {
+    const result = await api.live.biliLoginStatus();
+    state.biliAccount = {
+      loggedIn: Boolean(result && result.loggedIn),
+      uname: String((result && result.uname) || ''),
+      checked: true,
+    };
+  } catch {
+    state.biliAccount = { loggedIn: false, uname: '', checked: true };
+  } finally {
+    biliAccountBusy = false;
+  }
+  if (state.route === 'song') {
+    if (!refreshLiveRoomsPanel()) render({ preserveScroll: true });
+  }
+}
+
+/** 把一条弹幕送进点歌入口（带去重）。 */
+function feedLiveDanmaku(room, text, user) {
+  const body = String(text || '').trim();
+  if (!body) return;
+  const key = `${String(user || '')}|${body}`;
+  const now = Date.now();
+  let seen = liveSeenTexts.get(room.id);
+  if (!seen) {
+    seen = new Map();
+    liveSeenTexts.set(room.id, seen);
+  }
+  const at = seen.get(key) || 0;
+  if (now - at < 60000) return;
+  seen.set(key, now);
+  if (seen.size > 600) {
+    for (const [k, t] of seen) if (now - t > 60000) seen.delete(k);
+  }
+  handleLiveDanmaku(body, user, room.roomId || room.id);
 }
 
 /**
@@ -1834,7 +1895,7 @@ function handleBiliDanmuEvent(payload) {
       // 节点常驻后（song-view.js 计数/最近弹幕不再按 connected 隐藏），
       // 就地写即可；万一节点因重绘时序缺失，补一次轻量刷新兜底。
       if (!node || !lastNode) renderLiveIfNeeded();
-      handleLiveDanmaku(payload.message, payload.user, payload.roomId);
+      feedLiveDanmaku(room, payload.message, payload.user);
       break;
     }
     case 'open':
@@ -1893,6 +1954,7 @@ function closeLiveRuntime(room) {
     liveRuntimes.delete(room.id);
     if (rt.heartbeat) clearInterval(rt.heartbeat);
     if (rt.timer) clearInterval(rt.timer);
+    if (rt.historyTimer) clearInterval(rt.historyTimer);
     if (rt.socket) {
       // 标记是用户主动关的：close 事件据此判断要不要自动重连
       rt.closedByUser = true;
@@ -1921,6 +1983,7 @@ function closeLiveRuntime(room) {
     }
   }
   // 房间关了就把它没处理完的点歌队列清掉，别往已断开的歌单里继续插歌。
+  liveSeenTexts.delete(room.id);
   try {
     if (typeof forgetLiveQueue === 'function') forgetLiveQueue(room.platform === 'bilibili' ? room.roomId : room.id);
   } catch {
@@ -2045,10 +2108,21 @@ async function connectLiveRoom(rawUrl) {
       room.danmuAt = Date.now();
     } catch (error) {
       /*
-       * 拿不到鉴权就直接不连：B 站服务器对空 key 的连接"接受但一条弹幕都不推"，
-       * 以前这里静默继续，用户看到"已连接"却永远收不到点歌，还以为是自己房间没开播的问题。
-       * 现在把失败原因亮在卡片上（-352 = B站风控），用户能自己判断要不要重试。
+       * 拿不到鉴权就不连 WS：B 站服务器对空 key 的连接"接受但一条弹幕都不推"。
+       *
+       * 2026-11-18：未开播 / 轮播房间改成走聊天区轮询，鉴权失败也照样能点歌，
+       * 所以这两种状态不再直接放弃 —— 先起轮询，状态栏如实说明用的是哪条通道。
        */
+      if (room.liveStatus === 0 || room.liveStatus === 2) {
+        room.connecting = false;
+        room.connected = true;
+        room.danmaku = 'history';
+        startBiliHistoryPoll(room);
+        setLiveRoomStatus(room, '');
+        if (state.route === 'song') render({ preserveScroll: true });
+        toast(`弹幕鉴权没拿到，已改用聊天区轮询（${error.message}）`, 'info');
+        return;
+      }
       room.connecting = false;
       room.connected = false;
       room.status = `弹幕鉴权失败：${error.message}`;
@@ -2068,6 +2142,13 @@ async function connectLiveRoom(rawUrl) {
     setLiveRoomStatus(room, '连接直播间…');
     renderLiveIfNeeded();
     api.live.danmuConnect({ roomId: room.roomId, token: authKey, hosts });
+    /*
+     * 未开播 / 轮播房间：WS 照样能握手，但 B 站基本不往这里推弹幕。
+     * 补一路聊天区轮询（与 WS 共用 feedLiveDanmaku 去重），保证这两种房间也能点歌。
+     */
+    if (room.liveStatus === 0 || room.liveStatus === 2) {
+      startBiliHistoryPoll(room);
+    }
   } catch (error) {
     // 房间信息都解析不出来：从列表里摘掉，别留一张永远转圈的卡
     const idx = state.liveRooms.indexOf(room);
@@ -2076,6 +2157,59 @@ async function connectLiveRoom(rawUrl) {
     toast(`直播间连接失败：${error.message}`, 'error');
     if (state.route === 'song') render({ preserveScroll: true });
   }
+}
+
+/**
+ * 未开播 / 轮播房间的聊天区轮询（2026-11-18）。
+ *
+ * 用户要求「没开播和轮播中都要能点到歌」。这两种房间 B 站不往弹幕 WebSocket
+ * 推数据，但聊天区一直能用：主进程的 live:danmu-history 能读到最近 20 条。
+ * 这里 1.5s 拉一次，首轮只建立基线（否则一连上就把历史里的旧点歌全灌进队列），
+ * 之后的新消息走和 WS 同一套 feedLiveDanmaku 去重入口。
+ */
+function startBiliHistoryPoll(room) {
+  const rt = liveRuntimes.get(room.id) || {};
+  liveRuntimes.set(room.id, rt);
+  if (rt.historyTimer) clearInterval(rt.historyTimer);
+  const seen = new Set();
+  let primed = false;
+  const tick = async () => {
+    let list = [];
+    try {
+      list = (await api.live.danmuHistory(room.roomId)) || [];
+    } catch (error) {
+      // 轮询失败不打扰用户：状态由卡片文案兜底，下一次继续
+      return;
+    }
+    const fresh = [];
+    for (const item of list) {
+      const key = String(item.key || `${item.user}|${item.text}`);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fresh.push(item);
+    }
+    if (seen.size > 800) {
+      const keep = [...seen].slice(-400);
+      seen.clear();
+      for (const key of keep) seen.add(key);
+    }
+    if (!primed) {
+      primed = true;
+      return;
+    }
+    if (!fresh.length) return;
+    for (const item of fresh) {
+      room.lastDanmaku = String(item.text || '').slice(0, 80);
+      feedLiveDanmaku(room, item.text, item.user);
+    }
+    room.captured = (room.captured || 0) + fresh.length;
+    const cap = document.querySelector(`#live-captured-${room.id} b`);
+    if (cap) cap.textContent = String(room.captured);
+    const lastNode = document.querySelector(`#live-last-${room.id}`);
+    if (lastNode) lastNode.textContent = `最近弹幕：${room.lastDanmaku}`;
+  };
+  tick();
+  rt.historyTimer = setInterval(tick, 1500);
 }
 
 /**

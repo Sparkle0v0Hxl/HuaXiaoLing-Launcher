@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.2-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.3-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.2**（正式版）
+**当前版本：v2.12.3**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.2-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.3-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,34 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.2 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.3 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.3</b></summary>
+
+鸣潮 SD / UHD 三档画质不再按 HD 处理，更新/修复/跨服硬链接都按本机真实档位；转 WeGame 少占 3.9 GiB。弹幕点歌支持轮播和未开播房间（需登录 B 站），B 站登录状态常驻显示，底部播放条可展开歌单，QQ 音乐大歌单加载提速约 8 倍。
+
+
+**鸣潮画质档位**
+
+- 以前鸣潮不管你装的是 SD / HD / UHD，更新、修复、跨服硬链接全按 HD 清单处理 —— SD 用户白下 42.6 GiB，UHD 用户被降级还丢文件。现在三档贯通：更新/修复/预演跟随本机已装档位，跨服硬链接跟随源客户端。
+- 实测官方 3.8.0 三档清单各 924 文件：SD 真实占盘 0.79 GiB、HD 0.79 GiB、UHD 0.79 GiB（其余都能硬链复用）。
+- 鸣潮转 WeGame 版现在会跳过未完成下载（.kuro-tmp）和着色器缓存（PSO），本机实测少占 3.9 GiB。
+- 记账文件（launcherDownloadConfig.json）改为原子替换，中途关掉启动器也不会把配置写丢。
+
+**弹幕点歌与音乐**
+
+- B 站轮播和未开播房间的弹幕基本不推数据，但聊天区一直在。现在改用聊天历史轮询，这两种房间也能点歌。注意：B 站接口未登录时返回的聊天历史是空的，要先在卡片上登录 B 站账号。
+- 弹幕点歌卡片头部常驻 B 站登录状态，未登录显示「登录B站账号」，已登录显示昵称并可切换账号。
+- 底部播放条新增播放列表浮层，直接看当前 / 接下来 / 已播放，点一行就能切歌。
+- QQ 音乐大歌单加载从串行改 5 路并发：1297 首的歌单选约 1 秒（原来约 8–9 秒）。
+
+**其它改进**
+
+- 点歌去重闸门统一了弹幕和轮询两路，同人同句 60 秒内只算一次；单字语气词误判已过滤。
+
+</details>
+
 
 <details>
 <summary><b>v2.12.2</b></summary>

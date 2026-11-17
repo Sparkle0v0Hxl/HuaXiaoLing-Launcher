@@ -1487,17 +1487,39 @@ async function qqPublicPlaylistSongs(dissId) {
     return added;
   };
   collect(body.songlist || []);
-  // 首页就不满，说明没有第二页，别再白打一次请求
-  let lastPageShort = (body.songlist || []).length < QQ_SONG_PAGE_SIZE;
-  for (let begin = QQ_SONG_PAGE_SIZE; begin < QQ_SONG_PAGE_SIZE * QQ_SONG_MAX_PAGES; begin += QQ_SONG_PAGE_SIZE) {
-    if (lastPageShort) break;
-    if (total > 0 && rows.length >= total) break;
-    const page = await fetchJson(reqUrl(begin), headers);
-    const list = page?.req_1?.data?.songlist || [];
-    if (!list.length) break;
-    const added = collect(list);
-    if (!added) break;
-    lastPageShort = list.length < QQ_SONG_PAGE_SIZE;
+  /*
+   * 2026-11-18：剩余分页改成并发拉取（原来是一页一页串行 await）。
+   *
+   * 服务端每页写死 30 条，一张 1200 首的歌单要翻 40 页；串行 = 40 次往返排队，
+   * 高延迟线路上就是几十秒，用户感知到的就是「QQ 歌单加载很慢」。
+   * 首页已经带了 total，可以直接算出还要几页，用 5 路并发一次发完，
+   * 再按 begin 升序合并（顺序与原串行版本完全一致）。单页失败只跳过该页。
+   */
+  const firstPageCount = (body.songlist || []).length;
+  if (firstPageCount >= QQ_SONG_PAGE_SIZE) {
+    // total 缺失时保守只探 30 页（900 首），不拿 400 页上限去扫
+    const planned = total > 0 ? Math.ceil(total / QQ_SONG_PAGE_SIZE) : 30;
+    const pageCount = Math.max(1, Math.min(planned, QQ_SONG_MAX_PAGES));
+    const begins = [];
+    for (let index = 1; index < pageCount; index += 1) begins.push(index * QQ_SONG_PAGE_SIZE);
+    const CONCURRENCY = 5;
+    const pages = new Map();
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < begins.length) {
+        const begin = begins[cursor];
+        cursor += 1;
+        try {
+          const page = await fetchJson(reqUrl(begin), headers);
+          pages.set(begin, page?.req_1?.data?.songlist || []);
+        } catch {
+          // 单页失败（限流 / 超时）不影响整张歌单，按空页处理
+          pages.set(begin, []);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, begins.length) }, worker));
+    for (const begin of begins) collect(pages.get(begin) || []);
   }
   return {
     name: String(dirinfo.title || dirinfo.dissname || ''),

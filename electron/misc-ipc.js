@@ -41,6 +41,30 @@ function installMiscIpc(ctx) {
     bundleCovers: path.join(app.getAppPath(), 'data', 'covers'),
   });
 
+  /*
+   * 渲染层日志桥（2026-11-18）。
+   * 点歌链路的分支全在渲染层：解析出没出歌名、网易云搜没搜到、多平台兜底有没有结果。
+   * 这些以前只打到 DevTools console，用户报「弹幕点歌没效果」时主进程 launch.log
+   * 里什么都看不到，只能靠猜。这里让渲染层把关键节点写进同一份 launch.log，
+   * 与主进程日志按时间对齐，复现一次就能定位断在哪一环。
+   * 单条截断 600 字，写失败吞掉，绝不因为日志把业务搞挂。
+   */
+  ipcMain.on('app:client-log', (_event, message) => {
+    const text = String(message == null ? '' : message)
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return;
+    try {
+      fs.appendFileSync(
+        path.join(app.getPath('userData'), 'launch.log'),
+        `[${new Date().toISOString()}] [renderer] ${text.slice(0, 600)}\n`,
+        'utf8'
+      );
+    } catch {
+      /* 日志失败不影响业务 */
+    }
+  });
+
   /* bh3OfficialRetry 是 main.js 的模块级 let：按值解构是 const，赋值会抛 TypeError */
   const resetBh3Retry = () => {
     if (typeof setBh3OfficialRetry === 'function') setBh3OfficialRetry(0);
@@ -375,6 +399,18 @@ function installMiscIpc(ctx) {
             'wesight',
             'crashsight_data',
           ],
+          /*
+           * 2026-11-18：这两棵目录「根本不处理」，既不算硬链也不算复制。
+           *
+           * 实测本机官服 108.13 GiB / 1804 个文件转换 WeGame 时，「必须复制」共
+           * 4.75 GiB，其中 3.88 GiB 是纯垃圾：
+           *   · Client/Saved/PSO —— 两个 .ushaderprecache 合计 1.03 GiB，
+           *     显卡驱动生成的着色器缓存，WeGame 端首次启动自己会重建；
+           *   · 没下完的可选包 .pak.kuro-tmp（2.85 GiB）由 hardlinkTree 默认的
+           *     SKIP_LINK_SUFFIXES 跳过，不需要在这里列。
+           * 跳过之后 WeGame 端真实占盘从 4.75 GiB 降到约 0.87 GiB。
+           */
+          skipPrefixes: ['Client/Saved/PSO'],
         });
         /*
          * 2026-11-17 修 bug 3：转换完成后回填鸣潮的 WeGame 服务器行。

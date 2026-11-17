@@ -337,14 +337,21 @@ contextBridge.exposeInMainWorld('launcher', {
     getFps: () => ipcRenderer.invoke('starrail:fps:get'),
     setFps: (fps) => ipcRenderer.invoke('starrail:fps:set', fps),
   },
+  /*
+   * 渲染层日志桥：点歌链路（解析 → 搜索 → 入队）以前全在 DevTools 里，
+   * 用户报"没效果"时主进程日志一片空白。这里把关键节点写进 launch.log。
+   */
+  logClient: (message) => ipcRenderer.send('app:client-log', String(message == null ? '' : message)),
   live: {
-    biliRoom: (input) => ipcRenderer.invoke('live:bili-room', input),
-    room: (input) => ipcRenderer.invoke('live:bili-room', input),
+    biliRoom: (input) => ipcRenderer.invoke('live:bili-room', input),    room: (input) => ipcRenderer.invoke('live:bili-room', input),
     danmakuStart: (input) => ipcRenderer.invoke('live:danmaku-start', input),
     danmakuPoll: (id) => ipcRenderer.invoke('live:danmaku-poll', id),
     danmakuStop: (id) => ipcRenderer.invoke('live:danmaku-stop', id),
     danmuInfo: (roomId) => ipcRenderer.invoke('live:danmu-info', roomId),
+    // 未开播 / 轮播房间没有 WS 推送时的聊天区补拉
+    danmuHistory: (roomId) => ipcRenderer.invoke('live:danmu-history', roomId),
     biliLogin: () => ipcRenderer.invoke('bili:login'),
+    biliLoginStatus: () => ipcRenderer.invoke('bili:login-status'),
     // 弹幕长连接已迁到主进程：渲染层只发 connect/disconnect（send，不等回值），
     // 再用 onDanmuEvent 订阅主进程转发过来的 open/pushing/danmu/status/closed/reconnecting 事件。
     danmuConnect: (payload) => ipcRenderer.send('live:danmu-connect', payload),

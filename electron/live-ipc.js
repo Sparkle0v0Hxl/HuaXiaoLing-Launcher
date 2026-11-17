@@ -243,6 +243,40 @@ function installLiveIpc(ctx) {
     });
 
     /*
+     * 未开播 / 轮播房间的聊天区补拉（2026-11-18）。
+     *
+     * 用户报"没开播、轮播中也要能点到歌"。这两种房间 B 站照样开聊天区，
+     * 但官方弹幕 WebSocket 基本不推（轮播尤其明显），结果是界面「已连接」
+     * 却一条点歌都收不到。
+     *
+     * xlive/web-room/v1/dM/gethistory 不需要 token、不需要 wbi 签名，
+     * 未开播房间也能读到最近 20 条聊天记录。前端按 key 去重、首轮只做基线，
+     * 之后与 WS 事件汇进同一个点歌入口。
+     */
+    async function getBiliDanmuHistory(roomId) {
+      const id = String(roomId || '').trim();
+      if (!id) throw new Error('没有房间号');
+      await ensureBiliBuvid().catch(() => {});
+      const url = `https://api.live.bilibili.com/xlive/web-room/v1/dM/gethistory?roomid=${encodeURIComponent(
+        id
+      )}&room_type=0`;
+      const { json } = await biliGetJson(url, `https://live.bilibili.com/${id}`, (parsed) => Boolean(parsed?.data));
+      const list = Array.isArray(json?.data?.room) ? json.data.room : [];
+      return list.map((item) => {
+        const user = String(item?.nickname || item?.uname || '');
+        const text = String(item?.text || '');
+        return {
+          user,
+          text,
+          // timeline 只有 "HH:MM:SS"，同一秒可能多条，拼上 uid 与正文才能稳稳去重
+          key: `${String(item?.timeline || '')}|${String(item?.uid || '')}|${text}`,
+        };
+      });
+    }
+
+    ipcMain.handle('live:danmu-history', async (_event, roomId) => getBiliDanmuHistory(roomId));
+
+    /*
      * 弹幕 WebSocket 迁到主进程（根治渲染层长连接被本机网络层掐断的问题）。
      * 渲染层只负责：发 live:danmu-connect(token+hosts) / 收 live:danmu-event。
      * 真正建连、鉴权、心跳、断线重连、服务器轮换、token 刷新全在这里（Node 栈，
@@ -703,6 +737,33 @@ function installLiveIpc(ctx) {
      *   2. 放行 window.open——QQ / 微信 / 短信登录是弹窗，Electron 默认拦掉，
      *      不放行就是点了没反应。
      */
+    /*
+     * B 站登录状态（2026-11-18）。
+     *
+     * 登录窗口早就做了（bili:login 轮询 SESSDATA 自动关窗），但界面上没有地方
+     * 能看到"我现在到底登录了没有"。而轮播/未开播房间的点歌依赖聊天区接口，
+     * 未登录时 gethistory 返回空数组 —— 用户完全没有可观测依据，只能怀疑功能坏了。
+     * 这里用 x/web-interface/nav 回一个明确状态，卡片头部常驻显示。
+     * 未登录时 nav 返回 code -101 但 data.isLogin=0，仍然能判断，所以 accept 放宽。
+     */
+    ipcMain.handle('bili:login-status', async () => {
+      try {
+        const { json } = await biliGetJson(
+          'https://api.bilibili.com/x/web-interface/nav',
+          'https://www.bilibili.com/',
+          (parsed) => Boolean(parsed && typeof parsed === 'object' && parsed.data)
+        );
+        const data = (json && json.data) || {};
+        return {
+          loggedIn: Number(data.isLogin) === 1,
+          uname: String(data.uname || ''),
+          mid: String(data.mid || ''),
+        };
+      } catch {
+        return { loggedIn: false, uname: '', mid: '' };
+      }
+    });
+
     let biliLoginWin = null;
     ipcMain.handle('bili:login', () => {
       if (biliLoginWin) {

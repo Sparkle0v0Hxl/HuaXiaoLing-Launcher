@@ -662,15 +662,21 @@ function liveRoomsListMarkup() {
         const statusLine = room.status ? `<p class="song-live-status">${esc(room.status)}</p>` : '';
         // 拿不到鉴权时给一个登录入口（B站偶尔对未登录会话加码）。
         // -352 是接口签名问题，登录解决不了，别再把用户往死路上引。
+        // 2026-11-18：轮播/未开播房间走聊天区轮询，B站未登录时 gethistory 返回空数组，
+        // 所以「轮询已开但一条都没抓到」也把登录入口亮出来，并说明原因。
         const failedText = String(room.status || '');
-        const needBiliLogin = /鉴权失败/.test(failedText) && !/-352/.test(failedText);
+        const needBiliLogin =
+          (/鉴权失败/.test(failedText) && !/-352/.test(failedText)) ||
+          (room.danmaku === 'history' && !room.captured);
         // 计数与最近弹幕始终渲染（只读展示）：reconnecting/closed 会把 room.connected 置 false，
         // 若按 connected 隐藏，历史计数与最近弹幕会一并消失，视觉上像「从没抓到过」。
         // 这里数字不清零、节点不隐藏；仅断开时补一句很轻的状态说明。
         const captured = `<p class="song-live-captured" id="live-captured-${esc(room.id)}">已捕获 <b>${room.captured || 0}</b> 条弹幕${
             room.danmaku === 'bridge'
               ? '（观众发弹幕后数字不动 = 该站抓取失效）'
-              : '（发条弹幕试试：数字不动 = 服务器没推送，看状态行的原因）'
+              : room.danmaku === 'history'
+                ? '（聊天区轮询中；B站未登录时读不到聊天记录，建议先登录）'
+                : '（发条弹幕试试：数字不动 = 服务器没推送，看状态行的原因）'
           }</p>`;
         const liveLast = `<p class="song-live-last" id="live-last-${esc(room.id)}">最近弹幕：${esc(
             String(room.lastDanmaku || '—').slice(0, 80)
@@ -697,6 +703,28 @@ function liveRoomsListMarkup() {
       .join('')}`;
 }
 
+/**
+ * 弹幕点歌卡片头部的 B 站账号条（2026-11-18）。
+ *
+ * 轮播 / 未开播房间靠登录态读聊天区，所以登录入口必须常驻、
+ * 而不是等某个房间失败后才冒出来 —— 那样用户只会以为功能是坏的。
+ */
+function biliAccountMarkup() {
+  const acc = state.biliAccount || {};
+  if (acc.loggedIn) {
+    return `<div class="song-live-account is-on">
+      <span class="song-live-account-dot"></span>
+      <span class="song-live-account-text">B站已登录${acc.uname ? ` · ${esc(acc.uname)}` : ''}</span>
+      <button class="song-rail-more" data-action="bili-login">切换账号</button>
+    </div>`;
+  }
+  return `<div class="song-live-account">
+    <span class="song-live-account-dot"></span>
+    <span class="song-live-account-text">B站未登录${acc.checked ? ' · 轮播/未开播房间需登录后才能读聊天区点歌' : ''}</span>
+    <button class="song-rail-more" data-action="bili-login">登录B站账号</button>
+  </div>`;
+}
+
 /** 弹幕点歌块：房间列表（可单独刷新）+ 连接表单 + 历史。 */
 function liveDanmakuMarkup() {
   return `
@@ -709,6 +737,7 @@ function liveDanmakuMarkup() {
             : `<small>观众发「点歌 歌名」</small>`
         }
       </div>
+      ${biliAccountMarkup()}
       <div id="live-rooms-panel">${liveRoomsListMarkup()}</div>
       <div class="song-live-form">
         <input class="song-live-input" id="live-room-input" placeholder="直播间链接（B站 / 斗鱼 / 虎牙…）" title="支持 B站、斗鱼、虎牙、抖音、快手、YY、网易CC、花椒、酷狗直播、小红书、淘宝直播、Twitch、YouTube，其它站点会尝试通用抓取。可同时连接多个直播间" value="${esc(state.live.roomUrl || '')}" spellcheck="false" />
@@ -739,6 +768,8 @@ function refreshLiveRoomsPanel() {
   // 签名覆盖 liveRoomsListMarkup 里所有会随弹幕事件/状态变化的字段，漏一个都会导致对应数字或文案不刷新。
   const sig = JSON.stringify({
     mode: liveSongMode(),
+    // 登录态变了也要重绘账号条
+    bili: [state.biliAccount?.loggedIn ? 1 : 0, state.biliAccount?.uname || '', state.biliAccount?.checked ? 1 : 0],
     rooms: state.liveRooms.map((room) => [
       room.id,
       room.platformLabel,
@@ -781,7 +812,54 @@ function openMusicSettingsModal() {
   );
 }
 
+/**
+ * 底部播放条的「播放列表」浮层（2026-11-18 用户需求）。
+ *
+ * 以前列表按钮只是跳到音乐页再滚到队列，听歌时想换一首就得离开当前页。
+ * 现在直接在播放条上方展开：正在播放 / 接下来 / 已播放 三段，
+ * 点任意一行切歌。弹幕点的「下一首」插进来后会立刻出现在「接下来」第一行。
+ */
+function dockQueueMarkup() {
+  if (!state.dockListOpen) return '';
+  const songs = Array.isArray(state.songs) ? state.songs : [];
+  const total = songs.length;
+  const at = total ? Math.min(Math.max(0, Number(state.songIndex) || 0), total - 1) : -1;
+  const row = (song, index) =>
+    `<button class="dock-queue-row${index === at ? ' is-active' : ''}" data-action="song-select" data-index="${index}" title="${esc(
+      `${song?.title || '未知曲目'}${song?.artist ? ' · ' + song.artist : ''}`
+    )}">
+      <span class="dock-queue-idx">${index === at ? icon('play', 'xs') : index + 1}</span>
+      <span class="dock-queue-copy">
+        <strong>${esc(song?.title || '未知曲目')}</strong>
+        <small>${esc(song?.artist || '')}</small>
+      </span>
+    </button>`;
+  const upcoming = at >= 0 ? songs.slice(at + 1) : [];
+  const played = at >= 0 ? songs.slice(0, at) : [];
+  const body = total
+    ? `${at >= 0 ? `<p class="dock-queue-label">正在播放</p>${row(songs[at], at)}` : ''}
+       ${
+         upcoming.length
+           ? `<p class="dock-queue-label">接下来 · ${upcoming.length} 首</p>${upcoming
+               .map((s, i) => row(s, at + 1 + i))
+               .join('')}`
+           : '<p class="dock-queue-empty">已经是最后一首了</p>'
+       }
+       ${played.length ? `<p class="dock-queue-label">已播放 · ${played.length} 首</p>${played.map((s, i) => row(s, i)).join('')}` : ''}`
+    : '<p class="dock-queue-empty">队列还是空的，去点几首歌吧</p>';
+  return `
+    <div class="song-dock-queue" id="song-dock-queue" role="dialog" aria-label="播放列表">
+      <div class="song-dock-queue-head">
+        <span>播放列表 · 共 ${total} 首</span>
+        <button class="song-bar-btn" data-action="dock-list-toggle" title="收起">${icon('x', 'xs')}</button>
+      </div>
+      <div class="song-dock-queue-body">${body}</div>
+    </div>`;
+}
+
 function karaokeViewMarkup() {
+  // 每次进音乐页温和检查一次 B 站登录态（函数内部 60 秒节流，不会造成请求风暴）
+  if (typeof refreshBiliAccount === 'function') refreshBiliAccount(false);
   const current = state.songs[state.songIndex] || null;
   const playing = Boolean(current?.url);
   const tab = state.songTab || 'queue';
@@ -886,8 +964,9 @@ function karaokeViewMarkup() {
             <svg class="icon"><use id="dock-volume-use" href="${state.songMuted ? '#i-volume-x' : '#i-volume'}"></use></svg>
           </button>
           <input class="song-bar-volume" id="dock-volume" type="range" min="0" max="100" step="1" value="${state.songVolume}" aria-label="音量" data-no-sound />
-          <button class="song-bar-btn" data-action="dock-open-list" title="歌曲列表">${icon('library')}</button>
+          <button class="song-bar-btn" data-action="dock-list-toggle" title="${state.dockListOpen ? '收起播放列表' : '播放列表'}" aria-expanded="${state.dockListOpen ? 'true' : 'false'}">${icon('library')}</button>
         </div>
+        ${dockQueueMarkup()}
       </footer>
 
       <svg hidden style="display:none"><use id="song-mute-use" href="${state.songMuted ? '#i-volume-x' : '#i-volume'}"></use></svg>

@@ -605,6 +605,8 @@ case 'music-accounts':
       const loginResult = await api.live.biliLogin().catch((error) => ({ ok: false, reason: humanError(error) }));
       if (loginResult?.ok) {
         toast('B站账号已登录，重新连接直播间即可', 'success');
+        // 登录态刷新：卡片头部的「未登录」要立刻变成「已登录 · 昵称」
+        await refreshBiliAccount(true);
       } else if (loginResult?.reason && loginResult.reason !== '窗口已关闭') {
         toast(loginResult.reason, 'info');
       }
@@ -727,6 +729,18 @@ case 'music-accounts':
         document.querySelector('#song-queue')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 120);
       break;
+    case 'dock-list-toggle': {
+      // 底部播放条上方的播放列表浮层：再点一次收起
+      state.dockListOpen = !state.dockListOpen;
+      render({ preserveScroll: true });
+      if (state.dockListOpen) {
+        // 展开后把当前曲目滚到可见区（队列长的时候默认停在顶部看不到"正在播放"）
+        setTimeout(() => {
+          document.querySelector('#song-dock-queue .dock-queue-row.is-active')?.scrollIntoView({ block: 'center' });
+        }, 40);
+      }
+      break;
+    }
     case 'dock-open-list':
       if ((state.songTab || 'queue') !== 'queue') {
         state.songTab = 'queue';
@@ -742,6 +756,12 @@ case 'music-accounts':
       await hydrateSong(state.songs[state.songIndex]);
       await ensureSongQuality(state.songs[state.songIndex]);
       render({ preserveScroll: true });
+      // 从底部播放列表里点的：重绘后把新的「正在播放」行滚回视野中间
+      if (state.dockListOpen) {
+        setTimeout(() => {
+          document.querySelector('#song-dock-queue .dock-queue-row.is-active')?.scrollIntoView({ block: 'center' });
+        }, 40);
+      }
       playCurrentSong();
       break;
     }
