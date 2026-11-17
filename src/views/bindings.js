@@ -31,7 +31,37 @@ function bindCoverFallbacks(root = document) {
   });
 }
 
+/*
+ * 进音乐页时把「当前播放的那首」滚到可视区（2026-11-18）。
+ *
+ * 用户要求：「再次打开启动器，点音乐页，页面跳到我上次选择的歌曲位置」。
+ * songIndex 已经持久化，这里只负责把对应行滚进视野 —— 每次从别的页进音乐页做一次，
+ * 页内其他重绘不触发，免得用户正在看别处时被突然拉走。
+ */
+let lastBoundSongRoute = '';
+
+function scrollSongPageToCurrent() {
+  const node = document.querySelector('.song-row.active, .kr-detail-row.is-current, .song-chart-song.is-current');
+  if (!node) return;
+  const scroller = node.closest('.song-app-scroll') || node.closest('.song-app-side');
+  if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+    // 只滚内容容器，不带着整页跳
+    const top = node.offsetTop - scroller.clientHeight / 2 + node.offsetHeight / 2;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+    return;
+  }
+  node.scrollIntoView({ block: 'center', behavior: 'auto' });
+}
+
 function bindView() {
+  bindQueueDragOnce();
+  bindQueueBrushOnce();
+  if (state.route === 'song' && lastBoundSongRoute !== 'song') {
+    lastBoundSongRoute = 'song';
+    setTimeout(scrollSongPageToCurrent, 280);
+  } else if (state.route !== 'song') {
+    lastBoundSongRoute = state.route;
+  }
   bindCoverFallbacks();
   document.querySelectorAll('.avatar img').forEach((img) => {
     img.addEventListener(
@@ -350,4 +380,198 @@ function bindView() {
   restoreStartVideoState();
   startStartRunningTimer();
   bindSongLyrics();
+}
+
+
+/**
+ * 队列拖拽排序（2026-11-18）。
+ *
+ * 主流播放器都能拖动调整播放顺序，这里补上：
+ *   · document 级委托，只绑一次（bindQueueDragOnce 幂等）；
+ *   · 行上带 data-index（state.songs 的全局下标，折叠后依然正确）；
+ *   · 落位后调 moveQueueItem，播放指针跟着走，序号与队列一起重排。
+ */
+let queueDragBound = false;
+let queueDragFrom = -1;
+
+function bindQueueDragOnce() {
+  if (queueDragBound) return;
+  queueDragBound = true;
+
+  const clearMarks = () => {
+    document.querySelectorAll('.song-row.is-dragging, .song-row.is-drop-target').forEach((node) => {
+      node.classList.remove('is-dragging', 'is-drop-target');
+    });
+  };
+
+  document.addEventListener('dragstart', (event) => {
+    const row = event.target && event.target.closest && event.target.closest('.song-row');
+    if (!row || row.dataset.index == null) return;
+    queueDragFrom = Number(row.dataset.index);
+    row.classList.add('is-dragging');
+    try {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', String(queueDragFrom));
+    } catch {
+      /* 某些环境不给写 dataTransfer，拖拽本身仍可用 */
+    }
+  });
+
+  document.addEventListener('dragover', (event) => {
+    if (queueDragFrom < 0) return;
+    const row = event.target && event.target.closest && event.target.closest('.song-row');
+    if (!row) return;
+    event.preventDefault();
+    document.querySelectorAll('.song-row.is-drop-target').forEach((node) => node.classList.remove('is-drop-target'));
+    row.classList.add('is-drop-target');
+  });
+
+  document.addEventListener('drop', (event) => {
+    if (queueDragFrom < 0) return;
+    const row = event.target && event.target.closest && event.target.closest('.song-row');
+    if (!row) return;
+    event.preventDefault();
+    const to = Number(row.dataset.index);
+    const from = queueDragFrom;
+    queueDragFrom = -1;
+    clearMarks();
+    if (Number.isFinite(to) && to !== from && typeof moveQueueItem === 'function') {
+      moveQueueItem(from, to);
+    }
+  });
+
+  document.addEventListener('dragend', () => {
+    queueDragFrom = -1;
+    clearMarks();
+  });
+}
+
+
+/**
+ * 队列批量选择：按住 Shift 拖动刷选（2026-11-18）。
+ *
+ * 用户要求「批量操作的时候，可以按住鼠标往下划，快速选择」。
+ * 普通拖动留给排序（HTML5 drag），所以这里用 Shift + 拖动做刷选，两者不打架。
+ * 松开后顶部出现操作条：加入播放 / 从队列删除 / 取消。
+ */
+let queueBrushBound = false;
+
+function bindQueueBrushOnce() {
+  if (queueBrushBound) return;
+  queueBrushBound = true;
+
+  let active = false;
+  let anchor = -1;
+  let selected = new Set();
+
+  // 2026-11-18：歌单详情页也要能刷选，所以两种行都认
+  const rows = () => Array.from(document.querySelectorAll('#song-queue .song-row, .kr-detail-row'));
+
+  const paint = () => {
+    rows().forEach((row) => {
+      const index = Number(row.dataset.index);
+      row.classList.toggle('is-brush-selected', selected.has(index));
+    });
+    const bar = document.querySelector('#song-queue-brush');
+    if (bar) {
+      const count = bar.querySelector('b');
+      if (count) count.textContent = String(selected.size);
+    }
+  };
+
+  const clear = () => {
+    selected = new Set();
+    paint();
+    const bar = document.querySelector('#song-queue-brush');
+    if (bar) bar.remove();
+  };
+
+  const showBar = () => {
+    if (selected.size < 1) return;
+    let bar = document.querySelector('#song-queue-brush');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'song-queue-brush';
+      bar.className = 'song-queue-brush';
+      const host = document.querySelector('#song-queue');
+      if (!host) return;
+      host.prepend(bar);
+    }
+    bar.innerHTML = `
+      <span>已选 <b>${selected.size}</b> 首</span>
+      <button class="song-queue-brush-btn" data-brush="play">加入播放</button>
+      <button class="song-queue-brush-btn is-danger" data-brush="remove">从队列删除</button>
+      <button class="song-queue-brush-btn" data-brush="cancel">取消</button>`;
+    bar.querySelector('[data-brush="cancel"]').onclick = clear;
+    bar.querySelector('[data-brush="remove"]').onclick = (event) => {
+      event.stopPropagation();
+      const picked = state.pickedSongs || [];
+      const removeSet = new Set(selected);
+      state.pickedSongs = picked.filter((_item, index) => !removeSet.has(index));
+      savePicked();
+      const count = removeSet.size;
+      clear();
+      render({ preserveScroll: true });
+      toast(`已从队列移除 ${count} 首`, 'success');
+    };
+    bar.querySelector('[data-brush="play"]').onclick = async (event) => {
+      event.stopPropagation();
+      const picked = state.pickedSongs || [];
+      const pickedSongs = [...selected]
+        .sort((a, b) => a - b)
+        .map((index) => picked[index])
+        .filter(Boolean)
+        .map((item) => ({ ...item }));
+      if (!pickedSongs.length) return;
+      clear();
+      state.songs = pickedSongs;
+      state.songIndex = 0;
+      saveSongs();
+      await playSongAt(0, { preserveScroll: true });
+      toast(`正在播放选中的 ${pickedSongs.length} 首`, 'success');
+    };
+  };
+
+  document.addEventListener('mousedown', (event) => {
+    if (!event.shiftKey || event.button !== 0) return;
+    if (!document.querySelector('#song-queue')) return;
+    const row = event.target && event.target.closest && event.target.closest('#song-queue .song-row, .kr-detail-row');
+    if (!row) return;
+    event.preventDefault();
+    active = true;
+    anchor = Number(row.dataset.index);
+    selected = new Set([anchor]);
+    paint();
+  });
+
+  document.addEventListener('mousemove', (event) => {
+    if (!active) return;
+    const row = event.target && event.target.closest && event.target.closest('#song-queue .song-row, .kr-detail-row');
+    if (!row) return;
+    const index = Number(row.dataset.index);
+    if (!Number.isFinite(index)) return;
+    const from = Math.min(anchor, index);
+    const to = Math.max(anchor, index);
+    selected = new Set();
+    for (let i = from; i <= to; i += 1) selected.add(i);
+    paint();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!active) return;
+    active = false;
+    /*
+     * 歌单详情页的刷选写进 detailSelected；队列页写进 queueSelected。
+     * 写完后统一渲染一次，把选中态和操作条一起画出来。
+     */
+    if (document.querySelector('.kr-detail')) {
+      state.detailSelectMode = true;
+      state.detailSelected = [...selected].sort((a, b) => a - b);
+      render({ preserveScroll: true });
+      return;
+    }
+    state.queueSelectMode = true;
+    state.queueSelected = [...selected].sort((a, b) => a - b);
+    renderKeepingSideScroll();
+  });
 }

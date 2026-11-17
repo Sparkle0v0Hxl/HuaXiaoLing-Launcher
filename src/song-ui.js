@@ -18,16 +18,25 @@
  */
 
 const SONG_TABS = [
-  // 队列原来的标签是「歌单」，放在左栏里跟「我的歌单」并排时容易看错，统一叫「队列」
+  /*
+   * 2026-11-18：去掉「我的歌单」分页。
+   * 左栏已经把歌单逐条列出来了，主区再摆一面歌单卡片墙属于同一件事做两遍，
+   * 用户原话「中间留那大块地方放歌单吗？作用重复了吧」。
+   * 现在主区只负责「队列 / 当前歌单曲目 / 歌单广场 / 榜单 / 搜索」。
+   */
   ['queue', '队列'],
+  ['plaza', '歌单广场'],
   ['charts', '榜单'],
-  ['mine', '我的歌单'],
   ['search', '搜索'],
 ];
 const TAB_LABELS = new Map(SONG_TABS);
 /* 左栏两项最容易混：队列是「你点过的歌」，我的歌单是「平台上收藏的整张歌单」。
  * 名字下面挂一行小字，比任何 tooltip 都直接。 */
-const NAV_SUBTITLES = { queue: '点过的歌都在这', mine: '各平台收藏的歌单' };
+const NAV_SUBTITLES = {
+  queue: '点过的歌都在这',
+  mine: '各平台收藏的歌单',
+  plaza: '热门公开歌单，免登录',
+};
 
 /* ── 搜索 ─────────────────────────────────────────────────── */
 
@@ -507,7 +516,7 @@ function bindNeteaseQr() {
 /* ── 左侧曲库导航栏 ───────────────────────────────────────── */
 
 /** 左栏每一项的图标，跟 SONG_TABS 的键一一对应。 */
-const KR_NAV_ICONS = { queue: 'order', charts: 'star', mine: 'music', search: 'search' };
+const KR_NAV_ICONS = { queue: 'order', charts: 'star', mine: 'music', plaza: 'library', search: 'search' };
 
 /** 某个平台的歌单分组（没有就是 null，用来区分「没同步过」和「同步后为空」）。 */
 function krPlaylistGroupOf(platform) {
@@ -599,7 +608,7 @@ function krNavMarkup() {
   const logged = PLATFORM_ORDER.filter((key) => musicLoggedIn(key));
   const syncingAll = Boolean(state.myPlaylists.loadingAll);
   const myCount = logged.reduce((sum, key) => sum + (krPlaylistGroupOf(key)?.list || []).length, 0);
-  const counts = { queue: state.songs.length, charts: (state.charts.list || []).length, mine: myCount };
+  const counts = { queue: (state.pickedSongs || []).length, charts: (state.charts.list || []).length, mine: myCount };
   // 后端返回的 syncedAt / durationMs：同步慢的时候用户得知道上次是什么时候、花了多久
   const syncMeta = playlistSyncSummary();
 
@@ -622,9 +631,19 @@ function krNavMarkup() {
         ${count ? `<span class="kr-nav-count">${count}</span>` : ''}
       </button>`;
   };
+  /*
+   * 2026-11-18：左栏回归「导航」本职。
+   *
+   * 以前底下常驻一整块「平台歌单 + 同步全部 + 每个平台一行 ↻」，占掉将近一半高度，
+   * 而同步是低频操作 —— 用户原话「作用不多，还占个位置」。
+   * 现在同步入口收进「我的歌单」页头部（那里本来就有「同步全部 / 账号」），
+   * 单平台的 ↻ 也留在了各自分组头上，左栏只保留导航和设置。
+   * 同时把「歌单广场」独立成一项：原来它被塞在「我的歌单」页面底部，
+   * 歌单一多要滚很久才看得到，等于藏起来了。
+   */
   const navGroups = [
-    ['音乐库', ['queue', 'mine']],
-    ['发现', ['charts', 'search']],
+    ['音乐库', ['queue']],
+    ['发现', ['plaza', 'charts', 'search']],
   ]
     .map(
       ([label, keys]) => `
@@ -635,27 +654,178 @@ function krNavMarkup() {
     )
     .join('');
 
-  const syncBody = logged.length
-    ? `<div class="kr-sync-list">${logged.map(krSyncRow).join('')}</div>`
-    : `<p class="kr-nav-hint">还没有登录音乐账号，登录后这里会列出每个平台的歌单数。</p>
-       <button class="kr-nav-login" data-action="music-accounts">${icon('login', 'xs')}去登录</button>`;
+  /*
+   * 左栏「我的歌单」直接列表（2026-11-18）。
+   *
+   * 参考 QQ 音乐 / 网易云：左栏不是只放几个导航项，而是把账号里的歌单直接铺出来，
+   * 点一下就进曲目。之前歌单只在主区的卡片墙里，左栏下半截空着一大片，
+   * 用户原话「左边空的那么多」。
+   * 顶部给平台切换（全部 / 网易云 / QQ / 酷狗），歌单多的账号也不会一条长龙滚到底。
+   */
+  const groups = state.myPlaylists.groups || [];
+  /*
+   * 2026-11-18：只认「有 platform 且有歌单」的分组。
+   * 之前不过滤，某个 platform 为空的分组会把 musicPlatformLabel 的兜底「音乐」
+   * 渲染成一个真实标签，看起来像多出一个莫名其妙的平台。
+   */
+  const platformsWithList = groups
+    .filter((group) => group.platform && (group.list || []).length)
+    .map((group) => group.platform);
+  const sidePlatform = state.myPlaylists.sidePlatform || 'all';
+  const focusLocal = sidePlatform === 'local';
+  const filteredGroups = focusLocal
+    ? []
+    : sidePlatform === 'all'
+      ? groups.filter((group) => group.platform)
+      : groups.filter((group) => group.platform === sidePlatform);
+  const allPlaylists = filteredGroups.flatMap((group) =>
+    (group.list || []).map((pl) => ({ ...pl, platform: group.platform }))
+  );
+  const showAllSide = Boolean(state.myPlaylists.sideShowAll);
+  const sidePlaylists = showAllSide ? allPlaylists : allPlaylists.slice(0, 14);
+  const platformTabs = `<div class="kr-nav-pl-tabs">
+      <button class="kr-nav-pl-tab ${sidePlatform === 'all' ? 'is-active' : ''}" data-action="side-pl-platform" data-value="all">全部</button>
+      ${platformsWithList
+        .map(
+          (key) =>
+            `<button class="kr-nav-pl-tab ${sidePlatform === key ? 'is-active' : ''}" data-action="side-pl-platform" data-value="${esc(key)}">${esc(
+              musicPlatformLabel(key)
+            )}</button>`
+        )
+        .join('')}
+      <button class="kr-nav-pl-tab ${focusLocal ? 'is-active' : ''}" data-action="side-pl-platform" data-value="local">本地</button>
+    </div>`;
+  /*
+   * 2026-11-18：这一块改成**始终渲染**。
+   * 之前用 sidePlaylists.length 作为开关，切到「本地」时远程歌单被清空、
+   * sidePlaylists 变成 0，整块（连「新建歌单」按钮）一起消失了 ——
+   * 正是用户说的「本地那里没新建歌单」。
+   */
+  const totalSideCount = allPlaylists.length + (state.localPlaylists || []).length;
+  const playlistBlock = `<div class="kr-nav-block kr-nav-pl-block">
+        <p class="kr-nav-label"><span>我的歌单</span><span class="kr-nav-label-hint">${totalSideCount}</span></p>
+        ${platformTabs}
+        ${sidePlaylists
+          .map(
+            (pl) => `
+          <button class="kr-nav-pl" data-action="my-playlist-open" data-platform="${esc(pl.platform)}" data-id="${esc(pl.id)}" title="${esc(pl.name)}">
+            <span class="kr-nav-pl-cover">${
+              pl.cover ? `<img src="${esc(pl.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music', 'xs')
+            }</span>
+            <span class="kr-nav-pl-copy">
+              <strong>${esc(pl.name)}</strong>
+              <small>${pl.count ? `${pl.count} 首` : esc(musicPlatformLabel(pl.platform))}</small>
+            </span>
+          </button>`
+          )
+          .join('')}
+        ${
+          allPlaylists.length > 14
+            ? showAllSide
+              ? `<button class="kr-nav-pl-more" data-action="side-pl-more">收起</button>`
+              : `<button class="kr-nav-pl-more" data-action="side-pl-more">查看全部 ${allPlaylists.length} 个</button>`
+            : ''
+        }
+        ${(focusLocal || sidePlatform === 'all') && (state.localPlaylists || []).length
+          ? (state.localPlaylists || [])
+          .map(
+            (pl) => `
+          <button class="kr-nav-pl kr-nav-pl-local" data-action="local-playlist-open" data-id="${esc(pl.id)}" title="${esc(pl.name)}">
+            <span class="kr-nav-pl-cover">${icon('library', 'xs')}</span>
+            <span class="kr-nav-pl-copy">
+              <strong>${esc(pl.name)}</strong>
+              <small>${(pl.songs || []).length} 首 · 本地</small>
+            </span>
+          </button>`
+          )
+          .join('')
+          : ''}
+        <button class="kr-nav-pl-new" data-action="local-playlist-new">${icon('plus', 'xs')}新建歌单</button>
+      </div>`;
+
+  /*
+   * 最近播放（2026-11-18）：左栏把同步区拿掉之后下半截空了一大片，
+   * 主流播放器这里放的就是「最近播放」。只显示最近 6 首，点一下直接接着听。
+   */
+  const recent = (state.recentSongs || []).slice(0, 6);
+  const recentBlock = recent.length
+    ? `<div class="kr-nav-block kr-nav-recent">
+        <p class="kr-nav-label">最近播放</p>
+        ${recent
+          .map(
+            (song, index) => `
+          <button class="kr-nav-recent-item" data-action="recent-play" data-index="${index}" title="${esc(
+            `${song.title || ''}${song.artist ? ' · ' + song.artist : ''}`
+          )}">
+            <span class="kr-nav-recent-cover">${
+              song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music', 'xs')
+            }</span>
+            <span class="kr-nav-recent-copy">
+              <strong>${esc(song.title || '')}</strong>
+              <small>${esc(song.artist || '')}</small>
+            </span>
+          </button>`
+          )
+          .join('')}
+      </div>`
+    : '';
 
   return `
     <nav class="kr-nav" aria-label="音乐导航">
       ${navGroups}
-      <div class="kr-nav-block kr-nav-sync">
-        <p class="kr-nav-label"><span>平台歌单</span><span class="kr-nav-label-hint">点 ↻ 只同步这一个</span></p>
-        <button class="kr-sync-all" data-action="music-sync-all" ${syncingAll ? 'disabled' : ''}>
-          ${icon('refresh', 'xs')}${syncingAll ? '同步中…' : '同步全部'}
-        </button>
-        ${syncBody}
-        ${syncMeta && !syncingAll ? `<p class="kr-sync-meta">${esc(syncMeta)}</p>` : ''}
-      </div>
-      <button class="kr-nav-settings" data-action="music-settings" title="播放 / 音源 / 弹幕点歌，都收在这里">
-        ${icon('settings', 'xs')}<span>音乐设置</span>
-      </button>
-      <p class="kr-nav-hint">点歌单封面进去看曲目，卡片右下角的播放键直接整张开播。</p>
+      ${playlistBlock}
+      ${recentBlock}
     </nav>`;
+}
+
+/**
+ * 本地歌单详情（2026-11-18）。
+ *
+ * 用户自己新建的歌单：可整张播放、从我的队列导入、单首移除、删歌单。
+ * 这些歌只存在本地，不涉及任何音乐账号。
+ */
+function localPlaylistMarkup() {
+  const list = state.localPlaylists || [];
+  const pl = list.find((item) => item.id === state.localDetailId);
+  if (!pl) {
+    state.localDetailId = '';
+    return '';
+  }
+  const songs = pl.songs || [];
+  return `
+    <div class="kr-detail">
+      <div class="kr-detail-bar">
+        <button class="kr-detail-back" data-action="local-playlist-close">${icon('chevron-left', 'xs')}返回</button>
+        <div class="kr-detail-title">
+          <strong>${esc(pl.name)}</strong>
+          <small>${songs.length} 首 · 本地歌单</small>
+        </div>
+        <div class="kr-detail-actions">
+          <button class="kr-detail-play" data-action="local-playlist-play" data-id="${esc(pl.id)}" ${songs.length ? '' : 'disabled'}>${icon('play', 'xs')}整张播放</button>
+          <button class="playlists-chip" data-action="local-playlist-import" data-id="${esc(pl.id)}" title="把我的队列里所有歌加进来">${icon('download', 'xs')}导入我的队列</button>
+          <button class="playlists-chip is-danger" data-action="local-playlist-remove" data-id="${esc(pl.id)}" data-name="${esc(pl.name)}" title="删除这个本地歌单">${icon('trash', 'xs')}删除歌单</button>
+        </div>
+      </div>
+      ${
+        songs.length
+          ? `<div class="playlist-songs kr-detail-songs">
+              ${songs
+                .map(
+                  (song, index) => `
+                <div class="kr-detail-row">
+                  <button class="song-chart-song kr-detail-song" data-action="local-playlist-song" data-id="${esc(pl.id)}" data-index="${index}" title="播放这首">
+                    <span class="song-chart-index">${index + 1}</span>
+                    <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
+                    <span class="song-chart-copy"><strong>${esc(song.title || '未知曲目')}</strong><small>${esc(song.artist || '')}</small></span>
+                  </button>
+                  <button class="kr-detail-del" data-action="local-playlist-song-remove" data-id="${esc(pl.id)}" data-index="${index}" title="从歌单移除">${icon('x', 'xs')}</button>
+                </div>`
+                )
+                .join('')}
+            </div>`
+          : `<div class="song-empty">${icon('library')}<strong>这个歌单还是空的</strong><span>点右上角「导入我的队列」把队列里的歌搬进来；或在别的歌单里批量选择后选这个歌单。</span></div>`
+      }
+    </div>`;
 }
 
 /** 主区顶部条：当前分页的名字 + 一句话说明（替代原来那排分页按钮）。 */
@@ -664,19 +834,30 @@ function krSectionHeadMarkup() {
   const title = (SONG_TABS.find(([key]) => key === tab) || ['queue', '队列'])[1];
   const meta =
     tab === 'queue'
-      ? state.songs.length
-        ? `${state.songs.length} 首待播`
+      ? (state.pickedSongs || []).length
+        ? `${(state.pickedSongs || []).length} 首`
         : '还没有歌'
       : tab === 'charts'
         ? '公开榜单，免登录'
-        : tab === 'mine'
-          ? '点歌单进曲目，可整张播放'
-          : '四个平台一起搜';
+        : tab === 'plaza'
+            ? '热门公开歌单，免登录，点开就能看'
+            : '四个平台一起搜';
   return `
     <div class="kr-main-head">
       <strong class="kr-main-title">${esc(title)}</strong>
       <span class="kr-main-meta">${esc(meta)}</span>
-      ${tab === 'queue' && state.songs.length ? `<button class="kr-main-clear" data-action="song-clear">清空</button>` : ''}
+      ${
+        tab === 'queue'
+          ? `<div class="kr-main-actions">
+              <button class="kr-main-clear" data-action="queue-select-mode">${state.queueSelectMode ? '退出选择' : '批量选择'}</button>
+              ${
+                (state.pickedSongs || []).length && !state.queueSelectMode
+                  ? `<button class="kr-main-clear is-quiet" data-action="song-clear">清空</button>`
+                  : ''
+              }
+            </div>`
+          : ''
+      }
     </div>`;
 }
 
@@ -685,7 +866,13 @@ function krSectionHeadMarkup() {
  * 之前几百首的队列一次 innerHTML 全量画出来（几千个节点），点进队列页就卡；
  * 折叠后首屏节点数恒定，展开仍然全量渲染（用户主动要的，慢一点没关系）。
  */
-const QUEUE_SEGMENT_PREVIEW = 30;
+/*
+ * 2026-11-18：30 → 8。
+ * 队列里经常叠着好几张歌单（2163 首 = 十几段），每段露 30 行的话，
+ * 后面的歌单要滚很久才看得到。改成 8 行后，一屏能扫过好几个段头，
+ * 想看某段再点「展开其余 N 首」。
+ */
+const QUEUE_SEGMENT_PREVIEW = 8;
 
 /**
  * 队列分段：连续且同来源的歌归一段。
@@ -694,11 +881,11 @@ const QUEUE_SEGMENT_PREVIEW = 30;
  * 段头写清来源（整张导入的歌单显示歌单名，手动加的归「自选」），
  * 播放顺序不动，纯粹是给人看的分组。
  */
-function songQueueSegments() {
+function songQueueSegments(list = state.songs) {
   const segments = [];
   const keyOf = (song) =>
     song.origin === 'playlist' ? `pl:${song.from || '歌单'}` : 'pick';
-  for (const song of state.songs) {
+  for (const song of list) {
     const key = keyOf(song);
     const last = segments[segments.length - 1];
     if (last && last.key === key) last.items.push(song);
@@ -720,8 +907,8 @@ function songQueueSegments() {
  * 平铺所有歌；段的先后顺序与下标映射保持不变，song-select /
  * song-remove 拿到的下标和旧版完全一致。
  */
-function songQueueRowsMarkup() {
-  const segments = songQueueSegments();
+function songQueueRowsMarkup(list = state.songs) {
+  const segments = songQueueSegments(list);
   const filter = String(state.queueFilter || '').trim().toLowerCase();
   const rows = [];
   let flat = 0;
@@ -736,25 +923,78 @@ function songQueueRowsMarkup() {
     const visible = filter
       ? all.filter(({ song }) => `${song.title || ''} ${song.artist || ''}`.toLowerCase().includes(filter))
       : all;
-    for (const { song, index } of visible) {
+
+    /*
+     * 2026-11-18：恢复「按来源折叠」。
+     *
+     * 整张 1944 首的歌单铺进队列后，列表变成几千行，用户说「一堆歌很乱」。
+     * 主流音乐软件（QQ 音乐 / 网易云「当前播放」）都是按来源分段、只展开当前段，
+     * 这里照做：
+     *   · 段长 ≤ 30 的照常平铺；
+     *   · 长段显示段头（歌单名 + 总数），默认只露出当前播放项附近几首；
+     *   · 点段头或「展开其余 N 首」才全量渲染（状态存 state.queueExpanded）。
+     * 下标映射不变（data-index 仍是 state.songs 全局下标）。
+     */
+    const segKey = seg.key;
+    const isPlaylistSeg = seg.key !== 'pick';
+    const expanded = Boolean(state.queueExpanded?.[segKey]) || Boolean(filter);
+    const collapsible = isPlaylistSeg && visible.length > QUEUE_SEGMENT_PREVIEW;
+
+    if (collapsible) {
+      rows.push(`<div class="song-queue-seg">
+        <span class="song-queue-seg-name">${icon('music', 'xs')}《${esc(seg.label)}》</span>
+        <span class="song-queue-seg-count">${visible.length} 首</span>
+        <button class="song-queue-seg-toggle" data-action="queue-seg-toggle" data-seg="${esc(segKey)}">${expanded ? '收起' : '展开'}</button>
+      </div>`);
+    }
+
+    let shown = visible;
+    let headHidden = 0;
+    if (collapsible && !expanded) {
+      const activeAt = visible.findIndex(({ index }) => index === state.songIndex);
+      if (activeAt >= 0) {
+        // 当前正在播放的那首在段里：只露前后几首，其他收起来
+        const from = Math.max(0, activeAt - 2);
+        const to = Math.min(visible.length, activeAt + 6);
+        shown = visible.slice(from, to);
+        headHidden = from;
+      } else {
+        shown = visible.slice(0, QUEUE_SEGMENT_PREVIEW);
+      }
+    }
+
+    if (headHidden > 0) {
+      rows.push(`<button class="song-queue-more" data-action="queue-seg-toggle" data-seg="${esc(segKey)}">… 前面还有 ${headHidden} 首</button>`);
+    }
+
+    for (const { song, index } of shown) {
       rows.push(`
-              <div class="song-row ${index === state.songIndex ? 'active' : ''}">
-                <button class="song-row-main" data-action="song-select" data-index="${index}">
-                  <span class="song-index">${index === state.songIndex ? icon('play') : index + 1}</span>
+              <div class="song-row ${sameSongKey(song, state.songs[state.songIndex]) ? 'active' : ''}${song.unavailable ? ' is-unavailable' : ''}${(state.queueSelected || []).includes(index) ? ' is-brush-selected' : ''}" draggable="true" data-index="${index}">
+                <button class="song-row-main" data-action="song-select" data-queue="picked" data-index="${index}" title="${song.unavailable ? esc(song.unavailableReason || '暂时无法播放') : ''}">
+                  <span class="song-index">${sameSongKey(song, state.songs[state.songIndex]) ? icon('play') : index + 1}</span>
                   <span class="song-row-cover">${songCover(song) ? `<img src="${esc(songCover(song))}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : icon('music')}</span>
                   <span class="song-row-copy">
                     <strong>${esc(song.title)}</strong>
-                    <small>${esc(song.artist || (String(song.url || '').startsWith('file:') ? '本地文件' : '网络直链'))}</small>
+                    <small>${esc(
+                      song.unavailable
+                        ? `暂时无法播放${song.unavailableReason ? ' · ' + song.unavailableReason : ''}`
+                        : song.artist || (String(song.url || '').startsWith('file:') ? '本地文件' : '网络直链')
+                    )}</small>
                   </span>
                 </button>
-                <button class="song-row-remove" data-action="song-remove" data-index="${index}" title="移除">${icon('x')}</button>
+                <button class="song-row-remove" data-action="song-remove" data-queue="picked" data-index="${index}" title="从队列移除">${icon('x')}</button>
               </div>`);
+    }
+
+    if (collapsible && !expanded && shown.length < visible.length) {
+      const restCount = visible.length - shown.length;
+      rows.push(`<button class="song-queue-more" data-action="queue-seg-toggle" data-seg="${esc(segKey)}">展开其余 ${restCount} 首</button>`);
     }
   }
   return rows.join('');
 }
 
-function songQueueList() {
+function songQueueList(list = state.songs) {
   const filter = String(state.queueFilter || '').trim();
   /*
    * 轻量过滤框：只在队列多于一段预览量时出现（几十首以内没必要）。
@@ -770,14 +1010,60 @@ function songQueueList() {
         <button class="song-queue-filter-clear" data-action="queue-filter-clear" title="清空过滤" ${filter ? '' : 'hidden'}>${icon('x', 'xs')}</button>
       </div>`
       : '';
+  /*
+   * 「正在播放」上下文条（2026-11-18）。
+   *
+   * 队列里混着整张歌单 + 观众点歌时，光看几千行分不清「我现在听的是哪张歌单里的第几首」。
+   * 主流音乐软件的「当前播放」顶部都会钉一条这个，照做：封面 + 歌名 + 来源 + 位置。
+   */
+  const current = state.songs[state.songIndex] || null;
+  const nowBar = current
+    ? `<div class="song-queue-now">
+        <span class="song-queue-now-cover">${
+          songCover(current)
+            ? `<img src="${esc(songCover(current))}" alt="" referrerpolicy="no-referrer" />`
+            : icon('music')
+        }</span>
+        <span class="song-queue-now-copy">
+          <strong>${esc(current.title || '未知曲目')}</strong>
+          <small>${esc(current.artist || '未知歌手')}${current.origin === 'playlist' && current.from ? ` · 来自《${esc(current.from)}》` : ' · 自选'}</small>
+        </span>
+        <span class="song-queue-now-pos">${sameSongKey(current, list[state.songIndex]) && list === state.songs ? `${state.songIndex + 1} / ${state.songs.length}` : '播放中'}</span>
+      </div>`
+    : '';
+  /*
+   * 「恢复上一个队列」（2026-11-18）。
+   * 整张播放会替换队列，误点卡片上的播放键时靠这条把攒了很久的队列找回来。
+   */
+  const backup = state.queueBackup;
+  const backupBar = backup && backup.songs?.length
+    ? `<button class="song-queue-restore" data-action="queue-restore" title="把刚才被替换掉的队列装回来">
+        ${icon('refresh', 'xs')}
+        <span>恢复上一个队列 · <b>${backup.songs.length}</b> 首</span>
+      </button>`
+    : '';
+  const selectedCount = (state.queueSelected || []).length;
+  const selectBar = state.queueSelectMode
+    ? `<div class="song-queue-brush">
+        <span>已选 <b>${selectedCount}</b> 首${selectedCount ? '' : ' · 点歌曲勾选，或 Shift 拖动连选'}</span>
+        <button class="song-queue-brush-btn" data-action="queue-select-play" ${selectedCount ? '' : 'disabled'}>加入播放</button>
+        <button class="song-queue-brush-btn is-danger" data-action="queue-select-remove" ${selectedCount ? '' : 'disabled'}>删除</button>
+        <button class="song-queue-brush-btn" data-action="queue-select-mode">取消</button>
+      </div>`
+    : (state.pickedSongs || []).length
+      ? `<p class="song-queue-brush-hint">按住 Shift 拖动可以直接划选多首</p>`
+      : '';
   return `
     <div class="song-queue-wrap" id="song-queue">
+      ${selectBar}
+      ${backupBar}
+      ${nowBar}
       ${filterBar}
       <div class="song-list">
         ${
-          !state.songs.length
-            ? `<div class="song-empty">${icon('music')}<strong>歌单还是空的</strong><span>添加本地音频，或者导入一个网易云歌单。</span></div>`
-            : songQueueRowsMarkup() ||
+          !list.length
+            ? `<div class="song-empty">${icon('music')}<strong>队列还是空的</strong><span>把你喜欢的歌一首首加进来：歌单详情右侧的 ＋、直链、本地文件都算。</span></div>`
+            : songQueueRowsMarkup(list) ||
               `<div class="song-empty">${icon('search')}<strong>没有匹配的队列歌曲</strong><span>换个关键字，或者点右侧的 × 清空过滤。</span></div>`
         }
       </div>
@@ -785,19 +1071,22 @@ function songQueueList() {
 }
 
 function songMineMarkup() {
-  // 「我的歌单」按平台分区，所有已登录平台的歌单一起列出来。
-  // 登录入口只有页头那排账号按钮（打开统一的「音乐账号」面板），这里不再放登录按钮。
-  // 未登录也不再直接给空态：歌单广场不依赖登录，先让用户有东西可看。
+  /*
+   * 「我的歌单」只负责账号里的歌单（2026-11-18）。
+   *
+   * 歌单广场已经拆成独立的导航项，这里不再顺手 ensurePlaza ——
+   * 否则进「我的歌单」会白拉一次广场数据，而且广场被压在页面底部看不见。
+   */
   const anyLogged = ['netease', 'qq', 'kugou'].some((key) => musicAccountLoggedIn(key));
   if (anyLogged) ensureAllPlaylistsLoaded();
-  /*
-   * 点开某张歌单后主区换成曲目页，广场被钻取页盖住了。
-   * 这时候还去拉广场第一页等于白发一次请求，所以只在浏览态预取。
-   */
-  // 酷我已从广场移除：历史残留的 plazaPlatform 归一回网易云，别为看不见的平台发请求
+  return allPlaylistsMarkup();
+}
+
+/** 歌单广场入口：独立 tab，进来就拉第一页热门公开歌单（免登录）。 */
+function songPlazaMarkup() {
   if (!['netease', 'qq', 'kugou'].includes(state.myPlaylists.plazaPlatform)) {
     state.myPlaylists.plazaPlatform = 'netease';
   }
   if (!state.myPlaylists.detail) ensurePlaza(state.myPlaylists.plazaPlatform);
-  return allPlaylistsMarkup();
+  return plazaPanelMarkup();
 }

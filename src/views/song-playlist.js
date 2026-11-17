@@ -839,6 +839,18 @@ async function openMyPlaylist(platform, playlistId) {
     if (result?.ok && result.detail) {
       state.myPlaylists.detail = result.detail;
       state.myPlaylists.error = '';
+      /*
+       * 2026-11-18：记住上次打开的歌单，重启后自动回到这里。
+       * 只存标识（platform/id/name），曲目下次打开时再拉，避免 localStorage 存几千首。
+       */
+      try {
+        localStorage.setItem(
+          'vela:last-playlist',
+          JSON.stringify({ platform, id: playlistId, name: result.detail.name || '' })
+        );
+      } catch {
+        /* 存储满不影响打开 */
+      }
     } else {
       state.myPlaylists.detail = null;
       state.myPlaylists.error = result?.reason || '读取歌单失败';
@@ -862,11 +874,229 @@ async function openMyPlaylist(platform, playlistId) {
 }
 
 /**
- * 串行把一批曲目加进点歌队列，边加边报进度。
+ * 只解析、不入队。
  *
- * 曲源是逐首解析的（每首都可能要走一次网易云同名曲兜底），
- * 八百首的歌单跑下来要几分钟。不报数的话，界面停在那儿跟卡死没区别，
- * 所以这里每 20 首喊一次进度，并且先告诉用户总共多少首。
+ * 2026-11-18：从 insertChartSongToQueue 里抽出来，供批量导入使用 ——
+ * 批量时先并发解析出 entry，再按歌单顺序一次性插入，避免「边解析边 splice」把顺序打乱。
+ * 返回 null 表示这首暂时没有可播放版本。
+ */
+async function resolveChartSongEntry(song, options = {}) {
+  if (!song) return null;
+  const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
+  await api.netease.startService(apiBase).catch(() => {});
+  const platform = song.platform || options.platform || '';
+  const result = await api.musicResolve({
+    song: {
+      title: song.title,
+      artist: song.artist,
+      cover: song.cover,
+      album: song.album,
+      platform,
+      mid: song.mid,
+      hash: song.hash,
+      neteaseId: song.neteaseId,
+    },
+    apiBase,
+    level: state.songQuality,
+  });
+  if (!result?.ok || !result.url) return null;
+  const entry = {
+    title: result.title || song.title,
+    artist: result.artist || song.artist,
+    cover: result.cover || song.cover || '',
+    album: result.album || song.album || '',
+    neteaseId: result.neteaseId || song.neteaseId,
+    source: result.source || platform || '',
+    quality: result.level || state.songQuality,
+    url: result.url,
+  };
+  if (result.matched) entry.matched = result.matched;
+  if (song.hash) entry.hash = song.hash;
+  if (song.mid) entry.mid = song.mid;
+  /*
+   * 只有显式要求才写 origin/from：懒解析时是把结果 Object.assign 回队列里已有的
+   * entry，这里若无条件写 'pick' 会把整张歌单的分组标记（playlist + 歌单名）冲掉。
+   */
+  if (options.origin === 'playlist') {
+    entry.origin = 'playlist';
+    entry.from = options.from || '歌单';
+  } else if (options.origin) {
+    entry.origin = options.origin;
+  }
+  return entry;
+}
+
+/**
+ * 只把曲目元信息塞进队列，**不解析播放地址**（懒解析）。
+ *
+ * 2026-11-18 按用户要求重写：整张歌单入队应该是瞬间完成的 ——
+ * 队列里存 title / artist / cover / hash / mid，轮到播放时再由 playSongAt 解析。
+ * 这样点「整张播放」立刻就有 1900+ 首在列表里，第一首几秒内出声，
+ * 后面再按预取窗口（后 10 首）慢慢补，不会出现「点了没反应 / 导入一半没了」。
+ */
+function queueRawSongs(songs, options = {}) {
+  const list = Array.isArray(songs) ? songs : [];
+  if (!list.length) return 0;
+  const platform = options.platform || '';
+  const seen = buildQueuedKeySet();
+  const at = Number.isFinite(options.insertAt)
+    ? Math.max(0, Math.min(Number(options.insertAt), state.songs.length))
+    : state.songs.length;
+  const fresh = [];
+  for (const song of list) {
+    if (!song) continue;
+    if (songAlreadyQueued(seen, song)) continue;
+    const source = song.platform || platform || '';
+    const entry = {
+      title: song.title || '',
+      artist: song.artist || '',
+      cover: song.cover || '',
+      album: song.album || '',
+      neteaseId: song.neteaseId || '',
+      mid: song.mid || '',
+      hash: song.hash || '',
+      source,
+      platform: source,
+      quality: state.songQuality,
+      // 空串表示「还没解析」，playSongAt 会在播放前补上
+      url: '',
+      origin: options.origin === 'playlist' ? 'playlist' : options.origin || 'pick',
+    };
+    if (options.origin === 'playlist') entry.from = options.from || '歌单';
+    rememberQueuedKey(seen, entry);
+    fresh.push(entry);
+  }
+  if (!fresh.length) return 0;
+  state.songs.splice(at, 0, ...fresh);
+  saveSongs();
+  return fresh.length;
+}
+
+/* ── 本地歌单（2026-11-18） ─────────────────────────────────────── */
+
+function saveLocalPlaylists() {
+  try {
+    localStorage.setItem('vela:local-playlists', JSON.stringify(state.localPlaylists || []));
+  } catch {
+    toast('本地歌单太多，这次没能写进存档', 'info');
+  }
+}
+
+function createLocalPlaylist(name) {
+  const title = String(name || '').trim().slice(0, 40);
+  if (!title) return null;
+  const item = {
+    id: `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name: title,
+    songs: [],
+    createdAt: Date.now(),
+  };
+  state.localPlaylists = [item, ...(state.localPlaylists || [])];
+  saveLocalPlaylists();
+  return item;
+}
+
+function addSongsToLocalPlaylist(id, songs) {
+  const target = (state.localPlaylists || []).find((item) => item.id === id);
+  if (!target) return 0;
+  const seen = new Set(target.songs.map((song) => `${song.title}|${song.artist || ''}`));
+  let added = 0;
+  for (const song of songs || []) {
+    if (!song || !song.title) continue;
+    const key = `${song.title}|${song.artist || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    target.songs.push({ ...song });
+    added += 1;
+  }
+  if (added) saveLocalPlaylists();
+  return added;
+}
+
+/** 保存「我的队列」（手动添加的歌，独立于当前播放的歌单）。 */
+function savePicked() {
+  try {
+    localStorage.setItem('vela:picked-songs', JSON.stringify((state.pickedSongs || []).slice(0, 500)));
+  } catch {
+    /* 存储满不影响播放 */
+  }
+}
+
+/**
+ * 把手动添加的歌记进「我的队列」（2026-11-18）。
+ *
+ * 用户要求：「队列改成可以自己添加歌曲进去的那种，不要我点了歌单就全进去了」。
+ * 所以手动加的（＋、直链、本地文件、最近播放）都进这里，点歌单播放只替换
+ * state.songs（当前播放上下文），不会动 pickedSongs。
+ */
+function addToPicked(entry) {
+  if (!entry || !entry.title) return false;
+  const key = `${entry.title}|${entry.artist || ''}`;
+  const exists = (state.pickedSongs || []).some((item) => `${item.title}|${item.artist || ''}` === key);
+  if (exists) return false;
+  state.pickedSongs.unshift({
+    title: entry.title,
+    artist: entry.artist || '',
+    cover: entry.cover || '',
+    album: entry.album || '',
+    source: entry.source || entry.platform || '',
+    hash: entry.hash || '',
+    mid: entry.mid || '',
+    neteaseId: entry.neteaseId || '',
+    url: entry.url || '',
+    origin: 'pick',
+  });
+  state.pickedSongs = state.pickedSongs.slice(0, 500);
+  savePicked();
+  return true;
+}
+
+/** 从「我的队列」播放第 index 首：把队列装进播放列表再播。 */
+async function playPickedAt(index) {
+  const list = state.pickedSongs || [];
+  if (!list.length) return;
+  const at = Math.max(0, Math.min(Number(index) || 0, list.length - 1));
+  // 深拷贝一份：播放过程会往里写 url，不能污染「我的队列」的元数据
+  state.songs = list.map((item) => ({ ...item }));
+  state.songIndex = at;
+  saveSongs();
+  await playSongAt(at, { preserveScroll: true });
+}
+
+/**
+ * 队列拖拽排序（2026-11-18）。
+ *
+ * 把 from 位置的曲目移动到 to 位置。播放指针跟着一起挪，
+ * 保证「正在播放的仍然是同一首歌」，不会因为换了顺序就跳歌。
+ */
+function moveQueueItem(from, to) {
+  const total = state.songs.length;
+  const src = Number(from);
+  let dst = Number(to);
+  if (!Number.isFinite(src) || !Number.isFinite(dst)) return;
+  if (src < 0 || src >= total) return;
+  dst = Math.max(0, Math.min(dst, total - 1));
+  if (src === dst) return;
+  const [item] = state.songs.splice(src, 1);
+  state.songs.splice(dst, 0, item);
+  if (state.songIndex === src) state.songIndex = dst;
+  else if (src < state.songIndex && dst >= state.songIndex) state.songIndex -= 1;
+  else if (src > state.songIndex && dst <= state.songIndex) state.songIndex += 1;
+  saveSongs();
+  render({ preserveScroll: true });
+}
+
+/**
+ * 批量把一批曲目加进点歌队列。
+ *
+ * 2026-11-18 二次修正：改成「分批并发 + 每批立刻落盘」。
+ *
+ * 上一版是「全部解析完再一次性插入」，1944 首的酷狗歌单要空跑一两分钟，
+ * 期间队列一首都没有 —— 用户看到的就是「导入没反应 / 点别的就没了」。
+ * 现在每批 12 首并发解析、立刻插入并 saveSongs：
+ *   · 队列可见地一首首长出来；
+ *   · 中途被打断也只丢当前这一批，已插入的不受影响；
+ *   · 第一批落地时通过 onFirstBatch 通知调用方先开播。
  */
 async function addSongsToQueue(songs, options = {}) {
   const list = Array.isArray(songs) ? songs.filter(Boolean) : [];
@@ -877,15 +1107,61 @@ async function addSongsToQueue(songs, options = {}) {
   const origin = options.origin || '';
   const from = options.from || '';
   if (list.length > 1) {
-    toast(`正在${label}：共 ${list.length} 首，逐首解析需要一点时间…`, 'info');
+    toast(`正在${label}：共 ${list.length} 首`, 'info');
   }
+
+  const BATCH_SIZE = 12;
+  const CONCURRENCY = 4;
+  const seen = buildQueuedKeySet();
   let added = 0;
-  for (let i = 0; i < list.length; i += 1) {
-    if (await addChartSongToQueue(list[i], { silent: true, platform: platform || list[i].platform || '', origin, from })) added += 1;
-    const done = i + 1;
-    // 最后一条不用报，紧接着就是总结的 toast
-    if (done % 20 === 0 && done < list.length) {
-      toast(`正在${label}… ${done}/${list.length}（已可播 ${added} 首）`, 'info');
+  let firstBatchDone = false;
+
+  for (let start = 0; start < list.length; start += BATCH_SIZE) {
+    const batch = list.slice(start, start + BATCH_SIZE);
+    const resolved = new Array(batch.length).fill(null);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < batch.length) {
+        const index = cursor;
+        cursor += 1;
+        try {
+          resolved[index] = await resolveChartSongEntry(batch[index], {
+            platform: platform || batch[index].platform || '',
+            origin,
+            from,
+          });
+        } catch {
+          resolved[index] = null;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, worker));
+
+    let changed = false;
+    for (const entry of resolved) {
+      if (!entry) continue;
+      if (songAlreadyQueued(seen, entry)) continue;
+      state.songs.push(entry);
+      rememberQueuedKey(seen, entry);
+      added += 1;
+      changed = true;
+    }
+    if (changed) saveSongs();
+
+    if (!firstBatchDone) {
+      firstBatchDone = true;
+      if (typeof options.onFirstBatch === 'function') {
+        try {
+          options.onFirstBatch();
+        } catch {
+          /* 开播失败不影响后续批次 */
+        }
+      }
+    }
+
+    const filled = Math.min(start + BATCH_SIZE, list.length);
+    if (filled < list.length) {
+      toast(`正在${label}… ${filled}/${list.length}（可播 ${added} 首）`, 'info');
     }
   }
   return added;
@@ -907,18 +1183,38 @@ async function playPlaylist(platform, playlistId) {
       toast('这个歌单里没有可播放的曲目', 'info');
       return;
     }
-    // 先清空队列再逐首解析可播版本，避免和上一首歌单的残留混在一起
+    // 先清空队列再铺曲目：只写元数据，不解析，瞬间完成
+    /*
+     * 替换前留一份快照：卡片播放键容易误触，两千多首攒起来的队列被顶掉会很痛。
+     * 快照只放内存（一首首带封面/元数据，落盘没必要），队列页顶部可一键恢复。
+     */
+    if (state.songs.length) {
+      state.queueBackup = {
+        songs: state.songs.slice(),
+        index: state.songIndex,
+        at: Date.now(),
+      };
+    }
     state.songs = [];
-    // 整张歌单全都要：不再截 200 首，progress 由 addSongsToQueue 报
-    const added = await addSongsToQueue(songs, { platform, label: '解析歌单', origin: 'playlist', from: result?.detail?.name || '歌单' });
+    const added = queueRawSongs(songs, {
+      platform,
+      origin: 'playlist',
+      from: result?.detail?.name || '歌单',
+    });
     if (!added) {
-      toast('这些曲目暂时都找不到可播放版本', 'info');
+      toast('这些曲目已经在队列里了', 'info');
       return;
     }
     state.songIndex = 0;
     state.songTab = 'queue';
-    // 开播后退出歌单钻取态：否则下次点左栏「我的歌单」还会停在这张歌单上，回不到卡片墙
-    state.myPlaylists.detail = null;
+    /*
+     * 2026-11-18：不再清空 detail。
+     *
+     * 用户要的是「点了哪个歌单，主区就固定显示那个歌单」——
+     * 之前这里一开播就把钻取态清掉，主区立刻弹回队列，看着像歌单没选中。
+     * 现在点歌单 → 主区固定停在它的曲目页，只有点「返回歌单」才退出。
+     */
+    // 只解析第一首，其余按预取窗口（后 4 首）在后台补
     await playSongAt(0, { preserveScroll: true });
     toast(`正在播放歌单 · 已载入 ${added} 首`, 'success');
   } catch (error) {
@@ -984,26 +1280,54 @@ async function fillPlaylistQueueFrom({ songs, start, platform, fromName, cursor,
   let at = cursor;
   const total = Math.max(0, songs.length - start);
   const seen = buildQueuedKeySet();
-  for (let i = start; i < songs.length; i += 1) {
+  /*
+   * 2026-11-18：改成「分批并发 + 每批立刻 splice」。
+   * 原来逐首串行解析，1944 首要排十几分钟，播放器放完一首就得干等；
+   * 现在每批 10 首并发解析，按原顺序插入，token 变了立刻收手（用户点了别的歌）。
+   */
+  const BATCH_SIZE = 10;
+  const CONCURRENCY = 4;
+  let done = 0;
+  for (let s = start; s < songs.length; s += BATCH_SIZE) {
     if (token !== playlistFillToken) return;
-    const song = songs[i];
-    if (!song) continue;
-    // 队列里已经有同一首就别排第二遍：宁可少一首重复，也不要一首歌播两次
-    if (songAlreadyQueued(seen, song)) continue;
-    const ok = await addChartSongToQueue(song, {
-      silent: true,
-      platform: platform || song.platform || '',
-      origin: 'playlist',
-      from: fromName,
-      insertAt: at,
-    });
-    if (ok) {
+    const batch = songs.slice(s, s + BATCH_SIZE);
+    const resolved = new Array(batch.length).fill(null);
+    let c = 0;
+    const worker = async () => {
+      while (c < batch.length) {
+        const index = c;
+        c += 1;
+        const song = batch[index];
+        if (!song) continue;
+        try {
+          resolved[index] = await resolveChartSongEntry(song, {
+            platform: platform || song.platform || '',
+            origin: 'playlist',
+            from: fromName,
+          });
+        } catch {
+          resolved[index] = null;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, worker));
+
+    let changed = false;
+    for (const entry of resolved) {
+      if (token !== playlistFillToken) return;
+      if (!entry) continue;
+      // 队列里已经有同一首就别排第二遍：宁可少一首重复，也不要一首歌播两次
+      if (songAlreadyQueued(seen, entry)) continue;
+      state.songs.splice(at, 0, entry);
+      rememberQueuedKey(seen, entry);
       at += 1;
-      rememberQueuedKey(seen, song);
+      changed = true;
     }
-    const done = i - start + 1;
-    if (done % 20 === 0 && done < total) {
-      toast(`正在按歌单顺序排后面… ${done}/${total}`, 'info');
+    if (changed) saveSongs();
+
+    done += batch.length;
+    if (done % 20 === 0 && done < total && token === playlistFillToken) {
+      toast(`正在按歌单顺序排后面… ${Math.min(done, total)}/${total}`, 'info');
     }
   }
 }
@@ -1095,53 +1419,49 @@ async function playPlaylistFromIndex(platform, playlistId, index) {
   if (!song) return;
   const fromName = detail.name || '歌单';
 
-  // 上一次的续播先作废并等它收手：否则两批歌会插到同一个位置上
-  playlistFillToken += 1;
-  const token = playlistFillToken;
-  if (playlistFill) await playlistFill.promise.catch(() => {});
-
   /*
-   * 先在「这张歌单自己那一段」里找这首歌。
+   * 2026-11-18：点歌单里的某一首 → 把「这首 + 后面所有」以**元数据**铺进队列，
+   * 立刻播这首，其余交给预取窗口懒解析。
    *
-   * 以前是扫整个队列做模糊匹配（歌名+歌手），结果同一首歌如果早先被别的歌单
-   * 解析过一次（比如先用网易云歌单播过），就会命中旧队列里那一条 ——
-   * 播放位置和后面的续播顺序全落回旧队列，听起来就是
-   * 「点酷狗歌单的歌，下一首又跳回网易云的」。
-   * 所以匹配范围只限这张歌单那一段。
+   * 以前是「逐首解析后再插」，1900 首要排十几分钟；而且点别的歌会作废整轮续播，
+   * 用户看到的就是「导入一半，点别的就没了」。
+   * 现在入队是同步完成（无网络），播放这首歌时才解析它自己。
    */
+  playlistFillToken += 1;
+  if (playlistFill) {
+    const pending = playlistFill;
+    playlistFill = null;
+    await pending.promise.catch(() => {});
+  }
+
   const block = playlistBlockRange(fromName);
+  // 这张歌单已经排过一段就接在段末，否则插在当前播放项之后
+  const insertAt =
+    block.start >= 0 ? block.end : Math.min(state.songs.length, (Number(state.songIndex) || 0) + 1);
+  const added = queueRawSongs(songs.slice(start), {
+    platform: platform || song.platform || '',
+    origin: 'playlist',
+    from: fromName,
+    insertAt,
+  });
+  if (!added) {
+    // 整张都在队列里了：直接定位到这一首
+  }
+
+  // 先在新插入的这段里找，找不到再退回全队列（同一首歌可能早先已经排过）
   let target = -1;
-  for (let i = block.start; i >= 0 && i < block.end; i += 1) {
+  for (let i = insertAt; i < state.songs.length; i += 1) {
     if (sameSongKey(song, state.songs[i])) {
       target = i;
       break;
     }
   }
+  if (target < 0) target = state.songs.findIndex((entry) => sameSongKey(song, entry));
   if (target < 0) {
-    /*
-     * 段里没有就**插进队列**，不是甩到队尾。
-     * 已经有这一段（连续点同一张歌单）就接在段末，保持一段连着；
-     * 还没有就插在「当前正在播的这首之后」—— 用户点了这张歌单的歌，
-     * 下一首理应是这张歌单的下一首，而不是队列里之前剩下的歌。
-     * 前面已经排好的（观众点的歌）一首都不动，只是被排到这轮歌单后面。
-     */
-    const insertAt =
-      block.start >= 0
-        ? block.end
-        : Math.min(state.songs.length, (Number(state.songIndex) || 0) + 1);
-    const ok = await addChartSongToQueue(song, {
-      silent: true,
-      platform: platform || song.platform || '',
-      origin: 'playlist',
-      from: fromName,
-      insertAt,
-    });
-    if (!ok) {
-      toast(`「${song.title || '这首'}」暂时找不到可播放版本`, 'info');
-      return;
-    }
-    target = insertAt;
+    toast(`「${song.title || '这首'}」暂时找不到可播放版本`, 'info');
+    return;
   }
+
   state.songIndex = target;
   // 随机模式下「接着往下放」会变成随便挑一首；点歌单里的歌就是要按顺序听
   if (state.playMode === 'shuffle') setPlayMode('order');
@@ -1151,23 +1471,6 @@ async function playPlaylistFromIndex(platform, playlistId, index) {
     rest > 0 ? `正在播放：${song.title} · 后面 ${rest} 首按歌单顺序接着放` : `正在播放：${song.title}`,
     'success'
   );
-
-  if (!rest) return;
-  const promise = fillPlaylistQueueFrom({
-    songs,
-    start: start + 1,
-    platform,
-    fromName,
-    // 排在这张歌单已有那段之后：连续点几首时，后点的歌接在后面而不是插到前面
-    cursor: playlistBlockEnd(target + 1, fromName),
-    token,
-  });
-  playlistFill = { token, promise };
-  promise
-    .catch(() => {})
-    .then(() => {
-      if (playlistFill && playlistFill.token === token) playlistFill = null;
-    });
 }
 
 /** 读取各平台登录状态，渲染到榜单面板。 */

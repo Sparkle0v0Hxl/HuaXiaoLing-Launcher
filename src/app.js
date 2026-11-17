@@ -196,8 +196,77 @@ const state = {
   musicLogin: { qq: null, kugou: null, kuwo: null, loading: false },
   neteaseLogin: { loggedIn: false, apiBase: '' },
   songTab: localStorage.getItem('vela:song-tab') || 'queue',
+  /*
+   * 最近播放（2026-11-18）：主流播放器左栏都有这一块。
+   * 只存最近的 20 条元数据，不存直链（地址有时效），点击时按需解析。
+   */
+  recentSongs: (() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('vela:recent-songs') || '[]');
+      return Array.isArray(raw) ? raw.slice(0, 20) : [];
+    } catch {
+      return [];
+    }
+  })(),
   // 底部播放条「播放列表」浮层是否展开（会话内状态，不落盘）
   dockListOpen: false,
+  /*
+   * 我的队列（2026-11-18）。
+   *
+   * 用户原话：「队列改成可以自己添加歌曲进去的那种，不要我点了歌单，就全进去了」。
+   * 从这儿开始，「手动加的歌」和「当前在播的歌单」分开存：
+   *   · state.songs       当前播放列表（点歌单会被替换，这是播放上下文）
+   *   · state.pickedSongs 你自己一首首加进来的歌，持久保存，点歌单不会动它
+   */
+  pickedSongs: (() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('vela:picked-songs') || '[]');
+      return Array.isArray(raw) ? raw.slice(0, 500) : [];
+    } catch {
+      return [];
+    }
+  })(),
+  /*
+   * 队列快照（2026-11-18）。
+   *
+   * 「整张播放」会替换当前播放列表。卡片上的播放键很容易误触，
+   * 用户攒了很久的队列一下就没了还找不回来，所以替换前存一份快照。
+   */
+  queueBackup: null,
+  /*
+   * 批量选择（2026-11-18）：队列页的「批量选择」按钮与 Shift 刷选共用这套状态。
+   * queueSelected 存的是 pickedSongs 的下标，render 时按它给行加高亮。
+   */
+  queueSelectMode: false,
+  queueSelected: [],
+  /*
+   * 歌单详情的批量选择（2026-11-18）。
+   * 用户反馈「批量选择对歌单无效」——之前只做了「我的队列」页，
+   * 这里补上歌单详情页：选中若干首直接加进「我的队列」。
+   */
+  detailSelectMode: false,
+  detailSelected: [],
+  /*
+   * 本地歌单（2026-11-18）。
+   * 用户要求「队列下面应该有个新建歌单吧」「批量选择也能选择进自己新建的歌单里」。
+   * 结构：{ id, name, songs: [entry], createdAt }
+   * 只存在本地，和账号歌单完全隔离。
+   */
+  localPlaylists: (() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('vela:local-playlists') || '[]');
+      return Array.isArray(raw) ? raw : [];
+    } catch {
+      return [];
+    }
+  })(),
+  localDetailId: '',
+  /*
+   * 弹幕点歌面板是否展开（2026-11-18）。
+   * null = 还没手动点过，按「有没有已连接房间」自动决定：连过就展开，没连就折叠成一行。
+   * 折叠态常驻在右栏顶部，随时能看到状态、点一下展开，不再被歌词/大封面挤到看不见。
+   */
+  livePanelOpen: null,
   // 点歌台搜索：无状态输入放在 input 里，结果只在内存
   songSearch: { keyword: '', platform: 'all', loading: false, list: [], errors: [], done: false },
   /*
@@ -211,6 +280,12 @@ const state = {
   queueFilter: '',
   // syncedAt / syncDurationMs 来自主进程 music:all-playlists 的返回值，用来显示「上次同步」
   myPlaylists: {
+    /*
+     * 左栏「我的歌单」上次选中的平台标签（2026-11-18）。
+     * 用户要求「我的歌单那里，应该也保留上一次选择的标签」——
+     * all / netease / qq / kugou / local，落盘记住。
+     */
+    sidePlatform: localStorage.getItem('vela:side-platform') || 'all',
     platform: '',
     loading: false,
     list: [],
@@ -241,6 +316,8 @@ const state = {
      * 只存内存、不落盘：刷新应用即清，TTL 过期后先显示旧的再后台补新。
      */
     detailCache: {},
+    // 歌单详情是否「显示全部」：key = `${platform}:${id}`，只存会话内
+    detailExpanded: {},
     // 各歌单正在后台静默刷新的标记，防止同一张歌单并发刷两次
     detailRefreshing: {},
   },
@@ -374,9 +451,35 @@ try {
 try {
   const savedSongs = JSON.parse(localStorage.getItem('vela:songs') || '[]');
   if (Array.isArray(savedSongs)) state.songs = savedSongs;
+  /*
+   * 2026-11-18：连「听到第几首」一起恢复。
+   * 以前只存队列不存下标，关掉再开永远是第 1 首。
+   */
+  const savedIndex = Number(localStorage.getItem('vela:song-index') || 0);
+  if (Number.isFinite(savedIndex) && savedIndex >= 0 && savedIndex < state.songs.length) {
+    state.songIndex = savedIndex;
+  }
 } catch {
   state.songs = [];
 }
+
+/*
+ * 恢复「上次打开的歌单」（2026-11-18）。
+ *
+ * 用户反馈关掉启动器再开，「上次选的歌单」没了，主区回到别处。
+ * 这里在首屏渲染完、空闲时悄悄把这张歌单读回来（只拉一次，失败静默）。
+ */
+setTimeout(() => {
+  try {
+    const last = JSON.parse(localStorage.getItem('vela:last-playlist') || 'null');
+    if (!last || !last.platform || !last.id) return;
+    if (typeof openMyPlaylist !== 'function') return;
+    if (state.myPlaylists?.detail) return;
+    openMyPlaylist(last.platform, last.id).catch(() => {});
+  } catch {
+    /* 恢复失败就当没有上次记录 */
+  }
+}, 1500);
 
 const PAGE_META = {
   home: { label: '主页', eyebrow: 'OVERVIEW' },

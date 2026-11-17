@@ -21,6 +21,8 @@ function saveSongs() {
     // 队列里的歌原来最多只存 200 首：整张歌单八百首进来时，
     // 重开一次启动器就只剩前 200 首，注释还要告诉用户去恢复。现在改存全诗。
     localStorage.setItem('vela:songs', JSON.stringify(state.songs));
+    // 连带记住播放到第几首：重启后从同一首继续
+    localStorage.setItem('vela:song-index', String(Math.max(0, Number(state.songIndex) || 0)));
   } catch (error) {
     /*
      * 不再截 200 首之后，几百首的队列有可能顶到 localStorage 配额。
@@ -133,8 +135,11 @@ function applyPlayModeUi() {
   refreshSongPops();
   const miniIcon = document.querySelector('#mini-mode-use');
   if (miniIcon) miniIcon.setAttribute('href', `#i-${meta.icon}`);
-  const miniButton = document.querySelector('[data-action="cycle-play-mode"]');
-  if (miniButton) miniButton.title = `播放模式：${meta.label}（点击切换）`;
+  // 底部播放条的模式按钮也是图标（2026-11-18：原来写「列表循环」四个字，窄屏会折成两行）
+  const dockModeIcon = document.querySelector('#dock-mode-use');
+  if (dockModeIcon) dockModeIcon.setAttribute('href', `#i-${meta.icon}`);
+  const dockModeBtn = document.querySelector('[data-action="cycle-play-mode"]');
+  if (dockModeBtn) dockModeBtn.title = `播放模式：${meta.label}（点击切换）`;
 }
 
 function setPlayMode(mode) {
@@ -165,14 +170,133 @@ function randomSongIndex() {
   return next;
 }
 
+/**
+ * 记录到「最近播放」（2026-11-18）。
+ *
+ * 主流播放器都在左栏放这么一块，用来快速回到前几天听过的歌。
+ * 只存元数据、不存直链：音源地址带时效，存下来第二天就是死链。
+ */
+function recordRecentSong(song) {
+  if (!song || !song.title) return;
+  const key = `${song.title}|${song.artist || ''}`;
+  const list = (state.recentSongs || []).filter((item) => `${item.title}|${item.artist || ''}` !== key);
+  list.unshift({
+    title: song.title,
+    artist: song.artist || '',
+    cover: song.cover || '',
+    album: song.album || '',
+    source: song.source || song.platform || '',
+    hash: song.hash || '',
+    mid: song.mid || '',
+    neteaseId: song.neteaseId || '',
+  });
+  state.recentSongs = list.slice(0, 20);
+  try {
+    localStorage.setItem('vela:recent-songs', JSON.stringify(state.recentSongs));
+  } catch {
+    /* 存储满了也不影响播放 */
+  }
+}
+
+/**
+ * 把解析结果合并回队列条目时，**只补播放需要的字段**（2026-11-18）。
+ *
+ * 用户原话：「音乐软件还是得导入前的歌曲才对的」。
+ * 以前这里是 Object.assign(song, entry)，换源返回的标题/歌手/封面会把
+ * 歌单导入时的元数据整个覆盖掉 —— 歌单里的歌名就悄悄变成别家平台的版本了。
+ * 现在只写 url / source / quality，元数据只在本地缺字段时才补。
+ */
+function applyResolvedPlayback(song, entry) {
+  if (!song || !entry) return;
+  song.url = entry.url || song.url;
+  song.source = entry.source || song.source;
+  song.quality = entry.quality || song.quality;
+  if (entry.matched) song.matched = entry.matched;
+  if (!song.cover && entry.cover) song.cover = entry.cover;
+  if (!song.artist && entry.artist) song.artist = entry.artist;
+  if (!song.album && entry.album) song.album = entry.album;
+}
+
 async function playSongAt(index, options = {}) {
   if (!state.songs.length) return;
   state.songIndex = Math.max(0, Math.min(Number(index) || 0, state.songs.length - 1));
-  await hydrateSong(state.songs[state.songIndex]);
-  await ensureSongQuality(state.songs[state.songIndex]);
+  const song = state.songs[state.songIndex];
+  /*
+   * 懒解析（2026-11-18）：整张歌单入队时只写元数据，url 为空。
+   * 轮到这里播放时才去解析这一首；失败就交给 playCurrentSong 的失败收口跳下一首。
+   * 这样 1900 首的歌单可以瞬间入队，不用先跑十几分钟预热。
+   */
+  if (song && !song.url) {
+    try {
+      const entry = await resolveChartSongEntry(song, {
+        platform: song.source || song.platform || '',
+      });
+      if (entry) applyResolvedPlayback(song, entry);
+    } catch {
+      /* 解析失败不抛，让播放器按「没有可播放地址」处理 */
+    }
+    /*
+     * 注意：这里**不** saveSongs。
+     * 音源直链通常带时效（酷狗 URL 里直接写日期），存进 localStorage 后
+     * 第二天就是死链 —— 用户下次打开听到「没声音」多半是这个原因。
+     * 地址只留在内存里，重启后重新解析即可。
+     */
+  }
+  await hydrateSong(song);
+  await ensureSongQuality(song);
   if (options.skipRender) updateSongChrome();
   else render({ preserveScroll: options.preserveScroll !== false });
   playCurrentSong();
+  if (song) recordRecentSong(song);
+  // 预热后面 4 首：不阻塞播放，播到哪补到哪
+  void prefetchAhead(state.songIndex);
+}
+
+/**
+ * 预取窗口（2026-11-18）。
+ *
+ * 队列里只存元数据，这里把「当前曲目之后最多 10 首」的可播放地址提前解析好：
+ *   · 播完一首切下一首时基本已经就绪，不用现场等；
+ *   · 只补 10 首，不会像整张歌单那样把网络和内存打满；
+ *   · 换歌/清队列时 seq 变化，旧的预取自动作废。
+ */
+const PREFETCH_AHEAD = 4;
+let prefetchSeq = 0;
+
+async function prefetchAhead(index) {
+  if (!state.songs.length) return;
+  const seq = ++prefetchSeq;
+  const from = Math.max(0, Number(index) || 0) + 1;
+  const to = Math.min(state.songs.length, from + PREFETCH_AHEAD);
+  const targets = [];
+  for (let i = from; i < to; i += 1) {
+    const song = state.songs[i];
+    if (song && !song.url) targets.push(song);
+  }
+  if (!targets.length) return;
+  let cursor = 0;
+  const CONCURRENCY = 3;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      if (seq !== prefetchSeq) return;
+      const song = targets[cursor];
+      cursor += 1;
+      if (song.url) continue;
+      try {
+        const entry = await resolveChartSongEntry(song, {
+          platform: song.source || song.platform || '',
+        });
+        if (entry && seq === prefetchSeq) applyResolvedPlayback(song, entry);
+      } catch {
+        /* 单首预取失败无所谓，轮到它播的时候会再试一次 */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+  /*
+   * 不 saveSongs：预取到的地址同样有时效，只放内存。
+   * 每播一首就写一次 1900 首的队列 JSON 也纯属浪费 I/O。
+   */
 }
 
 async function handleSongEnded() {

@@ -516,33 +516,50 @@ async function qqMyPlaylists(session) {
   ];
 
   const errors = [];
-  for (const candidate of candidates) {
-    try {
-      const target = candidate.url();
-      const withGtk =
-        target.includes('musicu.fcg') && !target.includes('g_tk=')
-          ? target + '&g_tk=' + gtk
-          : target;
-      const json = await fetchJson(withGtk, headers);
-      const list = candidate.pick(json);
-      if (Array.isArray(list) && list.length) {
-        const mapped = list.map(candidate.map).filter((item) => item.id && item.name);
-        if (mapped.length) return mapped;
+  /*
+   * 2026-11-18：三个候选接口改成**并发**。
+   *
+   * 以前是 for + await 串行试：第一个超时（默认十几秒）才轮到第二个，
+   * 用户看到的就是「QQ 音乐一直在同步中」。三个接口互相独立，
+   * 并发发出后最坏只等一轮超时，然后按原顺序挑第一个有结果的。
+   */
+  const settled = await Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        const target = candidate.url();
+        const withGtk =
+          target.includes('musicu.fcg') && !target.includes('g_tk=')
+            ? target + '&g_tk=' + gtk
+            : target;
+        const json = await fetchJson(withGtk, headers);
+        return { candidate, json, error: null };
+      } catch (error) {
+        return { candidate, json: null, error };
       }
-      // 结构对但列表为空：记下来，别让它被后面的网络错误顶掉
-      // musicu 的回包按 req_0/req_1/req_2 分片，逐个看，别只盯 req_0
-      const code = json?.req_1?.code || json?.req_2?.code || json?.req_0?.code || json?.code || '';
-      const subcode =
-        json?.req_1?.subcode || json?.req_2?.subcode || json?.req_0?.subcode || '';
-      if (String(code || '') === '500003') {
-        errors.push(`${candidate.name}: 服务端认为还没登录（code 500003）`);
-      } else {
-        errors.push(
-          `${candidate.name}: 返回空歌单${code ? `（code ${code}${subcode ? '/' + subcode : ''}）` : ''}`
-        );
-      }
-    } catch (error) {
+    })
+  );
+
+  for (const entry of settled) {
+    const { candidate, json, error } = entry;
+    if (error) {
       errors.push(`${candidate.name}: ${humanizeError(error.message)}`);
+      continue;
+    }
+    const list = candidate.pick(json);
+    if (Array.isArray(list) && list.length) {
+      const mapped = list.map(candidate.map).filter((item) => item.id && item.name);
+      if (mapped.length) return mapped;
+    }
+    // 结构对但列表为空：记下来，别让它被后面的网络错误顶掉
+    // musicu 的回包按 req_0/req_1/req_2 分片，逐个看，别只盯 req_0
+    const code = json?.req_1?.code || json?.req_2?.code || json?.req_0?.code || json?.code || '';
+    const subcode = json?.req_1?.subcode || json?.req_2?.subcode || json?.req_0?.subcode || '';
+    if (String(code || '') === '500003') {
+      errors.push(`${candidate.name}: 服务端认为还没登录（code 500003）`);
+    } else {
+      errors.push(
+        `${candidate.name}: 返回空歌单${code ? `（code ${code}${subcode ? '/' + subcode : ''}）` : ''}`
+      );
     }
   }
   throw new Error(
@@ -742,25 +759,13 @@ async function kugouPlaylistSongs(session, listId) {
   const seen = new Set();
   let total = 0;
   /*
-   * 翻页终止条件要三条一起看，只信 data.total 是不够的：
-   *   1. 某页返回空                      —— 后面肯定没有了；
-   *   2. 本页不满 pagesize                —— 这就是最后一页（total 偶发漂移，
-   *                                          实测同一张歌单第 1 页报 805、第 2 页报 806）；
-   *   3. 重复的行全部被去重掉              —— 有些 ID 会把同一页反复返回，
-   *                                          只按前两条判断就会死循环。
-   * 另外 total 缺失 / 为 0 时不能用 songs.length >= total 判断，
-   * 否则第一页取完立刻就 break（0 永远成立），整张歌单只剩 500 首。
+   * 2026-11-18：与自建歌单同一套改法 —— 首页探总数，其余页 5 路并发。
+   * 终止条件仍保留「空页 / 不满一页 / 重复行」三重判断，但并发时不再边拉边 break，
+   * 改为并发结束后按页序合并；空页或重复页在合并阶段自然被跳过。
    */
-  for (let page = 1; page <= KUGOU_SONG_MAX_PAGES; page += 1) {
-    const url =
-      `http://mobilecdn.kugou.com/api/v3/special/song?specialid=${id}` +
-      `&page=${page}&pagesize=${KUGOU_SONG_PAGE_SIZE}&version=9108`;
-    const json = await fetchJson(url, KUGOU_CDN_HEADERS).catch(() => null);
-    const rows = Array.isArray(json?.data?.info) ? json.data.info : [];
-    if (!rows.length) break;
-    if (!total) total = Number(json?.data?.total) || 0;
+  const pushRows = (rows) => {
     let added = 0;
-    for (const row of rows) {
+    for (const row of rows || []) {
       const song = parseKugouSongRow(row);
       // 同一首歌可能跨页重复：先用 hash，没有 hash 就退回「歌名+歌手」
       const key = song.hash || `${song.title}|${song.artist}`;
@@ -769,9 +774,44 @@ async function kugouPlaylistSongs(session, listId) {
       songs.push(song);
       added += 1;
     }
-    if (!added) break;
-    if (total > 0 && songs.length >= total) break;
-    if (rows.length < KUGOU_SONG_PAGE_SIZE) break;
+    return added;
+  };
+  const pageUrl = (page) =>
+    `http://mobilecdn.kugou.com/api/v3/special/song?specialid=${id}` +
+    `&page=${page}&pagesize=${KUGOU_SONG_PAGE_SIZE}&version=9108`;
+
+  const first = await fetchJson(pageUrl(1), KUGOU_CDN_HEADERS).catch(() => null);
+  const firstRows = Array.isArray(first?.data?.info) ? first.data.info : [];
+  total = Number(first?.data?.total) || 0;
+  pushRows(firstRows);
+
+  if (firstRows.length >= KUGOU_SONG_PAGE_SIZE) {
+    const planned = total > 0 ? Math.ceil(total / KUGOU_SONG_PAGE_SIZE) : KUGOU_SONG_MAX_PAGES;
+    const pageCount = Math.max(1, Math.min(planned, KUGOU_SONG_MAX_PAGES));
+    const pageNums = [];
+    for (let page = 2; page <= pageCount; page += 1) pageNums.push(page);
+    if (pageNums.length) {
+      const results = new Map();
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < pageNums.length) {
+          const page = pageNums[cursor];
+          cursor += 1;
+          try {
+            results.set(page, await fetchJson(pageUrl(page), KUGOU_CDN_HEADERS));
+          } catch {
+            results.set(page, null);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(5, pageNums.length) }, worker));
+      for (const page of pageNums) {
+        const json = results.get(page);
+        const rows = json && Array.isArray(json.data?.info) ? json.data.info : [];
+        if (!rows.length) continue;
+        pushRows(rows);
+      }
+    }
   }
 
   if (!songs.length) {
@@ -968,14 +1008,16 @@ async function kugouCollectPlaylistMeta(info) {
 async function kugouCollectPlaylistSongs(info) {
   const songs = [];
   const seen = new Set();
-  let meta = null;
-  for (let page = 1; page <= KUGOU_COLLECT_MAX_PAGES; page += 1) {
-    const json = await fetchKugouCollectPage(info, page);
-    if (!meta) meta = kugouCollectMetaFrom(json);
-    const rows = Array.isArray(json?.list?.info) ? json.list.info : [];
-    if (!rows.length) break;
+  /*
+   * 2026-11-18：改成「先取首页 → 算页数 → 并发拉剩余页」。
+   *
+   * 之前是逐页 await，每页 100 条，1944 首的歌单要排 20 次往返，
+   * 实测整张 3.4 秒（用户点开就是一段白屏）。首页已经带 count，
+   * 直接算出页数用 5 路并发，按页序合并，顺序与串行完全一致。
+   */
+  const pushRows = (rows) => {
     let added = 0;
-    for (const row of rows) {
+    for (const row of rows || []) {
       const song = parseKugouSongRow(row);
       if (!song.hash && !song.title) continue;
       const key = song.hash || `${song.title}|${song.artist}`;
@@ -984,10 +1026,44 @@ async function kugouCollectPlaylistSongs(info) {
       songs.push(song);
       added += 1;
     }
-    if (!added) break;
-    if (meta.total > 0 && songs.length >= meta.total) break;
-    if (rows.length < KUGOU_COLLECT_PAGE_SIZE) break;
+    return added;
+  };
+
+  const first = await fetchKugouCollectPage(info, 1);
+  const meta = kugouCollectMetaFrom(first);
+  const firstRows = Array.isArray(first?.list?.info) ? first.list.info : [];
+  pushRows(firstRows);
+
+  if (firstRows.length >= KUGOU_COLLECT_PAGE_SIZE) {
+    const planned = meta.total > 0 ? Math.ceil(meta.total / KUGOU_COLLECT_PAGE_SIZE) : KUGOU_COLLECT_MAX_PAGES;
+    const pageCount = Math.max(1, Math.min(planned, KUGOU_COLLECT_MAX_PAGES));
+    const pageNums = [];
+    for (let page = 2; page <= pageCount; page += 1) pageNums.push(page);
+    if (pageNums.length) {
+      const results = new Map();
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < pageNums.length) {
+          const page = pageNums[cursor];
+          cursor += 1;
+          try {
+            results.set(page, await fetchKugouCollectPage(info, page));
+          } catch {
+            // 单页失败跳过，不影响整张歌单
+            results.set(page, null);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(5, pageNums.length) }, worker));
+      for (const page of pageNums) {
+        const json = results.get(page);
+        const rows = json && Array.isArray(json.list?.info) ? json.list.info : [];
+        if (!rows.length) continue;
+        pushRows(rows);
+      }
+    }
   }
+
   if (!songs.length) {
     throw new Error('这个酷狗歌单里一首歌都没读到（歌单可能是空的，或者分享链接已经失效）');
   }
@@ -1215,17 +1291,33 @@ async function kuwoPublicPlaylistSongs(listId) {
     }
   };
   push(info.musicList);
+  /*
+   * 2026-11-18：剩余页并发（原来 for + await 串行，最多 20 页排队）。
+   * 首页给了 total，直接算页数；中间页失败只跳过该页，保留已拿到的曲目。
+   */
   const pages = Math.min(Math.ceil(total / 30) || 1, 20);
-  for (let pn = 2; pn <= pages; pn++) {
-    let more;
-    try {
-      more = await kuwoApi('/playlist/playListInfo', { pid, pn, rn: 30 }, token);
-    } catch {
-      break; // 中间页偶发代理错误时保留已拿到的曲目
+  const pageNums = [];
+  for (let pn = 2; pn <= pages; pn += 1) pageNums.push(pn);
+  if (pageNums.length) {
+    const results = new Map();
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pageNums.length) {
+        const pn = pageNums[cursor];
+        cursor += 1;
+        try {
+          results.set(pn, await kuwoApi('/playlist/playListInfo', { pid, pn, rn: 30 }, token));
+        } catch {
+          results.set(pn, null);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(5, pageNums.length) }, worker));
+    for (const pn of pageNums) {
+      const rows = results.get(pn)?.data?.musicList;
+      if (!Array.isArray(rows) || !rows.length) continue;
+      push(rows);
     }
-    const rows = more?.data?.musicList;
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    push(rows);
   }
   return {
     name: String(info.name ?? '酷我歌单'),
@@ -1394,23 +1486,42 @@ async function neteasePublicPlaylistSongs(listId) {
 
   let tracks = embedded;
   if (trackIds.length > embedded.length) {
-    const filled = [];
+    /*
+     * 2026-11-18：分批补全改成 4 路并发（原来逐批 await）。
+     * 每批 200 首，2000 首的歌单要排 10 次；并发后一次发完，按批次顺序合并。
+     * 单批失败只丢那一批，其余照样返回。
+     */
+    const batches = [];
     for (let start = 0; start < trackIds.length; start += 200) {
-      const batch = trackIds.slice(start, start + 200).map((sid) => ({ id: sid }));
-      try {
-        const detail = await fetchJson(
-          `https://music.163.com/api/v3/song/detail?c=${encodeURIComponent(JSON.stringify(batch))}`,
-          headers
-        );
-        // 注意：这里只收集原始 song 对象，统一留给末尾那次 toSong 映射。
-        // 之前在这里就 push 了 toSong(song)，末尾又对整列再 map 一遍 toSong，
-        // 第二次拿到的是已映射的 {title,artist,cover}，取 song.name/song.ar 全是
-        // undefined —— 整张歌单 137 首的歌名/歌手/封面全部被清空（用户报的
-        // 「不显示歌名、封面」就是这个）。
-        for (const song of Array.isArray(detail?.songs) ? detail.songs : []) filled.push(song);
-      } catch {
-        /* 一批失败就跳过这批，剩下的批次继续，尽量多带几首回来 */
+      batches.push(trackIds.slice(start, start + 200).map((sid) => ({ id: sid })));
+    }
+    const batchResults = new Map();
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < batches.length) {
+        const index = cursor;
+        cursor += 1;
+        try {
+          const detail = await fetchJson(
+            `https://music.163.com/api/v3/song/detail?c=${encodeURIComponent(JSON.stringify(batches[index]))}`,
+            headers
+          );
+          batchResults.set(index, Array.isArray(detail?.songs) ? detail.songs : []);
+        } catch {
+          batchResults.set(index, []);
+        }
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, batches.length) }, worker));
+    /*
+     * 注意：这里只收集原始 song 对象，统一留给末尾那次 toSong 映射。
+     * 之前在这里就 push 了 toSong(song)，末尾又对整列再 map 一遍 toSong，
+     * 第二次拿到的是已映射的 {title,artist,cover}，取 song.name/song.ar 全是
+     * undefined —— 整张歌单的歌名/歌手/封面全部被清空。
+     */
+    const filled = [];
+    for (let index = 0; index < batches.length; index += 1) {
+      for (const song of batchResults.get(index) || []) filled.push(song);
     }
     if (filled.length > embedded.length) tracks = filled;
   }

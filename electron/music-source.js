@@ -686,7 +686,7 @@ const RESOLVE_RACE_TIMEOUT = 12000;
  * 洛雪运行时起来、或咪咕接口恢复，就自动多三条路；酷我是当下真正能出声音的那条。
  * QQ 仍默认关闭（实测换链不通，开了只会拖慢整轮）；酷狗已从音源表里删除。
  */
-const DEFAULT_SOURCE_FLAGS = { lx: true, netease: true, migu: true, kuwo: true, qq: false };
+const DEFAULT_SOURCE_FLAGS = { lx: true, netease: true, migu: true, kuwo: true, qq: false, kugou: true };
 
 /**
  * 上一版默认值。只用来判断「用户是不是从来没动过音源开关」——
@@ -736,21 +736,20 @@ const SOURCE_HOST_PATTERNS = {
   qq: /qq\.com|qqmusic/i,
   migu: /migu/i,
   netease: /music\.126\.net|music\.163\.com|netease/i,
+  // 2026-11-18：酷狗恢复为可选音源（酷狗歌单里的歌有 hash，可直接出链）。
+  // 保留宿主特征，这样用户在设置里关掉酷狗时仍然能把它拦下来。
+  kugou: /kugou|kgimg|kglink/i,
 };
 
 /*
- * 已彻底删除、不再使用的音源宿主特征。和上面那张表的区别是：这里不看开关，
- * 命中就一律不认。
+ * 已彻底删除、不再使用的音源宿主特征。命中就一律不认，不看开关。
  *
- * 为什么要单独列一条而不干脆不管：netease-client.js 的 crossSourceFallbackUrl
- * 里还留着 `if (flags.kugou !== false)` 的酷狗兜底分支，而 DEFAULT_SOURCE_FLAGS
- * 现在没有 kugou 键了 —— `undefined !== false` 为真，那条路照样会跑，酷狗直链
- * 就会混进网易云的回退结果里，变成「说删了其实还在用」。这里按 URL 宿主无条件
- * 拦掉，回退链也不会漏。
+ * 2026-11-18：酷狗从这里移除 —— 用户要求「酷狗歌单能点歌播放」，
+ * 现在酷狗是默认开启的可选音源（kugouSongUrl 直链可用，VIP 曲会抛「需要付费」
+ * 并由同名换源接手）。要不要用酷狗由 flags.kugou 控制，和酷我/QQ 同一套逻辑，
+ * 不再是无条件拉黑。表保留结构，将来真有要彻底删除的音源往这里加即可。
  */
-const BLOCKED_SOURCE_HOST_PATTERNS = {
-  kugou: /kugou|kgimg|kglink/i,
-};
+const BLOCKED_SOURCE_HOST_PATTERNS = {};
 
 /** 只查「已彻底删除、不看开关」的音源；命中返回 id，否则空串。 */
 function blockedSourceOfUrl(url) {
@@ -1002,6 +1001,17 @@ async function resolveSourceUrl(song, options = {}) {
   }
   if (source === 'migu' && song.contentId) {
     push('migu', async () => ({ ...(await miguSongUrl(song)), matched: '原生' }));
+  }
+  /*
+   * 2026-11-18：酷狗原生直链恢复。
+   *
+   * 酷狗歌单里的曲目自带 32 位 hash，getSongInfo.php 直连就能出地址（实测 ~55ms，
+   * 免费曲目返回标准 MP3）。之前这里没有这一条、BLOCKED 表还无条件拦 kugou 域名，
+   * 于是「酷狗歌单点歌」全部落到别的平台同名换源；用户没配好网易云 API 时
+   * 就表现为「点了播不了」。VIP 曲目会抛「需要付费」，由后面的同名换源接手。
+   */
+  if (source === 'kugou' && song.hash) {
+    push('kugou', async () => ({ ...(await kugouSongUrl(song.hash)), matched: '原生' }));
   }
 
   // ② 同名换源：所有启用的音源并发跑（洛雪已在 ⓪，酷狗已删除）

@@ -25,6 +25,26 @@
  * 从音频地址里猜一个能读的歌名：去掉域名、路径、扩展名、参数。
  * 猜不出来就返回空串，交给调用方让用户自己填。
  */
+/**
+ * 从音频地址猜「歌名 + 歌手」（2026-11-18）。
+ *
+ * 直链歌曲原来只填歌名，没有歌手 —— 主进程的歌词兜底是「歌名 + 歌手」
+ * 去酷我/QQ 搜索，缺了歌手就只能靠标题硬碰，命中率很低。
+ * 这里顺便把常见的「歌手 - 歌名」命名拆开，拆不出来就只给歌名。
+ */
+function guessSongMetaFromUrl(rawUrl) {
+  const full = titleFromAudioUrl(rawUrl);
+  if (!full) return { title: '', artist: '' };
+  // 文件名里常见的分隔： " - " / "–" / "—"
+  const matched = full.match(/^(.{1,40}?)\s*[-–—]\s*(.{1,60})$/);
+  if (matched) {
+    const left = matched[1].trim();
+    const right = matched[2].trim();
+    if (left && right) return { title: right, artist: left };
+  }
+  return { title: full, artist: '' };
+}
+
 function titleFromAudioUrl(rawUrl) {
   const text = String(rawUrl || '').trim();
   if (!text) return '';
@@ -422,6 +442,10 @@ function openAddSongLinkModal() {
             <span class="kr-imp-field-label">歌名<em>可选，自动填好后还能改</em></span>
             <input class="text-input" name="title" placeholder="夜航星" />
           </label>
+          <label class="kr-imp-field">
+            <span class="kr-imp-field-label">歌手<em>可选，填了才搜得准歌词</em></span>
+            <input class="text-input" name="artist" placeholder="不才" />
+          </label>
           <div class="kr-imp-foot-row">
             <button type="button" class="kr-imp-file" data-action="add-song-file">${icon('folder', 'xs')}选本地文件</button>
             <span class="kr-imp-hint">支持 mp3 / flac / m4a / wav</span>
@@ -439,6 +463,7 @@ function openAddSongLinkModal() {
   if (!form) return;
   const urlInput = form.querySelector('[name="url"]');
   const titleInput = form.querySelector('[name="title"]');
+  const artistInput = form.querySelector('[name="artist"]');
   const errorHost = form.querySelector('#song-link-error');
 
   const showError = (message) => {
@@ -448,17 +473,24 @@ function openAddSongLinkModal() {
 
   // 只有用户没自己动过歌名时才跟着地址改，别把人家改好的名字覆盖掉
   let titleTouched = false;
+  let artistTouched = false;
   titleInput.addEventListener('input', () => {
     titleTouched = Boolean(titleInput.value.trim());
   });
+  if (artistInput) {
+    artistInput.addEventListener('input', () => {
+      artistTouched = Boolean(artistInput.value.trim());
+    });
+  }
 
   urlInput.addEventListener('input', () => {
     showError('');
-    const guess = titleFromAudioUrl(urlInput.value);
-    if (!titleTouched && guess) titleInput.value = guess;
+    const guess = guessSongMetaFromUrl(urlInput.value);
+    if (!titleTouched && guess.title) titleInput.value = guess.title;
+    if (artistInput && !artistTouched && guess.artist) artistInput.value = guess.artist;
   });
 
-  form.addEventListener('submit', (event) => {
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const url = String(urlInput.value || '').trim();
     if (!url) {
@@ -471,13 +503,22 @@ function openAddSongLinkModal() {
       urlInput.focus();
       return;
     }
-    const title = String(titleInput.value || '').trim() || titleFromAudioUrl(url) || '未命名音频';
-    state.songs.push({ title, url });
-    state.songIndex = state.songs.length - 1;
+    const guess = guessSongMetaFromUrl(url);
+    const title = String(titleInput.value || '').trim() || guess.title || '未命名音频';
+    const artist = String(artistInput?.value || '').trim() || guess.artist || '';
+    const index = state.songs.length;
+    state.songs.push({ title, artist, url });
+    state.songIndex = index;
     saveSongs();
+    // 手动加的直链也进「我的队列」，点歌单播放不会冲掉
+    addToPicked({ title, artist, url, source: 'url' });
     closeModal();
-    render({ preserveScroll: true });
-    playCurrentSong();
+    /*
+     * 2026-11-18：以前这里直接 playCurrentSong()，跳过了 hydrateSong ——
+     * 直链歌曲的歌词搜索就从来没触发过，界面上永远写着「直链歌曲没有歌词」。
+     * 改走 playSongAt：它会补元数据、按歌名+歌手去酷我/QQ 搜 LRC。
+     */
+    await playSongAt(index, { preserveScroll: true });
   });
 }
 
@@ -727,16 +768,32 @@ function biliAccountMarkup() {
 
 /** 弹幕点歌块：房间列表（可单独刷新）+ 连接表单 + 历史。 */
 function liveDanmakuMarkup() {
+  /*
+   * 折叠态（2026-11-18）。
+   *
+   * 完整表单常驻会把右栏撑满，歌词被压没；折叠后只占一行，
+   * 状态（几个房间已连接）写在标题里，点一下才展开表单。
+   * 未手动点过时按「有没有已连接房间」自动决定，连过就默认展开。
+   */
+  const autoOpen = state.liveRooms.length > 0;
+  const open = state.livePanelOpen == null ? autoOpen : Boolean(state.livePanelOpen);
+  const connected = state.liveRooms.filter((room) => room.connected).length;
+  const head = `
+      <button class="song-live-toggle" data-action="live-panel-toggle" aria-expanded="${open ? 'true' : 'false'}">
+        <span class="song-live-toggle-title">${icon('mic', 'xs')} 弹幕点歌</span>
+        <span class="song-live-toggle-state${connected ? ' is-on' : ''}">${
+          connected ? `${connected} 个房间已连接` : state.liveRooms.length ? `${state.liveRooms.length} 个房间` : '未连接'
+        }</span>
+        <span class="song-live-toggle-arrow">${open ? '收起' : '展开'}</span>
+      </button>`;
+
+  if (!open) {
+    return `<section class="song-rail-card is-live is-collapsed">${head}</section>`;
+  }
+
   return `
     <section class="song-rail-card is-live">
-      <div class="song-rail-head">
-        <span>${icon('mic', 'xs')} 弹幕点歌</span>
-        ${
-          state.liveRooms.length
-            ? `<button class="song-rail-more" data-action="live-disconnect-all">全部断开</button>`
-            : `<small>观众发「点歌 歌名」</small>`
-        }
-      </div>
+      ${head}
       ${biliAccountMarkup()}
       <div id="live-rooms-panel">${liveRoomsListMarkup()}</div>
       <div class="song-live-form">
@@ -877,6 +934,7 @@ function karaokeViewMarkup() {
         <div class="song-app-toolrow">
           ${musicAccountEntryMarkup()}
           <div class="song-app-actions">
+            <button class="song-app-btn" data-action="music-settings" title="音乐设置（播放 / 音源 / 弹幕点歌）">${icon('settings')}</button>
             <button class="song-app-btn" data-action="add-song-file" title="添加本地歌曲（mp3 / flac 等文件）">${icon('plus')}</button>
             <button class="song-app-btn" data-action="import-playlist-link" title="链接导入歌单（网易云 / QQ 音乐 / 酷我）：粘贴歌单链接或整段分享文案">${icon('download')}</button>
             <button class="song-app-btn" data-action="add-song-link" title="添加音频链接">${icon('link')}</button>
@@ -885,15 +943,38 @@ function karaokeViewMarkup() {
       </header>
 
       <div class="song-app-body kr-body">
-        ${krNavMarkup()}
+        <aside class="song-app-side">
+          ${liveDanmakuMarkup()}
+          ${krNavMarkup()}
+        </aside>
 
         <main class="song-app-main">
-          ${krSectionHeadMarkup()}
-          <div class="song-app-searchbar">
-            ${songSearchMarkup()}
-          </div>
+          ${
+            /*
+             * 2026-11-18：进了某张歌单，主区顶部不该再挂着「队列标题条 + 搜索框」——
+             * 那是队列页的东西。歌单页只需要它自己的头部（返回 / 标题 / 整张播放 …）。
+             */
+            state.myPlaylists.detail || state.localDetailId
+              ? ''
+              : `${krSectionHeadMarkup()}
+                 <div class="song-app-searchbar">${songSearchMarkup()}</div>`
+          }
           <div class="song-app-scroll">
-            ${tab === 'charts' ? chartPanelMarkup() : tab === 'mine' ? songMineMarkup() : tab === 'search' ? songSearchPanel() : songQueueList()}
+            ${
+              state.localDetailId
+                ? localPlaylistMarkup()
+                : state.myPlaylists.detail
+                ? playlistDetailMarkup(state.myPlaylists.detail, state.myPlaylists.detail.platform)
+                : tab === 'charts'
+                  ? chartPanelMarkup()
+                  : tab === 'plaza'
+                    ? songPlazaMarkup()
+                    : tab === 'search'
+                      ? songSearchPanel()
+                      : tab === 'queue'
+                        ? songQueueList(state.pickedSongs)
+                        : songPlazaMarkup()
+            }
           </div>
         </main>
 
@@ -915,7 +996,7 @@ function karaokeViewMarkup() {
           <section class="song-rail-card is-lyrics">
             <div class="song-rail-head">
               <span>歌词</span>
-              <small>${current?.lyric ? '同步中' : current?.neteaseId ? '播放时获取' : '暂无'}</small>
+              <small>${current?.lyric ? '同步中' : current?.lyricChecked ? '未找到' : '播放时获取'}</small>
             </div>
             <div class="song-lyrics song-rail-lyrics" id="song-lyrics">
               ${
@@ -923,12 +1004,16 @@ function karaokeViewMarkup() {
                   ? parseLrc(current.lyric)
                       .map((line) => `<p class="song-lyric-line" data-time="${line.time}">${esc(line.text)}</p>`)
                       .join('')
-                  : `<div class="song-lyric-empty">${icon('music')}<span>${current?.neteaseId ? '播放时自动获取歌词' : '本地或直链歌曲没有歌词'}</span></div>`
+                  : `<div class="song-lyric-empty">${icon('music')}<span>${
+                      current?.lyricChecked
+                        ? current?.title
+                          ? `没找到「${esc(current.title)}」的歌词`
+                          : '这首歌没找到歌词'
+                        : '播放时按歌名 + 歌手搜索歌词'
+                    }</span></div>`
               }
             </div>
           </section>
-
-          ${liveDanmakuMarkup()}
         </aside>
       </div>
 
@@ -981,7 +1066,12 @@ function songView() {
 
 /* 账号歌单只覆盖这三家；酷狗已整条移除（不在 MUSIC_SOURCE_KEYS 里，
    它的分组即便主进程还回来也会被 musicPlatformEnabled 拦掉）。 */
-const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kuwo: '酷我' };
+/*
+ * 平台显示名（2026-11-18）。
+ * 之前少了 kugou —— 酷狗歌单的标签会掉进兜底文案显示成「音乐」，
+ * 用户看到的就是一个莫名其妙的标签，还以为自己的酷狗歌单没了。
+ */
+const MUSIC_PLATFORM_LABELS = { netease: '网易云', qq: 'QQ 音乐', kuwo: '酷我', kugou: '酷狗' };
 
 function musicPlatformLabel(platform) {
   return MUSIC_PLATFORM_LABELS[platform] || '音乐';
@@ -1025,13 +1115,23 @@ function playlistCardMarkup(item, platform, active) {
 }
 
 /**
+ * 歌单详情一次最多渲染多少首。
+ *
+ * 2026-11-18：1944 首的酷狗歌单全量渲染会直接把渲染进程撑崩
+ * （crash.log 实测 render-process-gone exitCode=-2147483645）。
+ * 200 首足够覆盖绝大多数浏览场景，剩下的用「显示全部」按需展开。
+ */
+const DETAIL_RENDER_LIMIT = 200;
+
+/**
  * 点开的某张歌单：整块主区换成「返回 / 标题 / 整张播放 / 加入队列 + 全量曲目」。
  *
  * 以前曲目详情是挂在卡片墙下面的，歌单多的时候要一路滑到底才看得到曲目，
  * 用户反馈「点进去没反应」。现在改成钻取：点卡片 → 主区只剩这张歌单，
  * 头部常驻四个动作，进来第一眼就能整张播放。
  *
- * 曲目不再截断：整张歌单多少首就渲染多少首（历史上截过 100 首，用户以为是歌单缺歌）。
+ * 曲目数据仍然完整保留（不再截断到 100 首），只是渲染分批：
+ * 首屏 200 首 + 「显示全部」，避免大歌单把渲染进程打崩。
  */
 function playlistDetailMarkup(detail, platform) {
   if (!detail) return '';
@@ -1047,6 +1147,18 @@ function playlistDetailMarkup(detail, platform) {
         <div class="kr-detail-actions">
           <button class="kr-detail-play" data-action="my-playlist-play" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}" ${songs.length ? '' : 'disabled'}>${icon('play', 'xs')}整张播放</button>
           <button class="playlists-chip" data-action="my-playlist-import" data-platform="${esc(platform)}" title="整张追加到队列末尾，不打断正在放的那首" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}整张入队</button>
+          <button class="playlists-chip${state.detailSelectMode ? ' is-active' : ''}" data-action="detail-select-mode" title="勾选若干首加入我的队列">${state.detailSelectMode ? '退出选择' : '批量选择'}</button>
+          ${
+            (() => {
+              // 只有「链接导入」的歌单可以删：账号同步来的歌单是云端数据，我们不动
+              const meta = (state.myPlaylists.groups || [])
+                .flatMap((group) => (group.list || []).map((item) => ({ ...item, platform: group.platform })))
+                .find((item) => String(item.id) === String(detail.id) && item.platform === platform);
+              return meta && meta.imported
+                ? `<button class="playlists-chip is-danger" data-action="my-playlist-remove" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}" data-name="${esc(detail.name || '这张歌单')}" title="只删启动器里的记录，不动账号">${icon('trash', 'xs')}删除歌单</button>`
+                : '';
+            })()
+          }
         </div>
       </div>`;
 
@@ -1064,26 +1176,63 @@ function playlistDetailMarkup(detail, platform) {
     return `<div class="kr-detail">${head}<p class="playlists-group-note">这个歌单里没有读到曲目。</p></div>`;
   }
   const current = state.songs[state.songIndex] || null;
+  /*
+   * 2026-11-18 防崩溃：歌单详情分段渲染。
+   *
+   * 用户点开 1944 首的酷狗歌单后，渲染进程直接崩溃
+   * （crash.log: render-process-gone exitCode=-2147483645）。
+   * 原因就是这里一次性 map 出 1944 个按钮 + 1944 个封面 <img>，
+   * 单页 DOM 节点与图片解码内存一起顶爆。
+   * 现在默认只渲染前 DETAIL_RENDER_LIMIT 首，底部给「显示全部」；
+   * 配合 CSS 的 content-visibility，即使用户点了全部也不会一次布局几千行。
+   */
+  const detailKey = `${platform}:${detail.id || ''}`;
+  const expanded = Boolean(state.myPlaylists?.detailExpanded?.[detailKey]);
+  const visible = expanded ? songs : songs.slice(0, DETAIL_RENDER_LIMIT);
   return `
     <div class="kr-detail">${head}
-      <p class="kr-detail-hint">点任意一首就直接开播，后面按歌单顺序接着往下放。队列里已有的歌不会被动。</p>
+      ${
+        state.detailSelectMode
+          ? `<div class="song-queue-brush">
+              <span>已选 <b>${(state.detailSelected || []).length}</b> 首</span>
+              <select class="song-queue-brush-target" data-detail-target title="选择要加入哪个歌单">
+                <option value="queue">我的队列</option>
+                ${(state.localPlaylists || [])
+                  .map((pl) => `<option value="${esc(pl.id)}">${esc(pl.name)}</option>`)
+                  .join('')}
+              </select>
+              <button class="song-queue-brush-btn" data-action="detail-select-add" ${(state.detailSelected || []).length ? '' : 'disabled'}>加入</button>
+              <button class="song-queue-brush-btn is-danger" data-action="detail-select-remove" ${(state.detailSelected || []).length ? '' : 'disabled'}>从我的队列移除</button>
+              <button class="song-queue-brush-btn" data-action="detail-select-mode">取消</button>
+            </div>`
+          : `<p class="kr-detail-hint">点任意一首就直接开播，后面按歌单顺序接着往下放；「批量选择」可以勾选多首加进我的队列。</p>`
+      }
       <div class="playlist-songs kr-detail-songs">
-        ${songs
+        ${visible
           .map((song, index) => {
             const playing = sameSongKey(song, current);
             return `
-          <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
-            <span class="song-chart-index">${playing ? '♪' : index + 1}</span>
-            <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
-            <span class="song-chart-copy">
-              <strong>${esc(song.title)}</strong>
-              <small>${esc(song.artist || '未知歌手')}</small>
-            </span>
-            ${icon('play', 'xs')}
-          </button>`;
+          <div class="kr-detail-row${(state.detailSelected || []).includes(index) ? ' is-brush-selected' : ''}">
+            <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
+              <span class="song-chart-index">${playing ? '♪' : index + 1}</span>
+              <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
+              <span class="song-chart-copy">
+                <strong>${esc(song.title)}</strong>
+                <small>${esc(song.artist || '未知歌手')}</small>
+              </span>
+              ${icon('play', 'xs')}
+            </button>
+            <button class="kr-detail-add" data-action="my-playlist-song-add" data-platform="${esc(platform)}" data-index="${index}" title="加入我的队列" aria-label="加入我的队列">${icon('plus', 'xs')}</button>
+            <button class="kr-detail-del" data-action="my-playlist-song-remove" data-platform="${esc(platform)}" data-index="${index}" title="从我的队列移除（不影响账号歌单）" aria-label="从我的队列移除">${icon('x', 'xs')}</button>
+          </div>`;
           })
           .join('')}
       </div>
+      ${
+        songs.length > visible.length
+          ? `<button class="kr-detail-more" data-action="my-playlist-show-all" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}">显示全部 ${songs.length} 首（还有 ${songs.length - visible.length} 首）</button>`
+          : ''
+      }
     </div>`;
 }
 
@@ -1175,14 +1324,16 @@ function allPlaylistsMarkup() {
 
   if (!logged.length) {
     /*
-     * 没登录也照常显示广场：热门公开歌单不用登录就能看曲目。
-     * 登录提示收窄成一条横幅，别再占整屏。
+     * 没登录时只提示登录，歌单广场已经独立成一个导航项，不再拼在这一页底部。
      */
     return `<div class="playlists-panel">
-      <div class="playlists-error">${icon('login', 'xs')}<span>登录后这里会列出你账号里的歌单；广场歌单不用登录，点开就能看。</span>
+      <div class="playlists-error">${icon('login', 'xs')}<span>登录后这里会列出你账号里的歌单。</span>
         <button class="link-btn" data-action="music-accounts">去登录</button>
       </div>
-      ${plazaSectionMarkup()}
+      <div class="playlists-empty-hint">
+        <p>还没登录任何音乐账号。</p>
+        <p>想先听歌？左栏「<b>歌单广场</b>」里的热门公开歌单不用登录，点开就能看、能整张播放。</p>
+      </div>
     </div>`;
   }
 
@@ -1263,12 +1414,20 @@ function allPlaylistsMarkup() {
       }
     </div>
     ${activeGroup ? myPlaylistGroupMarkup(activeGroup) : ''}
-    <button class="plaza-hint" data-action="plaza-scroll" title="滚到下面的歌单广场">
-      ${icon('chevron-down', 'xs')}
-      <span>往下还有<b>歌单广场</b>——热门公开歌单，免登录，点开就能看</span>
-    </button>
-    ${plazaSectionMarkup()}
   </div>`;
+}
+
+/**
+ * 歌单广场独立面板（2026-11-18）。
+ *
+ * 以前它被拼在「我的歌单」页面最底部，歌单一多就得往下滚很久，用户原话
+ * 「歌单广场难看到」。现在它是左栏「发现」里独立的一项，进来就是它本身。
+ * 点开广场里的某张歌单同样走钻取态（playlistDetailMarkup）。
+ */
+function plazaPanelMarkup() {
+  const detail = state.myPlaylists.detail;
+  if (detail) return playlistDetailMarkup(detail, detail.platform);
+  return `<div class="playlists-panel">${plazaSectionMarkup()}</div>`;
 }
 
 function chartPanelMarkup() {

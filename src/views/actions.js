@@ -17,6 +17,19 @@
 /* actions                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 左栏（.song-app-side）是独立滚动容器，整页重绘会把它滚回顶部。
+ * 左栏内部的操作（展开弹幕、切歌单平台、查看全部）重绘前后必须保住 scrollTop，
+ * 否则用户点一下「展开」，界面立刻跳回最上面 —— 用户反馈的正是这个。
+ */
+function renderKeepingSideScroll() {
+  const side = document.querySelector('.song-app-side');
+  const top = side ? side.scrollTop : 0;
+  render({ preserveScroll: true });
+  const next = document.querySelector('.song-app-side');
+  if (next) next.scrollTop = top;
+}
+
 async function toggleFavorite(id) {
   const game = state.games.find((g) => g.id === id);
   if (!game) return;
@@ -293,11 +306,22 @@ case 'music-accounts':
       const source = await api.pick.audio();
       if (!source) break;
       const url = await api.mediaUrl(source);
-      state.songs.push({ title: source.split(/[\\/]/).pop().replace(/\.[^.]+$/, ''), url });
-      state.songIndex = state.songs.length - 1;
+      const fileName = source.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+      /*
+       * 2026-11-18：和直链一样走 playSongAt，让它触发 hydrateSong 去搜歌词。
+       * 文件名里带「歌手 - 歌名」的顺手拆开，没有就只用歌名。
+       */
+      const meta = guessSongMetaFromUrl(url) || { title: fileName, artist: '' };
+      const index = state.songs.length;
+      state.songs.push({
+        title: meta.title || fileName,
+        artist: meta.artist || '',
+        url,
+      });
+      state.songIndex = index;
       saveSongs();
-      render({ preserveScroll: true });
-      playCurrentSong();
+      addToPicked(state.songs[index]);
+      await playSongAt(index, { preserveScroll: true });
       break;
     }
     case 'add-song-link': {
@@ -317,6 +341,16 @@ case 'music-accounts':
       await playPlaylist(element.dataset.platform || '', element.dataset.id || '');
       break;
     }
+    case 'my-playlist-show-all': {
+      // 歌单详情默认只渲染前 200 首（防大歌单撑崩渲染进程），这里按需展开全部
+      const platform = element.dataset.platform || '';
+      const id = element.dataset.id || '';
+      if (!platform || !id) break;
+      if (!state.myPlaylists.detailExpanded) state.myPlaylists.detailExpanded = {};
+      state.myPlaylists.detailExpanded[`${platform}:${id}`] = true;
+      render({ preserveScroll: true });
+      break;
+    }
     case 'my-playlist-close': {
       state.myPlaylists.detail = null;
       render({ preserveScroll: true });
@@ -333,7 +367,7 @@ case 'music-accounts':
       const removeName = element.dataset.name || '这张歌单';
       const confirmed = await confirmDialog({
         title: '移除歌单',
-        message: `「${removeName}」会从我的歌单里移除，本地记录也一起删掉。以后想要的话，重新粘贴一次歌单链接就能导入回来。`,
+        message: `「${removeName}」会从启动器的我的歌单里移除，只删本地记录，不会动网易云 / QQ 音乐账号里的原歌单。以后想要的话，重新粘贴一次歌单链接就能导入回来。`,
         confirmText: '移除',
         danger: true,
       });
@@ -345,26 +379,76 @@ case 'music-accounts':
     case 'my-playlist-song': {
       // 点一行 = 点歌：这首立刻开播，后面按歌单顺序接着放（以前只入队、不出声）
       const index = Number(element.dataset.index) || 0;
+      if (state.detailSelectMode) {
+        /*
+         * 批量选择模式：点行只切换勾选。
+         * 2026-11-18：改成局部更新，不再整页 render ——
+         * 之前每点一下都重绘整页，视觉上就是「闪一下才选中」。
+         */
+        const selected = new Set(state.detailSelected || []);
+        if (selected.has(index)) selected.delete(index);
+        else selected.add(index);
+        state.detailSelected = [...selected].sort((a, b) => a - b);
+        const row = element.closest('.kr-detail-row');
+        if (row) row.classList.toggle('is-brush-selected', selected.has(index));
+        const countNode = document.querySelector('.song-queue-brush b');
+        if (countNode) countNode.textContent = String(selected.size);
+        const addBtn = document.querySelector('[data-action="detail-select-add"]');
+        if (addBtn) addBtn.disabled = !selected.size;
+        break;
+      }
       const detail = state.myPlaylists.detail;
       const song = (detail?.songs || [])[index];
       if (!song || !detail) break;
       await playPlaylistFromIndex(element.dataset.platform || detail.platform || '', detail.id, index);
       break;
     }
+    case 'my-playlist-song-add': {
+      // 歌单详情里单首「+」：只把这一首追加到队列末尾，不打断正在播放的歌
+      const index = Number(element.dataset.index) || 0;
+      const detail = state.myPlaylists.detail;
+      const song = (detail?.songs || [])[index];
+      if (!song) break;
+      const added = queueRawSongs([song], {
+        platform: element.dataset.platform || detail?.platform || '',
+        origin: 'pick',
+      });
+      // 手动加的歌也进「我的队列」，点歌单播放不会冲掉它
+      addToPicked({
+        title: song.title,
+        artist: song.artist,
+        cover: song.cover,
+        album: song.album,
+        source: song.platform || element.dataset.platform || detail?.platform || '',
+        hash: song.hash,
+        mid: song.mid,
+        neteaseId: song.neteaseId,
+      });
+      toast(
+        added ? `已加入队列：${song.title || '这一首'}` : '这首歌已经在队列里了',
+        added ? 'success' : 'info'
+      );
+      break;
+    }
     case 'my-playlist-import': {
       const groupPlatform = element.dataset.platform || '';
       const songs = state.myPlaylists.detail?.songs || [];
       if (!songs.length) break;
-      const added = await addSongsToQueue(songs, {
+      /*
+       * 2026-11-18：整张入队改成「只写元数据」。
+       * 以前是逐首解析完再插，1900 首要跑十几分钟；现在瞬间入队，
+       * 播放到哪首才解析哪首（playSongAt 懒解析 + 后 10 首预取）。
+       */
+      const added = queueRawSongs(songs, {
         platform: groupPlatform,
-        label: '加入点歌队列',
         origin: 'playlist',
         from: state.myPlaylists.detail?.name || '歌单',
       });
       toast(
-        added ? `已加入 ${added} 首（其余在网易云没有可播版本）` : '这些曲目在网易云没有可播版本',
+        added ? `已加入 ${added} 首（播放时逐首解析）` : '这些曲目已经在队列里了',
         added ? 'success' : 'info'
       );
+      if (added) render({ preserveScroll: true });
       break;
     }
     /* 语音包语言：多选，但至少留一种 —— 一种都不下游戏里就是哑的 */
@@ -613,6 +697,273 @@ case 'music-accounts':
       if (state.route === 'song') render({ preserveScroll: true });
       break;
     }
+    case 'local-playlist-new': {
+      openModal(`
+        <div class="modal-backdrop" data-backdrop>
+          <div class="modal kr-imp-modal is-narrow" role="dialog" aria-modal="true">
+            <div class="modal-head">
+              <div><h2>新建歌单</h2><p>只保存在本地，不影响任何音乐账号。</p></div>
+              <button class="icon-btn" data-close>${icon('x')}</button>
+            </div>
+            <form class="modal-body kr-imp-body" id="local-pl-form">
+              <label class="kr-imp-field">
+                <span class="kr-imp-field-label">歌单名称</span>
+                <input class="text-input" name="name" placeholder="例如：深夜循环" maxlength="40" autofocus />
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" data-close>取消</button>
+                <button class="btn btn-primary" type="submit">创建</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `);
+      const form = document.querySelector('#local-pl-form');
+      if (form) {
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const name = String(form.querySelector('[name="name"]')?.value || '').trim();
+          const created = createLocalPlaylist(name);
+          closeModal();
+          if (!created) {
+            toast('歌单名称不能为空', 'info');
+            return;
+          }
+          state.localDetailId = created.id;
+          render({ preserveScroll: true });
+          toast(`已创建「${created.name}」`, 'success');
+        });
+      }
+      break;
+    }
+    case 'local-playlist-open': {
+      const id = element.dataset.id || '';
+      if (!id) break;
+      state.localDetailId = id;
+      state.myPlaylists.detail = null;
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'local-playlist-close': {
+      state.localDetailId = '';
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'local-playlist-import': {
+      const id = element.dataset.id || '';
+      const added = addSongsToLocalPlaylist(id, state.pickedSongs || []);
+      render({ preserveScroll: true });
+      toast(added ? `已导入 ${added} 首到本地歌单` : '队列里的歌都已经在这个歌单里了', added ? 'success' : 'info');
+      break;
+    }
+    case 'local-playlist-play': {
+      const id = element.dataset.id || '';
+      const pl = (state.localPlaylists || []).find((item) => item.id === id);
+      if (!pl || !pl.songs?.length) break;
+      state.songs = pl.songs.map((song) => ({ ...song }));
+      state.songIndex = 0;
+      saveSongs();
+      await playSongAt(0, { preserveScroll: true });
+      break;
+    }
+    case 'local-playlist-song': {
+      const id = element.dataset.id || '';
+      const index = Number(element.dataset.index) || 0;
+      const pl = (state.localPlaylists || []).find((item) => item.id === id);
+      if (!pl || !pl.songs?.[index]) break;
+      state.songs = pl.songs.map((song) => ({ ...song }));
+      state.songIndex = index;
+      saveSongs();
+      await playSongAt(index, { preserveScroll: true });
+      break;
+    }
+    case 'local-playlist-song-remove': {
+      const id = element.dataset.id || '';
+      const index = Number(element.dataset.index) || 0;
+      const pl = (state.localPlaylists || []).find((item) => item.id === id);
+      if (!pl || !pl.songs?.[index]) break;
+      pl.songs.splice(index, 1);
+      saveLocalPlaylists();
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'local-playlist-remove': {
+      const id = element.dataset.id || '';
+      const name = element.dataset.name || '这个歌单';
+      const ok = await confirmDialog({
+        title: '删除本地歌单',
+        message: `「${name}」会从启动器里删除，只删本地，不影响任何音乐账号。`,
+        confirmText: '删除',
+        danger: true,
+      });
+      if (!ok) break;
+      state.localPlaylists = (state.localPlaylists || []).filter((item) => item.id !== id);
+      if (state.localDetailId === id) state.localDetailId = '';
+      saveLocalPlaylists();
+      render({ preserveScroll: true });
+      toast('已删除本地歌单', 'success');
+      break;
+    }
+    case 'my-playlist-song-remove': {
+      /*
+       * 歌单行的「×」= 从「我的队列」移除这一首。
+       * 账号歌单本身不会被改动（那是云端数据，我们只读不写）。
+       */
+      const index = Number(element.dataset.index) || 0;
+      const detail = state.myPlaylists.detail;
+      const song = (detail?.songs || [])[index];
+      if (!song) break;
+      const before = (state.pickedSongs || []).length;
+      state.pickedSongs = (state.pickedSongs || []).filter((item) => !sameSongKey(item, song));
+      const removed = before - state.pickedSongs.length;
+      savePicked();
+      render({ preserveScroll: true });
+      toast(
+        removed ? `已从我的队列移除「${song.title || '这一首'}」` : '这首不在我的队列里（账号歌单本身不会被改动）',
+        removed ? 'success' : 'info'
+      );
+      break;
+    }
+    case 'detail-select-mode': {
+      state.detailSelectMode = !state.detailSelectMode;
+      if (!state.detailSelectMode) state.detailSelected = [];
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'detail-select-add': {
+      const detail = state.myPlaylists.detail;
+      const songs = detail?.songs || [];
+      const chosen = (state.detailSelected || [])
+        .slice()
+        .sort((a, b) => a - b)
+        .map((index) => songs[index])
+        .filter(Boolean);
+      if (!chosen.length) break;
+      /*
+       * 2026-11-18：批量选择的去处可选 —— 我的队列，或用户自己新建的本地歌单。
+       */
+      const target =
+        element.closest('.song-queue-brush')?.querySelector('[data-detail-target]')?.value || 'queue';
+      if (target !== 'queue') {
+        const addedLocal = addSongsToLocalPlaylist(target, chosen);
+        state.detailSelectMode = false;
+        state.detailSelected = [];
+        render({ preserveScroll: true });
+        toast(
+          addedLocal ? `已加入「${(state.localPlaylists || []).find((p) => p.id === target)?.name || '本地歌单'}」 ${addedLocal} 首` : '这些歌已经在那个歌单里了',
+          addedLocal ? 'success' : 'info'
+        );
+        break;
+      }
+      let added = 0;
+      for (const song of chosen) {
+        if (
+          addToPicked({
+            title: song.title,
+            artist: song.artist,
+            cover: song.cover,
+            album: song.album,
+            source: song.platform || detail?.platform || '',
+            hash: song.hash,
+            mid: song.mid,
+            neteaseId: song.neteaseId,
+          })
+        ) {
+          added += 1;
+        }
+      }
+      state.detailSelectMode = false;
+      state.detailSelected = [];
+      render({ preserveScroll: true });
+      toast(added ? `已加入我的队列 ${added} 首` : '这些歌已经在队列里了', added ? 'success' : 'info');
+      break;
+    }
+    case 'detail-select-remove': {
+      const detail = state.myPlaylists.detail;
+      const songs = detail?.songs || [];
+      const chosen = (state.detailSelected || [])
+        .slice()
+        .sort((a, b) => a - b)
+        .map((index) => songs[index])
+        .filter(Boolean);
+      if (!chosen.length) break;
+      const before = (state.pickedSongs || []).length;
+      state.pickedSongs = (state.pickedSongs || []).filter(
+        (item) => !chosen.some((song) => sameSongKey(item, song))
+      );
+      const removed = before - state.pickedSongs.length;
+      savePicked();
+      state.detailSelectMode = false;
+      state.detailSelected = [];
+      render({ preserveScroll: true });
+      toast(
+        removed ? `已从我的队列移除 ${removed} 首（账号歌单不受影响）` : '选中的歌都不在我的队列里',
+        removed ? 'success' : 'info'
+      );
+      break;
+    }
+    case 'queue-select-mode': {
+      // 进入/退出批量选择（2026-11-18）
+      state.queueSelectMode = !state.queueSelectMode;
+      if (!state.queueSelectMode) state.queueSelected = [];
+      render({ preserveScroll: true });
+      break;
+    }
+    case 'queue-select-play': {
+      const picked = state.pickedSongs || [];
+      const chosen = (state.queueSelected || [])
+        .slice()
+        .sort((a, b) => a - b)
+        .map((index) => picked[index])
+        .filter(Boolean)
+        .map((item) => ({ ...item }));
+      if (!chosen.length) break;
+      state.songs = chosen;
+      state.songIndex = 0;
+      state.queueSelectMode = false;
+      state.queueSelected = [];
+      saveSongs();
+      await playSongAt(0, { preserveScroll: true });
+      toast(`正在播放选中的 ${chosen.length} 首`, 'success');
+      break;
+    }
+    case 'queue-select-remove': {
+      const removeSet = new Set(state.queueSelected || []);
+      if (!removeSet.size) break;
+      const count = removeSet.size;
+      state.pickedSongs = (state.pickedSongs || []).filter((_item, index) => !removeSet.has(index));
+      savePicked();
+      state.queueSelectMode = false;
+      state.queueSelected = [];
+      render({ preserveScroll: true });
+      toast(`已从队列移除 ${count} 首（只删本地，不影响音乐账号）`, 'success');
+      break;
+    }
+    case 'side-pl-more': {
+      // 左栏「查看全部歌单」展开/收起（2026-11-18）
+      state.myPlaylists.sideShowAll = !state.myPlaylists.sideShowAll;
+      renderKeepingSideScroll();
+      break;
+    }
+    case 'side-pl-platform': {
+      // 左栏「我的歌单」按平台筛选（2026-11-18），选择结果落盘，重启后保留
+      const value = element.dataset.value || 'all';
+      state.myPlaylists.sidePlatform = value;
+      try {
+        localStorage.setItem('vela:side-platform', value);
+      } catch {
+        /* 存储失败只是不记忆，不影响切换 */
+      }
+      renderKeepingSideScroll();
+      break;
+    }
+    case 'live-panel-toggle': {
+      // 弹幕点歌折叠条展开/收起（2026-11-18）：重绘后保住左栏滚动位置，否则会跳回顶部
+      const current = state.livePanelOpen == null ? state.liveRooms.length > 0 : Boolean(state.livePanelOpen);
+      state.livePanelOpen = !current;
+      renderKeepingSideScroll();
+      break;
+    }
     case 'live-disconnect-all':
       disconnectBiliLive();
       break;
@@ -752,20 +1103,64 @@ case 'music-accounts':
       }, 60);
       break;
     case 'song-select': {
-      state.songIndex = Number(element.dataset.index) || 0;
-      await hydrateSong(state.songs[state.songIndex]);
-      await ensureSongQuality(state.songs[state.songIndex]);
-      render({ preserveScroll: true });
+      const selectIndex = Number(element.dataset.index) || 0;
+      if (element.dataset.queue === 'picked') {
+        if (state.queueSelectMode) {
+          // 批量选择模式：点行只切换勾选，不播放
+          const selected = new Set(state.queueSelected || []);
+          if (selected.has(selectIndex)) selected.delete(selectIndex);
+          else selected.add(selectIndex);
+          state.queueSelected = [...selected].sort((a, b) => a - b);
+          render({ preserveScroll: true });
+          break;
+        }
+        // 「我的队列」里的行：先把队列装进播放列表，再播这一首
+        await playPickedAt(selectIndex);
+      } else {
+        // 统一走 playSongAt：它会先给没有 url 的曲目补解析（懒解析），再播放
+        await playSongAt(selectIndex, { preserveScroll: true });
+      }
       // 从底部播放列表里点的：重绘后把新的「正在播放」行滚回视野中间
       if (state.dockListOpen) {
         setTimeout(() => {
           document.querySelector('#song-dock-queue .dock-queue-row.is-active')?.scrollIntoView({ block: 'center' });
         }, 40);
       }
-      playCurrentSong();
       break;
     }
-    /* queue-seg-toggle 已删：队列段的展开/收起砍掉了，列表平铺 */
+    case 'recent-play': {
+      // 左栏「最近播放」：点一下把这首重新放进队列并立即播放
+      const index = Number(element.dataset.index) || 0;
+      const song = (state.recentSongs || [])[index];
+      if (!song) break;
+      queueRawSongs([song], { origin: 'pick' });
+      addToPicked(song);
+      const position = state.songs.findIndex((entry) => sameSongKey(song, entry));
+      if (position >= 0) await playSongAt(position, { preserveScroll: true });
+      break;
+    }
+    case 'queue-restore': {
+      // 把被「整张播放」替换掉的队列装回来（2026-11-18）
+      const backup = state.queueBackup;
+      if (!backup || !backup.songs?.length) break;
+      state.songs = backup.songs;
+      state.songIndex = Math.max(0, Math.min(Number(backup.index) || 0, state.songs.length - 1));
+      state.queueBackup = null;
+      saveSongs();
+      render({ preserveScroll: true });
+      toast(`已恢复上一个队列（${state.songs.length} 首）`, 'success');
+      break;
+    }
+    case 'queue-seg-toggle': {
+      // 队列按来源分段的展开/收起（2026-11-18 恢复）：长歌单段默认只露当前播放附近
+      const seg = element.dataset.seg || '';
+      if (!seg) break;
+      if (!state.queueExpanded) state.queueExpanded = {};
+      state.queueExpanded[seg] = !state.queueExpanded[seg];
+      render({ preserveScroll: true });
+      break;
+    }
+    /* queue-seg-toggle 已恢复：队列段的展开/收起重新启用 */
     case 'queue-filter-clear': {
       state.queueFilter = '';
       render({ preserveScroll: true });
@@ -796,6 +1191,17 @@ case 'music-accounts':
       break;
     case 'song-remove': {
       const index = Number(element.dataset.index) || 0;
+      if (element.dataset.queue === 'picked') {
+        // 队列页的行来自「我的队列」，删的是 pickedSongs，不是当前播放列表
+        const picked = state.pickedSongs || [];
+        if (index < 0 || index >= picked.length) break;
+        picked.splice(index, 1);
+        savePicked();
+        // 选择下标会整体前移，直接清空避免删错
+        state.queueSelected = [];
+        render({ preserveScroll: true });
+        break;
+      }
       state.songs.splice(index, 1);
       state.songIndex = Math.max(0, Math.min(state.songIndex, state.songs.length - 1));
       saveSongs();
@@ -803,10 +1209,20 @@ case 'music-accounts':
       break;
     }
     case 'song-clear': {
+      /*
+       * 2026-11-18：队列页的「清空」清的是「我的队列」（pickedSongs），
+       * 以前只清 state.songs，界面上看着像点了没反应。
+       * 同时停掉当前播放列表，避免头歌词还挂着已删的歌。
+       */
+      state.pickedSongs = [];
+      savePicked();
       state.songs = [];
       state.songIndex = 0;
+      state.queueSelected = [];
+      state.queueSelectMode = false;
       saveSongs();
       render({ preserveScroll: true });
+      toast('队列已清空（只删本地，不影响音乐账号）', 'success');
       break;
     }
     case 'start-select': {

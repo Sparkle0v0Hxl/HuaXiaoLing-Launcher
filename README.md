@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.3-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.4-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.3**（正式版）
+**当前版本：v2.12.4**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.3-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.4-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,32 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.3 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.4 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.4</b></summary>
+
+音乐页重做：三栏布局 + 平台标签歌单列表，「我的队列」和播放列表分开，支持新建本地歌单、批量选择、Shift 刷选；播放位置和上次歌单自动恢复，直链/本地歌曲自动搜歌词，换源不再改掉歌名。
+
+
+**音乐页重构**
+
+- 音乐页改成三栏：左边是歌单列表和平台标签（全部 / 网易云 / QQ音乐 / 酷狗 / 本地），中间是歌单详情 / 队列 / 广场 / 榜单 / 搜索，右边是正在播放和歌词。
+
+**队列与本地歌单**
+
+- 「我的队列」和「当前播放列表」分开了：手动加歌、直链、本地文件、最近播放进队列；点歌单播放只换当前播放列表，不会再灌满队列。队列页和歌单详情都支持批量选择，还能按住 Shift 拖动连续勾选。
+- 可以新建本地歌单：整张播放、把队列导进去、单首移除、删除歌单都可以。
+- 播放到第几首、上次打开的歌单、左栏选的平台标签都会记住，下次进音乐页自动恢复并把当前播放行滚到可见位置。
+
+**其它改进**
+
+- 直链和本地歌曲以前加进来不会搜歌词，现在会自动按「歌名 + 歌手」去搜，弹窗也补了歌手输入框，从「歌手 - 歌名.mp3」这样的文件名也能自动拆出歌名和歌手。
+- 换音源时不再用别的平台的版本覆盖歌单里已经导入的歌名和信息。
+- 启动器里的删除都只动本地数据，不会影响网易云 / QQ 音乐账号里的歌单；账号同步来的歌单没有删除按钮。
+
+</details>
+
 
 <details>
 <summary><b>v2.12.3</b></summary>
