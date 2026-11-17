@@ -55,6 +55,24 @@ const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.tmp', 'shots', '.ca
 const SKIP_EXT = /\.(log|lnk)$/i;
 const SKIP_NAME = /(^|\.)(bak|old)(\.|$|-)|\.bak-/i;
 const TOPS = ['electron', 'src', 'build', 'scripts', 'package.json', 'LICENSE', 'README.md', 'AUTHORS.md', '启动-安全模式.bat','更新说明.md','latest.json'];
+/*
+ * EXCLUDE=latest.json —— 发版链路的第 ① 步必须带上它。
+ *
+ * 为什么：`latest.json` 是「客户端看到就会去下载」的开关。它一旦先于安装包上传，
+ * 这段时间里所有正在检查更新的用户都会拉到 404。
+ * 2026-11-17 审查实测过 v2.12.1 的真实时间线：
+ *   清单 19:27:56Z 就生效了，Portable.zip 直到 20:04:19Z 才传完 → **36 分 23 秒的 404 窗口**，
+ *   而且 GitHub Release 页面在这 35 分钟里挂着「已发布、零附件」。
+ *
+ * 所以现在拆成两步：
+ *   ① 推源码（EXCLUDE=latest.json，不带清单）
+ *   ② 传资产（gh-release / gitee / gitcode）
+ *   ⑧ 最后只推 latest.json（ONLY=latest.json），此刻所有包已经就位。
+ */
+const EXCLUDE = (process.env.EXCLUDE || '')
+  .split(',')
+  .map((s) => s.trim().replace(/\\/g, '/'))
+  .filter(Boolean);
 // ONLY=README.md,AUTHORS.md 只推这几个（相对仓库根的路径前缀）
 const ONLY = (process.env.ONLY || '')
   .split(',')
@@ -101,9 +119,20 @@ function walk(dir, out) {
     const st = fs.statSync(full);
     if (st.isDirectory()) walk(full, files); else files.push(full);
   }
+  // EXCLUDE：发版第 ① 步用它把 latest.json 摘出去（见文件头注释），
+  // 免得清单比安装包先上线、把正在检查更新的用户打到 404。
+  const kept = EXCLUDE.length
+    ? files.filter((f) => {
+      const rel = path.relative(WS, f).replace(/\\/g, '/');
+      const out = EXCLUDE.some((p) => rel === p || rel.startsWith(p + '/'));
+      if (out) console.log('EXCLUDE 排除:', rel);
+      return !out;
+    })
+    : files;
+  if (EXCLUDE.length) console.log('EXCLUDE 过滤:', EXCLUDE.join(', '), '-> 排除', files.length - kept.length, '个');
 
   const changes = [];
-  for (const f of files) {
+  for (const f of kept) {
     const rel = path.relative(WS, f);
     const rp = repoPathOf(rel);
     const buf = fs.readFileSync(f);

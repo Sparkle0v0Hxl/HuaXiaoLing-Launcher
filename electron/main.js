@@ -1359,7 +1359,13 @@ function declaredChannelOf(exePath) {
   const hit = declaredChannelCache.get(exePath);
   if (hit && now - hit.at < 2000) return hit.value;
   const value = {
-    config: clientChannel.configChannelFromPath(exePath),
+    /*
+     * 2026-11-17：config 通道改用 resolveChannelFromRoot（config.ini + 文件层渠道 SDK 复核）。
+     * 第三方三服切换器会把官服目录的 config.ini 改成 cps=bilibili，光看 ini 会把
+     * 官服本体当成 B服客户端 —— 于是 B服 行被判成「有可用客户端」（绿灯），
+     * 实际用的还是官服那份，账号态和渠道配置全串。
+     */
+    config: clientChannel.resolveChannelFromRoot(path.dirname(exePath)).channel,
     path: clientChannel.pathChannelHint(exePath),
   };
   declaredChannelCache.set(exePath, { at: now, value });
@@ -1397,7 +1403,7 @@ function serverExistsForView(game, server, endfieldHasBase) {
      * 判据比自愈更严：只认鸣潮官方体系渠道，且目标目录必须真能启动。
      */
     (game.builtinKey === 'wutheringwaves' &&
-      ['official', 'bilibili'].includes(String(server.channel || '')) &&
+      ['official', 'bilibili', 'global'].includes(String(server.channel || '')) &&
       Boolean(wuwaExeAt(server.rootDir || server.originalRoot)))
   );
 }
@@ -6008,7 +6014,20 @@ async function ensureKuroRuntime(game, server, options = {}) {
     targetExists(server.path) &&
     !server.runtimeLinked &&
     Boolean(server.root) &&
-    !String(server.root).includes('VelaRuntimes');
+    !String(server.root).includes('VelaRuntimes') &&
+    /*
+     * 2026-11-17：还要确认这份客户端「自己声明的渠道」就是这一行。
+     * 老数据里 B服 行可能指着官服本体（被第三方三服切换器改过 config.ini，
+     * 目录其实是官服的），这时界面显示绿灯、点切换却启动的还是官服。
+     * 渠道对不上就不算「已装好」，继续往下走去生成一份独立的。
+     */
+    (() => {
+      const root = wuwaClientRootOf(server.path) || server.root || '';
+      const declared = root ? kuroPacks.detectChannelOfSync(root) : '';
+      // 读不出特征 = 官服（库洛官服没有专属目录特征）
+      const actual = declared || 'official';
+      return actual === channel;
+    })();
   if (alreadyInstalled) return false;
 
   // 先找「另一个渠道」的完整客户端当源：官服 / B服 / WeGame 任意互相为源
@@ -6085,6 +6104,33 @@ async function ensureKuroRuntime(game, server, options = {}) {
   });
   return true;
 }
+
+/**
+ * 这个渠道能不能被「切过去」（2026-11-17，bug 3）。
+ *
+ * 鸣潮国际服（global）和 WeGame 版**不生成独立运行时**
+ * （ensureKuroRuntime 开头就是 `if (channel === 'global' || channel === 'wegame') return false;`），
+ * 它们只能指向自己那份已经装好的客户端。而 servers:activate 那边原来不检查这个返回值，
+ * 照样执行 `game.activeServerId = server.id; game.target = server.path;` ——
+ * 一旦这一行没有自己的客户端目录（server.path 为空或文件不在），切过去之后
+ * target 是空的、界面上却是绿灯，点启动直接失败，而且切不回来。
+ *
+ * 判据：只有「鸣潮 + global/wegame + 自己没有可用的客户端目录」才判不可切。
+ * 有自己的客户端（server.path 存在）时照常允许切 —— WeGame 版就是这么用的。
+ *
+ * 调用方（electron/servers-ipc.js）在 servers:activate 里切之前问一句：
+ *   if (typeof kuroChannelSwitchable === 'function' && !kuroChannelSwitchable(game, server)) return;
+ */
+function kuroChannelSwitchable(game, server) {
+  if (!game || !server) return false;
+  if (game.builtinKey !== 'wutheringwaves') return true;
+  const channel = String(server.channel || '');
+  if (!['global', 'wegame'].includes(channel)) return true;
+  // 自己有可用的客户端目录（WeGame 已安装 / 国际服已装好）就允许切。
+  if (server.path && targetExists(server.path)) return true;
+  return false;
+}
+
 async function prepareGenshinPackRuntime(game, server, onProgress) {
   const packRoot = server.root;
   const packExe = path.join(packRoot, 'GenshinImpact.exe');
@@ -6456,6 +6502,16 @@ async function detectionChannel(game, exePath) {
     }
   }
   const fromConfig = clientChannel.configChannelFromPath(exePath);
+  /*
+   * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+   * config.ini 会被第三方三服切换器改（官服本体的 cps 被写成 bilibili），
+   * 光看 ini 会把官服本体判成 B服。所以对米哈游四款再叠一层「文件层」复核：
+   * 真 B服客户端带 BLPlatform64 渠道 SDK，没有的就是官服本体被改了 ini。
+   */
+  if (MIHOYO_RUNTIME_KEYS.includes(key)) {
+    const resolved = clientChannel.resolveChannelFromRoot(path.dirname(exePath));
+    if (resolved.channel) return resolved.channel;
+  }
   if (fromConfig) return fromConfig;
   const fromPath = clientChannel.pathChannelHint(exePath);
   /*
@@ -6485,7 +6541,17 @@ async function detectionChannel(game, exePath) {
     // 「WeGame」那一行永远点不亮（用户 m28159/m28196）。kuro-packs 的
     // detectChannelOfSync 只认 bilibili/global，不认 wegame，所以在这里先判。
     if (/WeGameApps/i.test(exePath)) return 'wegame';
-    const kuro = kuroPacks.detectChannelOfSync(path.dirname(exePath));
+    /*
+     * 2026-11-17（bug 1）：这里原来传的是 exe 所在目录（...\Client\Binaries\Win64），
+     * 而 kuro-packs 的 detectChannelOfSync(installRoot) 判据是**相对本体根**的路径
+     * （KRSDKRes/Bilibili = B服、Client/Binaries/Win64/ThirdParty/KrPcSdk_Global =
+     * 国际服）。本体根在三层深（本体根\launcherDownloadConfig.json 认定），主程序
+     * 却在本体根\Client\Binaries\Win64 下 —— 传 exe 目录必然判不到特征，
+     * B服 / 国际服客户端恒定落回兜底的 'official'。
+     * 修法：传本体根（wuwaClientRootOf 对 exe 或目录都认，找不到再退回 exe 目录）。
+     */
+    const wuwaRoot = wuwaClientRootOf(exePath) || path.dirname(exePath);
+    const kuro = kuroPacks.detectChannelOfSync(wuwaRoot);
     if (kuro) return kuro;
   }
   if (fromPath) return fromPath;
@@ -6503,6 +6569,31 @@ function serverForDetected(game, channel) {
     if (matched) return matched;
   }
   return servers.find((server) => server.channel === 'official') || servers[0] || null;
+}
+
+/*
+ * 这个目录是不是已经被别的渠道行占用了。
+ *
+ * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+ * 每个渠道都该有一份独立的硬链接运行时，非官服渠道绝不能和官服指向同一个目录 ——
+ * 否则「切到 B服」实际切的还是官服那份客户端，渠道配置、登录态、画质包全都串了。
+ *
+ * 只比 root（本体根），path 比 root 更严（exe 在 root 下面），root 相同就一定冲突。
+ * 官服行本身不算冲突源：官服是本体，其它渠道都该从它「派生」出独立目录，
+ * 而不是「指着它」。
+ */
+function rootUsedByOtherChannel(game, server, root) {
+  const target = String(root || '').replace(/[\\/]+$/, '').toLowerCase();
+  if (!target) return false;
+  return (game.servers || []).some((item) => {
+    if (!item || item === server) return false;
+    if (item.channel === server.channel) return false;
+    const other = String(item.root || '').replace(/[\\/]+$/, '').toLowerCase();
+    if (!other) return false;
+    if (other === target) return true;
+    // 一方是另一方的子目录也算冲突（B服的目录嵌在官服目录里）
+    return other.startsWith(`${target}\\`) || other.startsWith(`${target}/`);
+  });
 }
 
 async function discoverBuiltinServers() {
@@ -6607,7 +6698,7 @@ async function discoverBuiltinServers() {
         if (game.builtinKey === 'wutheringwaves') {
           const stalePath = String(server.path || '');
           const pointsIntoRuntime = /[\\/]velaruntimes[\\/]/i.test(stalePath);
-          if (pointsIntoRuntime && ['official', 'bilibili'].includes(String(server.channel || ''))) {
+          if (pointsIntoRuntime && ['official', 'bilibili', 'global'].includes(String(server.channel || ''))) {
             const remembered = String(server.rootDir || server.originalRoot || '').trim();
             // 回填目标必须是一个「真安装目录」：它自己再指向 VelaRuntimes 就是同一类
             // 记账失效（运行时搬家前的旧记录），回填过去只是把一个坏路径换成另一个，没意义。
@@ -6676,7 +6767,7 @@ async function discoverBuiltinServers() {
       // 终末地 / Yostar 三区 / 方舟国服各有自己的判据，一律不走这里。
       const isMihoyoLinkedRuntime =
         isMihoyoRuntimeDir(dir, game.builtinKey) &&
-        (clientChannel.configChannelFromPath(server.path) === server.channel ||
+        (clientChannel.resolveChannelFromRoot(dir).channel === server.channel ||
           clientChannel.pathChannelHint(server.path) === server.channel) &&
         targetExists(server.path);
       // 鸣潮 WeGame 版（rail_apps\Wuthering Waves(2002137)）没有 config.ini，
@@ -6762,7 +6853,7 @@ async function discoverBuiltinServers() {
           yostarPacks.isYostarChannel(channel) &&
           fs.existsSync(path.join(exeDir, 'game-launcher-config.json'))) ||
         (isMihoyoRuntimeDir(exeDir, game.builtinKey) &&
-          (clientChannel.configChannelFromPath(exePath) === channel ||
+          (clientChannel.resolveChannelFromRoot(exeDir).channel === channel ||
             clientChannel.pathChannelHint(exePath) === channel) &&
           targetExists(exePath)) ||
         (game.builtinKey === 'wutheringwaves' &&
@@ -6780,6 +6871,22 @@ async function discoverBuiltinServers() {
         continue;
       }
       if (server.path && targetExists(server.path)) continue;
+      /*
+       * 2026-11-17：非官服渠道不能和别的渠道共用同一个安装目录。
+       * 扫到的官服本体（config.ini 被第三方切换器改成 cps=bilibili 那种半吊子配置）
+       * 绝不能写进 B服 那一行 —— 写进去就是「两个渠道共用一个目录」，
+       * 切到 B服 实际还是官服那份客户端。
+       */
+      /*
+       * 2026-11-17（bug 2）：这里原来判的是 exe 目录（...\Client\Binaries\Win64），
+       * 而「这个目录是不是被别的渠道占了」必须按**本体根**比 —— 本体根在三层深，
+       * 老数据里 server.root 又常常被填成 Client\Binaries\Win64 这一层，
+       * 拿 exe 目录去比永远比不相等（等于这个占用检查对鸣潮从来没生效）。
+       */
+      const occupiedRoot = game.builtinKey === 'wutheringwaves'
+        ? (wuwaClientRootOf(exeDir) || exeDir)
+        : exeDir;
+      if (server.channel !== 'official' && rootUsedByOtherChannel(game, server, occupiedRoot)) continue;
       server.path = exePath;
       /*
        * 鸣潮的本体根不是 exe 目录（主程序在 Client\Binaries\Win64 下），
@@ -6897,6 +7004,12 @@ async function repairServerChannels() {
        *   · packPath：这一行挂的是资源替换包（B服 / 国际服增量包），不是完整客户端；
        *   · 别的服务器用同一个 exe 或同一个目录：官服 / B服 共用一个安装目录是正常玩法；
        *   · 没有任何渠道相同的那一行。
+       *
+       * 2026-11-17 修订（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+       * 「共用目录」不再是合法玩法 —— 每个渠道都该有一份独立的硬链接运行时。
+       * 所以「共用」本身不再豁免：只要这一行的 config.ini 强声明了别的渠道，
+       * 就该把它清掉（而不是让它一直占着官服目录）。
+       * 仍然是「不动」的情况保留 —— 用户手动确认过的行由用户负责。
        */
       if (server.confirmed || server.packPath) continue;
       const ownPath = norm(server.path);
@@ -6907,8 +7020,81 @@ async function repairServerChannels() {
           (norm(item.path) === ownPath ||
             (ownRoot && (norm(item.root) === ownRoot || norm(item.originalRoot) === ownRoot)))
       );
-      if (shared) continue;
-      const actual = clientChannel.configChannelFromPath(server.path);
+      if (shared) {
+        /*
+         * 共用目录时也继续往下走，但只在「客户端自己声明了别的渠道」时改：
+         * 判据是 config.ini + 文件层渠道 SDK 复核，可信；读不出声明就照旧不动。
+         *
+         * 2026-11-17 新增「同一目录只能属于一个渠道」的迁移（用户口径：
+         * 「官服和B服就不该有共用一个文件夹的情况」）：
+         * 先问这个目录到底是谁的 —— resolveChannelFromRoot 会用 config.ini
+         * 加上文件层渠道 SDK（BLPlatform64 / PCGameSDK.dll）复核，
+         * 被第三方三服切换器改过 config.ini 的官服目录会被判回官服。
+         * 目录判给谁，那一行留下；别的行（尤其是非官服）把路径清空，
+         * 回到「未配置」，用户点「硬链接生成一份」就能得到自己独立的目录。
+         * 判不出归属就一个字都不动，绝不猜。
+         */
+        const resolvedShared = clientChannel.resolveChannelFromRoot(path.dirname(server.path));
+        if (!resolvedShared.channel) continue;
+        /*
+         * 2026-11-17 审查指出这里原来有两处死路，导致共用状态永远自愈不了：
+         *   ① `owner = servers.find(item => item !== server && item.channel === resolvedShared.channel)`
+         *      —— 目录判给的正好是这一行自己时，owner 必 undefined，直接 continue；
+         *   ② 官服行无条件 continue。
+         *   两者叠加 = 「官服目录被写进了 B服 行」这种最常见的错配一个都修不掉。
+         *
+         * 现在：如果目录就属于这一行自己（owner 为空但渠道对得上），清空后保留它自己、
+         * 不需要搬给别人；只有判给**别的**行时才把 activeServerId 转过去。
+         */
+        if (server.channel === 'official') continue; // 官服行是本体所在，别的行去让
+        const owner = servers.find((item) => item !== server && item.channel === resolvedShared.channel) || null;
+        if (!owner && server.channel !== resolvedShared.channel) continue; // 判给了别的渠道但那一行不存在：不动，别猜
+        const movedSharedPath = server.path;
+        /*
+         * 字段清理要清干净（11 个），并且 incomplete 必须是 false 而不是 true：
+         * 设成 true 的话界面会显示「客户端不完整（文件缺失），现在启动会失败」+ 主按钮「重建」，
+         * 正确语义是「缺独立目录」+ 主按钮「生成」。
+         * ★这里不能调 resetServerState —— 它定义在 installIpc() 内部（本文件 10351 行），
+         *   而 repairServerChannels 是顶层函数，够不到。所以按同一份字段清单内联。
+         */
+        server.path = '';
+        server.root = '';
+        server.incomplete = false;
+        server.packPath = '';
+        server.originalRoot = '';
+        server.rootDir = '';
+        server.runtimeLinked = false;
+        server.legacyRuntime = false;
+        server.confirmed = false;
+        server.unavailable = false;
+        server.predownload = null;
+        if (owner && game.activeServerId === server.id) {
+          game.activeServerId = owner.id;
+          game.target = owner.path;
+          game.workDir = owner.root;
+        } else if (!owner && game.activeServerId === server.id) {
+          // 目录本来就是自己的，但被清空了：active 指向一个空行没意义，交回第一个可用的行
+          const fallback = servers.find((item) => item.id !== server.id && item.path && targetExists(item.path));
+          if (fallback) {
+            game.activeServerId = fallback.id;
+            game.target = fallback.path;
+            game.workDir = fallback.root;
+          }
+        }
+        writeLaunchLog(
+          `shared-root-split ${game.builtinKey}: ${server.name}(${server.channel}) 与 ` +
+            `${owner ? `${owner.name}(${owner.channel})` : '自己'} 共用同一目录，已把前者清空为「未配置」（${movedSharedPath}）`
+        );
+        changed += 1;
+        continue;
+      }
+      /*
+       * 实际渠道：config.ini 的声明 + 文件层渠道 SDK 复核。
+       * config.ini 说 B服、但目录里没有 B服渠道 SDK（BLPlatform64 / PCGameSDK.dll）
+       * → 这份客户端本体其实是官服（ini 被第三方三服切换器改过），判官服。
+       */
+      const resolvedActual = clientChannel.resolveChannelFromRoot(path.dirname(server.path));
+      const actual = resolvedActual.channel || clientChannel.configChannelFromPath(server.path);
       if (!actual || actual === server.channel) continue;
       const target = servers.find((item) => item !== server && item.channel === actual);
       if (!target) continue;
@@ -6956,15 +7142,34 @@ async function detectBuiltins(onlyMissing = true) {
       // 检测到的客户端属于哪个渠道，就写进哪个渠道那一行。
       // 只装了 B服 / 国际服 的玩家本来就没有官服客户端，不能把路径塞进官服行。
       const detected = serverForDetected(game, await detectionChannel(game, found));
-      if (detected && (!detected.path || !targetExists(detected.path))) {
+      const detectedRoot = detected ? path.dirname(found) : '';
+      /*
+       * 2026-11-17（bug 2）：占用检查必须按**本体根**比。本体根在三层深
+       * （本体根\launcherDownloadConfig.json），主程序在本体根\Client\Binaries\Win64，
+       * 老数据里 server.root 又常被填成 Client\Binaries\Win64 这一层 ——
+       * 拿 exe 目录去比永远不相等，这个检查对鸣潮等于没写。
+       */
+      const detectedRootReal = game.builtinKey === 'wutheringwaves'
+        ? (wuwaClientRootOf(found) || detectedRoot)
+        : detectedRoot;
+      /*
+       * 2026-11-17：非官服渠道不能和别的渠道共用同一个安装目录。
+       * 真出现了（老数据里 B服 行指着官服本体）就不写这一行 ——
+       * 让它保持「未配置」，用户点「硬链接生成一份」就能得到独立目录。
+       */
+      const sharedWithOther =
+        Boolean(detected) &&
+        detected.channel !== 'official' &&
+        rootUsedByOtherChannel(game, detected, detectedRootReal);
+      if (detected && !sharedWithOther && (!detected.path || !targetExists(detected.path))) {
         detected.path = found;
-        detected.root = path.dirname(found);
+        detected.root = detectedRootReal;
         detected.incomplete = false;
         detected.unavailable = false;
       }
       // 已经有一个能用的服务器在用时，别把当前选择抢回默认那一行
       const activeUsable = Boolean(active && active.path && targetExists(active.path));
-      if (detected && (!active || !activeUsable)) {
+      if (detected && !sharedWithOther && (!active || !activeUsable)) {
         game.activeServerId = detected.id;
         game.target = detected.path || found;
         game.workDir = path.dirname(game.target);
@@ -9781,6 +9986,8 @@ function installIpc() {
     ensureEndfieldChannelRuntime,
     ensureArknightsRuntime,
     ensureKuroRuntime,
+    // 2026-11-17（bug 3）：鸣潮国际服 / WeGame 没有独立运行时，切过去前必须问一句。
+    kuroChannelSwitchable,
     channelPackNeededFor,
     channelPackStatus,
     clientChannel,
@@ -9935,7 +10142,7 @@ function installIpc() {
   installBackgroundIpc({ getOfficialSyncState: () => officialSyncState });
   installInstallIpc({ fetchLatestForChannel, shell });
   installArknightsIpc({ targetExists, send, pushState, ARKNIGHTS_CN_CHANNELS, updateEndfieldGame, externalLinkSources, endfieldPackWritableRoot, ARKNIGHTS_OFFICIAL_PROFILE, ARKNIGHTS_BILIBILI_PROFILE, verifyArknightsSource, updateEndfieldProfile, refreshPackChannels, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
-  installWuwaIpc({ targetExists, send, pushState, writeLaunchLog, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate });
+  installWuwaIpc({ targetExists, send, pushState, writeLaunchLog, getStore: () => store, getRunning: () => running, invalidateRuntimesAfterUpdate, externalLinkSources });
   installNevernessIpc({
     pushState,
     send,
@@ -10199,6 +10406,19 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
       if (!source.path || !target.path) throw new Error('两个服务器都需要先配置启动程序');
       if (!source.root || !target.root) throw new Error('无法确定安装目录');
       if (!targetExists(source.path) || !targetExists(target.path)) throw new Error('启动程序不存在，请重新配置');
+      /*
+       * 2026-11-17（用户报障：「所有有硬链接的游戏，都应该硬链接独立出来一个文件夹」）：
+       * 两个渠道共用同一个安装目录时不能建硬链接 —— 那不是「去重」，
+       * 是把一份客户端当成两个渠道用，渠道配置和登录态全串。
+       * 正确做法是每个渠道各自「硬链接生成一份」，得到独立目录。
+       */
+      const normDir = (value) => String(value || '').replace(/[\\/]+$/, '').toLowerCase();
+      if (normDir(source.root) === normDir(target.root)) {
+        throw new Error(
+          `「${source.name}」和「${target.name}」现在装在同一个目录里，没法去重。` +
+            '每个渠道要一份独立目录：请先给其中一个渠道点「硬链接生成一份」。'
+        );
+      }
       // 同上一处：先 normalize 再取盘符，避免正斜杠路径被误判成不同盘。
       const sourceDrive = path.parse(path.normalize(source.root)).root.toLowerCase();
       const targetDrive = path.parse(path.normalize(target.root)).root.toLowerCase();
@@ -10708,7 +10928,12 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
    */
   function engineFor(gameKey, channel) {
     if (gameKey === 'arknights' && yostarPacks.isYostarChannel(channel)) return 'yostar';
-    if (gameKey === 'wutheringwaves' && kuroPacks.isKuroChannel(channel)) return 'kuro';
+    if (gameKey === 'wutheringwaves') {
+      // WeGame 版没有库洛官方清单（它在 WeGame 商店里下），别把它当 kuro 引擎
+      // 再去报一句费解的「没有对应的鸣潮渠道」。
+      if (!kuroPacks.isKuroChannel(channel)) return '';
+      return 'kuro';
+    }
     return DOWNLOADABLE_KEYS[gameKey];
   }
 
@@ -10936,7 +11161,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     const clientChannelOfServer =
       game.builtinKey === 'endfield' || game.builtinKey === 'wutheringwaves'
         ? ''
-        : clientChannel.configChannelFromPath(server.path);
+        : clientChannel.resolveChannelFromRoot(path.dirname(server.path)).channel;
     return {
       game,
       server,
@@ -12675,7 +12900,47 @@ function startKuroGachaWatcher() {
       pushDir(server.path);
     }
     pushDir(game.target);
-    return roots;
+    /*
+     * 2026-11-17（bug 4）：上面 push 进去的目录不一定是本体根 ——
+     * 老数据里 server.root 常常被填成 `Client\Binaries\Win64` 这一层，
+     * 而日志目录在 `<本体根>\Client\Saved\Logs`（本体根在三层深，靠根目录的
+     * launcherDownloadConfig.json 认定）。不做还原的话 logSignature(root) 拼出来的
+     * 目录根本不存在 → 抽卡自动同步**永久静默**，用户完全不知道。
+     *
+     * 还原判据（两种）：
+     *  1) 目录本身或其祖先里有 launcherDownloadConfig.json → 用 wuwaClientRootOf；
+     *  2) 我们自己生成的运行时目录（VelaRuntimes\wutheringwaves\<channel>）
+     *     没有那个 json → 改成「向上最多 5 层找第一个存在 Client\Saved\Logs 的祖先」。
+     */
+    const restored = [];
+    for (const dir of roots) {
+      let dir2 = dir;
+      try {
+        if (fs.statSync(dir2).isFile()) dir2 = path.dirname(dir2);
+      } catch {
+        continue;
+      }
+      const wuwaRoot = wuwaClientRootOf(dir2);
+      if (wuwaRoot) {
+        if (!restored.includes(wuwaRoot)) restored.push(wuwaRoot);
+        continue;
+      }
+      // 运行时目录（无 launcherDownloadConfig.json）：向上找带 Client\Saved\Logs 的那层
+      let dir3 = dir2;
+      let picked = '';
+      for (let depth = 0; depth < 5 && dir3; depth += 1) {
+        if (fs.existsSync(path.join(dir3, 'Client', 'Saved', 'Logs'))) {
+          picked = dir3;
+          break;
+        }
+        const next = path.dirname(dir3);
+        if (next === dir3) break;
+        dir3 = next;
+      }
+      const finalDir = picked || dir2;
+      if (!restored.includes(finalDir)) restored.push(finalDir);
+    }
+    return restored;
   };
   /* 日志签名：目录下 Client*.log 的「文件名:大小」。只 stat，不读内容。 */
   const logSignature = (root) => {
@@ -13495,3 +13760,14 @@ app.on('child-process-gone', (_event, details) => {
 app.on('render-process-gone', (_event, _contents, details) => {
   writeCrashLog('render-process-gone', JSON.stringify(details));
 });
+
+/*
+ * 2026-11-17（bug 3）：把「这个渠道能不能被切过去」的守卫导出。
+ * servers-ipc.js 那边的调用由另一个 agent 接（servers:activate 里切之前问一句）。
+ * 注意：main.js 是 Electron 主进程入口，直接 require 它会把 App 跑起来 ——
+ * 需要这个函数的模块请走 installServersIpc 的 ctx（那边已经拿到 kuroChannelSwitchable），
+ * 这里的导出只作契约声明与自检用。
+ */
+module.exports = {
+  kuroChannelSwitchable,
+};

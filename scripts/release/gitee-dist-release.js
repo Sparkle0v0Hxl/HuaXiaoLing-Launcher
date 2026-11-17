@@ -28,6 +28,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const minisign = require('../../electron/minisign');
 
 const OWNER = 'SparkleHxl';
 const REPO = 'HuaXiaoLing-Launcher';
@@ -184,7 +185,7 @@ async function attach(releaseId, filePath) {
   await attach(rel.id, MANIFEST);
 
   // 4. 仓库根 latest.json 也带镜像前缀提交一份（浏览仓库的人能直接看到本版清单）
-  const giteeManifest = { ...manifest };
+  let giteeManifest = { ...manifest };
   const url = String(giteeManifest.url || '');
   if (url && !url.startsWith(MIRROR)) giteeManifest.url = MIRROR + url;
   if (Array.isArray(giteeManifest.deltas)) {
@@ -193,6 +194,20 @@ async function attach(releaseId, filePath) {
       return u && !u.startsWith(MIRROR) ? { ...d, url: MIRROR + u } : d;
     });
   }
+  /*
+   * ★2026-11-17（审查 rev-release 后）：deltas[].url 现在**在签名载荷内**，
+   *   上面把 delta 的 url 改成镜像前缀之后，原签名必然失配 ——
+   *   客户端（updater.js「有签名就必须验过」）会直接拒绝这份清单，国内用户全掉更新。
+   *   所以提交前必须重签；没有私钥就中止，绝不把失效签名推上去。
+   */
+  const hadSig = Boolean(manifest && manifest.sig && manifest.sig.value);
+  const keyFile = (process.env.HXL_UPDATE_KEY || 'H:\\HXL-pack\\keys\\update-signing.pem').trim();
+  const resigned = minisign.signManifestWithKeyFile(giteeManifest, keyFile);
+  if (!resigned && hadSig) {
+    console.error('✗ 镜像清单改写 url 后需要重新签名，但找不到私钥：' + keyFile);
+    process.exit(1);
+  }
+  if (resigned) giteeManifest = resigned;
   const text = JSON.stringify(giteeManifest, null, 2);
   const current = await api('GET', `/contents/latest.json?ref=${BRANCH}`);
   const sha = current && current.sha;

@@ -12,8 +12,17 @@
  * HXL_UPDATE_KEY 指定路径。没有私钥的机器只能 --check，签不了名。
  *
  * 签名写在清单的 sig 字段里：{ alg, keyId, value }。签的是「版本号 / 整包 sha256 /
- * 大小 / 是否强制 / deltas 的 from-to-sha256-size」，不含 url（镜像改写地址后签名
- * 仍然有效）。规则细节见 electron/minisign.js。
+ * 大小 / 是否强制 / deltas 的 from-to-sha256-size-url」。
+ *
+ * ★2026-11-17（审查 rev-release 后加强）：deltas[].url **现在也进签名**。
+ *   原来 url 不在载荷里，实测把下载地址改成任意域名签名照样验得过 ——
+ *   虽然下游会用 sha256 校验内容（改不出坏包），但「能让客户端去敲任意域名」
+ *   本身就不该成立。注意这是**改变签名格式**的破坏性变更，所以：
+ *     · 本脚本（新发的清单）用含 url 的新规格；
+ *     · electron/minisign.js 的 verifyManifest 会先按新规格验，不行再按老规格验，
+ *       因此在 2.12.1 及之前发布的老清单继续可用，老用户不会掉更新。
+ * 规则细节见 electron/minisign.js。镜像改写地址（gitee/gitcode 清单换 ghfast.top
+ * 前缀）也需要重新签名 —— 各 sync 脚本正是「改写 url 之后再签一次」的顺序。
  */
 
 const fs = require('node:fs');

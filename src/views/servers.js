@@ -128,10 +128,10 @@ function serverBlockHint(server) {
     // 别让用户对着「未选 exe」纳闷 —— 他明明早就配过、只是共用着目录。
     return {
       text: server.root
-        ? '这一服还没有可用的独立客户端（可能和别的渠道共用了安装目录）'
+        ? '这一服还没有自己独立的客户端目录（现在和别的渠道共用同一个文件夹）'
         : '还没选择启动程序（.exe）',
-      short: server.root ? '缺独立客户端' : '未选 exe',
-      next: '点这一行 → 服务器管理 → 编辑指定，或点「重建」生成独立客户端',
+      short: server.root ? '缺独立目录' : '未选 exe',
+      next: '点这一行 → 服务器管理 → 「生成」做一份自己的硬链接客户端（每个渠道一份独立目录）',
     };
   }
   return null;
@@ -820,6 +820,19 @@ function serverRow(game, server) {
    */
   const usable = server.exists && !server.incomplete && !server.needsRuntime;
   const shared = sharedRootWith(game, server);
+  /*
+   * 2026-11-17（用户口径：「官服和B服就不该有共用一个文件夹的情况」）：
+   * 共用目录的行不算「可用」—— 那一行的客户端其实和别的渠道是同一份，
+   * 点「切换」会把两个渠道的账号态/渠道配置搅在一起。判成不可用后主按钮
+   * 自动落到「生成」，一点就进 openServerSetupDialog 那套面板
+   * （硬链接生成一份 / 下载游戏 / 选择已装客户端 / 自动扫描），
+   * 生成出来的是这一渠道自己的独立目录。
+   *
+   * 只有「非官服」行这么判：本体装在官服目录时，那一行才是这一份客户端的主人，
+   * 它必须保持可用（终末地官服还是直启本体）。
+   */
+  const usableIndependent =
+    usable && !(shared && String(server.channel || '') !== 'official');
   const block = serverBlockHint(server);
   /*
    * 2026-11-08（回退）：终末地仍然是「每个渠道一份独立的硬链接运行时」。
@@ -886,38 +899,47 @@ function serverRow(game, server) {
     usable &&
     (!server.caps || server.caps.repair !== false);
   const fileName = server.path ? server.path.split(/[\\/]/).pop() : '';
-  const primaryAction = usable
+  const primaryAction = usableIndependent
     ? server.active
       ? 'launch-game'
       : 'activate-server'
     : 'rebuild-server';
   // 未就绪的终末地渠道说「生成」而不是「重建」：它压根没有可重建的东西，
-  // 是先要生成一份（硬链接 + 差异分块下载），和别的游戏「重建」是两个意思
-  const primaryLabel = usable
+  // 是先要生成一份（硬链接 + 差异分块下载），和别的游戏「重建」是两个意思。
+  // 共用目录的行同样说「生成」：它要的是一份自己的独立目录。
+  const primaryLabel = usableIndependent
     ? server.active
       ? '启动'
       : '切换'
-    : server.needsRuntime
+    : server.needsRuntime || (shared && String(server.channel || '') !== 'official')
       ? '生成'
       : '重建';
-  const primaryIcon = usable ? (server.active ? 'play' : 'swap') : server.needsRuntime ? 'link' : 'refresh';
+  const primaryIcon = usableIndependent
+    ? server.active
+      ? 'play'
+      : 'swap'
+    : server.needsRuntime || (shared && String(server.channel || '') !== 'official')
+      ? 'link'
+      : 'refresh';
   // 一行只留一句能读的话：有 exe 就写文件名，没有才用「未选 exe」这种四字状态。
   // 以前这里叠着 状态胶囊 + 三个徽标 + 一句长提示，四行字挤在 250px 里。
   const sub =
-    fileName ||
+    (shared && String(server.channel || '') !== 'official'
+      ? '缺独立目录'
+      : fileName) ||
     (block ? block.short : '') ||
     (server.needsRuntime ? (server.path || server.root ? '缺独立运行时' : '未选 exe') : '') ||
     '未选择客户端';
   return `
     <article class="server-tile ${server.active ? 'is-active' : ''} ${
-      usable ? '' : 'is-broken'
+      usableIndependent ? '' : 'is-broken'
     }" data-state="${status.cls}">
       <span class="st-dot ${status.cls}" aria-hidden="true"></span>
       <div class="st-main">
         <div class="st-title">
           <strong>${esc(server.name)}</strong>
           ${server.active ? '<span class="st-flag">当前</span>' : ''}
-          ${!usable && status.label ? `<span class="st-chip is-warn">${status.label}</span>` : ''}
+          ${!usableIndependent && status.label ? `<span class="st-chip is-warn">${status.label}</span>` : ''}
           ${
             server.runtimeLinked
               ? `<span class="st-chip" title="终末地每个渠道各有一份独立的硬链接运行时，切服从官服本体整树重建后只铺该渠道差异文件；已下载的语音包会保留，不会被删。">独立运行时</span>`
@@ -926,8 +948,8 @@ function serverRow(game, server) {
           ${
             shared
               ? `<span class="st-chip is-shared" title="${esc(
-                  `${esc(server.name)} 和「${shared.name}」用的是同一个安装目录：删掉这个文件夹，两边都会失效`
-                )}">与${esc(shared.name)}共用目录</span>`
+                  `${esc(server.name)} 和「${shared.name}」现在指向同一个安装目录。每个渠道要一份独立目录：点这一行的「生成」做一份自己的硬链接客户端`
+                )}">与${esc(shared.name)}共用目录 · 需生成独立目录</span>`
               : ''
           }
         </div>
@@ -954,7 +976,7 @@ function serverRow(game, server) {
         }
         <button class="st-tool" data-action="edit-server" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="编辑服务器">${icon('edit')}</button>
         ${
-          usable
+          usableIndependent
             ? `<button class="st-tool" data-action="open-server-folder" data-game="${esc(game.id)}" data-server="${esc(server.id)}" title="打开安装目录">${icon('folder-open')}</button>`
             : ''
         }

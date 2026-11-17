@@ -25,6 +25,26 @@ const MIHOYO_CHANNEL_KEYS = ['genshin', 'starrail', 'zzz', 'bh3'];
 const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
 
 /**
+ * 鸣潮客户端的「本体根」：主程序在 Client\Binaries\Win64 下（三层深），
+ * 本体根由根目录的 launcherDownloadConfig.json 认定。老数据里 server.root
+ * 常被填成 exe 所在那一层，所以这里向上找回来（和 main.js 的 wuwaClientRootOf
+ * 同一判据；这里独立实现一份，避免 main.js 改动前就 ReferenceError）。
+ */
+function kuroClientRootOf(dirOrExe) {
+  let dir = String(dirOrExe || '').trim();
+  if (!dir) return '';
+  if (path.extname(dir).toLowerCase() === '.exe') dir = path.dirname(dir);
+  dir = path.normalize(dir);
+  for (let depth = 0; depth < 5 && dir; depth += 1) {
+    if (fs.existsSync(path.join(dir, 'launcherDownloadConfig.json'))) return dir;
+    const next = path.dirname(dir);
+    if (next === dir) break;
+    dir = next;
+  }
+  return '';
+}
+
+/**
  * 服务器/渠道管理：增删改、硬链接、端末地运行时、渠道包、Sophon 增量。
  *
  * 从 main.js 的 installIpc() 里整段搬出来（那个函数一度有 11300 多行、
@@ -66,6 +86,30 @@ function installServersIpc(ctx) {
     }
     return null;
   };
+
+  /*
+   * 这一行能不能被「切过去」。
+   *
+   * 2026-11-17：鸣潮的国际服与 WeGame 版不生成独立运行时（ensureKuroRuntime
+   * 对这两个渠道直接 return false），所以它们必须自己已经有客户端目录，
+   * 否则切过去 target 是空的 —— 界面显示绿灯、点启动启动不了，
+   * 而且 active 落在空行上再也切不回官服。
+   *
+   * ★位置很重要：必须放在 installServersIpc 内部（targetExists 是从 ctx 解构的）。
+   *   2026-11-17 审查发现同名实现有两份：main.js:6124 用 targetExists、
+   *   这里原来用 fs.existsSync —— server.path 指向目录时两份结论相反。
+   *   现在统一用 targetExists 这一个语义，main.js 那份已挂进 ctx 作为唯一来源。
+   */
+  function kuroChannelSwitchable(game, server) {
+    if (!game || !server) return false;
+    if (game.builtinKey !== 'wutheringwaves') return true;
+    const channel = String(server.channel || '');
+    // 官服 / B服 能靠硬链接生成运行时，永远可以切
+    if (!['global', 'wegame'].includes(channel)) return true;
+    // 国际服 / WeGame：只有这一行自己指着一个真实存在的客户端才行
+    if (server.path && targetExists(server.path)) return true;
+    return false;
+  }
 
     ipcMain.handle('servers:channel-pack-plan', async (_event, input) => {
       const game = getStore().data.games.find((item) => item.id === input?.gameId);
@@ -119,6 +163,25 @@ function installServersIpc(ctx) {
       const serverPath = String(input?.path || '').trim();
       if (serverPath) {
         if (!targetExists(serverPath)) throw new Error('这个启动程序不存在');
+        /*
+         * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+         * 内置渠道的行不许指向另一个渠道的客户端目录。
+         *
+         * 客户端的 config.ini 是它自己写的身份声明 —— 第三方三服切换器把官服目录
+         * 改成 cps=bilibili 之后，这个目录其实还是官服那份。写进 B服 行就变成
+         * 「两个渠道共用一个目录」，切服时渠道配置、登录态、画质包全串。
+         * 自定义服务器（custom）不受限制：那是用户自己指的路。
+         */
+        if (server.channel && server.channel !== 'custom') {
+          const resolved = clientChannel.resolveChannelFromRoot(path.dirname(serverPath));
+          if (resolved.channel && resolved.channel !== server.channel) {
+            const other = (game.servers || []).find((item) => item.channel === resolved.channel);
+            throw new Error(
+              `这个目录是${other ? other.name : clientChannel.channelLabel(resolved.channel)}的客户端，不能填到${server.name}这一行。` +
+                `每个渠道要一份独立目录：请点「硬链接生成一份」，或者把这一行留空、用另一个目录。`
+            );
+          }
+        }
         server.path = serverPath;
         server.confirmed = true;
         // 用户手动指定了有效启动程序：它就是一个可用的客户端，不再视为「需要重建」。
@@ -206,6 +269,20 @@ function installServersIpc(ctx) {
       // 方舟台服：没配目录也允许「先生成一份」（以国服客户端为源）
       const arknightsTaiwanCanGenerate =
         game.builtinKey === 'arknights' && server.channel === 'taiwan';
+      /*
+       * 2026-11-17：鸣潮的国际服 / WeGame 版不生成独立运行时（ensureKuroRuntime
+       * 对这两个渠道直接 return false）。以前这里只看 path 存不存在就放行，
+       * 切过去以后 target 指向空路径 —— 界面显示绿灯、点启动启动不了，
+       * 而且 active 落在空行上，再也切不回官服。
+       * 所以这两个渠道必须自己已经指着一个真实存在的客户端。
+       */
+      if (!kuroChannelSwitchable(game, server)) {
+        throw new Error(
+          `「${server.name || '这一行'}」还没有自己的客户端目录。` +
+            '鸣潮的国际服和 WeGame 版不能靠硬链接生成，' +
+            '请先在官方启动器或 WeGame 里装好，然后用「编辑」把这一行的路径指到它。'
+        );
+      }
       if (server.incomplete && game.builtinKey !== 'endfield' && !kuroCanGenerate && !arknightsTaiwanCanGenerate) {
         throw new Error('这个目录是资源替换包，不是完整客户端；请点这一行的下载按钮生成国际服客户端');
       }
@@ -291,9 +368,34 @@ function installServersIpc(ctx) {
         const chosenChannel = String(server.channel || '');
         const iniChannel = clientChannel.configChannelFromPath(server.path) || '';
         const hintChannel = clientChannel.pathChannelHint(server.path) || '';
-        const actualChannel = iniChannel || hintChannel;
+        /*
+         * 2026-11-17：鸣潮的渠道不在 config.ini 里，写在
+         * ThirdParty\KrPcSdk_Mainland\KRSDKRes\KRSDKConfig.json 里（KR_ChannelId
+         * 19=官服 / 46=B服），国际服则是 ThirdParty\KrPcSdk_Global 目录。
+         * 以前体检名单只有米哈游四款 → 鸣潮切服永远 ini=- hint=-，
+         * 错配了也不提示。鸣潮用 kuroPacks.detectChannelOfSync（读本体根）。
+         */
+        const kuroChannel =
+          game.builtinKey === 'wutheringwaves'
+            ? (kuroPacks.detectChannelOfSync(kuroClientRootOf(server.path) || '') || '')
+            : '';
+        /*
+         * 2026-11-17：米哈游四款不能只看 config.ini。
+         * 第三方三服切换器会把官服目录的 ini 改成 cps=bilibili，纯 ini 判定会
+         * 把官服目录认成 B服 → 真机 zzz 官服目录 ini=bilibili、实际=official，
+         * 于是点切换必弹「那个目录里是B服客户端，账号会串到另一个服」。
+         * resolveChannelFromRoot 会拿渠道 SDK 复核，把这种「ini 被改过但没渠道件」
+         * 的情形判回官服（evidence=config-conflict）。
+         */
+        const resolvedMihoyo =
+          MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0
+            ? clientChannel.resolveChannelFromRoot(path.dirname(server.path))
+            : null;
+        const actualChannel =
+          (resolvedMihoyo && resolvedMihoyo.channel) || iniChannel || kuroChannel || hintChannel;
         const mismatch =
-          MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0 &&
+          (MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0 ||
+            game.builtinKey === 'wutheringwaves') &&
           CHANNEL_PROBE_KEYS.indexOf(chosenChannel) >= 0 &&
           Boolean(actualChannel) &&
           chosenChannel !== actualChannel;
@@ -1006,7 +1108,18 @@ function installServersIpc(ctx) {
               });
             },
           });
-          executable = path.join(installDir, result.executable || 'Client-Win64-Shipping.exe');
+          /*
+           * 鸣潮的主程序不在根目录，而在 Client\Binaries\Win64 下（根目录只有
+           * Wuthering Waves.exe / ClearThirdParty.exe 两个启动壳）。以前这里直接
+           * path.join(installDir, result.executable)，写回了一个不存在的路径，
+           * 用户点「下载游戏」下完却打不开。现在按官方清单里的真实位置拼。
+           */
+          executable = path.join(installDir, 'Client', 'Binaries', 'Win64', result.executable || 'Client-Win64-Shipping.exe');
+          if (!fs.existsSync(executable)) {
+            // 兜底：清单版本偶尔把主程序放根目录，两种布局都认一下。
+            const fallback = path.join(installDir, result.executable || 'Client-Win64-Shipping.exe');
+            if (fs.existsSync(fallback)) executable = fallback;
+          }
           version = String(result.version || version || '');
         } else {
           /*

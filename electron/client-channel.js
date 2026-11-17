@@ -72,8 +72,17 @@ function parseIni(text) {
 
 /**
  * 按 ini 字段判定渠道。
+ *
  * 顺序很重要：B服 → 国际服（game_biz / uapc 的硬标记优先于 cps）→ 国服。
  * 返回 '' 表示「这份 ini 里没有足够的证据」，绝不瞎猜。
+ *
+ * 2026-11-17 说明（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+ * 这里**只看 config.ini**。第三方三服切换器会把官服目录里的 config.ini 改成
+ * `cps=bilibili`，于是这个目录会被判成 B服 —— 光看 ini 分不出「真 B服客户端」
+ * 和「被改过配置的官服客户端」。真正的区别在文件层：B服客户端带渠道 SDK
+ * （BLPlatform64 目录），官服本体没有。那一层判据见 resolveChannelFromRoot()。
+ * 所以这个函数保持原样（纯 ini 判读），别在这里加「game_biz 优先」——
+ * 真 B服客户端的 game_biz 同样是 *_cn（和官服同包），那样会把真 B服判成官服。
  */
 function classifyIni(fields) {
   if (!fields) return '';
@@ -93,6 +102,84 @@ function classifyIni(fields) {
   if (/mihoyo|gw_pc|hyp_cn/.test(cps)) return 'official';
   if (/_global/.test(sdk)) return 'global';
   return '';
+}
+
+/**
+ * 这个客户端目录里有没有 B服渠道 SDK。
+ *
+ * B服客户端比官服多一套渠道件（B站自己的登录/支付 SDK），装在：
+ *   · 绝区零 / 星铁：<Game>_Data\Plugins\x86_64\BLPlatform64\  ← 在_Data 里面，不在根目录
+ *   · 方舟 / 终末地：根目录的 PCGameSDK.dll
+ * 这是「文件层」证据，比 config.ini 可信 —— ini 会被第三方三服切换器改，
+ * 渠道件不会凭空出现。
+ *
+ * 2026-11-17 修正：以前只查根目录，结果 B服运行时（渠道件在 _Data\Plugins 里）
+ * 被判成官服，界面上那一行直接变成「目录已不在」。
+ * 现在往下找三层，但只在 *_Data\Plugins 下面找，避免整棵树乱扫。
+ */
+function hasBilibiliChannelSdk(root) {
+  const dir = String(root || '');
+  if (!dir) return false;
+  try {
+    if (fs.existsSync(path.join(dir, 'BLPlatform64'))) return true;
+    if (fs.existsSync(path.join(dir, 'PCGameSDK.dll'))) return true;
+    // <Game>_Data\Plugins\x86_64\BLPlatform64（绝区零 / 星铁的渠道件实际位置）
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    for (const item of entries) {
+      if (!item.isDirectory()) continue;
+      if (!/_Data$/i.test(item.name)) continue;
+      const dataDir = path.join(dir, item.name);
+      const plugins = path.join(dataDir, 'Plugins');
+      if (!fs.existsSync(plugins)) continue;
+      let archDirs = [];
+      try {
+        archDirs = fs.readdirSync(plugins, { withFileTypes: true });
+      } catch {
+        archDirs = [];
+      }
+      for (const arch of archDirs) {
+        if (!arch.isDirectory()) continue;
+        if (fs.existsSync(path.join(plugins, arch.name, 'BLPlatform64'))) return true;
+      }
+    }
+  } catch {
+    /* 读不到就当没有 */
+  }
+  return false;
+}
+
+/**
+ * 结合 config.ini 与文件层证据判定一个客户端目录到底是哪个渠道。
+ *
+ * 返回 { channel, evidence }：
+ *   channel  '' = 认不出来；'official'/'bilibili'/'global' = 认出来的渠道
+ *   evidence 'config'        = 只有 ini 声明
+ *           'config+sdk'     = ini 说 B服，且目录里确实有 B服渠道 SDK（真 B服）
+ *           'config-conflict'= ini 说 B服，但没有渠道 SDK —— 说明 ini 被第三方
+ *                            切换器改过，这份客户端本体其实是官服
+ *
+ * 2026-11-17 新增（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+ * 第三方三服切换器会把官服目录的 config.ini 改成 cps=bilibili，于是官服本体
+ * 被判成 B服，自动扫描就把官服路径写进了 B服 那一行 —— 两个渠道共用一个目录。
+ * 有了这层「文件层」复核，同一份官服本体无论 ini 被改成什么样，都只会算官服。
+ */
+function resolveChannelFromRoot(root) {
+  const dir = String(root || '');
+  if (!dir) return { channel: '', evidence: 'none' };
+  const config = readClientConfig(dir);
+  if (!config) return { channel: '', evidence: 'none' };
+  const declared = classifyIni(config.fields);
+  if (declared !== 'bilibili') {
+    return { channel: declared, evidence: declared ? 'config' : 'none' };
+  }
+  if (hasBilibiliChannelSdk(dir)) return { channel: 'bilibili', evidence: 'config+sdk' };
+  // ini 说 B服但没有渠道 SDK：这份客户端本体不是 B服
+  return { channel: 'official', evidence: 'config-conflict' };
 }
 
 /** 读某个客户端目录里的 config.ini；读不到返回 null。 */
@@ -204,4 +291,6 @@ module.exports = {
   pathChannelHint,
   channelFromInstallPath,
   channelLabel,
+  hasBilibiliChannelSdk,
+  resolveChannelFromRoot,
 };

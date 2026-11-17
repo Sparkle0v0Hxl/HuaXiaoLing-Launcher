@@ -105,8 +105,14 @@ const GAME_CHANNEL_CAPS = {
      *     两份清单（game 1.42GB + asb 35.27GB）都能正常下载并 zstd 解码。
      *   · B服确实没有：三个 B服 launcher（umfgRO5gh5 / 6P5gHMNyK3 / xV0f4r1GT0）
      *     下都查不到崩坏3 —— B服走 B站自有启动器，不在 HoYoPlay 分发体系里。
-     * 所以 download / repair / update / predownload 现在官服 + 国际服都通，
-     * B服只剩 link（硬链接是纯本地文件操作，不依赖远端清单）。
+     *     2026-11-17 补测 getGameChannelSDKs：原神 / 星铁 / 绝区零 三个 B服
+     *     launcher 都能拿到 84MB 的渠道 SDK，**崩坏3 拿不到**（invalid params）。
+     * 所以 download / repair / update / predownload 现在官服 + 国际服都通。
+     *
+     * link 保留 B服：硬链接本身是纯本地文件操作，不依赖远端清单 ——
+     * 拿官服本体铺一份目录出来不需要任何远端接口。缺的是 B站渠道件
+     * （装不进来，B站不发），所以那个目录得配合 B站自己的客户端用，
+     * 点「生成」时后端会明确说「官方没给这个游戏发 B服渠道 SDK」。
      */
     link: CH_BH3,
     download: ['official', 'global'],

@@ -217,11 +217,80 @@ const MUST_COPY_ROOT_FILES = [
   'marquee_config.bin',
 ];
 
+/*
+ * 硬链接例外白名单（2026-11-17 用户报障「转换 WeGame 端怎么占那么大」查出来的）。
+ *
+ * 鸣潮的客户端资源实际放在 `Client\Saved\Resources\`（pak 分块 + 视频，官方版本体
+ * 里这一块就 48 GB）。而相对路径里带 'saved' 段，会命中 MUTABLE_DIR_SEGMENTS，
+ * 结果整棵 48 GB 被**拷贝**而不是硬链接 —— 转换一次就多占 48 GB，
+ * 「硬链接本来只该多占几 MB」的前提整个不成立。
+ *
+ * 这些 pak 是只读的（游戏按 pak 只读挂载，不会就地改写），共享 inode 没有污染风险，
+ * 所以给一份例外白名单，让它们走硬链接。
+ *
+ * 例外里仍要拷贝的：还在下载/临时状态的pak（.kuro-tmp 之类），
+ * 内容随时会变，链过去等于两个渠道互相写坏。
+ */
+const HARDLINK_ALLOW_PREFIXES = [
+  'client/saved/resources',
+  'starrail_data/persistent/audio',
+  /* 其它几款米哈游客户端如果也是 Persistent/Audio 布局，段名兜底见 isHardlinkAllowed 的第二段判据 */
+];
+/* 白名单里只放只读扩展名：.pak/.sig 是官方资源分块与签名，.pck/.hash 是语音包与校验；
+ * .txt/.json 挂载表仍按可写处理。 */
+const HARDLINK_ALLOW_EXTS = [
+  '.pak',
+  '.sig',
+  '.pck',
+  '.hash',
+];
+const HARDLINK_ALLOW_BLOCK_SUFFIXES = [
+  '.kuro-tmp',
+  '.tmp',
+  '.part',
+  '.partial',
+  '.download',
+  '.crdownload',
+];
+
+function isHardlinkAllowed(relLower, baseName) {
+  const lower = String(baseName || '').toLowerCase();
+  for (const suffix of HARDLINK_ALLOW_BLOCK_SUFFIXES) {
+    if (lower.endsWith(suffix)) return false;
+  }
+  const ext = path.extname(lower);
+  if (HARDLINK_ALLOW_EXTS.indexOf(ext) < 0) return false;
+  for (const prefix of HARDLINK_ALLOW_PREFIXES) {
+    if (relLower === prefix || relLower.startsWith(`${prefix}/`)) return true;
+  }
+  return false;
+}
+
 function mustCopyNotLink(rel) {
   const relLower = String(rel).toLowerCase().replace(/\\/g, '/');
   const segments = relLower.split('/');
   const topDir = segments[0];
   const baseName = segments[segments.length - 1];
+
+  /*
+   * 下载中 / 临时状态的文件一律拷贝 —— 必须排在最前面，连白名单都不能放行。
+   *
+   * 2026-11-17 审查发现：这段以前只写在 isHardlinkAllowed() 内部（命中后缀就
+   * return false =「不走白名单例外」）。但白名单之外的地方仍然会掉进下面那套
+   * 通用判据，而 .kuro-tmp / .part / .partial / .download / .crdownload 这五个
+   * 后缀一个都不在 MUTABLE_EXTS 里 —— 于是非白名单路径下的临时文件照样被判
+   * 「可硬链接」。实测 Client/Content/Paks/x.pak.kuro-tmp → false（链接）。
+   *
+   * kuro-packs.js 的下载器正是在这些 temp 上 open(r+/w) + truncate 原地续传，
+   * 硬链接过去 = 两个渠道共享同一个 inode，续传会把另一侧写坏。
+   * 所以这里提到最前面：命中后缀直接 return true，后面的判据一条不看。
+   */
+  for (const suffix of HARDLINK_ALLOW_BLOCK_SUFFIXES) {
+    if (baseName.endsWith(suffix)) return true;
+  }
+
+  // 例外白名单优先：这些是只读大资源，走硬链接省几十 GB（见上面的说明）。
+  if (isHardlinkAllowed(relLower, baseName)) return false;
 
   if (segments.length <= 1) {
     if (MUST_COPY_ROOT_FILES.indexOf(relLower) >= 0) return true;
@@ -240,6 +309,114 @@ function mustCopyNotLink(rel) {
   if (MUTABLE_EXTS.indexOf(ext) >= 0) return true;
   // 老判据保留（.json / .blc 索引）
   return isMutableIndexFile(rel);
+}
+
+/**
+ * 把一个文件铺到目标路径：硬链接或拷贝。返回 'link' / 'copy'，调用方按它计数。
+ *
+ * ⚠ 这里有两个必须守住的规矩（2026-11-17 审查 + 真机复现确认）：
+ *
+ * 1）**拷贝前先断链**（rename 挪开再写）。
+ *    `fsp.copyFile(src, dest)` 对已存在的 dest 是**原地截断写**。如果 dest 是
+ *    别处的硬链接（重复生成运行时 / 增量补文件 / 上一次留下的运行时），
+ *    这一下就顺着 inode 写穿过去，把另一个渠道的文件也改成新内容。
+ *    真机复现过：other/shared.bin 从 "BBBB" 变成 "AAAA"。
+ *    overlayDirectory 一直是这么做的（先 rename 断链），这里以前漏了。
+ *
+ * 2）**link 失败不能无脑退 copy**。
+ *    link 抛 EEXIST 的语义是「目标已存在」。这时直接 copyFile 就是上面那个写穿。
+ *    所以 EEXIST 要先把目标挪开再重试 link；其它错误（跨卷 EXDEV / 权限）
+ *    才退化成拷贝，且拷贝同样要先断链。
+ */
+async function placeOneFile({ rel, full, destination, shouldCopy }) {
+  const parkAway = async () => {
+    const parked = `${destination}.hxl-old-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      await fsp.rename(destination, parked);
+      return parked;
+    } catch (error) {
+      // 目标不存在：本来就没有可写穿的 inode，直接往下写新文件。
+      if (error && error.code === 'ENOENT') return '';
+      /*
+       * 改名挪不开 = 目标存在但被占用 / ACL 没权限（官方安装器用管理员身份写的文件，
+       * 普通用户没有 DELETE 权限）。**绝不退回原地覆盖写** —— 目标多半是硬链接，
+       * copyFile 会写穿到基础客户端，硬链接架构下不可逆。
+       */
+      throw new Error(
+        `无法替换 ${rel}：目标被其它进程占用或权限不足（${String(error && error.message ? error.message : error)}）。` +
+        '为避免沿硬链接写穿其它渠道的客户端，已拒绝原地覆盖写，请关闭占用该文件的程序后重试。'
+      );
+    }
+  };
+
+  const dropParked = async (parked) => {
+    if (!parked) return;
+    try {
+      await fsp.rm(parked, { force: true });
+    } catch {
+      // 清不掉（ACL 挡着）不中断整次操作：残留的是整份旧文件，记日志事后清
+      console.warn(`[runtime] 旧文件清理失败，残留 ${parked}`);
+    }
+  };
+
+  if (shouldCopy) {
+    const parked = await parkAway();
+    try {
+      await fsp.copyFile(full, destination);
+    } catch (error) {
+      // 拷贝失败要把原件搬回去，否则目标路径上就缺了这个文件
+      if (parked) {
+        try { await fsp.rename(parked, destination); } catch { /* 搬不回，错误信息里带上路径 */ }
+      }
+      throw new Error(`无法创建 ${rel}：${error.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
+    }
+    await dropParked(parked);
+    return 'copy';
+  }
+
+  // 先试硬链接（目标不存在时最省事、零拷贝）
+  try {
+    await fsp.link(full, destination);
+    return 'link';
+  } catch (error) {
+    const code = error && error.code;
+    if (code !== 'EEXIST') {
+      /*
+       * 跨卷 / 权限 / 文件系统不支持硬链接：退化成拷贝。
+       * 拷贝前同样要断链（目标可能存在，也可能是上次残留的硬链接）。
+       */
+      const parked = await parkAway();
+      try {
+        await fsp.copyFile(full, destination);
+      } catch (e2) {
+        if (parked) {
+          try { await fsp.rename(parked, destination); } catch { /* 同上 */ }
+        }
+        throw new Error(`无法创建 ${rel}：${e2.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
+      }
+      await dropParked(parked);
+      return 'copy';
+    }
+    // EEXIST：目标已存在。断链后重试链接，绝不直接 copyFile（那会写穿）。
+    const parked = await parkAway();
+    try {
+      await fsp.link(full, destination);
+    } catch (error2) {
+      // 断链后仍链不上（跨卷等）：这次才是合法的拷贝时机
+      try {
+        await fsp.copyFile(full, destination);
+      } catch (e3) {
+        if (parked) {
+          try { await fsp.rename(parked, destination); } catch { /* 同上 */ }
+        }
+        throw new Error(`无法创建 ${rel}：${e3.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
+      }
+      await dropParked(parked);
+      return 'copy';
+    }
+    await dropParked(parked);
+    return 'link';
+  }
 }
 
 async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, signal, copyDirs = [] }) {
@@ -303,22 +480,14 @@ async function hardlinkTree({ sourceRoot, targetRoot, onProgress = () => {}, sig
       copyPrefixes.some((prefix) => relLower === prefix || relLower.startsWith(`${prefix}/`)) ||
       copyPrefixes.indexOf(topDir) >= 0 ||
       mustCopyNotLink(file.rel);
-    try {
-      if (shouldCopy) {
-        await fsp.copyFile(file.full, destination);
-        copied += 1;
-      } else {
-        await fsp.link(file.full, destination);
-        linked += 1;
-      }
-    } catch {
-      try {
-        await fsp.copyFile(file.full, destination);
-        copied += 1;
-      } catch (error) {
-        throw new Error(`无法创建 ${file.rel}：${error.message}`);
-      }
-    }
+    const placed = await placeOneFile({
+      rel: file.rel,
+      full: file.full,
+      destination,
+      shouldCopy,
+    });
+    if (placed === 'copy') copied += 1;
+    else linked += 1;
     processed += 1;
     bytesDone += Number(file.size) || 0;
     const now = Date.now();

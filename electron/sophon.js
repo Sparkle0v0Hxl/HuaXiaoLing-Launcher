@@ -940,13 +940,22 @@ async function fetchChunk(chunk, prefix, chunkCacheDir, signal) {
 }
 
 async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal) {
-  if (!info || !info.launcher || !info.game) return '';
+  if (!info || !info.launcher || !info.game) {
+    throw new Error('这个渠道没有官方渠道 SDK 配置，装不了 B服渠道件');
+  }
   const query =
     `getGameChannelSDKs?launcher_id=${info.launcher}&language=zh-cn&channel=14&sub_channel=0` +
     `&game_ids[]=${info.game}`;
   const data = await fetchJson(`${API.cn}/${query}`);
   const sdk = (data.game_channel_sdks || [])[0];
-  if (!sdk || !sdk.channel_sdk_pkg) return '';
+  if (!sdk || !sdk.channel_sdk_pkg) {
+    /*
+     * 2026-11-17：以前这里静默返回空串，接着照样写一份 cps=bilibili 的
+     * config.ini —— 结果生成出一个「说是 B服、其实没有 B站渠道件」的目录，
+     * 启动会失败，界面还显示绿灯。以后宁可当场报错，让用户知道没装成。
+     */
+    throw new Error('官方没给这个游戏发 B服渠道 SDK，装不了 B服渠道件');
+  }
   const pkg = sdk.channel_sdk_pkg;
   const fileName = path.basename(new URL(pkg.url).pathname) || 'channel-sdk.zip';
   await fsp.mkdir(cacheDir, { recursive: true });
@@ -1171,6 +1180,15 @@ async function prepareBilibiliRuntime({
       }),
   });
   const info = CHANNELS[gameKey].bilibili;
+  if (!info) {
+    /*
+     * 2026-11-17：崩坏3 官方没有 B服渠道（HoYoPlay 三个 B服 launcher 下都查不到
+     * bh3 —— B服走 B站自有启动器）。以前这里是 undefined 传给 installChannelSdk，
+     * 它静默返回空串，接着照样写一份 cps=bilibili 的 config.ini，
+     * 生成出一个「说是 B服、其实没有渠道件」的目录。现在当场报错。
+     */
+    throw new Error('崩坏3 官方没有 B服渠道（B服走 B站自有启动器），没法用官服生成 B服');
+  }
   const sdkVersion = await installChannelSdk(info, targetRoot, cacheDir, onProgress, signal);
   const tag = readGameVersion(baseRoot) || '0.0.0';
   await writeFileIsolated(
@@ -1477,6 +1495,25 @@ async function prepareSophon({
       } catch {
         /* target may not exist */
       }
+      /*
+       * 这条链**故意**不看 runtime.mustCopyNotLink()，与 hardlinkTree 的口径不同。
+       *
+       * 2026-11-17 实测过本机星铁官服 ↔ 国际服：两边同名 11931 个文件里，有 411 个
+       * / 12.14 GB 是「mustCopyNotLink 说要拷贝、实际共享了 inode」的 —— 350 个是
+       * Persistent/Audio 下的语音包 .pck（12.05 GB），其余 61 个 / 380 MB 是
+       * RawConfig/*.dat、Plugins/*.dat、il2cpp_data/*.dat、boot.config 这类只读资源。
+       *
+       * 判据是 mtime：这 411 个文件的 mtime 全部落在官方更新写入的时刻
+       * （2026-04-19 / 06-01 / 08-26 / 09-28 / 11-11 02:4x~02:5x），
+       * 最近 3 天内被写过的是 **0 个** → 游戏运行时不会就地改写它们。
+       * 反过来说，凡是真会被改写的（config.ini / 存档 / 日志 / 缓存）本来就不在 pkg
+       * 清单里、走不到这条链；而更新要覆盖某个文件时，走的是下面的 openForWrite()，
+       * 它先 unlink/rename 断链再写，绝不顺着 inode 改基础客户端。
+       *
+       * 所以这里按「只读资源可以共享」放行。如果哪天接上 mustCopyNotLink，
+       * 代价是每次跨服生成都真拷贝这 12.14 GB —— 正是用户抱怨的「占盘太大」。
+       * 语音包已在 runtime.js 的 HARDLINK_ALLOW_* 白名单里显式登记，两处口径一致。
+       */
       try {
         await fsp.link(source, target);
       } catch {

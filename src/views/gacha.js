@@ -2261,6 +2261,18 @@ function openGachaSyncMenu() {
 function gachaManualUrlModal(gameKey) {
   const selection = gachaEnsureSelection();
   const gameName = selection?.game?.name || gameKey || "当前游戏";
+  /*
+   * 鸣潮的链接长法和米哈游完全不一样（没有 getGachaLog / authkey，
+   * 是 aki-gm-resources.aki-game 域名 + aki/gacha 路径），
+   * 沿用米哈游的示例等于教用户粘一条必然被拒的链接。
+   */
+  const isKuroModal = (gameKey || selection?.game?.key || state.gachaGameKey || "") === "wutheringwaves";
+  const linkPlaceholder = isKuroModal
+    ? "https://aki-gm-resources.aki-game.net/aki/gacha/index.html#/record?player_id=..."
+    : "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey_ver=1&...";
+  const linkHint = isKuroModal
+    ? "在鸣潮里打开抽卡记录页，点右上角「分享」→ 选「复制链接」，把整条链接粘到这里。"
+    : "在浏览器里打开官方抽卡记录页，按 F12 → Network → 找 getGachaLog 请求 → 右键 Copy → Copy link address。";
   openModal(
     [
       '<div class="modal-backdrop" data-backdrop>',
@@ -2274,9 +2286,9 @@ function gachaManualUrlModal(gameKey) {
       '    <div class="modal-body">',
       '      <label class="field">',
       '        <span>抽卡链接</span>',
-      '        <textarea id="gacha-manual-url" rows="4" placeholder="https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey_ver=1&amp;..." style="font-family:var(--font-mono, ui-monospace, monospace);font-size:12px;word-break:break-all"></textarea>',
+      '        <textarea id="gacha-manual-url" rows="4" placeholder="' + esc(linkPlaceholder) + '" style="font-family:var(--font-mono, ui-monospace, monospace);font-size:12px;word-break:break-all"></textarea>',
       "      </label>",
-      '      <p class="form-hint">在浏览器里打开官方抽卡记录页，按 F12 → Network → 找 getGachaLog 请求 → 右键 Copy → Copy link address。</p>',
+      '      <p class="form-hint">' + esc(linkHint) + "</p>",
       '      <div class="field-error" id="gacha-manual-error"></div>',
       "    </div>",
       '    <div class="modal-foot">',
@@ -2300,7 +2312,24 @@ function gachaManualUrlModal(gameKey) {
       errorBox.textContent = "先把抽卡链接粘进来";
       return;
     }
-    if (!/^https?:\/\//i.test(value) || !value.includes("authkey=")) {
+    /*
+     * 校验按游戏分流。
+     *
+     * authkey= 是米哈游（原神 / 星铁 / 绝区零）的口径；鸣潮走的是「分享链接」，
+     * 链接里根本没有 authkey，只有 aki-gm-resources.aki-game 域名 + aki/gacha 路径。
+     * 以前这里一刀切要求 authkey=，等于鸣潮用户粘自己的分享链接 100% 被拒。
+     *
+     * 鸣潮这边放宽：只要是 http(s) 链接且带 aki（域名或路径任一）就算数，
+     * 免得国际服/国服域名变体（.net / .com / -oversea）被误杀。
+     */
+    const effectiveKey = gameKey || selection?.game?.key || state.gachaGameKey || "";
+    const isKuro = effectiveKey === "wutheringwaves";
+    if (isKuro) {
+      if (!/^https?:\/\//i.test(value) || !/aki/i.test(value)) {
+        errorBox.textContent = "这不是一条鸣潮抽卡分享链接 —— 应该带 aki-gm-resources.aki-game 域名";
+        return;
+      }
+    } else if (!/^https?:\/\//i.test(value) || !value.includes("authkey=")) {
       errorBox.textContent = "这不是一条抽卡链接 —— 里面应该带 authkey= 参数";
       return;
     }

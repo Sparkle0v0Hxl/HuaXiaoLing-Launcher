@@ -244,6 +244,66 @@ function installMiscIpc(ctx) {
       };
     });
 
+    /*
+     * 2026-11-17 修 bug 3（转换后回填 WeGame 服务器行）。
+     *
+     * 做什么：把鸣潮 game 的「WeGame」渠道行的 server.path / server.root 填上，
+     * 并标记 confirmed = true，让界面点「WeGame 版」不再是空的。
+     *
+     * 定位主程序：WeGame 版鸣潮的 UE 主程序与官服同构，
+     *   `<WeGame根>\Client\Binaries\Win64\Client-Win64-Shipping.exe`
+     * （与 main.js 的 wuwaExeAt 一致：根目录的 Wuthering Waves.exe 只是启动壳）。
+     * server.root 填 WeGame 本体根（那棵含 Client/ 的鸣潮目录）。
+     *
+     * 找不到行 / 拿不到 store 时静默跳过：回填失败不应该让已经做完的转换报错。
+     */
+    const backfillWeGameServerRow = async (wegameRoot) => {
+      try {
+        if (typeof getStore !== 'function' || typeof pushState !== 'function') return false;
+        const root = String(wegameRoot || '').trim();
+        if (!root) return false;
+        const store = getStore();
+        const game = (store?.data?.games || []).find((item) => item.builtinKey === 'wutheringwaves');
+        if (!game) return false;
+        const servers = Array.isArray(game.servers) ? game.servers : [];
+        const server = servers.find((item) => String(item.channel || '') === 'wegame');
+        if (!server) return false;
+        /*
+         * 2026-11-17 审查（rev-wuwa B2）：这里原来无条件覆盖 —— 只要点一次「转换」，
+         * 就把用户手填过的 WeGame 路径（可能是另一个安装位）改成当前这次的目标目录，
+         * 还顺手把 confirmed 置 true。
+         *
+         * 现在只在这一行还没有可用路径时才回填：
+         *   · 已经指着一个真实存在的 exe → 尊重用户/历史，不动；
+         *   · 空着，或指着已经不存在的位置 → 才写。
+         * 这样「转换成功但界面没有这一行」（用户删过 WeGame 行的情况）能补回，
+         * 而不会把用户手选的目录顶掉。
+         */
+        const hadPath = Boolean(server.path && fs.existsSync(server.path));
+        if (hadPath) return false;
+        // 主程序路径：优先用真实存在的 exe；不存在也照样写期望路径
+        // （转换刚完成时文件必然在，但 WeGame 自己搬过目录时可能需要重算）。
+        const exe = wuwaExeAt(root)
+          || path.join(root, 'Client', 'Binaries', 'Win64', 'Client-Win64-Shipping.exe');
+        server.path = exe;
+        server.root = root;
+        server.confirmed = true;
+        server.incomplete = false;
+        server.unavailable = false;
+        if (!server.packPath) server.packPath = exe;
+        if (game.activeServerId === server.id) {
+          game.target = exe;
+          game.workDir = root;
+        }
+        await store.saveNow();
+        pushState(true);
+        return true;
+      } catch (error) {
+        console.warn('[misc-ipc] WeGame 服务器行回填失败：', error && error.message);
+        return false;
+      }
+    };
+
     ipcMain.handle('wegame:wuwa-convert', async (_event, input) => {
       const sourceRoot = String(input?.sourceRoot || '').trim();
       const targetRoot = String(input?.targetRoot || '').trim();
@@ -271,6 +331,8 @@ function installMiscIpc(ctx) {
         // WeGame 版已经装好（rail_apps 里有完整主程序）：不再往里硬链覆盖，
         // 否则会把它自己的渠道件冲掉（用户 m28159「我wegame端下好能启动了」）。
         const alreadyDone = { jobId: crypto.randomUUID(), ok: true, already: true, phase: 'done' };
+        // 已经是装好的 WeGame 版：同样回填服务器行（否则这一行永远空着）。
+        await backfillWeGameServerRow(targetRoot);
         send('link:progress', { gameId: 'builtin-wutheringwaves', ...alreadyDone });
         send('link:done', { gameId: 'builtin-wutheringwaves', ...alreadyDone });
         return { ok: true, already: true, message: 'WeGame 版已经装好并能启动，不需要再转换' };
@@ -292,12 +354,40 @@ function installMiscIpc(ctx) {
             'launcherDownload',
             'launcherDownloadConfig',
             'Client/Config',
-            'Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland/KRSDKRes',
+            /*
+             * 2026-11-17 修 bug 2（渠道身份）：
+             * 渠道身份写在
+             *   Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland/KRSDKRes/KRSDKConfig.json
+             * （官服 KR_ChannelId=19 / B服 46 / KR_AppId=com.kurogame.mingchao.bilibili）。
+             * 原来只把 KRSDKRes 整棵拷贝，而 ThirdParty 下别的 SDK 二进制
+             * （KRSDK.dll / KRSDKExternal.exe 等）仍然是硬链 —— 硬链共享 inode，
+             * WeGame 目录里就可能带着官服渠道身份的 SDK。
+             *
+             * 修法：改成**整棵 ThirdParty SDK 目录**拷贝，渠道身份文件必然在其中。
+             * 代价：ThirdParty 整棵实测约 800 MB 量级，转换多占一份磁盘、
+             * 多花一点时间；换来的是「WeGame 目录里绝不会有官服渠道身份件」。
+             * 国际服目录名是 KrPcSdk_Global（不是 Mainland），一并列上更保险
+             * （WeGame 转换目前只对官服/B服，但以后放宽也不用再改这里）。
+             */
+            'Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland',
+            'Client/Binaries/Win64/ThirdParty/KrPcSdk_Global',
             '.quality',
             'wesight',
             'crashsight_data',
           ],
         });
+        /*
+         * 2026-11-17 修 bug 3：转换完成后回填鸣潮的 WeGame 服务器行。
+         * 以前只发 link:progress / link:done，从不回填 —— WeGame 行的
+         * server.path / server.root 恒空，界面点「WeGame 版」永远像没配好。
+         *
+         * 回填内容：
+         *   server.path = WeGame 目录里的主程序（Client\Binaries\Win64\Client-Win64-Shipping.exe）
+         *   server.root = WeGame 本体根（exe 往上一层的客户端根，即 WeGameApps 下那棵鸣潮目录）
+         *   confirmed = true（用户不再需要手工选路径）
+         * 代价：多一次 saveNow + pushState（写盘一次、推一次全量状态），可忽略。
+         */
+        await backfillWeGameServerRow(targetRoot);
         const done = { jobId, ok: true, ...result, phase: 'done' };
         // 任务面板只认 link:progress 的 done 帧（src/app.js 的 onLinkProgress
         // 在 phase==='done' 时 setTaskState(null)）。以前只发 link:done，弹窗

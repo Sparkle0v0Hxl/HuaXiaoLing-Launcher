@@ -33,6 +33,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const minisign = require('../../electron/minisign');
 
 const OWNER = 'SparkleHxl';
 const REPO = 'hxl-update';
@@ -110,6 +111,17 @@ async function attach(releaseId, filePath, label) {
   const deltaFiles = deltas.map((d) => path.join(BUILD, `delta-${d.from}-to-${d.to}.zip`));
   for (const f of deltaFiles) if (!fs.existsSync(f)) die('清单声明了增量包但找不到: ' + f);
 
+  /*
+   * Gitee 附件单个文件上限 100 MB（实测：传 164.9 MB 的 Setup.exe 报
+   * 「验证失败：文件大小已超出限制：100 MB」）。
+   * 所以完整安装包/便携包传不上去，只有增量包（几十 KB）能挂附件。
+   * 超过上限的包改成在正文里给出镜像直链 —— 用户照样能在 Gitee 页面上点开下载，
+   * 只是走镜像站而不是 Gitee 附件。
+   */
+  const GITEE_ASSET_LIMIT = 100 * 1024 * 1024;
+  const tooBig = (file) => fs.statSync(file).size > GITEE_ASSET_LIMIT;
+  const inlineOnly = [setup, zip, ...deltaFiles].filter(tooBig);
+
   const notes = String(manifest.notes || '').split('\n').filter(Boolean);
   const body = [
     `## 花筱灵启动器 ${VER}`,
@@ -124,10 +136,18 @@ async function attach(releaseId, filePath, label) {
     ...deltas.map((d) => `- 增量包：\`delta-${d.from}-to-${d.to}.zip\`（${(d.size / 1048576).toFixed(2)} MB）—— 启动器自动用，不用手动下`),
     `- 更新清单：\`latest.json\``,
     '',
+    ...(inlineOnly.length
+      ? [
+          '> Gitee 附件单个文件上限 100 MB，完整安装包与便携包放不下，改用下面这个镜像直链下载（同一个文件，同一份校验值）：',
+          '',
+          ...inlineOnly.map((f) => `- \`${path.basename(f)}\` → ${MIRROR}${manifest.url.replace(/[^/]+$/, path.basename(f))}`),
+          '',
+        ]
+      : []),
     `SHA-256（便携包）：\`${manifest.sha256 || ''}\``,
     '',
     '### 手动更新',
-    '旧版本可以直接下载本发布页的文件覆盖；也可以把 latest.json 地址填到启动器「设置 → 启动器更新 → 更新源」。',
+    '旧版本可以直接下载上面的文件覆盖；也可以把 latest.json 地址填到启动器「设置 → 启动器更新 → 更新源」。',
     '',
     '---',
     '感谢 **Starward** 与 **XelLauncher** 两个开源项目。',
@@ -165,14 +185,18 @@ async function attach(releaseId, filePath, label) {
   });
   console.log(`\n发布页已建  ${rel && rel.html_url ? rel.html_url : ''}`);
 
-  // 3. 传附件（先大包后小包；清单也传一份，客户端可直接从发布页读）
-  await attach(rel.id, setup);
-  await attach(rel.id, zip);
-  for (const f of deltaFiles) await attach(rel.id, f);
+  // 3. 传附件（超过 100 MB 的只留正文直链，不挂附件）
+  for (const f of [setup, zip, ...deltaFiles]) {
+    if (tooBig(f)) {
+      console.log(`  · ${path.basename(f)} 超过 100 MB，改用正文里的镜像直链`);
+      continue;
+    }
+    await attach(rel.id, f);
+  }
   await attach(rel.id, MANIFEST);
 
   // 4. 把清单也写成仓库根的 latest.json（这份带镜像前缀，给 Gitee 源用）
-  const giteeManifest = { ...manifest };
+  let giteeManifest = { ...manifest };
   const url = String(giteeManifest.url || '');
   if (url && !url.startsWith(MIRROR)) giteeManifest.url = MIRROR + url;
   if (Array.isArray(giteeManifest.deltas)) {
@@ -181,6 +205,20 @@ async function attach(releaseId, filePath, label) {
       return u && !u.startsWith(MIRROR) ? { ...d, url: MIRROR + u } : d;
     });
   }
+  /*
+   * ★2026-11-17（审查 rev-release 后）：deltas[].url 现在**在签名载荷内**，
+   *   上面把 delta 的 url 改成镜像前缀之后，原签名必然失配 ——
+   *   客户端（updater.js「有签名就必须验过」）会直接拒绝这份清单，国内用户全掉更新。
+   *   所以提交前必须重签；没有私钥就中止，绝不把失效签名推上去。
+   */
+  const hadSig = Boolean(manifest && manifest.sig && manifest.sig.value);
+  const keyFile = (process.env.HXL_UPDATE_KEY || 'H:\\HXL-pack\\keys\\update-signing.pem').trim();
+  const resigned = minisign.signManifestWithKeyFile(giteeManifest, keyFile);
+  if (!resigned && hadSig) {
+    console.error('✗ 镜像清单改写 url 后需要重新签名，但找不到私钥：' + keyFile);
+    process.exit(1);
+  }
+  if (resigned) giteeManifest = resigned;
   const text = JSON.stringify(giteeManifest, null, 2);
   const current = await api('GET', `/contents/latest.json?ref=${BRANCH}`);
   const sha = current && current.sha;
@@ -198,9 +236,7 @@ async function attach(releaseId, filePath, label) {
   const mine = (after || []).find((r) => r && r.tag_name === TAG);
   const names = ((mine && mine.assets) || []).map((a) => a.name);
   const want = [
-    `HuaXiaoLing-${VER}-Setup.exe`,
-    `HuaXiaoLing-${VER}-Portable.zip`,
-    ...deltaFiles.map((f) => path.basename(f)),
+    ...[setup, zip, ...deltaFiles].filter((f) => !tooBig(f)).map((f) => path.basename(f)),
     'latest.json',
   ];
   const missing = want.filter((n) => !names.includes(n));

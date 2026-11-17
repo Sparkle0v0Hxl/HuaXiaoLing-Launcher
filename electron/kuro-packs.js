@@ -99,6 +99,18 @@ function isKuroChannel(channel) {
   return Object.prototype.hasOwnProperty.call(KURO_PROFILES, String(channel || ''));
 }
 
+/**
+ * 渠道找不到时的报错。WeGame 版要单独说清楚：它没有库洛官方清单，
+ * 只能在 WeGame 商店里下，不能在启动器里下载。
+ */
+function noKuroChannelError(channel) {
+  const key = String(channel || '');
+  if (key === 'wegame') {
+    return new Error('WeGame 版没有库洛官方清单，请在 WeGame 商店里下载并更新；启动器只负责官服 / B服 / 国际服客户端');
+  }
+  return new Error(`没有对应的鸣潮渠道（${key || '(空)'}）`);
+}
+
 function profileFor(channel) {
   const key = String(channel || '');
   return Object.prototype.hasOwnProperty.call(KURO_PROFILES, key) ? KURO_PROFILES[key] : null;
@@ -187,7 +199,7 @@ async function fetchText(url, { timeoutMs = API_TIMEOUT_MS } = {}) {
  */
 async function loadIndex(profile) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const hosts = [target.indexHost, ...INDEX_HOST_BACKUPS];
   let lastError = null;
   for (const host of hosts) {
@@ -225,7 +237,7 @@ async function loadIndex(profile) {
  */
 async function loadManifest(profile, indexInfo, { verifyMd5 = true } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const url = buildDownloadUrl(indexInfo.cdnUrl, '', indexInfo.indexFile);
   const attempt = async () => {
     const body = JSON.parse(await fetchText(url, { timeoutMs: 10 * 60 * 1000 }));
@@ -315,9 +327,9 @@ function bundleIndexUrl(target) {
  */
 async function loadBundleIndex(profile) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const url = bundleIndexUrl(target);
-  if (!url) throw new Error('没有对应的鸣潮渠道');
+  if (!url) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const hosts = [target.indexHost, ...INDEX_HOST_BACKUPS];
   let lastError = null;
   for (const host of hosts) {
@@ -368,7 +380,7 @@ async function loadBundleIndex(profile) {
  */
 async function loadBundleManifest(profile, indexInfo) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const cdnUrl = indexInfo.cdnUrl;
   if (!cdnUrl) throw new Error('库洛清单没有可用的 CDN 域名');
   const names = Array.isArray(indexInfo.packNames) && indexInfo.packNames.length ? indexInfo.packNames : ['common', 'hd'];
@@ -805,7 +817,7 @@ async function writeLauncherConfig({ installRoot, channel, version, bundle = BUN
  */
 async function installGame({ profile, installRoot, signal, onProgress } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
   if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
 
@@ -883,7 +895,7 @@ async function installGame({ profile, installRoot, signal, onProgress } = {}) {
  */
 async function updateGame({ profile, installRoot, allowDelete = false, fullVerify = false, signal, onProgress } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
   if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
 
@@ -1014,7 +1026,7 @@ async function updateGame({ profile, installRoot, allowDelete = false, fullVerif
 /** 只读预演：算「这次会下多少」，不下载不删除不写盘。 */
 async function planForGame({ profile, installRoot, fullVerify = false } = {}) {
   const target = profileFor(profile && profile.channel ? profile.channel : profile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(profile && profile.channel ? profile.channel : profile);
   const root = path.resolve(String(installRoot || ''));
   if (!root || root === path.parse(root).root) throw new Error('请先选择一个安装目录');
   const localConfig = await readGameConfig(root);
@@ -1061,20 +1073,47 @@ async function planForGame({ profile, installRoot, fullVerify = false } = {}) {
  * 判据宁可多拷贝：命中的都是小文件，错判的代价是几 MB 盘；
  * 而漏判一次就是整个客户端状态被就地改写、修不回来。
  */
-const KURO_MUST_COPY_DIRS = [
+/*
+ * 「必须拷贝」的路径段白名单（大小写不敏感）。
+ *
+ * 2026-11-17 修正：以前这里用的是「相对路径整段前缀相等」，而实际相对路径是
+ * `client/binaries/win64/thirdparty/krpcsdk_mainland/krsdkres/...`，
+ * 永远不以 `kr_sdkres/` 开头 → 这条闸形同虚设，KRSDKRes 里的 cef.pak / libcef.dll
+ * 仍然被硬链共享 inode。
+ *
+ * 现在改成「路径中任意一段整段相等」：relLower.split('/') 之后 includes(seg)。
+ * 代价：白名单段名出现在任何位置都会命中（例如别处有个叫 bilibili 的目录）。
+ * 这是可接受的 —— 这些段名都是鸣潮 SDK 的专有名，误伤概率极低；
+ * 而漏判一次就是渠道身份文件被就地共享、污染不可逆。
+ */
+const KURO_MUST_COPY_SEGMENTS = [
   'launcherdownload',
   'launcherdownloadconfig',
-  'client/config',
-  'client/config/kuro',
   '.quality',
   'wesight',
   'crashsight_data',
-  'kr_sdkres',
+  // 渠道身份真正的落点（实测 2026-11-17）：
+  //   Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland/KRSDKRes/KRSDKConfig.json
+  //   （KR_ChannelId=19 官服 / 46 B服），以及 B服独有的 KRSDKRes/Bilibili/。
+  'krsdkres',
+  'krsdkconfig.json',
+  'bilibili',
+];
+
+/*
+ * 「必须拷贝」的多段前缀白名单：只对 client/config 这类**确知**的相对路径前缀生效。
+ * 注意 'config' 不在段名白名单里 —— 否则 client/config 下的正常文件会被误伤。
+ */
+const KURO_MUST_COPY_PREFIXES = [
+  'client/config',
+  'client/config/kuro',
 ];
 
 const KURO_MUST_COPY_NAMES = [
   'launcherdownloadconfig.json',
-  'kr_sdkconfig.json',
+  // 实测文件名是 KRSDKConfig.json（没有下划线）；以前这里写的是带下划线的
+  // 错误拼法，与真实文件名对不上，这条规则等于没有生效。
+  'krsdkconfig.json',
   'config.txt',
   'uninstall.ini',
   'cert.pem',
@@ -1093,8 +1132,20 @@ function mustCopyForCrossRuntime(rel) {
   const relLower = String(rel || '').toLowerCase().replace(/\\/g, '/');
   if (!relLower) return true;
   const base = relLower.slice(relLower.lastIndexOf('/') + 1);
-  for (const dir of KURO_MUST_COPY_DIRS) {
-    if (relLower === dir || relLower.startsWith(dir + '/')) return true;
+  // 多段前缀（确知路径）命中：client/config 等
+  for (const prefix of KURO_MUST_COPY_PREFIXES) {
+    if (relLower === prefix || relLower.startsWith(prefix + '/')) return true;
+  }
+  /*
+   * 路径段整段相等命中（2026-11-17 修 bug 1）：
+   * 判据从「路径开头前缀相等」改成「任意一段整段相等」，
+   * 这样 `client/binaries/win64/thirdparty/krpcsdk_mainland/krsdkres/...`
+   * 这种真实相对路径才真的会被拦下来（原来 kr_sdkres 这条永远命中不了）。
+   * 代价：白名单段名出现在路径任意位置都命中（宁可多拷贝，不冒渠道污染风险）。
+   */
+  const segments = relLower.split('/');
+  for (const seg of KURO_MUST_COPY_SEGMENTS) {
+    if (segments.includes(seg)) return true;
   }
   for (const name of KURO_MUST_COPY_NAMES) {
     if (base.indexOf(name) >= 0) return true;
@@ -1105,7 +1156,7 @@ function mustCopyForCrossRuntime(rel) {
 
 async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signal, onProgress } = {}) {
   const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (target.channel === 'global') {
     throw new Error('鸣潮国际服与国服内容几乎完全不同，不支持硬链接互切；请用「下载游戏」直接安装国际服');
   }
@@ -1207,13 +1258,29 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
       await fsp.link(item.src, dest);
       linked += 1;
     } catch (error) {
-      if (error && (error.code === 'EEXIST' || error.code === 'ENOENT')) {
+      if (error && error.code === 'EEXIST') {
+        /*
+         * 目标已存在（上次中断遗留，或上一轮生成留下的硬链接）。
+         *
+         * ⚠ 这里以前直接 copyFile(item.src, dest) —— 那是**原地截断写**：
+         * dest 若是上一轮从官服硬链过来的（同 inode），这一下就顺着 inode 写穿，
+         * 把官服那份也改成这次的内容。2026-11-17 同型问题已在 runtime.js 复现并修复，
+         * 这里一并对齐：先 unlink 断链再重试 link，实在链不上才拷贝（拷贝前也已断链）。
+         */
+        await fsp.unlink(dest).catch(() => {});
         try {
-          await fsp.copyFile(item.src, dest);
+          await fsp.link(item.src, dest);
           linked += 1;
         } catch {
-          /* 上次中断遗留且内容一致即可 */
+          try {
+            await fsp.copyFile(item.src, dest);
+            linked += 1;
+          } catch {
+            /* 上次中断遗留且内容一致即可 */
+          }
         }
+      } else if (error && error.code === 'ENOENT') {
+        /* 源刚被删：跳过，留给后面的下载/校验兜底 */
       } else {
         throw error;
       }
@@ -1287,7 +1354,7 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
 /** 估算官B互切的空间与下载量（确认弹窗用；global 传入直接拒绝）。 */
 async function planCrossRuntime({ sourceRoot, targetProfile } = {}) {
   const target = profileFor(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
-  if (!target) throw new Error('没有对应的鸣潮渠道');
+  if (!target) throw noKuroChannelError(targetProfile && targetProfile.channel ? targetProfile.channel : targetProfile);
   if (target.channel === 'global') {
     throw new Error('鸣潮国际服与国服内容几乎完全不同，不支持硬链接互切');
   }

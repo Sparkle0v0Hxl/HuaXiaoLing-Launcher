@@ -28,6 +28,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const minisign = require('../../electron/minisign');
 
 const OWNER = 'huahuozuikeai';
 const REPO = 'hxl-update';
@@ -64,6 +65,23 @@ function buildGitCodeManifest(manifest) {
   return out;
 }
 
+/**
+ * 改写之后重签。
+ *
+ * ★2026-11-17（审查 rev-release 后）：deltas[].url 现在**在签名载荷内**，
+ *   所以改完 url 必须重新签名，否则这份清单的 sig 必然失配 ——
+ *   客户端（updater.js「有签名就必须验过」）会直接拒绝它，国内用户全掉更新。
+ *   私钥路径沿用 sign-manifest.js 的约定：HXL_UPDATE_KEY 或
+ *   H:\HXL-pack\keys\update-signing.pem。没有私钥且原来有签名 → 返回 null，调用方必须中止。
+ */
+function reapSign(payload, hadSig) {
+  const keyFile = (process.env.HXL_UPDATE_KEY || 'H:\\HXL-pack\\keys\\update-signing.pem').trim();
+  const signed = minisign.signManifestWithKeyFile(payload, keyFile);
+  if (signed) return signed;
+  if (!hadSig) return payload; // 过渡期老清单，本来就没签名
+  return null;
+}
+
 async function api(method, urlPath, body) {
   const base = `https://api.gitcode.com/api/v5/repos/${OWNER}/${REPO}${urlPath}`;
   const sep = urlPath.includes('?') ? '&' : '?';
@@ -88,7 +106,19 @@ async function api(method, urlPath, body) {
 
 (async () => {
   const manifest = readManifest();
-  const payload = buildGitCodeManifest(manifest);
+  const mirrored = buildGitCodeManifest(manifest);
+  const hadSig = Boolean(manifest && manifest.sig && manifest.sig.value);
+  const payload = reapSign(mirrored, hadSig);
+  if (!payload) {
+    console.error('');
+    console.error('✗ 改写 url 之后需要重新签名，但找不到私钥。');
+    console.error('  私钥默认在 H:\\HXL-pack\\keys\\update-signing.pem，也可以用 HXL_UPDATE_KEY 指定。');
+    console.error('  不能把签名已失效的清单推上去 —— 客户端会直接拒绝它（updater.js「有签名就必须验过」）。');
+    process.exit(1);
+  }
+  if (hadSig && payload.sig && payload.sig.value !== manifest.sig.value) {
+    console.log('已重新签名（deltas[].url 在签名载荷内，改写后必须重签）');
+  }
   const text = JSON.stringify(payload, null, 2);
 
   console.log(`版本      ${manifest.version}`);

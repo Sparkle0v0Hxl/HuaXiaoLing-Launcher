@@ -1487,14 +1487,30 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
       await fsp.link(item.src, dest);
       linked += 1;
     } catch (error) {
-      if (error && (error.code === 'EEXIST' || error.code === 'ENOENT')) {
-        // 目标已存在（上次中断遗留）或源刚被删：都退回复制/跳过，不中断整次生成
+      if (error && error.code === 'EEXIST') {
+        /*
+         * 目标已存在（上次中断遗留，或更早一次生成留下的硬链接）。
+         *
+         * ⚠ 这里以前直接 copyFile(item.src, dest) —— 那是**原地截断写**：
+         * 如果 dest 是上一次从别的渠道硬链过来的（同一个 inode），这一下会顺着
+         * inode 写穿到另一边，把那个渠道的文件也改成这次的内容。
+         * 2026-11-17 同型问题在 runtime.js 的 hardlinkTree 里已复现修复，
+         * 这里一并对齐：先 unlink 断链，再重试 link；实在链不上才拷贝（拷贝前也已断链）。
+         */
+        await fsp.unlink(dest).catch(() => {});
         try {
-          await fsp.copyFile(item.src, dest);
+          await fsp.link(item.src, dest);
           linked += 1;
         } catch {
-          /* 目标已存在且内容一致即可，留待第 2 步之后的校验兜底 */
+          try {
+            await fsp.copyFile(item.src, dest);
+            linked += 1;
+          } catch {
+            /* 目标已存在且内容一致即可，留待第 2 步之后的校验兜底 */
+          }
         }
+      } else if (error && error.code === 'ENOENT') {
+        // 源刚被删（并发删源）：跳过，留待校验兜底，不中断整次生成
       } else {
         throw error;
       }

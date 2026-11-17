@@ -6,6 +6,16 @@
  * 2026-11-14 从 main.js 的 installIpc() 里整段搬出来（与 gacha-ipc.js 同一次重构）。
  * 拆分理由见 gacha-ipc.js 文件头：installIpc() 原本 8700 多行、225 个 IPC 全塞里面。
  *
+ * ★★★ 本文件目前是**死代码**，不要接线（2026-11-17 审查确认）★★★
+ *   · 全仓库（electron / src / scripts，含 .tmp）零处 require 本文件；
+ *   · 它注册的 16 个 channel 与 electron/gacha-ipc.js **完全重名**，
+ *     且**没有一个是本文件独有的**；
+ *   · 上游 2.11.1 官方包里同样残留着这个文件（不是我们拆分时漏删的）。
+ * 一旦有人把它接进 installIpc()，同一批 channel 会被 ipcMain.handle 注册两遍，
+ * Electron 会直接抛「Attempted to register a second handler for 'gacha:load'」
+ * —— 启动即崩。要接线必须先删掉 gacha-ipc.js 里的同名 handler，
+ * 但那样等于把抽卡 IPC 整体搬家，没有任何收益，所以保持现状 + 本注释警示。
+ *
  * 约定：只注册 handler，不持有业务状态。业务状态在 gacha-backup / gacha-meta /
  * nte-capture 各自的模块与 store.data 里。
  *

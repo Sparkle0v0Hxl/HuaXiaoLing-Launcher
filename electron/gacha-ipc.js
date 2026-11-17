@@ -122,11 +122,20 @@ function installGachaIpc(ctx) {
         if (!installRoot || !targetExists(server?.path)) {
           throw new Error('先配置鸣潮的客户端路径');
         }
+        /*
+         * 手动粘贴的分享链接。
+         *
+         * 渲染层传的是 manualUrl（和米哈游那条分支同名），历史上这里只读
+         * input.link —— 字段名对不上，渲染层也从没写过 link，于是用户粘的
+         * 链接被无声丢掉，日志没链接时只能报「没找到链接」。
+         * 两个名字都收：manualUrl 优先，link 作为兼容。
+         */
+        const manualLink = String(input?.manualUrl || input?.link || '').trim();
         try {
           return await kuroGacha.syncWuwaGacha({
             installRoot,
             userData: app.getPath('userData'),
-            manualLink: input?.link,
+            manualLink,
           });
         } catch (error) {
           if (error?.needShare) {

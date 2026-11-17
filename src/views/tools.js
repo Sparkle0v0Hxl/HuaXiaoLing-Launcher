@@ -816,7 +816,15 @@ function openPluginPermissionDialog(plugin) {
       </div>
     </div>
   </div>`, {
-    onBackdrop: () => handleAction('plugin-cancel-install', undefined, modalPlaceholder),
+    /*
+     * 点遮罩 = 取消安装。
+     *
+     * 2026-11-17 审查发现这里原来写的是 `handleAction('plugin-cancel-install', undefined, modalPlaceholder)`，
+     * 而 modalPlaceholder 全仓库从来没有定义过 → 点一下遮罩就 ReferenceError，
+     * modals.js 里 closeModal() 执行不到，弹窗关不掉、「取消并撤销」那条（含删插件文件）整个跳过。
+     * 那个分支只需要 action 名，第三参传的就是 element，这里本来就没有元素可传。
+     */
+    onBackdrop: () => handleAction('plugin-cancel-install'),
   });
 }
 

@@ -16,6 +16,25 @@ const { createCancelSignal } = require('./cancel-signal');
 // 这里的 handler 只查表，不再自己写死渠道数组（用户 2026-11-16 定的规则）。
 const gameChannels = require('./game-channels');
 
+/**
+ * 鸣潮客户端的「本体根」：主程序在 Client\Binaries\Win64 下（三层深），
+ * 本体根由根目录的 launcherDownloadConfig.json 认定。老数据里 root 常被填成
+ * exe 所在那一层，这里向上找回来（判据与 main.js 的 wuwaClientRootOf 一致）。
+ */
+function kuroClientRootOf(dirOrExe) {
+  let dir = String(dirOrExe || '').trim();
+  if (!dir) return '';
+  if (path.extname(dir).toLowerCase() === '.exe') dir = path.dirname(dir);
+  dir = path.normalize(dir);
+  for (let depth = 0; depth < 5 && dir; depth += 1) {
+    if (fs.existsSync(path.join(dir, 'launcherDownloadConfig.json'))) return dir;
+    const next = path.dirname(dir);
+    if (next === dir) break;
+    dir = next;
+  }
+  return '';
+}
+
 /*
  * 渠道体检（2026-11-16 报障）：只有这几款米哈游游戏的客户端目录里带 config.ini
  * （或者 exe 名本身能区分 YuanShen.exe / GenshinImpact.exe），判出来的渠道才可信。
@@ -331,10 +350,33 @@ function installGamesIpc(ctx) {
           writeLaunchLog(`detect ${game.builtinKey}: ${channel || '未知'} ← ${found}`);
           const detected = serverForDetected(game, channel);
           if (detected) {
-            detected.path = found;
-            detected.root = path.dirname(found);
-            detected.incomplete = false;
-            detected.unavailable = false;
+            /*
+             * 2026-11-17 审查：这里是第四条写 server.path 的路，也是唯一没有占用检查的一条
+             * （另外三处 main.js 的 discoverBuiltinServers / detectBuiltins 和本文件的
+             *  games:detect-server 都有）。「自动检测」按钮走的就是这里 —— 只要官服目录的
+             * config.ini 被第三方三服切换器改成 cps=bilibili，就会把官服路径写进 B服 行，
+             * 又变回「两个渠道共用一个目录」。
+             *
+             * 所以照 detectBuiltins 的做法补两道：
+             *   ① 非官服行的目标目录如果已经被别的渠道占到，就不写这一行；
+             *   ② root 用本体根（鸣潮主程序在三层深，用 exe 目录会落到 Client\Binaries\Win64）。
+             */
+            const foundRoot = kuroClientRootOf(found) || path.dirname(found);
+            const normTarget = String(foundRoot).replace(/[\\/]+$/, '').toLowerCase();
+            const occupied = (game.servers || []).some((item) => {
+              if (!item || item.id === detected.id || item.channel === detected.channel) return false;
+              const other = String(item.root || '').replace(/[\\/]+$/, '').toLowerCase();
+              if (!other) return false;
+              return other === normTarget || other.startsWith(`${normTarget}\\`) || other.startsWith(`${normTarget}/`);
+            });
+            if (detected.channel !== 'official' && occupied) {
+              writeLaunchLog(`detect ${game.builtinKey}: 扫到的目录已被别的渠道占用，不写入 ${detected.channel} 行 ← ${foundRoot}`);
+            } else {
+              detected.path = found;
+              detected.root = foundRoot;
+              detected.incomplete = false;
+              detected.unavailable = false;
+            }
           }
           if (detected && (!active || !activeHadPath)) {
             game.activeServerId = detected.id;
@@ -377,8 +419,34 @@ function installGamesIpc(ctx) {
           error: `没扫到${server.name}的客户端。它可能还没下载，或者装在非常规目录里 —— 可以手动选路径。`,
         };
       }
+      /*
+       * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+       * 非官服渠道不能和别的渠道共用同一个安装目录 —— 扫到的这个 exe 所在的目录
+       * 如果已经被别的渠道行占了，就不写这一行，改成提示用户「硬链接生成一份」。
+       *
+       * 鸣潮要按「本体根」比：主程序在 Client\Binaries\Win64 下（三层深），
+       * 本体根由根目录的 launcherDownloadConfig.json 认定。用 exe 目录比会
+       * 把同一个本体根的两个渠道误判成「没占用」，也拦不住真冲突。
+       */
+      const foundRoot = kuroClientRootOf(found) || path.dirname(found);
+      const target = String(foundRoot).replace(/[\\/]+$/, '').toLowerCase();
+      const shared = (game.servers || []).some((item) => {
+        if (!item || item.id === server.id || item.channel === server.channel) return false;
+        const other = String(item.root || '').replace(/[\\/]+$/, '').toLowerCase();
+        if (!other) return false;
+        return other === target || other.startsWith(`${target}\\`) || other.startsWith(`${target}/`);
+      });
+      if (server.channel !== 'official' && shared) {
+        return {
+          ok: false,
+          error: `扫到的${server.name}客户端和别的渠道装在同一个目录里（${foundRoot}）。每个渠道要一份独立目录，请点「硬链接生成一份」。`,
+        };
+      }
       server.path = found;
-      server.root = path.dirname(found);
+      // 鸣潮的本体根不是 exe 目录（主程序在 Client\Binaries\Win64 下），
+      // 靠根目录的 launcherDownloadConfig.json 认。填 exeDir 会让「点更新」
+      // 判成「不是库洛官方客户端」（2026-11-17 报障）。
+      server.root = foundRoot;
       server.incomplete = false;
       server.unavailable = false;
       await getStore().saveNow();
@@ -711,9 +779,21 @@ function installGamesIpc(ctx) {
          */
         try {
           const chosenChannel = String((activeServer && activeServer.channel) || '');
+          /*
+           * 2026-11-17：这里原来只看 config.ini（configChannelFromPath）。
+           * 但第三方三服切换器会把官服目录的 ini 改成 cps=bilibili，
+           * 于是点启动必弹「那个目录里是B服客户端，账号会串到另一个服」——纯误报。
+           *
+           * resolveChannelFromRoot 会拿渠道 SDK（BLPlatform64 / PCGameSDK.dll）复核：
+           * ini 说是 B服、目录里却没有渠道件 → 判成官服（evidence=config-conflict）。
+           * ini 只用来落日志，最终判定以它为准。
+           */
           const iniChannel = clientChannel.configChannelFromPath(target) || '';
           const hintChannel = clientChannel.pathChannelHint(target) || '';
-          const actualChannel = iniChannel || hintChannel;
+          const resolved = clientChannel.resolveChannelFromRoot
+            ? clientChannel.resolveChannelFromRoot(path.dirname(target))
+            : null;
+          const actualChannel = (resolved && resolved.channel) || iniChannel || hintChannel;
           const mismatch =
             MIHOYO_CHANNEL_KEYS.indexOf(game.builtinKey) >= 0 &&
             CHANNEL_PROBE_KEYS.indexOf(chosenChannel) >= 0 &&

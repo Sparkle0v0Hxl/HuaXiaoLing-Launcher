@@ -91,24 +91,65 @@ if (!t.includes(marker)) {
     lines.push('</details>');
     lines.push('');
     const block = lines.join('\n') + '\n\n';
-    // 锚点：紧邻的上一个版本段
+    /*
+     * 插到**最上面那个版本段**之前 —— 版本历史是新的在上、老的在下的倒序。
+     *
+     * 以前这里取「紧邻的上一版」，2026-11-17 审查发现两个问题：
+     * ①匹配出的 vers 元素自带 v（`v2.12.1`），下面又拼了一次 v → 锚点成了 `vv2.12.1`，
+     *   t.includes(anchor) 恒 false，版本段**从来没插进去过**，但脚本照样 exit 0；
+     * ②求上一版用的是 VER 在 vers 里的位置，可 VER 是这次要发的新版本、README 里当然还没有，
+     *   indexOf 返回 -1 → 退化取 vers 最后一个（最老的 v1.0.0），真插进去也会插到历史最底部。
+     * 现在改成：直接锚定 vers[0]（README 里最新的那一段），并校验锚点必须能找到。
+     */
     const vers = Array.from(new Set((t.match(/<summary><b>v([\d.]+)<\/b><\/summary>/g) || [])
-      .map((x) => x.replace(/<summary><b>/, '').replace(/<\/b><\/summary>/, ''))));
-    const cur = vers.indexOf(VER);
-    const prev = cur > 0 ? vers[cur - 1] : vers[vers.length - 1];
-    const anchor = `<details>\n<summary><b>v${prev}</b></summary>`;
+      .map((x) => x.replace(/<summary><b>v/, '').replace(/<\/b><\/summary>/, ''))));
+    if (!vers.length) die('README 里一个版本段都没找到，无法插入展开段');
+    const top = vers[0];
+    const anchor = `<details>\n<summary><b>v${top}</b></summary>`;
     if (!t.includes(anchor)) {
-      console.log(`（找不到上一版锚点 v${prev}，跳过插入展开段）`);
-    } else {
-      t = t.replace(anchor, block + anchor);
-      edits.push(`插入 v${VER} 展开段（锚点 v${prev}）`);
+      // 以前这里是「打印一行、跳过」—— 于是发版时 README 少一段也没人发现。必须让整步失败。
+      die(`找不到最新版本段的锚点（v${top}），README 结构可能变了，拒绝静默跳过`);
     }
+    t = t.replace(anchor, block + anchor);
+    edits.push(`插入 v${VER} 展开段（锚点 v${top}，插在版本历史最上方）`);
   }
 }
 
-const dCount = (t.match(/<details>/g) || []).length;
-const sCount = (t.match(/<summary>/g) || []).length;
-if (dCount !== sCount) die(`折叠结构被破坏：details ${dCount} / summary ${sCount}`);
+/*
+ * 折叠结构的完整性校验。
+ *
+ * ★2026-11-17 审查（rev-release）：原来只数裸 <details> 与 <summary> 的数量是否相等 ——
+ *   两个数字一起漂（比如同时多一个 <details open> 和一句正文里的 <summary>）就查不出来，
+ *   而且 `<details open>` 这种带属性的写法会被 `<details>` 的精确匹配漏掉。
+ * 现在做两件事：
+ *   ① 数量：`<details` 开标签（含带属性）与 `</details>` 闭合标签必须相等；
+ *   ② 配对：按出现顺序扫一遍，任何 `</details>` 出现在没有未闭合 `<details>` 之后就报错，
+ *      扫完仍有未闭合的也报错。
+ */
+const dOpen = (t.match(/<details\b/g) || []).length;
+const dClose = (t.match(/<\/details>/g) || []).length;
+const sOpen = (t.match(/<summary\b/g) || []).length;
+const sClose = (t.match(/<\/summary>/g) || []).length;
+if (dOpen !== dClose) die(`折叠结构被破坏：<details> 开 ${dOpen} / 闭 ${dClose}`);
+if (sOpen !== sClose) die(`折叠结构被破坏：<summary> 开 ${sOpen} / 闭 ${sClose}`);
+if (dOpen !== sOpen) die(`折叠结构被破坏：details ${dOpen} / summary ${sOpen}（每个 details 应当恰好配一个 summary）`);
+{
+  // 按顺序扫配对：用一个栈，遇到开标签压栈、遇到闭标签弹栈，弹不出来就是错的
+  const tagRe = /<(\/?)details\b/g;
+  const stack = [];
+  let m;
+  while ((m = tagRe.exec(t))) {
+    if (m[1] === '/') {
+      if (!stack.length) die('折叠结构被破坏：出现了多余的 </details>');
+      stack.pop();
+    } else {
+      stack.push(m.index);
+    }
+  }
+  if (stack.length) die(`折叠结构被破坏：有 ${stack.length} 个 <details> 没有闭合`);
+}
+const dCount = dOpen;
+const sCount = sOpen;
 
 for (const e of edits) console.log('  ' + e);
 if (t === before) {

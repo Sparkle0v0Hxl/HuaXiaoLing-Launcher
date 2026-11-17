@@ -80,7 +80,13 @@ function decryptElog(buffer) {
 
 /**
  * 解密 logs 目录下全部 Client*.log，拼接成一个大文本。
- * 解密结果不是合法 UTF-8 的话说明 key 换了，抛出可读错误。
+ *
+ * 解密结果不是合法 UTF-8 说明 key 换了（游戏大版本会换 ELog XOR key）。
+ * 以前这里静默回落 latin1：乱码照样拿去跑正则，可能匹出半条假的链接，
+ * 用户还完全不知道出了事。现在改成「跳过这一段 + 计数」，
+ * 整份日志都解不开时抛可读错误，让用户改用手动粘贴链接。
+ *
+ * 返回 { text, decodedSegments, skippedSegments }。
  */
 async function readLogsText(installRoot) {
   const dir = logsDir(installRoot);
@@ -93,22 +99,27 @@ async function readLogsText(installRoot) {
   const logs = entries.filter((name) => /^Client.*\.log$/i.test(name)).sort();
   if (!logs.length) throw new Error('鸣潮日志目录里没有 Client 日志文件');
   const parts = [];
+  let decodedSegments = 0;
+  let skippedSegments = 0;
   for (const name of logs) {
     const raw = await fsp.readFile(path.join(dir, name));
     let text;
     if (isEncrypted(raw)) {
       const plain = decryptElog(raw);
-      // 解密失败（key 变了）会让 UTF-8 序列碎掉
+      // 解密失败（key 变了）会让 UTF-8 序列碎掉，出现 U+FFFD。
+      // 不再回落 latin1（乱码会被当成正常文本继续匹配），直接跳过这一段。
       text = plain.toString('utf8');
       if (text.includes('\uFFFD')) {
-        text = plain.toString('latin1');
+        skippedSegments += 1;
+        continue;
       }
     } else {
       text = raw.toString('utf8');
     }
+    decodedSegments += 1;
     parts.push(text);
   }
-  return parts.join('\n');
+  return { text: parts.join('\n'), decodedSegments, skippedSegments };
 }
 
 /* ── 链接提取与解析 ─────────────────────────────────────────── */
@@ -138,7 +149,10 @@ function parseLinkParams(url) {
     serverId,
     languageCode,
     recordId,
-    oversea: url.includes('-oversea.aki-game.net'),
+    // 国际服：链接域名带 -oversea.aki-game 前缀。
+    // 之前只认 .net，但国际服还有 .com 变体（正则 LINK_RE 本来两个都收），
+    // .com 会被误判成国服 → 拿国服接口域名去查 → 查不到数据。
+    oversea: url.includes('-oversea.aki-game.net') || url.includes('-oversea.aki-game.com'),
   };
 }
 
@@ -205,23 +219,69 @@ function composeRecordId(item, seq) {
 /* ── 主入口 ─────────────────────────────────────────────────── */
 
 async function syncWuwaGacha({ installRoot, userData, onProgress, manualLink }) {
-  const text = await readLogsText(installRoot);
-  let links = extractRecordLinks(text);
-  if (manualLink && /^https:/i.test(String(manualLink))) {
-    links = [String(manualLink).trim(), ...links];
+  /*
+   * 有手动链接时，日志读不出来也不该拦住同步：日志只是「自动找链接」的来源。
+   * （本体根没配好 / 日志全解不开时，用户手动粘的链接仍然可用。）
+   */
+  let decodedSegments = 0;
+  let skippedSegments = 0;
+  let text = '';
+  if (installRoot) {
+    try {
+      const logs = await readLogsText(installRoot);
+      text = logs.text;
+      decodedSegments = logs.decodedSegments;
+      skippedSegments = logs.skippedSegments;
+    } catch (error) {
+      // 手动粘了链接就不被日志问题挡住；没粘链接时下面统一报错。
+      if (!manualLink) throw error;
+    }
   }
-  if (!links.length) {
+  let links = extractRecordLinks(text);
+  /*
+   * 用户手动粘的链接**优先**。
+   *
+   * 2026-11-17 审查发现：原来是把手动链接插在 links 头部（`[manual, ...links]`），
+   * 但下面挑链接用的是**倒序**（从末尾往前找第一条能解析的）——
+   * 于是只要日志里能提出任意一条链接，用户粘的那条永远排在最后、永远轮不到。
+   * 「字段名对不上」那次修的是值送不到，这次修的是送到了却排不上用。
+   *
+   * 现在：先单独试手动链接，解析成功就直接用；解析不了才回落日志里最新的一条。
+   * 同时把协议判据从 `/^https:/i` 放宽到 `/^https?:\/\//i`（原文案允许 http 链接）。
+   */
+  let params = null;
+  const manualText = String(manualLink || '').trim();
+  if (manualText && /^https?:\/\//i.test(manualText)) {
+    params = parseLinkParams(manualText);
+  }
+  if (!params) {
+    for (let i = links.length - 1; i >= 0; i -= 1) {
+      params = parseLinkParams(links[i]);
+      if (params) break;
+    }
+  }
+  if (!links.length && !params) {
+    /*
+     * 一条链接都没找到：分两种情况给不同的话。
+     *   - 所有日志段都解不开 → 游戏换了加密 key，只能手动粘贴链接；
+     *   - 日志解开了但里面没有链接 → 用户还没点过「分享」。
+     */
+    if (decodedSegments === 0 && skippedSegments > 0) {
+      const error = new Error(
+        '这份客户端日志解不开（游戏可能换了加密 key），请用手动粘贴链接的方式同步抽卡记录'
+      );
+      error.needShare = true;
+      error.decodedSegments = decodedSegments;
+      error.skippedSegments = skippedSegments;
+      throw error;
+    }
     const error = new Error(
       '没有在日志里找到抽卡分享链接。请先打开鸣潮 → 抽卡记录 → 点右上角「分享」→ 选「复制链接」，然后回启动器点同步（也可以直接粘贴链接）。'
     );
     error.needShare = true;
+    error.decodedSegments = decodedSegments;
+    error.skippedSegments = skippedSegments;
     throw error;
-  }
-  // 取最新一条能解析的链接（日志里可能积累多条，最新的参数最可信）
-  let params = null;
-  for (let i = links.length - 1; i >= 0; i -= 1) {
-    params = parseLinkParams(links[i]);
-    if (params) break;
   }
   if (!params) throw new Error('抽卡分享链接解析失败（链接不完整），请重新在游戏里分享一次');
   const base = params.oversea ? QUERY_API_OVERSEA : QUERY_API;
@@ -284,6 +344,8 @@ async function syncWuwaGacha({ installRoot, userData, onProgress, manualLink }) 
       requests: requestCount,
       pools: perPool,
       warning: '11 个卡池都是空的：可能是分享链接已过期，也可能是这个账号还没有唤取记录。请重新在游戏里分享一次再试。',
+      decodedSegments,
+      skippedSegments,
     };
   }
 
@@ -299,7 +361,23 @@ async function syncWuwaGacha({ installRoot, userData, onProgress, manualLink }) 
     total: groups.find((group) => group.game === 'wutheringwaves' && group.uid === uid)?.records.length || 0,
     requests: requestCount,
     pools: perPool,
+    decodedSegments,
+    skippedSegments,
   };
 }
 
-module.exports = { syncWuwaGacha, extractRecordLinks, parseLinkParams, POOL_TYPES, POOL_NAMES };
+/*
+ * 导出解密相关能力，自检脚本要用它直接解本机 Client.log
+ * （渲染层/主进程都不需要，但外部脚本要能验证解密没坏）。
+ */
+module.exports = {
+  syncWuwaGacha,
+  extractRecordLinks,
+  parseLinkParams,
+  decryptElog,
+  isEncrypted,
+  readLogsText,
+  logsDir,
+  POOL_TYPES,
+  POOL_NAMES,
+};

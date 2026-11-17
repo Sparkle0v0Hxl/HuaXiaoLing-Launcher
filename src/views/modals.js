@@ -38,7 +38,18 @@ function openModal(html, options = {}) {
     backdrop.addEventListener('click', (event) => {
       if (event.target !== backdrop) return;
       if (options.onBackdrop) {
-        options.onBackdrop();
+        /*
+         * 点遮罩走的是各弹窗自己传进来的回调。回调一旦抛错，closeModal() 就执行不到，
+         * 弹窗会卡在屏幕上关不掉（2026-11-17 审查在插件权限弹窗上真复现过：
+         * 那边引用了不存在的 modalPlaceholder → ReferenceError → 遮罩点烂也关不掉）。
+         * 回调做错事不该让用户被锁在弹窗里，所以这里兜住，然后照常关。
+         */
+        try {
+          options.onBackdrop();
+        } catch (error) {
+          console.error('弹窗遮罩回调出错，仍然关闭弹窗：', error);
+        }
+        closeModal();
         return;
       }
       closeModal();
@@ -712,6 +723,18 @@ const YOSTAR_DIR_NAMES = {
   'global-kr': 'Arknights_KR',
 };
 
+/*
+ * 库洛（鸣潮）三渠道同样是三套独立客户端，主程序和资源都不通用。
+ * 以前这里不带渠道后缀，国际服和官服默认会装进同一个目录，
+ * 一路回车就把官服目录覆盖了。现在按渠道分开（名字跟 main.js 里的
+ * GAME_DETECTION 预设一致）。
+ */
+const KURO_DIR_NAMES = {
+  official: 'wutheringwaves-official',
+  bilibili: 'wutheringwaves-bilibili',
+  global: 'wutheringwaves-global',
+};
+
 /**
  * 未安装游戏的默认安装目录：跟随现有游戏安装盘。
  * 哪个内置游戏已经装好了，就把它的安装盘借过来（比如原神装在 D 盘，新游戏默认
@@ -727,10 +750,12 @@ function defaultDownloadDir(game, channel = '') {
   // 直接导致 mkdir ENOENT、空间预估失败。
   const m = /^([a-zA-Z]:)[\\/]/.exec(installedRoot);
   const drive = m ? m[1] : 'C:';
-  const suffix = YOSTAR_DIR_NAMES[channel];
-  const leaf = suffix
-    ? `${game.builtinKey || 'game'}-${suffix}`
-    : (game.builtinKey || 'game');
+  const yostar = YOSTAR_DIR_NAMES[channel];
+  const kuro = KURO_DIR_NAMES[channel];
+  // 方舟用官方目录名（Arknights_EN 之类），库洛这里直接给完整叶名
+  const leaf = yostar
+    ? `${game.builtinKey || 'game'}-${yostar}`
+    : (kuro || (game.builtinKey || 'game'));
   return `${drive}\\HuaXiaoLingGames\\${leaf}`;
 }
 

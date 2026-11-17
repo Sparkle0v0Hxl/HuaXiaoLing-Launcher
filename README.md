@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.2-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.1**（正式版）
+**当前版本：v2.12.2**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.2-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,33 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.2 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.2</b></summary>
+
+绝区零 B服 硬链接生成后显示「目录已不在」修了；官服和 B服共用目录的老问题修了，每个渠道一份独立目录；鸣潮深层目录误判、手动粘贴链接不生效、WeGame 版带错渠道身份也都修了。
+
+
+**渠道目录**
+
+- 点「硬链接生成一份」之后，B服那一行显示「目录已不在」——是渠道件识别只看了根目录，B服的渠道件其实装在 `<游戏>_Data\Plugins\x86_64\` 下面。现在三种位置都认。
+- 官服和 B服共用一个安装目录的老问题也一并修了：以前启动器把「共用」当成正常玩法，第三方切换器改过配置.ini之后还会把官服目录错认成 B服。现在启动器会检查目录里的渠道件，确认归谁；判不归属时不动任何一行，判得出就把多占的那行清成「未配置」。
+
+**鸣潮**
+
+- 装在深层目录（主程序在三层下）的鸣潮会被误判成「不是官方客户端」，现在更新链路会向上找到本体根。
+- 抽卡记录手动粘贴的链接不生效——粘贴的链接被日志里的旧链接顶掉了，而且字段名对不上等于没传。现在粘的链接优先。
+- WeGame 版转换后会带着官服的登录身份进不去游戏，渠道件现在按目标渠道各写各的。
+
+**其它修复**
+
+- 插件权限弹窗点空白处关不掉（遮罩回调里有个没定义的变量，一报错弹窗就锁死了）。
+- 鸣潮 WeGame 版转换按钮直接放在服务器那一行，不用再进弹窗找。
+- 硬链接不再共享游戏运行时会改写的文件（音效、设置、存档类），两个渠道各写各的，互不串。
+
+</details>
+
 
 <details>
 <summary><b>v2.12.1</b></summary>
