@@ -1,30 +1,35 @@
 {
-  "version": "2.12.5",
-  "title": "花筱灵启动器 2.12.5",
-  "date": "2026-11-18",
+  "version": "2.12.6",
+  "title": "花筱灵启动器 2.12.6",
+  "date": "2026-11-19",
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
-    "主题扩展：新增 15 套界面皮肤，主题、皮肤、强调色可自由搭配。",
-    "新增界面不透明度调节，拖动实时生效，不糊背景图。",
-    "启动页改为固定深色，浅色主题下游戏卡片文字也清晰。",
-    "修复：增量更新一直退回整包，现在增量能正常应用。",
-    "修复：切换歌单时播放列表不再叠加旧歌单的歌。"
+    "2.12.6。",
+    "改进：启动时检测已装游戏快 4.4 倍。",
+    "改进：解压更新包快 1.56 倍。",
+    "改进：终末地多服切换不再重复拷贝语音包，每个渠道省 3.7 GB。",
+    "清理：旧的语音包备份会自动删掉。",
+    "清理：游戏下载分块缓存改成边下边清，升级后自动清掉旧版本残留。",
+    "清理：安装包裁掉 53 个用不到的语言包，小约 47 MB。",
+    "修复：增量更新从 2.9.4 起每次都退回整包下载。",
+    "修复：歌单广场切换平台后点不动。",
+    "修复：补丁工具失败会留下半截文件，导致之后重试永久失败。"
   ],
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.5/HuaXiaoLing-2.12.5-Portable.zip",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.6/HuaXiaoLing-2.12.6-Portable.zip",
   "deltas": [
     {
-      "from": "2.12.4",
-      "to": "2.12.5",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.5/delta-2.12.4-to-2.12.5.zip",
-      "sha256": "bc012ce0c26a82967694e93bfdcbf9227c486f904d685f97b24fae45d6bbd2fc",
-      "size": 112420
+      "from": "2.12.5",
+      "to": "2.12.6",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.6/delta-2.12.5-to-2.12.6.zip",
+      "sha256": "66599933d944c8bb53fc0672efc8dd04ae6fff2e1b4fa5db8259712057b476ba",
+      "size": 23577652
     }
   ],
-  "sha256": "2316c064772ad8091ecd5d021b7ad2f7331f9ebeb93db9520becdb55b307488f",
-  "size": 214351239,
+  "sha256": "b518274944782a79da9776072f5444faa628e87b1ae2cf5fc9d7445417ec536d",
+  "size": 199812754,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "1ZkqEKsGhP33UGHocn0F/LBlbTPyXZi9F9wVjMuLbftZ5nu81J87gGbNIsWIxBTY3pvg9IHwneUO5EVl/NgRCQ=="
+    "value": "j96LmwF3duHMQPbbqR1GIV3mP3zQKym4DMDWK6Y+jaVFYQxIKgpQiS8M9sTAGqG51a5MkPc6ZRNcoAnyWV0kDQ=="
   }
 }
