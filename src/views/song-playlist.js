@@ -1350,6 +1350,40 @@ async function waitForMoreSongs(ms) {
  * 且 `from` 是歌单名，单点或本地的是 `origin='pick'`。所以「同一张歌单的曲目
  * 是否已经排过」用这两个字段就能认出来，不必靠歌名去猜。
  */
+/**
+ * 把「别的歌单」留在播放列表里的曲目清掉，只保留当前这张歌单 + 弹幕点歌。
+ *
+ * 为什么要有这一步（2026-11-18 用户报「队列 2164 首，可我这张歌单才 1944 首」）：
+ * 点歌单里的某一首走的是「往后追加」这条路（见下面 playPlaylistFromIndex），
+ * 从来不清旧的那张 —— 于是换过几次歌单之后，几张歌单的曲目全叠在一个列表里，
+ * 数字越滚越大，播放顺序也跟着乱。用户要的是「播放列表就跟着我选的这张歌单来，
+ * 只有弹幕点歌插进来的才额外排进去」，所以切歌单时先把别的歌单段落摘掉。
+ *
+ * 保留：origin 不是 'playlist' 的条目（弹幕点歌 / 手动 ＋ / 直链 / 本地文件），
+ *       它们本来就该按顺序夹在歌单里往下放。
+ * 返回清掉的条数。
+ */
+function pruneOtherPlaylistBlocks(keepName) {
+  const name = keepName || '歌单';
+  const before = state.songs.length;
+  if (!before) return 0;
+  const current = state.songs[state.songIndex];
+  state.songs = state.songs.filter((entry) => {
+    if (!entry || entry.origin !== 'playlist') return true;
+    return (entry.from || '歌单') === name;
+  });
+  const removed = before - state.songs.length;
+  // 一条都没动就别碰播放指针，免得本来正确的播放项被重置
+  if (!removed) return 0;
+  // 正在播放的那一首如果被清掉了，指针先收回合法范围（后面会按目标歌重新定位）
+  const stillThere = current ? state.songs.indexOf(current) : -1;
+  state.songIndex = stillThere >= 0
+    ? stillThere
+    : Math.max(0, Math.min(Number(state.songIndex) || 0, state.songs.length - 1));
+  saveSongs();
+  return removed;
+}
+
 function playlistBlockRange(fromName) {
   const name = fromName || '歌单';
   let start = -1;
@@ -1433,6 +1467,17 @@ async function playPlaylistFromIndex(platform, playlistId, index) {
     playlistFill = null;
     await pending.promise.catch(() => {});
   }
+
+  /*
+   * 2026-11-18：先摘掉「别的歌单」留在列表里的曲目，再把这张歌单铺进去。
+   *
+   * 用户要的规则很明确：「正常是跟着选择的歌单来，除非弹幕点歌点歌进来了，
+   * 才能插进这个播放列表排序下去」。
+   * 以前这里只往后追加、从不清旧歌单，换过几次歌单后队列就叠成好几张歌单的合集
+   * （用户看到的 2164 首 = 这张歌单 1944 + 早先几张歌单残留的 220）。
+   * 弹幕点歌 / 手动添加的条目（origin 不是 playlist）原样保留，继续夹在歌单里顺序播。
+   */
+  pruneOtherPlaylistBlocks(fromName);
 
   const block = playlistBlockRange(fromName);
   // 这张歌单已经排过一段就接在段末，否则插在当前播放项之后

@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.4-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.5-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.4**（正式版）
+**当前版本：v2.12.5**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.4-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.5-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,27 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.4 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.5 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.5</b></summary>
+
+主题扩展为 15 套皮肤，主题/皮肤/强调色可自由搭配；新增界面不透明度调节；启动页固定深色；修复增量更新一直退回整包、切歌单播放列表叠加旧歌两个问题。
+
+
+**主题与外观**
+
+- 主题拆成三个互不影响的维度：「主题」管明暗（深色 / 浅色 / 跟随系统），「皮肤」管底色倾向（共 15 套：原色、深夜蓝、樱霞、霜青、暖木、海洋深处、落日大道、森林树冠、极简灰阶、金色时刻、极地霜蓝、沙漠玫瑰、科技前沿、植物园、午夜星河），「强调色」管按钮、进度和细节（8 种）。三者可以自由搭配。
+- 新增界面不透明度调节（40%–100%），拖动实时生效、松手保存；只作用于侧栏、主界面和弹窗，不会把背景图一起糊掉。
+- 启动页改为整页固定深色，不管外层主题是深色还是浅色，游戏卡片的名称和状态都清晰可读。
+
+**问题修复**
+
+- 修复增量更新从 2.9.4 起一直退回整包的问题：根因是更新清单 latest.json 被当成普通补丁，打包基线里是精简版、用户机器上是完整版，基准大小校验必然失败，而它又是补丁清单第一项，导致后面的补丁都没机会跑。现在 latest.json 不再进增量包，增量更新可以正常应用。
+- 修复切换歌单时播放列表会叠加旧歌单的问题：以前点歌单里的某一首只会往后追加、从不清掉上一张歌单留下的歌，切几次就会越堆越多。现在切歌单会清掉别的歌单残留，但弹幕点歌、手动加的歌、直链和本地文件都会保留，继续按顺序播放。
+
+</details>
+
 
 <details>
 <summary><b>v2.12.4</b></summary>

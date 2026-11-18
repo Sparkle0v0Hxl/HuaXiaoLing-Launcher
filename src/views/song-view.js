@@ -982,7 +982,7 @@ function karaokeViewMarkup() {
           <section class="song-rail-card is-now">
             <div class="song-rail-head">
               <span>${icon('headphones', 'xs')} 正在播放</span>
-              <small>${state.songs.length ? `队列 ${state.songs.length} 首` : '暂无曲目'}</small>
+              <small>${state.songs.length ? `播放列表 ${state.songs.length} 首` : '暂无曲目'}</small>
             </div>
             <div class="song-rail-now">
               <span class="song-rail-cover ${cover ? 'has-cover' : ''}">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>

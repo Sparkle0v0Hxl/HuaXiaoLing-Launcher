@@ -1016,12 +1016,16 @@ function defaultSettings() {
     avatar: '',
     theme: 'dark',
     accent: 'spark',
+    // 界面皮肤：classic / midnight / sakura / frost / amber（2026-11-18）
+    skin: 'classic',
     // 窗口材质：none / acrylic / mica / micaTabbed / auto
     material: 'none',
     // 自定义背景图（data URL 或本地 backgrounds/ 下的相对路径）
     customBackground: '',
     // 自定义背景不透明度 0-100：数值越低越透明，能看到更多系统材质
     backgroundOpacity: 100,
+    // 界面不透明度（40–100，2026-11-18）
+    uiOpacity: 100,
     // 背景图清晰度 0-100：100 为原图，越低越模糊（用来让内容更易读）
     backgroundBlur: 0,
     // 背景动态效果：缓慢运镜 + 鼠标视差 + 换图溶解，关掉就是一张静止的图
@@ -8859,7 +8863,9 @@ function applyLoginItem(settings) {
 }
 
 function applyNativeTheme(theme) {
-  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
+  // 纯白主题已下线（2026-11-18）：历史配置里的 white 按浅色处理
+  nativeTheme.themeSource =
+    theme === 'dark' ? 'dark' : theme === 'light' || theme === 'white' ? 'light' : 'system';
 }
 
 /* ------------------------------------------------------------------ */

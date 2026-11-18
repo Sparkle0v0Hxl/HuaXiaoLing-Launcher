@@ -1972,6 +1972,16 @@ async function stageDelta({ deltaPath, tempBase, version, currentVersion = '', t
       throw new Error(`增量包里的路径非法：${entry.path}`);
     }
     if (isProtected(rel)) throw new Error(`增量包试图写入受保护目录：${rel}`);
+    /*
+     * 更新清单 latest.json 永不从增量包重建：
+     *   · 打包基线里它是精简版（build/latest.json 生成），用户机器上的是更新流程
+     *     从更新源拉来的完整版（带 sig/deltas/sha256），两者天然不同，patch 前
+     *     校验 baseSize 必然抛「基准文件大小不符」，导致整个增量退回整包；
+     *   · 它本来就该由更新流程自己从远端维护，不靠增量补丁同步。
+     * 这里对旧包（2.12.4 及之前，增量里仍带 latest.json）做容错跳过，让 app.asar
+     * 等真正的补丁照常应用；新包已在 build-delta.js 侧彻底不产出这个条目。
+     */
+    if (rel === 'latest.json') continue;
     const destination = path.join(source, rel);
     await fsp.mkdir(path.dirname(destination), { recursive: true });
 

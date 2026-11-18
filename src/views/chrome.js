@@ -280,11 +280,20 @@ function applySettings() {
         : 'dark'
       : mode;
   document.documentElement.dataset.theme = resolved === 'light' ? 'light' : 'dark';
+  // 纯白主题已下线（2026-11-18），老设置里残留的 white 一律按浅色处理
+  delete document.documentElement.dataset.tone;
   document.documentElement.dataset.accent = settings.accent || 'spark';
+  // 皮肤只影响底色倾向，明暗仍由 theme 决定（2026-11-18）
+  document.documentElement.dataset.skin = settings.skin || 'classic';
   document.body.classList.toggle('sidebar-collapsed', settings.sidebarCollapsed === true);
   document.body.classList.toggle('charms-on', settings.charms !== false);
   document.body.classList.toggle('charbg-on', settings.charBg !== false);
   document.body.classList.toggle('no-sidebar-char', settings.sidebarChar === false);
+  // 界面不透明度（40–100）：只作用在侧栏/主内容/弹窗，背景图不受影响
+  {
+    const value = Math.max(40, Math.min(100, Number(settings.uiOpacity ?? 100)));
+    document.documentElement.style.setProperty('--ui-opacity', String(value / 100));
+  }
   applyBackdrop(settings);
   document.title = `花筱灵启动器 · ${PAGE_META[state.route]?.label || '主页'}`;
 }

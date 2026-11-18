@@ -117,6 +117,31 @@ const THEME_OPTIONS = [
   ['light', '浅色'],
   ['system', '跟随系统'],
 ];
+/*
+ * 界面皮肤（2026-11-18）。
+ *
+ * 用户要「界面主题做多一点」。这里不把皮肤塞进 theme 枚举（那会让
+ * applyNativeTheme 和一堆 :root[data-theme="light"] 覆盖全部失效），
+ * 而是单独一个 skin 键：只改底色倾向，明暗仍由 theme 决定。
+ */
+const SKIN_OPTIONS = [
+  ['classic', '原色'],
+  ['midnight', '深夜蓝'],
+  ['sakura', '樱霞'],
+  ['frost', '霜青'],
+  ['amber', '暖木'],
+  // 由「主题工厂」技能转换而来（2026-11-18）
+  ['ocean', '海洋深处'],
+  ['sunset', '落日大道'],
+  ['forest', '森林树冠'],
+  ['mono', '极简灰阶'],
+  ['golden', '金色时刻'],
+  ['arctic', '极地霜蓝'],
+  ['rose', '沙漠玫瑰'],
+  ['tech', '科技前沿'],
+  ['garden', '植物园'],
+  ['galaxy', '午夜星河'],
+];
 const ACCENT_OPTIONS = [
   ['spark', '花火', '#e8435a'],
   ['gold', '金箔', '#f0c674'],
@@ -551,6 +576,7 @@ function settingsView() {
   const backup = gachaBackupState();
   const backupPresetKey = gachaBackupPresetKey();
   const themeOptions = THEME_OPTIONS;
+  const skinOptions = SKIN_OPTIONS;
   const accents = ACCENT_OPTIONS;
   const tab = settingsTab();
   const group = (key, span) =>
@@ -588,6 +614,19 @@ function settingsView() {
                   .map(
                     ([key, label]) =>
                       `<button class="${settings.theme === key ? 'active' : ''}" data-action="set-theme" data-value="${key}">${label}</button>`
+                  )
+                  .join('')}
+              </div>
+            </div>
+          </div>
+          <div class="setting-row setting-row-stack">
+            <div class="setting-copy"><strong>界面皮肤</strong><span>只改底色倾向，明暗仍由上面的主题决定。</span></div>
+            <div class="setting-control">
+              <div class="theme-chips">
+                ${skinOptions
+                  .map(
+                    ([key, label]) =>
+                      `<button class="theme-chip ${(settings.skin || 'classic') === key ? 'is-active' : ''}" data-action="set-skin" data-value="${key}">${label}</button>`
                   )
                   .join('')}
               </div>
@@ -678,24 +717,29 @@ function settingsView() {
             </div>
           </div>
           ${officialBgGridHtml()}
-          <div class="setting-row-pair">
-            <div class="setting-row">
-              <div class="setting-copy"><strong>背景不透明度</strong><span>调低后背景变淡，能看见更多窗口材质。</span></div>
-              <div class="setting-control volume-control">
-                <input class="volume-range" id="bg-opacity" type="range" min="0" max="100" step="1" value="${Number(settings.backgroundOpacity ?? 100)}" aria-label="背景不透明度" ${settings.customBackground ? '' : 'disabled'} />
-                <span class="volume-value" id="bg-opacity-value">${Number(settings.backgroundOpacity ?? 100)}%</span>
-              </div>
-            </div>
-            <div class="setting-row">
-              <div class="setting-copy"><strong>背景清晰度</strong><span>往左越模糊，画面花的时候文字更好读。</span></div>
-              <div class="setting-control volume-control">
-                <input class="volume-range" id="bg-blur" type="range" min="0" max="60" step="1" value="${100 - Number(settings.backgroundBlur ?? 0)}" aria-label="背景清晰度" ${settings.customBackground ? '' : 'disabled'} />
-                <span class="volume-value" id="bg-blur-value">${Number(settings.backgroundBlur ?? 0) ? `模糊 ${Number(settings.backgroundBlur)}` : '原图'}</span>
-              </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>界面不透明度</strong><span>40%–100%。调低后侧栏与内容整体变透，背景图保持原样。</span></div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="ui-opacity" type="range" min="40" max="100" step="1" value="${Number(settings.uiOpacity ?? 100)}" aria-label="界面不透明度" />
+              <span class="volume-value" id="ui-opacity-value">${Number(settings.uiOpacity ?? 100)}%</span>
             </div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>背景动态效果</strong><span>缓慢运镜 + 鼠标轻微视差，背景不再是一张死图。系统开了「减少动态效果」时会自动关掉。</span></div>
+            <div class="setting-copy"><strong>背景不透明度</strong><span>调低后背景变淡，能看见更多窗口材质。</span></div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="bg-opacity" type="range" min="0" max="100" step="1" value="${Number(settings.backgroundOpacity ?? 100)}" aria-label="背景不透明度" ${settings.customBackground ? '' : 'disabled'} />
+              <span class="volume-value" id="bg-opacity-value">${Number(settings.backgroundOpacity ?? 100)}%</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>背景清晰度</strong><span>往左越模糊，画面花的时候文字更好读。</span></div>
+            <div class="setting-control volume-control">
+              <input class="volume-range" id="bg-blur" type="range" min="0" max="60" step="1" value="${100 - Number(settings.backgroundBlur ?? 0)}" aria-label="背景清晰度" ${settings.customBackground ? '' : 'disabled'} />
+              <span class="volume-value" id="bg-blur-value">${Number(settings.backgroundBlur ?? 0) ? `模糊 ${Number(settings.backgroundBlur)}` : '原图'}</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>背景动态效果</strong><span>缓慢运镜 + 鼠标轻微视差。系统开了「减少动态效果」时会自动关掉。</span></div>
             <div class="setting-control">${switchMarkup('backgroundMotion', settings.backgroundMotion !== false)}</div>
           </div>
           <div class="setting-row">

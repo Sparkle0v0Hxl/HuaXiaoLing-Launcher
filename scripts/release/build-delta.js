@@ -79,6 +79,18 @@ function isProtectedRel(rel) {
   const r = norm(rel);
   const top = r.split('/')[0];
   if (top === 'data' || top === 'downloads') return true;
+  /*
+   * 更新清单 latest.json 绝不进增量，这是「增量从没成功过」的根因：
+   *   · 打包基线 prev/<ver>/win-unpacked/latest.json 是精简版（build/latest.json
+   *     生成的，无 sig/deltas/sha256），每次发布 notes 条数一变它大小也跟着变；
+   *   · 而用户机器上的 latest.json 是更新流程从更新源拉下来的「完整版」（带
+   *     sig/deltas/sha256），两者大小/内容天然不同，永远对不上；
+   *   · stageDelta 把它当 patch 的第一项，patch 前校验 baseSize 必然抛
+   *     「基准文件大小不符」→ 整个增量退回整包（从引入签名清单的 2.9.4 起、
+   *     每一次都栽在这一个文件上）。
+   * 清单的正确性由更新流程自己从远端拉取维护，不需要也不应该靠增量补丁同步。
+   */
+  if (r === 'latest.json') return true;
   if (/\.bak(-\S+)?$/i.test(r)) return true;
   if (/\.(tmp|temp|part|download|crdownload)$/i.test(r)) return true;
   if (/(^|\/)\.DS_Store$/i.test(r)) return true;

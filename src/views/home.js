@@ -676,7 +676,7 @@ function startServerPanel(game) {
    * 现在列表自己滚（.sw-srv-list），动作区在文档流里占固定高度。
    */
   return `
-    <div class="start-dock${open ? ' is-menu-open' : ''}">
+    <div class="start-dock${open ? ' is-menu-open' : ''}" style="background:#121016;border-radius:18px">
       <span class="start-dock-crest" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></span>
       <span class="start-dock-charm" aria-hidden="true"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
       <span class="start-dock-sparks" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -1211,6 +1211,12 @@ function characterDuoMarkup() {
   // 直接写 audio.src 会在渲染主页时抛 "audio is not defined"，整个主页都切不过去。
   const audio = document.querySelector('#song-audio');
   const playing = Boolean(song) && Boolean(audio && audio.src) && Boolean(audio && !audio.paused);
+  /*
+   * 这里统计的是「当前播放列表」（state.songs），不是「我的队列」（state.pickedSongs）。
+   * 2.11.x 音乐页重构把两者拆开了：「队列」一词专指用户手动加的 pickedSongs（上限 500 首），
+   * 播放列表才是点歌单铺进来的这一串。文案按后者写，别再叫「队列」——
+   * 否则点一张两千多首的歌单，首页会显示「队列 2164 首」，和队列页对不上。
+   */
   const queue = state.songs.length;
   const liveCount = Array.isArray(state.liveRooms) ? state.liveRooms.length : 0;
 
@@ -1218,8 +1224,8 @@ function characterDuoMarkup() {
     ? `累计 ${formatPlaytime(totalSeconds)} · 点一下接着演`
     : '在游戏库里挑一个开场吧';
   const songSub = song
-    ? `${playing ? '正在播放' : '已暂停'}${songArtist ? ' · ' + songArtist : ''} · 队列 ${queue} 首`
-    : `队列 ${queue} 首 · 点一下去点歌`;
+    ? `${playing ? '正在播放' : '已暂停'}${songArtist ? ' · ' + songArtist : ''} · 播放列表 ${queue} 首`
+    : `播放列表 ${queue} 首 · 点一下去点歌`;
 
   const gameBody = recent
     ? `<span class="duo-game">
@@ -1245,7 +1251,7 @@ function characterDuoMarkup() {
       <span class="duo-ctrl" data-action="duo-next" title="下一首">${icon('chevron-right', 'xs')}</span>
       ${liveCount ? `<span class="duo-live">${icon('mic', 'xs')}直播点歌 × ${liveCount}</span>` : ''}
     </span>
-    <small class="duo-note">${songArtist ? esc(songArtist) + ' · ' : ''}队列 ${queue} 首</small>`;
+    <small class="duo-note">${songArtist ? esc(songArtist) + ' · ' : ''}播放列表 ${queue} 首</small>`;
 
   return `
     <div class="char-duo">
@@ -1408,8 +1414,8 @@ function homeView() {
         <p class="sub">${mood.sub}</p>
       </div>
       <div class="page-head-actions">
+        <!-- 2026-11-18：「添加游戏」只保留游戏库头部那一个，页头这里不重复 -->
         <button class="btn btn-ghost" data-action="create-desktop-shortcut" title="在桌面创建花筱灵启动器快捷方式">${icon('monitor')}创建桌面快捷</button>
-        <button class="btn btn-primary" data-action="add-game">${icon('plus')}添加游戏</button>
       </div>
     </div>`;
 

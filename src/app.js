@@ -1466,6 +1466,13 @@ function songRowPlayTarget(action, element) {
      * 否则会插成一条 origin 不同的副本，歌单那一段里找不到它。
      */
     const fromName = detail.name || '歌单';
+    /*
+     * 双击这条路也得先摘掉「别的歌单」的残留，否则它会绕开
+     * playPlaylistFromIndex 里的同一道清理，把几张歌单叠在一起
+     * （用户报的「播放列表 2164 首 > 歌单本身 1944 首」就是这么攒出来的）。
+     * 清理必须在算 block 之前做，不然段边界还是旧的。
+     */
+    pruneOtherPlaylistBlocks(fromName);
     const block = playlistBlockRange(fromName);
     const insertAt =
       block.start >= 0 ? block.end : Math.min(state.songs.length, (Number(state.songIndex) || 0) + 1);

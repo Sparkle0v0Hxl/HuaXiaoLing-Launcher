@@ -3453,6 +3453,13 @@ case 'music-accounts':
       render({ preserveScroll: true });
       break;
     }
+    case 'set-skin': {
+      const skin = element.dataset.value;
+      if (!skin || !SKIN_OPTIONS.some(([key]) => key === skin)) break;
+      await applySettingLocally({ skin });
+      render({ preserveScroll: true });
+      break;
+    }
     case 'set-accent': {
       const accent = element.dataset.value;
       if (!accent || !ACCENT_OPTIONS.some(([key]) => key === accent)) break;

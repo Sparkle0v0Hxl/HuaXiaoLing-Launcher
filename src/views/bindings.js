@@ -236,6 +236,27 @@ function bindView() {
     });
   }
 
+  // 界面不透明度：40–100，只作用于侧栏/主内容/弹窗，不影响背景图（2026-11-18）
+  const uiOpacity = document.querySelector('#ui-opacity');
+  if (uiOpacity) {
+    const label = document.querySelector('#ui-opacity-value');
+    const initial = uiOpacity.value;
+    const clamp = (v) => Math.max(40, Math.min(100, Number(v) || 100));
+    uiOpacity.addEventListener('input', () => {
+      const value = clamp(uiOpacity.value);
+      if (label) label.textContent = `${value}%`;
+      document.documentElement.style.setProperty('--ui-opacity', String(value / 100));
+    });
+    uiOpacity.addEventListener('change', async () => {
+      if (uiOpacity.value === initial) return;
+      const value = clamp(uiOpacity.value);
+      state.settings = { ...(state.settings || {}), uiOpacity: value };
+      const saved = await api.updateSettings({ uiOpacity: value });
+      if (saved?.settings) state.settings = saved.settings;
+      applySettings();
+    });
+  }
+
   // 背景不透明度 / 清晰度：拖动时实时改 CSS 变量，松手才落盘。
   // 注意：不能直接用滑块 DOM 上的 value 回写——页面可能是在设置变化前渲染的，
   // 那样会把别的途径刚写进去的值覆盖掉。记下渲染时的初值，只提交真正的改动。

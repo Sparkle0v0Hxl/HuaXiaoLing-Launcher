@@ -11474,7 +11474,7 @@ select {
   padding: 13px 15px;
   border: 1px solid rgba(255, 255, 255, 0.13);
   border-radius: 20px;
-  background: rgba(9, 7, 11, 0.52);
+  background: rgba(9, 7, 11, 0.94);
   backdrop-filter: blur(20px);
   box-shadow: 0 22px 54px rgba(0, 0, 0, 0.5);
 }
@@ -15558,6 +15558,10 @@ body.start-mode .start-games {
   font-size: 11px;
   color: var(--muted);
   font-weight: 400;
+  /* 「播放列表 2164 首」比原来的「队列 2164 首」长两个字，右栏最窄 340px 也放得下；
+     这里只防极端位数把标题挤得换行。 */
+  white-space: nowrap;
+  flex: none;
 }
 .song-rail-more {
   border: 0;
@@ -16853,8 +16857,8 @@ body.start-mode .start-games {
 
 /* 统一的玻璃卡片底：和主页 .panel 同一套颜色、圆角、描边、阴影 */
 .start-screen {
-  --start-glass: rgba(11, 9, 14, 0.58);
-  --start-glass-hover: rgba(16, 13, 20, 0.72);
+  --start-glass: rgba(11, 9, 14, 0.94);
+  --start-glass-hover: rgba(16, 13, 20, 0.97);
   --start-line: var(--line-strong);
   --start-radius: var(--radius-lg);
   --start-shadow: 0 20px 52px rgba(0, 0, 0, 0.46);
@@ -24091,7 +24095,7 @@ body.sidebar-collapsed .brand {
   background:
     radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.17), transparent 58%),
     radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.15), transparent 58%),
-    rgba(9, 7, 11, 0.62);
+    rgba(9, 7, 11, 0.94);
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
@@ -24526,7 +24530,7 @@ body.sidebar-collapsed .brand {
   background:
     radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.15), transparent 58%),
     radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.13), transparent 58%),
-    rgba(9, 7, 11, 0.46);
+    rgba(9, 7, 11, 0.94);
 }
 
 /* 顶栏别压住画面：去掉实心底，只留按钮本身 */
@@ -24542,7 +24546,7 @@ body.sidebar-collapsed .brand {
   background:
     radial-gradient(130% 150% at 0% 0%, rgba(232, 67, 90, 0.13), transparent 60%),
     radial-gradient(130% 150% at 100% 100%, rgba(240, 198, 116, 0.11), transparent 60%),
-    rgba(9, 7, 11, 0.26);
+    rgba(9, 7, 11, 0.94);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.09);
 }
 
@@ -29602,7 +29606,6 @@ body.is-subpage .page-deco {
 
 .home-page .game-card:hover {
   border-color: rgba(var(--accent-rgb), 0.45);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.22);
 }
 /* ═══ 2.4.x 启动页菜单键 = 唤出主页那个原生侧栏 ═══════════════
    不另造面板、不改造侧栏自身形态（收缩/展开、图标条宽度全部沿用主页）。
@@ -39854,3 +39857,1221 @@ select:focus-visible {
   font-size: 11.5px;
   max-width: 140px;
 }
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 主题跟随 · 第一批：启动页抽屉游戏卡片（2026-11-18）
+ *
+ * 用户报的 bug：「浅色主题，启动页抽屉的游戏卡片下面，根本看不清字」。
+ * 根因：.start-game-copy 的底衬在第五代样式里被改成 background: none，
+ *       游戏名 color 还是 #fff —— 白字直接压在亮封面上，浅色下必然看不见。
+ * 处理：底衬、文字色、封面压暗、状态点描边全部抽成变量，深浅两套各给值。
+ * 深色取值与现状完全一致，所以深色观感不变。
+ * ══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --start-card-veil: linear-gradient(0deg, rgba(7, 6, 9, 0.96), rgba(7, 6, 9, 0.82));
+  --start-card-ink: #ffffff;
+  --start-card-ring: rgba(4, 3, 7, 0.42);
+  --start-card-ring-inset: rgba(255, 255, 255, 0.62);
+  --start-games-bg: linear-gradient(0deg, rgba(6, 5, 9, 0.92), rgba(6, 5, 9, 0.55));
+  --start-card-thumb-shade: linear-gradient(
+    0deg,
+    rgba(4, 3, 7, 0.55) 0%,
+    rgba(4, 3, 7, 0.28) 34%,
+    transparent 64%
+  );
+}
+
+:root[data-theme='light'] {
+  --start-card-veil: linear-gradient(0deg, rgba(255, 253, 249, 0.97), rgba(255, 253, 249, 0.88));
+  --start-card-ink: #1e1c19;
+  --start-card-ring: rgba(255, 253, 249, 0.9);
+  --start-card-ring-inset: rgba(30, 28, 25, 0.45);
+  --start-games-bg: linear-gradient(0deg, rgba(255, 253, 249, 0.96), rgba(255, 253, 249, 0.72));
+  --start-card-thumb-shade: linear-gradient(
+    0deg,
+    rgba(255, 253, 249, 0.5) 0%,
+    rgba(255, 253, 249, 0.2) 34%,
+    transparent 64%
+  );
+}
+
+.start-screen .start-games {
+  background: var(--start-games-bg);
+}
+
+.start-screen .start-games .start-game-thumb::after {
+  background: var(--start-card-thumb-shade);
+}
+
+.start-screen .start-games .start-game-copy {
+  background: var(--start-card-veil);
+}
+
+.start-screen .start-games .start-game-copy strong {
+  color: var(--start-card-ink);
+}
+
+.start-screen .start-games .start-game-state {
+  box-shadow: inset 0 0 0 1.5px var(--start-card-ring-inset), 0 0 0 2.5px var(--start-card-ring);
+}
+
+.start-screen .start-games .start-game-state.is-ready {
+  box-shadow: 0 0 0 2.5px var(--start-card-ring);
+}
+
+.start-screen .start-games .start-game-state.is-running {
+  box-shadow: 0 0 0 2.5px var(--start-card-ring), 0 0 10px var(--accent);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 主题跟随 · 第二批：主页 hero + 双角色卡 + 音乐页底栏（2026-11-18）
+ *
+ * 三块都是同一类问题：最后生效的那一代样式把颜色写死成深色，
+ * 且全文没有任何 :root[data-theme="light"] 的对应覆盖。
+ * 这里统一抽成变量，深浅各一套；深色取值与现状一致。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 变量：深色 = 现状 ─────────────────────────────────────────── */
+:root {
+  --hero-mask-a: rgba(10, 3, 8, 0.96);
+  --hero-mask-b: rgba(22, 7, 13, 0.79);
+  --hero-mask-c: rgba(16, 5, 9, 0.28);
+  --hero-mask-d: rgba(10, 3, 8, 0.54);
+  --hero-mask-tail: rgba(10, 3, 8, 0.9);
+  --hero-bg-brightness: 0.8;
+
+  --duo-card-bg: radial-gradient(120% 140% at 86% 12%, rgba(232, 67, 90, 0.22), transparent 58%),
+    linear-gradient(160deg, rgba(30, 26, 39, 0.94), rgba(20, 17, 28, 0.97));
+  --duo-sparxie-bg: radial-gradient(120% 140% at 86% 12%, rgba(240, 198, 116, 0.2), transparent 58%),
+    linear-gradient(160deg, rgba(33, 27, 22, 0.94), rgba(24, 20, 16, 0.97));
+  --duo-card-border: rgba(255, 255, 255, 0.07);
+  --duo-card-line: rgba(255, 255, 255, 0.09);
+
+  --bar-veil: rgba(14, 12, 18, 0.8);
+  --bar-shadow: 0 -12px 32px rgba(0, 0, 0, 0.3);
+  --mini-veil: rgba(10, 8, 12, 0.6);
+}
+
+/* ── 变量：浅色 ───────────────────────────────────────────────── */
+:root[data-theme='light'] {
+  --hero-mask-a: rgba(255, 250, 240, 0.94);
+  --hero-mask-b: rgba(255, 247, 235, 0.74);
+  --hero-mask-c: rgba(255, 250, 240, 0.2);
+  --hero-mask-d: rgba(255, 248, 238, 0.4);
+  --hero-mask-tail: rgba(255, 250, 240, 0.88);
+  --hero-bg-brightness: 1.06;
+
+  --duo-card-bg: radial-gradient(120% 140% at 86% 12%, rgba(232, 67, 90, 0.12), transparent 58%),
+    linear-gradient(160deg, rgba(255, 252, 247, 0.96), rgba(252, 246, 238, 0.98));
+  --duo-sparxie-bg: radial-gradient(120% 140% at 86% 12%, rgba(240, 198, 116, 0.18), transparent 58%),
+    linear-gradient(160deg, rgba(255, 253, 246, 0.97), rgba(253, 248, 238, 0.98));
+  --duo-card-border: rgba(40, 30, 25, 0.1);
+  --duo-card-line: rgba(40, 30, 25, 0.1);
+
+  --bar-veil: rgba(255, 253, 249, 0.9);
+  --bar-shadow: 0 -12px 32px rgba(80, 60, 40, 0.12);
+  --mini-veil: rgba(255, 253, 249, 0.86);
+}
+
+/* ── 主页 hero ─────────────────────────────────────────────────── */
+.home-page .hero-shade {
+  background:
+    linear-gradient(
+      90deg,
+      var(--hero-mask-a) 0%,
+      var(--hero-mask-b) 42%,
+      var(--hero-mask-c) 72%,
+      var(--hero-mask-d) 100%
+    ),
+    radial-gradient(700px 380px at 18% 92%, var(--accent-soft), transparent 68%),
+    linear-gradient(0deg, var(--hero-mask-tail), transparent 62%);
+}
+
+.home-page .hero-bg {
+  filter: brightness(var(--hero-bg-brightness));
+}
+
+/* ── 主页双角色卡 ─────────────────────────────────────────────── */
+.char-duo-card {
+  background: var(--duo-card-bg);
+  border: 1px solid var(--duo-card-border);
+}
+
+.char-duo-card.is-sparxie {
+  background: var(--duo-sparxie-bg);
+}
+
+/* 卡片内的分隔线/控件描边跟着主题走 */
+.home-page .duo-tag,
+.home-page .duo-game-cover,
+.home-page .duo-song-line {
+  border-color: var(--duo-card-line);
+}
+
+.home-page .char-duo-stat {
+  border-top-color: var(--duo-card-line);
+}
+
+/* ── 音乐页底栏 ───────────────────────────────────────────────── */
+.song-bar {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 62%),
+    var(--bar-veil);
+  box-shadow: var(--bar-shadow);
+}
+
+/* 最小化播放器同源：浅色下同样不该发黑 */
+.mini-player.is-on-start .mini-ball {
+  background: var(--mini-veil);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 界面皮肤（2026-11-18）
+ *
+ * 只覆盖底色系的几个变量，不碰任何结构；明暗仍由 data-theme 决定。
+ * 选择器带 data-theme，特异性高于文件前部的 :root[data-theme="dark"]，
+ * 且写在最后，能稳定生效。classic = 不定义任何覆盖（保持原样）。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 深夜蓝 ───────────────────────────────────────────────────── */
+:root[data-theme='dark'][data-skin='midnight'] {
+  --bg: #070a12;
+  --bg-deep: #04060c;
+  --surface: #0d1220;
+  --surface-2: #131a2b;
+  --surface-3: #1a2338;
+  --glass: rgba(7, 10, 18, 0.72);
+}
+
+:root[data-theme='light'][data-skin='midnight'] {
+  --bg: #f4f7fd;
+  --bg-deep: #eef3fb;
+  --surface: #ffffff;
+  --surface-2: #f3f7fd;
+  --surface-3: #e8eefa;
+  --glass: rgba(255, 255, 255, 0.74);
+}
+
+/* ── 樱霞 ─────────────────────────────────────────────────────── */
+:root[data-theme='dark'][data-skin='sakura'] {
+  --bg: #140d13;
+  --bg-deep: #0f090e;
+  --surface: #1c121a;
+  --surface-2: #241722;
+  --surface-3: #2c1d2a;
+  --glass: rgba(20, 13, 19, 0.72);
+}
+
+:root[data-theme='light'][data-skin='sakura'] {
+  --bg: #fdf6f8;
+  --bg-deep: #fbeef2;
+  --surface: #ffffff;
+  --surface-2: #fdf1f4;
+  --surface-3: #fae6ec;
+  --glass: rgba(255, 255, 255, 0.76);
+}
+
+/* ── 霜青 ─────────────────────────────────────────────────────── */
+:root[data-theme='dark'][data-skin='frost'] {
+  --bg: #0a1213;
+  --bg-deep: #070e0f;
+  --surface: #111a1b;
+  --surface-2: #172324;
+  --surface-3: #1e2c2d;
+  --glass: rgba(10, 18, 19, 0.72);
+}
+
+:root[data-theme='light'][data-skin='frost'] {
+  --bg: #f4fbfb;
+  --bg-deep: #ecf7f7;
+  --surface: #ffffff;
+  --surface-2: #f0f9f9;
+  --surface-3: #e6f4f4;
+  --glass: rgba(255, 255, 255, 0.76);
+}
+
+/* ── 暖木 ─────────────────────────────────────────────────────── */
+:root[data-theme='dark'][data-skin='amber'] {
+  --bg: #12100c;
+  --bg-deep: #0d0b08;
+  --surface: #1a1611;
+  --surface-2: #221c15;
+  --surface-3: #2a231a;
+  --glass: rgba(18, 16, 12, 0.72);
+}
+
+:root[data-theme='light'][data-skin='amber'] {
+  --bg: #fbf7f0;
+  --bg-deep: #f7f0e4;
+  --surface: #ffffff;
+  --surface-2: #faf4ea;
+  --surface-3: #f4ebdd;
+  --glass: rgba(255, 255, 255, 0.76);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 主页 hero：花火立绘移到文字区（2026-11-18 用户要求）
+ *
+ * 原来 .hero-sparxie 是 right: 262px 贴右侧，会和右侧双角色卡挤在一起。
+ * 现在改到左侧文字区，作为文字背后的主视觉；文字靠 .hero-content 的
+ * 半透明底衬保证可读，遮罩方向也跟着从「向左淡出」改成「向右淡出」。
+ * ══════════════════════════════════════════════════════════════════ */
+.home-page .hero-sparxie {
+  right: auto;
+  left: 1%;
+  bottom: -14%;
+  height: 118%;
+  opacity: 0.74;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 0.86) 54%,
+    transparent 92%
+  );
+  mask-image: linear-gradient(
+    to right,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 0.86) 54%,
+    transparent 92%
+  );
+}
+
+/* 文字压在立绘之上，给一层从左往右淡出的底衬，浅色深色各一套 */
+.home-page .hero-content {
+  position: relative;
+  z-index: 3;
+  background: linear-gradient(
+    90deg,
+    rgba(10, 3, 8, 0.74) 0%,
+    rgba(10, 3, 8, 0.42) 58%,
+    transparent 100%
+  );
+  border-radius: 18px;
+}
+
+:root[data-theme='light'] .home-page .hero-content {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 250, 240, 0.82) 0%,
+    rgba(255, 250, 240, 0.5) 58%,
+    transparent 100%
+  );
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 界面风格（2026-11-18）
+ *
+ * 用户要「主题不止是皮肤」。除了 skin 改配色，再加一个形状维度：
+ * default / round / sharp，只改主要容器的圆角，不动结构、不动间距，
+ * 风险可控且切换时一眼看得出。默认值等于现状，所以「默认」不改变观感。
+ * ══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --shape-lg: 18px;
+  --shape-md: 14px;
+  --shape-sm: 10px;
+}
+
+
+/* 主要面板 */
+.kr-nav,
+.song-app-main,
+.settings-shell,
+.home-page .hero,
+.char-duo-card {
+  border-radius: var(--shape-lg);
+}
+
+/* 卡片类 */
+.song-rail-card,
+.song-dock-queue,
+.kr-detail-bar,
+.playlist-card-cover,
+.dock-queue-row,
+.kr-nav-recent-item,
+.kr-nav-pl {
+  border-radius: var(--shape-md);
+}
+
+/* 小控件 */
+.kr-nav-item,
+.kr-nav-pl-tab,
+.kr-main-clear,
+.song-queue-brush,
+.song-queue-brush-btn,
+.song-live-toggle-arrow {
+  border-radius: var(--shape-sm);
+}
+
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题可读性修复（2026-11-18）
+ *
+ * 扫描确认：.start-screen 的底色是 var(--bg-deep)，浅色主题下会变浅，
+ * 但启动页的文字/图标大量写死成 #fff / rgba(255,255,255,x) —— 这就是
+ * 用户说的「有些地方的文字和图案还是有看不清的地方」。
+ * 这里按区块统一换成语义色，深色不受影响（只在 light 下生效）。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 启动页：文字与玻璃层 ─────────────────────────────────────── */
+
+
+
+
+
+/* 启动页顶部按钮 / 关闭键 */
+
+
+/* 抽屉里的服务器行 */
+
+
+
+
+
+
+/* ── 主页 hero 的「花」字水印 ─────────────────────────────────── */
+:root[data-theme='light'] .hero-index {
+  color: rgba(120, 90, 60, 0.09);
+}
+
+/* ── 窗口控制按钮（浅色下白字看不见） ─────────────────────────── */
+:root[data-theme='light'] .window-control {
+  color: var(--text-2);
+}
+
+:root[data-theme='light'] .window-control:hover {
+  color: var(--text);
+}
+
+/* ── 通用：浅色下的徽标/提示 ─────────────────────────────────── */
+:root[data-theme='light'] .figure-credit,
+:root[data-theme='light'] .figure-credit:hover,
+:root[data-theme='light'] .shot-reveal {
+  color: var(--text-2);
+}
+
+:root[data-theme='light'] .gacha-tile-pity {
+  color: var(--text-2);
+}
+
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 弹窗 / 更新窗口跟随主题（2026-11-18）
+ *
+ * 用户要求「弹窗更新的窗口也得跟着动」。
+ * 弹窗本体的底已经用 color-mix(--surface) 跟着主题走了，问题在：
+ *   · 阴影与内高光写死成深色 / 白色；
+ *   · 服务器选择弹窗里的行卡片用 rgba(255,255,255,x) 描边和底色，
+ *     浅色下几乎透明，卡片边界完全看不见。
+ * ══════════════════════════════════════════════════════════════════ */
+
+:root[data-theme='light'] .modal {
+  box-shadow:
+    0 20px 60px rgba(80, 60, 40, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+:root[data-theme='light'] .modal-backdrop {
+  background: rgba(56, 46, 40, 0.3);
+}
+
+
+/* 服务器选择弹窗的行卡片：浅色下要有可见的边界与底色 */
+
+
+
+
+/* 更新弹窗顶部的版本图：浅色下别再用深色压图 */
+:root[data-theme='light'] .update-modal .news-figure.update-hero::after {
+  background: linear-gradient(180deg, transparent 40%, rgba(255, 253, 249, 0.9));
+}
+
+/* 其它弹窗里常见的白系描边 */
+:root[data-theme='light'] .modal .modal-head,
+:root[data-theme='light'] .modal .modal-foot {
+  border-color: var(--line);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题全局对比度提升（2026-11-18）
+ *
+ * 用户反馈「目前只有深色主题是最完美的」。浅色的问题不是某一处，
+ * 而是历史硬编码（#fff 文字、rgba(255,255,255,x) 描边）太多，
+ * 逐个补丁效率低且容易漏。
+ *
+ * 这里做一层全局兜底：把浅色的文字色整体加深、描边加强。
+ *  - 深色主题完全不受影响（只在 light 下生效）；
+ *  - 文字从 #2b1119 系加深到 #17130f，正文/次文/弱化三档一起压；
+ *  - 描边透明度从 0.09 提到 0.13，卡片边界更清楚。
+ * 这一步会让全站浅色都"沉"下来，剩下的个别白字再定点处理。
+ * ══════════════════════════════════════════════════════════════════ */
+
+:root[data-theme='light'] {
+  --text: #17130f;
+  --text-2: #45403a;
+  --muted: #6b655c;
+  --line: rgba(60, 45, 30, 0.13);
+  --line-strong: rgba(60, 45, 30, 0.22);
+  --shadow: 0 24px 70px rgba(80, 60, 40, 0.16);
+}
+
+/* 纯白主题同步加深（否则白底上的浅灰更糊） */
+
+/* 正文默认色兜底：避免个别容器仍继承到浅色 */
+:root[data-theme='light'] body {
+  color: var(--text);
+}
+
+/* 表单控件在浅色下统一用深字 + 明显边框，避免"看不见输入框" */
+:root[data-theme='light'] .text-input,
+:root[data-theme='light'] textarea,
+:root[data-theme='light'] select {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+:root[data-theme='light'] .text-input::placeholder,
+:root[data-theme='light'] textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* 小标签类：浅色下统一成次文字色，不依赖各自的硬编码 */
+:root[data-theme='light'] .setting-copy span,
+:root[data-theme='light'] .desc,
+:root[data-theme='light'] .sub,
+:root[data-theme='light'] .form-hint,
+:root[data-theme='light'] .empty-hint {
+  color: var(--text-2);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题定点修复（2026-11-18 按用户截图）
+ *
+ * 图4 主页 hero：白字压浅色立绘 → 文字改深
+ * 图3/5 顶部栏与「添加游戏」：白字 → 深字
+ * 注：图1（服务器选择弹窗）用户要求「维持原样」，这里不做任何覆盖。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 主页 hero 文字 ───────────────────────────────────────────── */
+:root[data-theme='light'] .home-page .hero-content,
+:root[data-theme='light'] .home-page .hero-content h2,
+:root[data-theme='light'] .home-page .hero-title {
+  color: #24150e;
+}
+
+:root[data-theme='light'] .home-page .hero-kicker {
+  color: rgba(36, 21, 14, 0.78);
+}
+
+:root[data-theme='light'] .home-page .hero-sub {
+  color: rgba(36, 21, 14, 0.72);
+}
+
+:root[data-theme='light'] .home-page .hero-desc {
+  color: rgba(36, 21, 14, 0.86);
+}
+
+/* ── 游戏库「添加游戏」等 ─────────────────────────────────────── */
+:root[data-theme='light'] .library-add,
+:root[data-theme='light'] .game-add-btn,
+:root[data-theme='light'] .lib-add-btn {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: rgba(0, 0, 0, 0.035);
+}
+
+/* ── 启动页顶栏「选择游戏」那一条 ─────────────────────────────── */
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题补充修复（2026-11-18 第二批，按用户截图）
+ *
+ * 三处的背景性质不同，处理方向也相反：
+ *   · 游戏详情标题（.start-titlebox h1）：背景是深色封面大图 → 固定白字
+ *   · 选择游戏顶栏（.start-games-head）：背景在浅色下是浅底 → 深字
+ *   · 服务器弹窗（.modal-servers）：加强描边与胶囊，浅色下也要分得清
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── 游戏详情：标题压在深色封面上，必须保持白字 ─────────────────── */
+
+
+
+/* 公告区同样压在深图上 */
+
+
+
+
+/* ── 选择游戏顶栏：浅底 → 深字 ───────────────────────────────── */
+
+
+
+/* ── 服务器弹窗：浅色下加强对比 ─────────────────────────────── */
+:root[data-theme='light'] .modal-servers .modal-head h2 {
+  color: var(--text);
+}
+
+:root[data-theme='light'] .modal-servers .modal-head p,
+:root[data-theme='light'] .modal-servers .ms-count {
+  color: var(--text-2);
+}
+
+:root[data-theme='light'] .modal-servers .st-title strong {
+  color: var(--text);
+}
+
+:root[data-theme='light'] .modal-servers .st-sub {
+  color: var(--text-2);
+}
+
+/* 「未配置」这类黄色胶囊：浅底上要更实 */
+:root[data-theme='light'] .modal-servers .st-chip {
+  color: #8a5410;
+  border-color: rgba(180, 120, 40, 0.35);
+  background: rgba(240, 198, 116, 0.22);
+}
+
+/* 行内的工具按钮（重建 / 编辑 / 删除） */
+:root[data-theme='light'] .modal-servers .st-tool {
+  color: var(--text-2);
+  border-color: var(--line-strong);
+}
+
+:root[data-theme='light'] .modal-servers .st-tool:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme='light'] .modal-servers .st-tool.is-danger:hover {
+  color: #b0453f;
+  background: rgba(176, 69, 63, 0.1);
+}
+
+/* 底部那排：重新扫描 / 硬链接去重 / 切换说明 / 完成 */
+:root[data-theme='light'] .modal-servers .ms-foot > .btn {
+  color: var(--text-2);
+  border-color: var(--line-strong);
+}
+
+:root[data-theme='light'] .modal-servers .ms-foot > .btn:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题 · 按钮与进度条（2026-11-18 第三批）
+ *
+ * 用户截图指出的问题：
+ *   · hero 三个玻璃按钮的文字几乎看不见；
+ *   · 游戏库「添加游戏」在浅色强调色上字发虚；
+ *   · 音乐页底部播放条的进度条轨道太淡，看不出播到哪。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* 玻璃按钮：浅色下改深字 + 实心白底，别再半透明 */
+:root[data-theme='light'] .btn-glass {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+:root[data-theme='light'] .btn-glass:hover {
+  color: #000;
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(0, 0, 0, 0.24);
+}
+
+/* 主按钮：强调色底一律配深色字，避免浅金底 + 白字 */
+:root[data-theme='light'] .btn-primary {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 70%, #000);
+}
+
+:root[data-theme='light'] .btn-primary:hover {
+  color: var(--accent-ink);
+}
+
+/* 音乐页底部进度条：轨道加深、已播放段用强调色、滑块加白描边 */
+:root[data-theme='light'] .song-bar-progress input[type='range'] {
+  accent-color: var(--accent);
+}
+
+:root[data-theme='light'] .song-bar-progress input[type='range']::-webkit-slider-runnable-track {
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 999px;
+}
+
+:root[data-theme='light'] .song-bar-progress input[type='range']::-webkit-slider-thumb {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px #fff, 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme='light'] .song-bar-progress span {
+  color: var(--text-2);
+}
+
+/* 游戏卡 hover 时盖在封面上的半透明遮罩：浅色下太亮，压深一点 */
+:root[data-theme='light'] .game-card:hover .game-cover img {
+  filter: brightness(0.72);
+}
+
+
+/* 服务器弹窗：用户觉得浅色版不如深色，这里浅色主题下也走深色玻璃 */
+
+
+
+
+
+
+/* ── 界面不透明度（2026-11-18） ─────────────────────────────────────
+ * 40%–100%，只作用于侧栏 / 主内容 / 弹窗容器，背景图层保持不动，
+ * 否则调低时背景图也跟着糊掉，"透出桌面"的观感反而变差。
+ */
+.sidebar,
+.main,
+#modal-root {
+  opacity: var(--ui-opacity, 1);
+  transition: opacity 0.18s ease;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 服务器弹窗：恢复圆角 + 深色门面（2026-11-18 修正）
+ *
+ * 两个问题：
+ *  1. `.modal.modal-servers .server-tile { border-radius: 0 }`（31795 行）
+ *     把每一行服务器卡片压成了直角 —— 弹窗整体看着"方方正正"。
+ *  2. 之前给的深色背景没有生效（被后写/更具体的规则压住），
+ *     用户看到浅色版还是不如深色，这里加 !important 锁定。
+ * ══════════════════════════════════════════════════════════════════ */
+
+
+/* 行卡片恢复圆角（覆盖 31795 的 border-radius: 0） */
+.modal-servers .server-tile,
+.modal.modal-servers .server-tile {
+  border-radius: 12px;
+}
+
+/* 深色门面下，行卡片用白色系描边 */
+
+
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 主题工厂皮肤 ×10（2026-11-18）
+ *
+ * 由「主题工厂」技能的 10 套预设配色转换而来，只覆盖底色系的几个变量：
+ * bg / bg-deep / surface / surface-2 / surface-3 / glass。
+ * 强调色仍由用户单独设置的主题强调色控制，二者不冲突。
+ * 每套都提供深色与浅色两版，跟随界面主题切换。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* 海洋深处 */
+:root[data-theme='dark'][data-skin='ocean'] {
+  --bg: #0b141d;
+  --bg-deep: #0b141d;
+  --surface: #101b27;
+  --surface-2: #152231;
+  --surface-3: #1b2a3b;
+  --glass: color-mix(in srgb, #0b141d 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='ocean'] {
+  --bg: #f1faee;
+  --bg-deep: #f1faee;
+  --surface: #ffffff;
+  --surface-2: #eaf5f3;
+  --surface-3: #dceeec;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 落日大道 */
+:root[data-theme='dark'][data-skin='sunset'] {
+  --bg: #170f0d;
+  --bg-deep: #170f0d;
+  --surface: #221714;
+  --surface-2: #2b1d19;
+  --surface-3: #34231e;
+  --glass: color-mix(in srgb, #170f0d 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='sunset'] {
+  --bg: #fdf6f0;
+  --bg-deep: #fdf6f0;
+  --surface: #fffdfa;
+  --surface-2: #fbeee6;
+  --surface-3: #f7e2d7;
+  --glass: color-mix(in srgb, #fffdfa 88%, transparent);
+}
+
+/* 森林树冠 */
+:root[data-theme='dark'][data-skin='forest'] {
+  --bg: #0f140d;
+  --bg-deep: #0f140d;
+  --surface: #161d13;
+  --surface-2: #1d2519;
+  --surface-3: #242e1f;
+  --glass: color-mix(in srgb, #0f140d 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='forest'] {
+  --bg: #faf9f6;
+  --bg-deep: #faf9f6;
+  --surface: #ffffff;
+  --surface-2: #f3f4ef;
+  --surface-3: #e9ece3;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 极简灰阶 */
+:root[data-theme='dark'][data-skin='mono'] {
+  --bg: #141618;
+  --bg-deep: #141618;
+  --surface: #1c1f22;
+  --surface-2: #23272a;
+  --surface-3: #2b3034;
+  --glass: color-mix(in srgb, #141618 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='mono'] {
+  --bg: #f7f8f9;
+  --bg-deep: #f7f8f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f4;
+  --surface-3: #e6e9ec;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 金色时刻 */
+:root[data-theme='dark'][data-skin='golden'] {
+  --bg: #150f07;
+  --bg-deep: #150f07;
+  --surface: #1f170d;
+  --surface-2: #281e11;
+  --surface-3: #312516;
+  --glass: color-mix(in srgb, #150f07 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='golden'] {
+  --bg: #fdf8ee;
+  --bg-deep: #fdf8ee;
+  --surface: #fffdf8;
+  --surface-2: #faf1e1;
+  --surface-3: #f4e7d0;
+  --glass: color-mix(in srgb, #fffdf8 88%, transparent);
+}
+
+/* 极地霜蓝 */
+:root[data-theme='dark'][data-skin='arctic'] {
+  --bg: #0c1420;
+  --bg-deep: #0c1420;
+  --surface: #131d2b;
+  --surface-2: #192536;
+  --surface-3: #1f2d41;
+  --glass: color-mix(in srgb, #0c1420 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='arctic'] {
+  --bg: #f4f8fd;
+  --bg-deep: #f4f8fd;
+  --surface: #ffffff;
+  --surface-2: #ecf3fb;
+  --surface-3: #e0ebf7;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 沙漠玫瑰 */
+:root[data-theme='dark'][data-skin='rose'] {
+  --bg: #170f12;
+  --bg-deep: #170f12;
+  --surface: #221619;
+  --surface-2: #2b1d21;
+  --surface-3: #342429;
+  --glass: color-mix(in srgb, #170f12 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='rose'] {
+  --bg: #fbf3f1;
+  --bg-deep: #fbf3f1;
+  --surface: #fffdfc;
+  --surface-2: #f7e9e6;
+  --surface-3: #f1ddd8;
+  --glass: color-mix(in srgb, #fffdfc 88%, transparent);
+}
+
+/* 科技前沿 */
+:root[data-theme='dark'][data-skin='tech'] {
+  --bg: #0a0c10;
+  --bg-deep: #0a0c10;
+  --surface: #12161b;
+  --surface-2: #181d23;
+  --surface-3: #1f252c;
+  --glass: color-mix(in srgb, #0a0c10 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='tech'] {
+  --bg: #f5f7fa;
+  --bg-deep: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #eef1f5;
+  --surface-3: #e3e8ee;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 植物园 */
+:root[data-theme='dark'][data-skin='garden'] {
+  --bg: #0d130c;
+  --bg-deep: #0d130c;
+  --surface: #141c12;
+  --surface-2: #1b2418;
+  --surface-3: #222d1e;
+  --glass: color-mix(in srgb, #0d130c 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='garden'] {
+  --bg: #f8f7f2;
+  --bg-deep: #f8f7f2;
+  --surface: #ffffff;
+  --surface-2: #f2f2ea;
+  --surface-3: #e9ebdf;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+/* 午夜星河 */
+:root[data-theme='dark'][data-skin='galaxy'] {
+  --bg: #100c1a;
+  --bg-deep: #100c1a;
+  --surface: #181226;
+  --surface-2: #1f1830;
+  --surface-3: #261d3a;
+  --glass: color-mix(in srgb, #100c1a 82%, transparent);
+}
+
+:root[data-theme='light'][data-skin='galaxy'] {
+  --bg: #f5f2fb;
+  --bg-deep: #f5f2fb;
+  --surface: #ffffff;
+  --surface-2: #eeeaf7;
+  --surface-3: #e4dcf2;
+  --glass: color-mix(in srgb, #ffffff 88%, transparent);
+}
+
+
+/* ── 皮肤选择器：可换行的 chip 组（2026-11-18，皮肤扩到 15 套） ────── */
+.theme-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 540px;
+}
+
+.theme-chip {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.theme-chip:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.theme-chip.is-active {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 启动页整页固定深色（2026-11-18 用户要求）
+ *
+ * 用户原话：「你干脆浅色系也不会改变启动页，启动页整页就留深色系那样」。
+ *
+ * 做法：在 .start-screen 自身上重设一整套深色变量，覆盖从 html 继承来的
+ * 浅色值。因为启动页内部所有元素都用 var(--surface) / var(--text) 之类，
+ * 重设变量后它们自动变回深色，不需要逐个选择器覆盖。
+ * 之前为浅色主题加的启动页覆盖（标题、公告、顶栏）会因此自动拿到
+ * 正确的深色外观，不需要删。
+ * ══════════════════════════════════════════════════════════════════ */
+
+.start-screen {
+  --bg: #0a0b0f;
+  --bg-deep: #07080b;
+  --surface: #111319;
+  --surface-2: #171a22;
+  --surface-3: #1e222c;
+  --text: #f2eee7;
+  --text-2: #cbc5ba;
+  --muted: #9aa0ab;
+  --line: rgba(255, 255, 255, 0.075);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
+  --hero-ink: #f8f3e9;
+  --hero-muted: rgba(248, 243, 233, 0.68);
+  --glass: rgba(10, 11, 15, 0.72);
+  --panel-soft: rgba(255, 255, 255, 0.05);
+  --accent-text: color-mix(in srgb, var(--accent) 72%, #fff);
+
+  /* 启动页自己的玻璃层与卡片底衬 */
+  --start-glass: rgba(11, 9, 14, 0.94);
+  --start-glass-hover: rgba(16, 13, 20, 0.97);
+  --start-shadow: 0 20px 52px rgba(0, 0, 0, 0.46);
+  --start-card-veil: linear-gradient(0deg, rgba(7, 6, 9, 0.96), rgba(7, 6, 9, 0.82));
+  --start-card-ink: #ffffff;
+  --start-card-ring: rgba(4, 3, 7, 0.42);
+  --start-card-ring-inset: rgba(255, 255, 255, 0.62);
+  --start-games-bg: linear-gradient(0deg, rgba(6, 5, 9, 0.92), rgba(6, 5, 9, 0.55));
+  --start-card-thumb-shade: linear-gradient(
+    0deg,
+    rgba(4, 3, 7, 0.55) 0%,
+    rgba(4, 3, 7, 0.28) 34%,
+    transparent 64%
+  );
+
+  background: var(--bg-deep);
+  color: var(--text);
+}
+
+/* 启动页里少数直接用 #fff / rgba(255,255,255) 的地方，深色下本来就是对的，
+   这里不用额外处理；之前为浅色加的覆盖也都会拿到上面这套深色变量。 */
+
+
+/* ── 皮肤选择器：等宽网格（2026-11-18 修正排列） ────────────────────
+ * 之前用 flex + 右对齐换行，每行从右边开始排、左边缘参差不齐。
+ * 改成等宽网格：每行自动铺满，chip 等宽、左右对齐。
+ */
+.setting-control .theme-chips {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.theme-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 6px;
+  width: 100%;
+  max-width: none;
+  justify-content: initial;
+}
+
+.theme-chips .theme-chip {
+  width: 100%;
+  padding: 6px 6px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* ── 皮肤行：上下堆叠，chip 铺满整行（2026-11-18 修正竖排问题） ──────
+ * 之前和文字并排，右侧控件区被压得很窄，auto-fill 只能排 1 列，
+ * 15 个 chip 竖着占了整屏。改成：说明在上、chip 网格在下、占满整行。
+ */
+.setting-row.setting-row-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  /*
+   * 关键：.setting-copy 全局是 flex: 1 1 220px，在纵向 flex 里
+   * flex-basis 220px 会变成「高度 220px」，于是说明文字和 chip 之间
+   * 出现一大片空白。这里把基准改回内容高度。
+   */
+  min-height: 0;
+}
+
+.setting-row.setting-row-stack .setting-copy {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.setting-row.setting-row-stack .setting-copy {
+  max-width: none;
+}
+
+.setting-row.setting-row-stack .setting-control {
+  width: 100%;
+  max-width: none;
+  justify-content: stretch;
+  align-items: stretch;
+}
+
+.setting-row.setting-row-stack .theme-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 7px;
+  width: 100%;
+}
+
+.setting-row.setting-row-stack .theme-chip {
+  width: 100%;
+  padding: 7px 8px;
+  text-align: center;
+}
+
+/* ── 服务器弹窗：圆角修复（2026-11-18 最终） ─────────────────────────
+ * 之前把整个弹窗强制深色，方向错了 —— 图3 那种「浅色下浅底深字」才是对的。
+ * 这里只保留圆角修复，配色重新交回主题控制。
+ */
+.modal.modal-servers {
+  border-radius: 18px;
+}
+
+.modal.modal-servers .server-tile,
+.modal-servers .server-tile {
+  border-radius: 12px;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 启动页：强制深色文字 + 服务器下拉圆角（2026-11-18 用户截图）
+ *
+ * 图1：启动页标题/副标题被浅色主题的深字规则压住，压在游戏大图上几乎看不见
+ *      → 这里用 !important 拉回白色，启动页背景始终是图，白字才可读。
+ * 图2：启动页的服务器下拉菜单（.start-server-menu）丢了圆角
+ *      → 强制 14px，并裁掉内部第一/最后一行的方角。
+ * ══════════════════════════════════════════════════════════════════ */
+
+.start-screen .start-titlebox > h1,
+.start-screen .start-main h1,
+.start-screen .start-titlebox + .start-sub,
+.start-screen .start-sub {
+  color: #ffffff !important;
+}
+
+.start-screen .start-meta,
+.start-screen .start-meta span {
+  color: rgba(255, 255, 255, 0.76) !important;
+}
+
+/* 服务器下拉菜单：圆角 + 内部边缘跟随 */
+.start-server-menu {
+  border-radius: 14px !important;
+  overflow: hidden;
+}
+
+.start-server-menu .sw-srv-actions:first-child {
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
+}
+
+.start-server-menu .sw-srv-list:last-child {
+  border-bottom-left-radius: 14px;
+  border-bottom-right-radius: 14px;
+}
+
+/* 下拉里的每一行也带一点圆角，别在直角容器里显得突兀 */
+.start-server-menu .sw-srv-item,
+.start-server-menu .sw-srv-action {
+  border-radius: 9px;
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 启动页：服务器下拉真正深色 + 外圈圆角（2026-11-18 修正）
+ *
+ * 图2 之前还是浅灰底、外圈直角：
+ *   · 菜单背景没跟着 .start-screen 的变量走（它自己写死了浅色）；
+ *   · border-radius 加在 .start-server-menu 上，但外层还有一层方形容器
+ *     把圆角盖住了。
+ * 这里给启动页作用域下的菜单强制深色 + 圆角 + 深阴影，
+ * 并保证内部每一行都是深底白字。
+ * ══════════════════════════════════════════════════════════════════ */
+
+.start-screen .start-server-menu {
+  background: rgba(16, 14, 21, 0.97) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.55) !important;
+  overflow: hidden !important;
+  color: #f2eee7;
+}
+
+.start-screen .start-server-menu .sw-srv-actions,
+.start-screen .start-server-menu .sw-srv-list {
+  background: transparent;
+}
+
+.start-screen .start-server-menu .sw-srv-action {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: #f2eee7;
+}
+
+.start-screen .start-server-menu .sw-srv-action:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.start-screen .start-server-menu .sw-srv-action-copy strong {
+  color: #f7f3ea;
+}
+
+.start-screen .start-server-menu .sw-srv-item,
+.start-screen .start-server-menu .start-server-item {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: #f2eee7;
+}
+
+.start-screen .start-server-menu .sw-srv-item:hover,
+.start-screen .start-server-menu .start-server-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.start-screen .start-server-menu .start-server-item-copy strong,
+.start-screen .start-server-menu .sw-srv-item strong {
+  color: #f7f3ea;
+}
+
+.start-screen .start-server-menu .start-server-item-copy small,
+.start-screen .start-server-menu .sw-srv-item small {
+  color: rgba(247, 243, 234, 0.62);
+}
+
+/* 启动页标题区：背后是游戏大图，压一层深色径向遮罩，确保是"深色系" */
+.start-screen .start-titlebox::before {
+  background: radial-gradient(
+    60% 60% at 30% 50%,
+    rgba(10, 6, 12, 0.55),
+    rgba(10, 6, 12, 0.25) 55%,
+    transparent 78%
+  ) !important;
+}
+
+/* 启动页主体再压一层，浅色主题下也不会显得发白 */
+
+
+/* ── 游戏卡操作按钮：浅色主题下改白底深图标（2026-11-18） ─────────────
+ * .card-tool 原值 background: rgba(8,9,12,.6) 是给深色主题写的，
+ * 深色下和卡片背景融合看不出框，浅色下就是一块突兀的深色方块。
+ * 浅色下换成白色半透明底 + 深色图标，和深色主题的「深底白图标」对称。
+ */
+

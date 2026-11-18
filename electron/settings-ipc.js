@@ -75,6 +75,8 @@ function installSettingsIpc(ctx) {
         'material',
         'customBackground',
         'backgroundOpacity',
+        // 界面不透明度（40–100，2026-11-18）
+        'uiOpacity',
         'backgroundBlur',
         'backgroundMotion',
         'backgroundRotate',
@@ -84,6 +86,8 @@ function installSettingsIpc(ctx) {
         // 音乐缓存：播放过的音频字节落盘，同一首歌再播直接读本机
         'musicCache',
         'musicCacheLimitMB',
+        // 界面皮肤（2026-11-18）：不在白名单里会被快照回推抹掉
+        'skin',
       ];
       for (const key of allowed) {
         if (!(key in patch)) continue;
@@ -93,6 +97,12 @@ function installSettingsIpc(ctx) {
           settings.avatar = String(patch.avatar || '').slice(0, 500);
         } else if (key === 'theme') {
           if (['dark', 'light', 'system'].includes(patch.theme)) settings.theme = patch.theme;
+          // 纯白已下线：老配置里的 white 落回浅色
+          else if (patch.theme === 'white') settings.theme = 'light';
+        } else if (key === 'skin') {
+          if (['classic', 'midnight', 'sakura', 'frost', 'amber', 'ocean', 'sunset', 'forest', 'mono', 'golden', 'arctic', 'rose', 'tech', 'garden', 'galaxy'].includes(patch.skin)) {
+            settings.skin = patch.skin;
+          }
         } else if (key === 'accent') {
           if (['spark', 'gold', 'sakura', 'cyan', 'rose', 'jade', 'violet', 'amber'].includes(patch.accent)) {
             settings.accent = patch.accent;
@@ -152,6 +162,9 @@ function installSettingsIpc(ctx) {
               settings.customBackground = `backgrounds/${base}`;
             }
           }
+        } else if (key === 'uiOpacity') {
+          const value = Number(patch.uiOpacity);
+          if (Number.isFinite(value)) settings.uiOpacity = Math.max(40, Math.min(100, Math.round(value)));
         } else if (key === 'backgroundOpacity') {
           const value = Number(patch.backgroundOpacity);
           if (Number.isFinite(value)) settings.backgroundOpacity = Math.max(0, Math.min(100, Math.round(value)));
