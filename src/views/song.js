@@ -16,7 +16,42 @@
 /** 上一次提示「存档写不下」的时间戳，用来节流，别每加一首就弹一次。 */
 let saveSongsWarnedAt = 0;
 
-function saveSongs() {
+/* --- 歌单落盘：节流 + 异步（2026-11-19 改） --------------------------- *
+ * 为什么要改（都是实测数）：1944 首时 state.songs 序列化出来 0.65 MB，
+ * JSON.stringify 单程 8.76 ms；而 saveSongs() 一共被 29 处调用
+ * （actions.js 7 / song-playlist.js 12 / song-view.js 3 / song.js 6 / bindings.js 1），
+ * 其中不少就长在「点一下」的路径上：改播放模式、勾选、拖拽排序、加进队列……
+ * 于是每点一下都同步 stringify 一遍 0.65 MB —— 这就是「点一下卡一下」的来源。
+ * （顺带说明：markup 不是瓶颈，1944 首全量渲染 2.18 ms，按段折叠只渲染 8 行是 0.02 ms。）
+ *
+ * 拆成三段，对外接口不变：
+ *   saveSongs()      —— 29 处调用点一个字都不用改，现在只打脏标记 + 排一个合并窗口；
+ *   writeSongsNow()  —— 原来那段同步 stringify + setItem，只在窗口到期时跑；
+ *   flushSongs()     —— 立刻刷盘，给关窗 / 切歌 / 切歌单 / 页面隐藏这些时刻用。
+ *
+ * 窗口取 400 ms：比连点/双击间隔（一般 <300 ms）略长，能把一串连续操作并成一次写；
+ * 又短到松手一两秒内一定已经落盘，进程被强杀时最多丢这 400 ms 内的最后一次改动。
+ * 数据结构与 key 一律没动（还是 vela:songs / vela:song-index），老存档照旧能读。
+ */
+const SONGS_SAVE_DELAY_MS = 400;
+/** requestIdleCallback 的最长等待：再忙也不能把落盘无限往后推。 */
+const SONGS_SAVE_IDLE_TIMEOUT_MS = 2000;
+
+/** 合并窗口的 setTimeout 句柄（0 = 当前没有待写的改动）。 */
+let songsSaveTimer = 0;
+/** requestIdleCallback 句柄，flush 时要能撤掉（0 = 没有）。 */
+let songsSaveIdleHandle = 0;
+/** 脏标记：内存里的队列已经和本地存档不一致，必须找机会写一次。 */
+let songsSaveDirty = false;
+
+/**
+ * 真正落盘。这就是原来 saveSongs() 的函数体，逻辑一行没改，只是不再被 29 处直接调用。
+ * 走到这里说明窗口已经到期，或者有人明确要求立刻刷 —— 所以 stringify 一次就是一次。
+ */
+function writeSongsNow() {
+  // 先摘脏标记：万一这次写失败（配额满），也回到和原来一样的「不自动重试」行为，
+  // 免得每 400 ms 又拿 0.65 MB 去撞一次配额；后续任何一次 saveSongs() 会重新标脏。
+  songsSaveDirty = false;
   try {
     // 队列里的歌原来最多只存 200 首：整张歌单八百首进来时，
     // 重开一次启动器就只剩前 200 首，注释还要告诉用户去恢复。现在改存全诗。
@@ -37,6 +72,83 @@ function saveSongs() {
     }
   }
 }
+
+/** 把当前排着的窗口整个撤掉（窗口句柄和 idle 句柄都清，保证 flush 后不会再补写一次）。 */
+function cancelSongsSave() {
+  if (songsSaveTimer) {
+    clearTimeout(songsSaveTimer);
+    songsSaveTimer = 0;
+  }
+  if (songsSaveIdleHandle) {
+    if (typeof cancelIdleCallback === 'function') cancelIdleCallback(songsSaveIdleHandle);
+    songsSaveIdleHandle = 0;
+  }
+}
+
+/** 窗口到期后的收口：忙就顺延到一个空闲帧，不忙就直接写。 */
+function runSongsSave() {
+  songsSaveTimer = 0;
+  songsSaveIdleHandle = 0;
+  if (!songsSaveDirty) return;
+  /*
+   * 大歌单的 stringify 要 8.76 ms。窗口到期时如果用户正在滚动/输入/看动画，
+   * 这 8 ms 照样是肉眼可见的一顿 —— 交给 requestIdleCallback 顺延，空闲时才付。
+   * 带 timeout 兜底，另外没有 idle 回调时退回 setTimeout(0)：无论如何最终一定写进去。
+   */
+  if (typeof requestIdleCallback === 'function') {
+    songsSaveIdleHandle = requestIdleCallback(() => {
+      songsSaveIdleHandle = 0;
+      if (songsSaveDirty) writeSongsNow();
+    }, { timeout: SONGS_SAVE_IDLE_TIMEOUT_MS });
+    return;
+  }
+  songsSaveTimer = setTimeout(() => {
+    songsSaveTimer = 0;
+    if (songsSaveDirty) writeSongsNow();
+  }, 0);
+}
+
+/**
+ * 排一次落盘。签名与原实现完全一致（无参数、无返回值），29 处调用点不用改。
+ * 连续调用只换一次 stringify：窗口没到期就不再排第二个定时器。
+ */
+function saveSongs() {
+  songsSaveDirty = true;
+  if (songsSaveTimer || songsSaveIdleHandle) return;
+  songsSaveTimer = setTimeout(runSongsSave, SONGS_SAVE_DELAY_MS);
+}
+
+/**
+ * 立刻刷盘。给「用户可能马上关应用」的时刻用：关窗、切歌、切歌单、页面被隐藏。
+ * 没有待写改动时是空转，不会多出一次 stringify。
+ */
+function flushSongs() {
+  if (!songsSaveDirty) {
+    cancelSongsSave();
+    return;
+  }
+  cancelSongsSave();
+  writeSongsNow();
+}
+
+/**
+ * 兜底：把 flushSongs 挂到「窗口要走」的两个事件上。
+ * beforeunload 里同步写 localStorage 是浏览器允许且可靠的，所以这条一定要有；
+ * 这个启动器会最小化到托盘/直接被主进程结束进程，那种路径不触发 beforeunload，
+ * 于是再加 visibilitychange(hidden) 这道闸，先落盘再休息。
+ * 只注册一次，重复加载脚本也不会挂两遍。
+ */
+function bindSongsSaveFlush() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.__songsSaveFlushBound) return;
+  window.__songsSaveFlushBound = true;
+  window.addEventListener('beforeunload', flushSongs);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushSongs();
+  });
+}
+
+bindSongsSaveFlush();
 
 const PLAY_MODES = [
   { key: 'order', label: '顺序播放', short: '顺序', icon: 'order' },
@@ -219,6 +331,12 @@ function applyResolvedPlayback(song, entry) {
 
 async function playSongAt(index, options = {}) {
   if (!state.songs.length) return;
+  /*
+   * 切歌是「手刚离开鼠标就可能去关应用」的时刻：先把还在窗口里的队列改动落盘，
+   * 再继续解析/播放（懒解析之后写进 song 的元数据由本函数末尾的渲染链路继续收集）。
+   * 没有待写改动时 flushSongs 是空转，不会多一次 stringify。
+   */
+  flushSongs();
   state.songIndex = Math.max(0, Math.min(Number(index) || 0, state.songs.length - 1));
   const song = state.songs[state.songIndex];
   /*

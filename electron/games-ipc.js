@@ -55,7 +55,7 @@ const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
  */
 
 function installGamesIpc(ctx) {
-  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, launchWithSignedParent, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame } = ctx;
+  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, launchWithSignedParent, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame, clearRegistryCache } = ctx;
   /*
    * 下面这批是从 main.js 顶层直接传进来的（函数提升 / require 的常量）。
    * 拆分时漏掉过，导致 games:launch / games:update / games:detect 一调用就 ReferenceError。
@@ -337,6 +337,12 @@ function installGamesIpc(ctx) {
        * 先修能把路径搬回国际服行，检测再写一次也只是原地覆盖。
        */
       let repaired = await repairServerChannels();
+      /*
+       * 用户点「自动检测」= 明确要求重新扫一遍，先把注册表查询的进程内缓存清掉。
+       * 不清的话上一次启动时没扫到（超时/游戏当时还没装）的负结果会一直挡着，
+       * 用户会以为「检测按钮坏了」。启动路径上的 detectBuiltins 不清，那是省时间用的。
+       */
+      if (typeof clearRegistryCache === 'function') clearRegistryCache();
       const updated = [];
       for (const game of targets) {
         if (!game.builtinKey) continue;

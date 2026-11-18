@@ -786,6 +786,14 @@ async function applyHdiffPrepass({
       } else {
         await fsp.writeFile(tempDiff, slice);
         await fsp.mkdir(path.dirname(target), { recursive: true });
+        /*
+         * hpatchz 输出路径必须不存在，否则报 exit 12。
+         * 这个 tempOut 在游戏安装目录里（不是缓存目录），上次如果崩在半路会留下
+         * 一个 .hpatch-tmp，之后这个文件永远补不上（每次都被 exit 12 顶掉），
+         * 只能靠 chunk 重下 —— 白费流量。打补丁前先清掉。
+         * 不用 -f：那会先截断已存在的文件，失败就毁了。
+         */
+        await fsp.rm(tempOut, { force: true }).catch(() => {});
         await execFileAsync(
           path.join(__dirname, 'vendor', 'hpatchz.exe'),
           // 纯新增文件：oldPath 传空串（hpatchz 的 uncompress 用法）

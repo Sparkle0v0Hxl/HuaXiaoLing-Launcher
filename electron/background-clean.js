@@ -28,9 +28,43 @@ const path = require('node:path');
    RGBA 取回来。顺带用 drawImage 的高质量缩放把宽度压到 2560 以内，省掉
    后续手工缩放的模糊损失。窗口复用，只在官方图更新时跑一次。 */
 let decoderWindow = null;
+let decoderIdleTimer = null;
+// 空闲多久之后把离屏解码窗销毁（见 releaseDecoderLater 的说明）
+const DECODER_IDLE_RELEASE_MS = 20000;
+
+/**
+ * 用完就排一次「闲时销毁」。
+ *
+ * 这个离屏 BrowserWindow 是一个完整 Chromium 渲染进程：常驻会一直占
+ * 几十 MB 常驻内存（主进程 + 渲染进程 + GPU 分配），而它只在「官方版本图
+ * 更新了」这一刻才用得上 —— 平时启动器开一整天也不会再碰。
+ * 所以跑完解码后等 20 秒没事就销毁，下次真需要时 ensureDecoderWindow()
+ * 会重新建。20 秒的作用是：一次启动页刷新可能连着解好几张图，
+ * 别解一张建一次窗口。
+ */
+function releaseDecoderLater() {
+  if (decoderIdleTimer) clearTimeout(decoderIdleTimer);
+  decoderIdleTimer = setTimeout(() => {
+    decoderIdleTimer = null;
+    if (decoderWindow && !decoderWindow.isDestroyed()) {
+      try {
+        decoderWindow.destroy();
+      } catch {
+        /* 已经没了就算了 */
+      }
+    }
+    decoderWindow = null;
+  }, DECODER_IDLE_RELEASE_MS);
+  // 别让这个定时器单独把进程吊活着
+  if (decoderIdleTimer.unref) decoderIdleTimer.unref();
+}
 
 async function ensureDecoderWindow() {
-  if (decoderWindow && !decoderWindow.isDestroyed()) return decoderWindow;
+  if (decoderWindow && !decoderWindow.isDestroyed()) {
+    // 还在用，把销毁计划往后推
+    releaseDecoderLater();
+    return decoderWindow;
+  }
   const { BrowserWindow } = require('electron');
   decoderWindow = new BrowserWindow({
     show: false,
@@ -39,6 +73,7 @@ async function ensureDecoderWindow() {
     webPreferences: { offscreen: true, sandbox: true, contextIsolation: true },
   });
   await decoderWindow.loadURL('about:blank');
+  releaseDecoderLater();
   return decoderWindow;
 }
 

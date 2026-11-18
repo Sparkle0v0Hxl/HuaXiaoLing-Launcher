@@ -226,8 +226,16 @@ case 'music-accounts':
       const next = element.dataset.value || 'queue';
       state.songTab = next;
       localStorage.setItem('vela:song-tab', next);
-      // 离开「我的歌单」时退出钻取态：再切回来应该看到卡片墙，而不是上次那张歌单
-      if (next !== 'mine') state.myPlaylists.detail = null;
+      /*
+       * 离开承载钻取态的 tab 时退出钻取（再切回来应该看到列表，而不是上次那张歌单）。
+       *
+       * 2026-11-19：广场（plaza）和「我的歌单」（mine）都各自带钻取态，
+       * 所以「离开」要按来源判：从广场点开的歌单回到广场时仍是钻取态，
+       * 切到别处才清。以前只写了 next !== 'mine'，从广场点开歌单后
+       * 切到别的 tab 不会被清掉，于是广场一直停在旧详情上 ——
+       * 用户看到的就是「点进歌单没反应 / 广场切了没变化」。
+       */
+      if (next !== 'mine' && next !== 'plaza') state.myPlaylists.detail = null;
       render({ preserveScroll: true });
       if (next === 'charts' && !(state.charts.list || []).length && !state.charts.loading) {
         handleAction('chart-platform', { dataset: { value: state.charts.platform || 'all' } });
@@ -557,16 +565,33 @@ case 'music-accounts':
       break;
     }
     case 'plaza-platform': {
+      /*
+       * 2026-11-19 修「切几下平台就没反应」：
+       *
+       * ensurePlaza() 在「这个平台已经加载过」时会直接 return（它内部只在
+       * 真正发起请求的前后才 render），于是切回加载过的平台时 ——
+       * 标签高亮不换、内容不换，界面**一点动静都没有**。
+       * 用户看到的就是「切几下以后点哪都没反应」。
+       *
+       * 所以这里先按新平台重绘一次（标签立刻高亮、已缓存的列表立刻显示），
+       * 再交给 ensurePlaza 去补未加载的平台。
+       */
       state.myPlaylists.plazaPlatform = element.dataset.value || 'netease';
+      if (state.route === 'song') render({ preserveScroll: true });
       await ensurePlaza(state.myPlaylists.plazaPlatform);
       break;
     }
     case 'plaza-more': {
-      await plazaMore(element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease');
+      /* 同上：plazaMore 在 loading/done 时也会静默 return，先重绘保证有反馈 */
+      const morePlatform = element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease';
+      await plazaMore(morePlatform);
+      if (state.route === 'song') render({ preserveScroll: true });
       break;
     }
     case 'plaza-retry': {
-      await ensurePlaza(element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease', true);
+      const retryPlatform = element.dataset.platform || state.myPlaylists.plazaPlatform || 'netease';
+      await ensurePlaza(retryPlatform, true);
+      if (state.route === 'song') render({ preserveScroll: true });
       break;
     }
     case 'chart-platform': {

@@ -1554,8 +1554,11 @@ async function updateGameFromBundle({
     //         整组重跑差分收益为负，交给 ② 的逐文件队列即可，那只会续传那
     //         0.13GiB 尾巴（downloadOne 有 .kuro-tmp 断点续传）。
     //     官方 KRGroupApplyTask 也不对已就位/半就位的文件打补丁。
-    //     注意：这里不预校验 srcFiles md5（REA 结论：官方从不预校验，
-    //     src 不匹配由 hpatchz 自己报错后回落整文件）。
+    //     注意：这里不预校验 srcFiles md5（REA 结论：官方从不预校验）。
+    //     ★但「src 不匹配由 hpatchz 自己报错后回落」这句是错的 —— hpatchz 单文件
+    //     模式只比对旧文件的字节长度，不比内容；长度刚好相同的话它会 exit 0 并产出
+    //     一份内容全错的成品。真正兜底的是 applyGroup 之后逐文件 md5 比对
+    //     （见本文件 1715 行附近的 krpdiff.md5OfFile），对不上就 fallbackJobs 重下。
     const plannedGroups = [];
     const groupDestSet = new Set();
     for (const group of groupJobs) {

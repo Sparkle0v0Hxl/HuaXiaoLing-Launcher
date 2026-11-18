@@ -234,6 +234,20 @@ const MUST_COPY_ROOT_FILES = [
 const HARDLINK_ALLOW_PREFIXES = [
   'client/saved/resources',
   'starrail_data/persistent/audio',
+  /*
+   * 终末地 Endfield_Data\Persistent（2026-11-19）。
+   *
+   * 这里和下面 HARDLINK_ALLOW_EXTS 的 .chk 配合使用，两个条件同时满足才放行，
+   * 所以只有 Persistent 下的 .chk 走硬链接；.json / .blc 扩展名不在 exts 白名单里，
+   * 照样掉进 MUTABLE_DIR_SEGMENTS 的 'persistent' 判据被强制拷贝。
+   *
+   * 依据（一手）：G:\Arknights Endfield\sdklogs\HGDownloadLog.log 显示官方下载器
+   * 落位全程是 rename（旧文件 → .bak，temp → 正式名，删 .bak），没有原地覆写；
+   * 搜 truncate / overwrite in place / write 到 VFS 目标零命中。
+   * 已实证：StreamingAssets\VFS 下同类 .chk 早就 nlink=3、三渠道共享 63.3 GB。
+   * 11-07 官服污染的元凶是索引 json 同 inode 写穿，不是 .chk 被改写。
+   */
+  'endfield_data/persistent',
   /* 其它几款米哈游客户端如果也是 Persistent/Audio 布局，段名兜底见 isHardlinkAllowed 的第二段判据 */
 ];
 /* 白名单里只放只读扩展名：.pak/.sig 是官方资源分块与签名，.pck/.hash 是语音包与校验；
@@ -243,6 +257,23 @@ const HARDLINK_ALLOW_EXTS = [
   '.sig',
   '.pck',
   '.hash',
+];
+/*
+ * 前缀 + 扩展名的配对准入（2026-11-19）。
+ *
+ * 为什么不能直接把 .chk 塞进上面的 HARDLINK_ALLOW_EXTS：那个表是全局的，
+ * 塞进去之后「任何前缀 + .chk」都会放行 —— 实测 `Client/Saved/Resources/x.chk`
+ * （鸣潮 Saved/Resources，走的是 `client/saved/resources` 前缀）也会被判成可链接。
+ * 鸣潮那边 Saved/Resources 是官方可写目录，不该因为终末地的需求被放宽。
+ *
+ * 所以要成对声明：只有前缀和扩展名同时命中才放行。
+ */
+const HARDLINK_ALLOW_PAIRS = [
+  {
+    /* 终末地 Endfield_Data\Persistent：语音包与资源分块。 */
+    prefix: 'endfield_data/persistent',
+    exts: ['.chk'],
+  },
 ];
 const HARDLINK_ALLOW_BLOCK_SUFFIXES = [
   '.kuro-tmp',
@@ -259,6 +290,11 @@ function isHardlinkAllowed(relLower, baseName) {
     if (lower.endsWith(suffix)) return false;
   }
   const ext = path.extname(lower);
+  // 配对准入：前缀与扩展名同时命中才放行（见 HARDLINK_ALLOW_PAIRS 的说明）。
+  for (const pair of HARDLINK_ALLOW_PAIRS) {
+    if (pair.exts.indexOf(ext) < 0) continue;
+    if (relLower === pair.prefix || relLower.startsWith(`${pair.prefix}/`)) return true;
+  }
   if (HARDLINK_ALLOW_EXTS.indexOf(ext) < 0) return false;
   for (const prefix of HARDLINK_ALLOW_PREFIXES) {
     if (relLower === prefix || relLower.startsWith(`${prefix}/`)) return true;

@@ -602,6 +602,13 @@ async function applyPatchNode({ installRoot, tempDir, stageDir, vfsBase, item, l
       throw new Error(`base file 校验失败：${baseRelative || name}`);
     }
     const output = `${target}.hpatch`;
+    /*
+     * hpatchz 输出路径必须不存在，否则 exit 12。上一轮差分如果崩在中途，
+     * .hpatch 半成品会留在游戏目录里，导致这个文件以后每次都失败。
+     * 先清残留（纯防御，正常情况下这里本来就没有文件）。
+     * 不用 -f：那会先截断已存在的文件，失败就毁了原内容。
+     */
+    await fsp.rm(output, { force: true }).catch(() => {});
     await execFileAsync(hpatchzPath(), [basePath, diffFile, output], {
       windowsHide: true,
       timeout: 300000,

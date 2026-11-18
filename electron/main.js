@@ -73,6 +73,16 @@ const clientChannel = require('./client-channel');
  */
 const gameChannels = require('./game-channels');
 const { DownloadManager } = require('./downloads');
+/*
+ * 升级后自动清掉旧版本遗留的分块缓存（userData/sophon-cache/chunks）。
+ *
+ * 2026-11-19 用户决定：「而且之前别的用户下出来的缓存，也得清了这个缓存吧，没留的必要」。
+ * 本机实测那份缓存堆了 10.99 GB / 10588 个文件，全是旧版只写不删的残留。
+ * 新版（sophon.js 的边下边清）不再产生堆积，这个模块只负责清老版本留下的那份。
+ *
+ * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ */
+const { purgeLegacyChunkCache } = require('./cache-purge');
 const hgBackgrounds = require('./hg-backgrounds');
 const { ensureSeedData } = require('./seed');
 const { linkTrees, previewTrees } = require('./link');
@@ -2773,6 +2783,25 @@ let bh3OfficialRetry = 0;
    这就是「clean3 一直生成不出来」的根因。
    这里用隐藏窗口的 canvas 解码转成 PNG 落盘（Chromium 一定认得 webp）。 */
 let pngConvertWindow = null;
+let pngConvertIdleTimer = null;
+// 空闲多久之后销毁这个隐藏窗口（理由同 background-clean 的 releaseDecoderLater）
+const PNG_CONVERT_IDLE_RELEASE_MS = 20000;
+
+function releasePngConvertLater() {
+  if (pngConvertIdleTimer) clearTimeout(pngConvertIdleTimer);
+  pngConvertIdleTimer = setTimeout(() => {
+    pngConvertIdleTimer = null;
+    if (pngConvertWindow && !pngConvertWindow.isDestroyed()) {
+      try {
+        pngConvertWindow.destroy();
+      } catch {
+        /* 已经没了 */
+      }
+    }
+    pngConvertWindow = null;
+  }, PNG_CONVERT_IDLE_RELEASE_MS);
+  if (pngConvertIdleTimer.unref) pngConvertIdleTimer.unref();
+}
 
 async function convertImageToPngBuffer(imagePath) {
   if (!pngConvertWindow || pngConvertWindow.isDestroyed()) {
@@ -2791,6 +2820,8 @@ async function convertImageToPngBuffer(imagePath) {
     });
     await pngConvertWindow.loadURL('data:text/html,<canvas id="c"></canvas>');
   }
+  // 每次用到就把「闲时销毁」往后推一次：一次启动刷新可能连着转好几张图
+  releasePngConvertLater();
   const fileUrl = require('node:url').pathToFileURL(imagePath).href;
   const dataUrl = await pngConvertWindow.webContents.executeJavaScript(
     `(async () => {
@@ -3445,17 +3476,54 @@ function decodeWindowsOutput(buffer) {
   }
 }
 
+/*
+ * 注册表查询的进程内缓存。
+ *
+ * 背景（2026-11-19 实测）：这台机器上 HKCU\Software\miHoYo\原神 与
+ * HKCU\Software\miHoYo\Genshin Impact 两条键「打开本身」就要 3.9~25.9 秒
+ * （去掉 /s 也一样，慢的不是递归展开，是键本身），而启动链里 detectBuiltins
+ * 会对 8 个游戏跑 35 个键。原来的写法 timeout 2500 让每条慢键都必然
+ * ETIMEDOUT 白等 2.5 秒，用户看到的就是「双击图标后两三秒才出窗口」。
+ *
+ * 所以这里做三件事，目标是把启动路径上的白等压到几乎为 0：
+ *   1. timeout 2500 → 600 ms：实测（_bench-timeout.js）600 ms 与 2500 ms
+ *      录到的结果**完全一样**（都是 8/35 条有值），但全部键并发总耗时
+ *      从 2686 ms 降到 720 ms；压到 300 ms 才开始丢结果，所以 600 留了余量。
+ *   2. 负缓存：同一条键在一次进程生命周期里只查一次，失败的也记住，
+ *      避免 detectBuiltins / detectServerExecutable 反复踩同一个坑。
+ *   3. 常量只读一次：查询本身是异步 execFile，不再额外阻塞事件循环。
+ *
+ * 注意：缓存只存本进程结果，不落盘 —— 用户新装了游戏后重启启动器即可扫到；
+ * 手动「重新检测」会先清缓存（见 clearRegistryCache 的调用点）。
+ */
+const REGISTRY_QUERY_TIMEOUT = 600;
+const registryCache = new Map();
+
+/** 用户主动重新检测游戏时清掉，否则新装的游戏会被上一次的负结果挡住。 */
+function clearRegistryCache() {
+  registryCache.clear();
+}
+
 function registryValues(key) {
+  const cached = registryCache.get(key);
+  if (cached) return Promise.resolve(cached);
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (values) => {
+      if (settled) return;
+      settled = true;
+      registryCache.set(key, values);
+      resolve(values);
+    };
     let child;
     try {
       child = execFile(
         'reg.exe',
         ['query', key, '/s'],
-        { encoding: 'buffer', windowsHide: true, timeout: 2500, maxBuffer: 2 * 1024 * 1024 },
+        { encoding: 'buffer', windowsHide: true, timeout: REGISTRY_QUERY_TIMEOUT, maxBuffer: 2 * 1024 * 1024 },
         (error, stdout) => {
           if (error || !stdout) {
-            resolve([]);
+            done([]);
             return;
           }
           const output = decodeWindowsOutput(stdout);
@@ -3464,16 +3532,16 @@ function registryValues(key) {
             const match = line.match(/REG_(?:SZ|EXPAND_SZ)\s+(.+?)\s*$/i);
             if (match) values.push(match[1]);
           }
-          resolve(values);
+          done(values);
         }
       );
     } catch {
       // 在受限环境里 spawn 可能直接抛出 EPERM；检测失败不应该让整个启动流程崩掉。
-      resolve([]);
+      done([]);
       return;
     }
     if (child && typeof child.on === 'function') {
-      child.on('error', () => resolve([]));
+      child.on('error', () => done([]));
     }
   });
 }
@@ -3539,10 +3607,56 @@ function runtimePaths(baseRoot, gameKey, channel, overrideRoot = '') {
  */
 const ENDFIELD_RUNTIME_MARKER = '.hxl-endfield-runtime-v2';
 // 建运行时时整棵强制拷贝的目录（多段前缀由 runtime.js 的 hardlinkTree 支持）。
-//   U8Data / sdkdata：渠道登录态与 SDK 配置，硬链接会让一个渠道改写另一个渠道的身份；
-//   Endfield_Data/Persistent：游戏自己维护的资源索引与已下载内容（约 3.9GB），
-//     整棵拷过来之后它才真正「属于」该渠道的运行时。
-const ENDFIELD_RUNTIME_COPY_DIRS = ['U8Data', 'sdkdata', 'Endfield_Data/Persistent'];
+//   U8Data / sdkdata：渠道登录态与 SDK 配置，硬链接会让一个渠道改写另一个渠道的身份。
+//
+// ★ Endfield_Data/Persistent 已从这份清单里去掉（2026-11-19）。
+//   原来把它整棵拷贝，是为了堵 11-07 那次官服污染 —— 但那次真正的元凶只有
+//   index_main.json / pref_*.json 这类**进程内直接写**的索引（同 inode 写穿），
+//   加上 .blc 索引，合计只有 61 MB；而 Persistent 下 178 个 .chk 占了 3.63 GB，
+//   被连带拷了三份（官服 + B服 + 国际服，各渠道独占 4 GB 左右）。
+//
+//   一手证据：G:\Arknights Endfield\sdklogs\HGDownloadLog.log 显示官方下载器落位
+//   全程是 rename（旧文件 → .bak，temp → 正式名，删 .bak），没有原地覆写。
+//   Windows 同卷 rename 只改目录项、不动 inode 数据 → .chk 硬链接安全。
+//   已实证：StreamingAssets\VFS 下同类 .chk 早就 nlink=3、三渠道共享 63.3 GB。
+//
+//   现在的保护靠 runtime.js 的前缀+扩展名配对准入（HARDLINK_ALLOW_PAIRS）：
+//   `endfield_data/persistent` 这个前缀配 `.chk` 这个扩展名，两个同时命中才走硬链接；
+//   .json / .blc 不在配对准入里 → 继续命中 MUTABLE_DIR_SEGMENTS 的 'persistent' 判据
+//   被强制拷贝。索引仍然各渠道一份，隔离性一点没少。
+const ENDFIELD_RUNTIME_COPY_DIRS = ['U8Data', 'sdkdata'];
+
+/*
+ * 清掉历史遗留的终末地语音包备份（2026-11-19）。
+ *
+ * 老版本每次重建运行时都会把 Endfield_Data\Persistent 整份拷到
+ *   <userData>\endfield-persistent-backup\<渠道>\Persistent
+ * 两个渠道就是 7.39 GB。现在 .chk 走硬链接、基础客户端里本来就有一份，
+ * 这份备份不再需要，留着纯占盘。
+ *
+ * 只在「没有任何终末地任务在跑」时动手，避免和重建抢文件；
+ * 失败只写日志，绝不影响启动或切服。
+ */
+async function cleanupLegacyEndfieldBackup() {
+  try {
+    const backupRoot = path.join(app.getPath('userData'), 'endfield-persistent-backup');
+    if (!fs.existsSync(backupRoot)) return { removed: false };
+    // 有正在跑的终末地任务就不动它（终末地重建/切服走 sophonJobs 与 linkJobs 两张表）
+    const busy =
+      (typeof sophonJobs !== 'undefined' && sophonJobs && sophonJobs.size > 0) ||
+      (typeof linkJobs !== 'undefined' && linkJobs && linkJobs.size > 0);
+    if (busy) {
+      writeLaunchLog('[endfield] 语音包备份清理：有相关任务在跑，本次跳过');
+      return { removed: false, skipped: 'busy' };
+    }
+    await fsp.rm(backupRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 300 });
+    writeLaunchLog('[endfield] 已清理历史语音包备份（endfield-persistent-backup，老版本遗留，现已不需要）');
+    return { removed: true };
+  } catch (error) {
+    writeLaunchLog('[endfield] 清理历史语音包备份失败（不影响使用）：' + (error && error.message));
+    return { removed: false, error: String((error && error.message) || error) };
+  }
+}
 
 /** 两个路径是不是「同一个目录」或「互相包含」。运行时目录嵌进基础客户端里会把官服本体原地改写，反过来重建时也会连带删掉官服。 */
 function pathsOverlap(left, right) {
@@ -5006,20 +5120,23 @@ async function buildEndfieldChannelRuntime({
         writeLaunchLog('[endfield] 重置国际服语音索引失败（不影响本次运行）：' + (error && error.message));
       }
     }
-    // ★ 语音包备份：运行时就位后把 Persistent 备份到 userData，
-    // 下次删了重建时能恢复语音包（用户反馈的「每切一次服重下一次语音包」问题）。
-    try {
-      const runtimePersistent = path.join(runtimeRoot, 'Endfield_Data', 'Persistent');
-      if (fs.existsSync(runtimePersistent)) {
-        const backupDir = path.join(app.getPath('userData'), 'endfield-persistent-backup', path.basename(runtimeRoot));
-        await fsp.mkdir(backupDir, { recursive: true });
-        await fsp.rm(path.join(backupDir, 'Persistent'), { recursive: true, force: true }).catch(() => {});
-        await fsp.cp(runtimePersistent, path.join(backupDir, 'Persistent'), { recursive: true });
-        writeLaunchLog('[endfield] 已备份 Endfield_Data\\Persistent 到 ' + backupDir);
-      }
-    } catch (error) {
-      writeLaunchLog('[endfield] 备份 Persistent 失败（不影响本次运行）：' + (error && error.message));
-    }
+    /*
+     * ★ 语音包备份已取消（2026-11-19），这一段原来会把 Persistent 整份拷到 userData：
+     *     endfield-persistent-backup/<渠道>/Persistent  （每渠道约 3.7 GB，两个渠道 7.39 GB）
+     *
+     * 为什么可以取消：
+     *   1. Persistent 下的 .chk 现在走硬链接（见 runtime.js 的 HARDLINK_ALLOW_PAIRS）。
+     *      基础客户端里就有同一批 .chk（官服本体 Persistent 3.75 GB / 208 个文件），
+     *      重建时直接从基础客户端链过来，不需要备份兜底。
+     *   2. 索引类（.json / .blc 合计 61 MB）本来就强制拷贝，代价可以忽略。
+     *   3. 真正会丢的是「该渠道自己新下的、基础客户端里没有的 .chk」—— 这类场景由
+     *      上面 :4969-4981 的 rename 搬运兜住（carried = true，同卷瞬间完成、不占空间）。
+     *   备份只在「旧运行时目录整个被删 / 搬不动」这种边角情况下才有意义，
+     *   为了它常驻 7.39 GB 不划算。
+     *
+     * 兼容：下面 :5013-5028 的「从备份恢复」分支原样保留，老用户已经存在的备份
+     * 照样能读；历史备份由 cleanupLegacyEndfieldBackup() 一次性清掉。
+     */
     // 旧目录改名成功后才敢删：硬链接居多、删了不额外回空间，但目录项会堆着，
     // 而且 walkFiles 之类遍历会扫到它。删失败不影响本次启动，下次重建再顺手清一遍。
     if (staleRoot) {
@@ -7137,15 +7254,38 @@ async function detectBuiltins(onlyMissing = true) {
   if (!store) return 0;
   // 先修历史错配再检测，理由同 games:detect（否则两行会指向同一个 exe）
   let updated = await repairServerChannels();
+  /*
+   * 2026-11-19（启动更快）：检测拆成「先并发探、再串行写」两段。
+   *
+   * 原来是一个 for 循环里 await detectGame() —— 8 个游戏完全串行。
+   * 实测（_bench-reg-keys.js）光注册表就 8012 ms：米哈游三条中文键
+   * （HKCU\Software\miHoYo\原神 / 崩坏：星穹铁道 / 绝区零）在这台机器上
+   * 「打开键本身」就要 4~26 秒，被 timeout 拦住也各白等 2.5 秒。
+   *
+   * 检测阶段只有读（detectGame + detectionChannel 都不写 store），
+   * 所以可以安全并发；写 store 的那段（serverForDetected / targetExists /
+   * rootUsedByOtherChannel）必须在拿到全部结果之后按原顺序串行做，
+   * 否则两个游戏抢同一行会互相覆盖。
+   */
+  const pending = [];
   for (const game of store.data.games) {
     if (!game.builtin || !game.builtinKey) continue;
     if (onlyMissing && game.target && targetExists(game.target)) continue;
-    const found = await detectGame(game.builtinKey);
+    pending.push(game);
+  }
+  const probes = await Promise.all(
+    pending.map(async (game) => {
+      const found = await detectGame(game.builtinKey);
+      if (!found) return { game, found: null, channel: '' };
+      return { game, found, channel: await detectionChannel(game, found) };
+    })
+  );
+  for (const { game, found, channel } of probes) {
     if (found) {
       const active = (game.servers || []).find((server) => server.id === game.activeServerId);
       // 检测到的客户端属于哪个渠道，就写进哪个渠道那一行。
       // 只装了 B服 / 国际服 的玩家本来就没有官服客户端，不能把路径塞进官服行。
-      const detected = serverForDetected(game, await detectionChannel(game, found));
+      const detected = serverForDetected(game, channel);
       const detectedRoot = detected ? path.dirname(found) : '';
       /*
        * 2026-11-17（bug 2）：占用检查必须按**本体根**比。本体根在三层深
@@ -10065,6 +10205,8 @@ function installIpc() {
     ensureServers,
     detectBuiltins,
     detectGame,
+    // 用户点「自动检测」时先清注册表负缓存，否则新装的游戏会被上次的失败结果挡住
+    clearRegistryCache,
     // 重构拆分时漏掉的依赖
     fetchGameNotices,
     updateEndfieldGame,
@@ -13430,7 +13572,9 @@ app.whenReady().then(async () => {
   if (elevationDeclined) store.data.settings.elevationDeclined = true;
   if (
     store.data.settings.alwaysAdmin &&
-    !isElevated() &&
+    // 走缓存：isElevated() 要起一个 powershell（同步 execFileSync，约几十到几百 ms），
+    // 而 currentElevation() 在本进程内只探一次。两者语义相同，这里没有理由重算。
+    !currentElevation() &&
     !elevationDeclined &&
     !store.data.settings.elevationDeclined &&
     process.env.HX_CAPTURE !== '1' &&
@@ -13452,6 +13596,62 @@ app.whenReady().then(async () => {
     onToast: (payload) => send('toast', payload),
   });
   downloads.restore();
+
+  /*
+   * 升级后自动清掉旧版本遗留的 sophon 分块缓存（10.99 GB / 10588 个文件那堆）。
+   *
+   * 为什么不 await：这是纯后台维护动作，删一万一多个文件在机械盘上要几秒，
+   * 绝不能挂在启动链上拖慢窗口。setTimeout 3 秒也只是错开首帧和 IPC 注册。
+   *
+   * 为什么不阻塞判断：分块缓存同时被三条链路占着 —— 下载管理器的普通下载、
+   * sophon 安装/修复（sophonJobs）、预下载（predownloadJobs）。三张表里任意一张
+   * 非空就不清，也不写标记，下次启动再试（正在续传的包可能还指着这份缓存）。
+   *
+   * 顺序铁律不动：这一段插在 installShotProtocol / createWindow 之前，但它是
+   * 定时器回调、不占启动链，createWindow → installTray → installIpc 的相对顺序原样保留。
+   */
+  setTimeout(() => {
+    try {
+      purgeLegacyChunkCache({
+        userData: app.getPath('userData'),
+        version: APP_VERSION,
+        isBusy: () => {
+          // ① 下载管理器里的普通下载（downloads.js 的状态名：downloading / queued）
+          if (
+            Array.isArray(downloads?.items) &&
+            downloads.items.some(
+              (item) => item && (item.status === 'downloading' || item.status === 'queued')
+            )
+          ) {
+            return true;
+          }
+          // ② 正在跑的 sophon 安装 / 修复：这些正是往 chunks 里读写分块的那条链路
+          if (sophonJobs.size > 0) return true;
+          // ③ 预下载任务：同样可能走分块缓存
+          if (predownloadJobs.size > 0) return true;
+          return false;
+        },
+        log: writeLaunchLog,
+      }).catch(() => {
+        /* 清理失败不影响使用：模块内部已经兜底，这里只防未处理的 rejection */
+      });
+    } catch {
+      /* ignore */
+    }
+  }, 3000);
+
+  /*
+   * 启动时顺带清掉老版本留下的终末地语音包备份（endfield-persistent-backup，约 7.39 GB）。
+   *
+   * 老用户不一定马上重建运行时，所以不能只依赖 buildEndfieldChannelRuntime 里那一次调用。
+   * 同样是定时器回调、不 await、不占启动链；有终末地任务在跑时 cleanup 内部会自己跳过。
+   * 和上面 purgeLegacyChunkCache 一样错开 3 秒，避免和首帧抢磁盘。
+   */
+  setTimeout(() => {
+    cleanupLegacyEndfieldBackup().catch(() => {
+      /* 清理失败不影响使用：函数内部已经写日志兜底 */
+    });
+  }, 3000);
 
   // 协议必须在创建任何窗口之前注册好，否则首帧里的 <img src="hxl-shot:..."> 会 404
   installShotProtocol();

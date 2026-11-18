@@ -1087,6 +1087,24 @@ function songPlazaMarkup() {
   if (!['netease', 'qq', 'kugou'].includes(state.myPlaylists.plazaPlatform)) {
     state.myPlaylists.plazaPlatform = 'netease';
   }
+  /*
+   * 2026-11-19 修「点进歌单没反应 / 切到广场还是旧页面」：
+   *
+   * 广场和「我的歌单」共用一个 state.myPlaylists.detail（钻取态），
+   * 但进广场这条路径以前既不判断也不清理它 ——
+   * 用户先在「我的歌单」点开过一张歌单，之后切到广场，
+   * plazaPanelMarkup() 看到 detail 还在就直接画那张歌单的详情，
+   * 广场列表根本不出现；再点广场里的卡片也是把 detail 覆盖成新的一张，
+   * 视觉上像「点了没反应」。
+   *
+   * 广场是独立入口，进来就该是广场本身：只要 detail 是别的平台的、
+   * 或压根不是从广场点开的，这里一律退回列表态。
+   * 从广场自己点开的（detail.fromPlaza === true）保留钻取态，
+   * 用户从详情返回列表仍走 my-playlist-close。
+   */
+  if (state.myPlaylists.detail && !state.myPlaylists.detail.fromPlaza) {
+    state.myPlaylists.detail = null;
+  }
   if (!state.myPlaylists.detail) ensurePlaza(state.myPlaylists.plazaPlatform);
   return plazaPanelMarkup();
 }

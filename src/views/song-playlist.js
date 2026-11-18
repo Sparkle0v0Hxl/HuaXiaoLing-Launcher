@@ -817,11 +817,20 @@ async function refreshPlaylistDetailSilently(platform, playlistId) {
 /** 打开某个自建歌单的曲目。 */
 async function openMyPlaylist(platform, playlistId) {
   if (!platform || !playlistId) return;
+  /*
+   * 2026-11-19：记下「这次是从广场点开的」。
+   *
+   * 广场（tab=song-plaza）和「我的歌单」共用同一个 state.myPlaylists.detail
+   * 钻取态，但两边是不同的入口：从广场点开要能返回广场列表，
+   * 而不是被 songPlazaMarkup 当成「我的歌单遗留的旧详情」清掉。
+   * 判据取当前 tab —— 只有站在广场页上点卡片才算广场钻取。
+   */
+  const fromPlaza = String(state.songTab || '') === 'plaza';
   const key = playlistDetailCacheKey(platform, playlistId);
   const cached = state.myPlaylists.detailCache[key];
   if (cached) {
     // 命中缓存：无论新旧先把上次的详情摆出来，不转圈、不白屏。
-    state.myPlaylists.detail = cached.detail;
+    state.myPlaylists.detail = { ...cached.detail, fromPlaza };
     state.myPlaylists.error = '';
     render({ preserveScroll: true });
     // 过了 TTL 的后台悄悄补一次新的；没过期就直接用
@@ -832,12 +841,12 @@ async function openMyPlaylist(platform, playlistId) {
   }
   // 首次点开：loading 态先画出来（占位带上曲目数估算），取完写进缓存
   state.myPlaylists.loading = true;
-  state.myPlaylists.detail = { id: playlistId, platform, loading: true };
+  state.myPlaylists.detail = { id: playlistId, platform, loading: true, fromPlaza };
   render({ preserveScroll: true });
   try {
     const result = await fetchPlaylistDetail(platform, playlistId);
     if (result?.ok && result.detail) {
-      state.myPlaylists.detail = result.detail;
+      state.myPlaylists.detail = { ...result.detail, fromPlaza };
       state.myPlaylists.error = '';
       /*
        * 2026-11-18：记住上次打开的歌单，重启后自动回到这里。

@@ -914,29 +914,117 @@ async function downloadChunk(chunk, prefix, signal) {
  * 缓存写入失败不影响安装，只是少了一次复用机会。
  */
 async function fetchChunk(chunk, prefix, chunkCacheDir, signal) {
+  /*
+   * 第三个返回值 cachePath：这一块在磁盘上「确实躺着」的绝对路径，没有就 null。
+   *
+   * 2026-11-19 用户决定「边下边清」「之前别的用户下出来的缓存，也得清了」：
+   * 分块缓存只是组装的中间物，硬链接链路（runtime / kuro-packs / link-source /
+   * link.js / hdiff.js）完全不碰 sophon-cache，所以文件一旦校验通过，缓存里那一份
+   * 就没有留的必要。要让调用方知道删哪个文件，就得在这里把路径带出去。
+   */
+  let cachePath = '';
   if (chunkCacheDir && chunk.uncompressedMd5) {
-    const cachePath = path.join(chunkCacheDir, chunk.uncompressedMd5);
+    cachePath = path.resolve(chunkCacheDir, chunk.uncompressedMd5);
     try {
       const cached = await fsp.readFile(cachePath);
       if (md5Buffer(cached) === chunk.uncompressedMd5.toLowerCase()) {
-        return { raw: cached, fromCache: true };
+        return { raw: cached, fromCache: true, cachePath };
       }
     } catch {
       /* 缓存未命中或已损坏，走网络 */
     }
   }
   const raw = await downloadChunk(chunk, prefix, signal);
-  if (chunkCacheDir && chunk.uncompressedMd5) {
+  // 写完缓存才把它算作「可回收」，写失败（或压根没开缓存）就回 null，别让调用方去删不存在的东西
+  let writtenPath = null;
+  if (cachePath) {
     try {
       await fsp.mkdir(chunkCacheDir, { recursive: true });
       const tmp = path.join(chunkCacheDir, `${chunk.uncompressedMd5}.tmp`);
       await fsp.writeFile(tmp, raw);
-      await fsp.rename(tmp, path.join(chunkCacheDir, chunk.uncompressedMd5));
+      await fsp.rename(tmp, cachePath);
+      await fsp.access(cachePath);
+      writtenPath = cachePath;
     } catch {
       /* 缓存写失败不影响安装 */
     }
   }
-  return { raw, fromCache: false };
+  return { raw, fromCache: false, cachePath: writtenPath };
+}
+
+/*
+ * best-effort 清掉分块缓存目录里的残留分块。
+ *
+ * 2026-11-19 用户决定：「边下边清才是合理的情况吧」「而且之前别的用户下出来的缓存，
+ * 也得清了这个缓存吧，没留的必要」。所以安装收口处不再保留 chunks 目录 ——
+ * 包括上一版（或别的用户那份）安装留下来的旧缓存，一并在这次收口里清掉。
+ *
+ * 只接受「chunks 子目录」这一个入参：cacheDir 根目录还放着 B服渠道 SDK 的 zip
+ * （installChannelSdk 会先 readFile 复用，见它上面的注释），那份绝对不能删，
+ * 所以清理目标不能是 cacheDir 本身。
+ * 失败一律吞掉：缓存残留只是占盘，不影响这次安装的成败。
+ */
+async function clearChunkCache(chunkCacheDir) {
+  if (!chunkCacheDir) return;
+  try {
+    await fsp.rm(chunkCacheDir, { recursive: true, force: true });
+  } catch {
+    /* 清理失败不影响安装 */
+  }
+}
+
+/*
+ * 渠道 SDK zip 的老化清理。
+ *
+ * 为什么需要：installChannelSdk 把官方渠道 SDK 的 zip 缓存在 cacheDir 根目录
+ * （不是 chunks/ 子目录），文件名里带官方版本号（形如 <md5>_<数字>.zip）。所以同一个
+ * 版本内反复装/更新还能命中，省一次下载；但一旦过了版本，旧 zip 就再也不会被读到，
+ * 却一直占着盘。本机实测 sophon-cache 根目录躺着 3 个这样的 zip，各 81.05MB，
+ * 合计 243.15MB，全是白占。
+ * 2026-11-19 用户明确说：「而且之前别的用户下出来的缓存，也得清了这个缓存吧，
+ * 没留的必要」—— 所以按时间老化，而不是一刀全删：留最近 keep 个，老的才清。
+ *
+ * 保守口径：
+ *   - 只看 cacheDir 根目录下 isFile() 且 *.zip 的条目，绝不递归进 chunks/；
+ *   - 绝不碰 manifest_*（那是清单缓存，删了要重下清单）；
+ *   - 按 mtime 倒序，前 keep 个无条件保留；更老的里只有超过 maxAgeDays 天才删，
+ *     免得刚下下来的那份被顺手删掉；
+ *   - protect 点名的那份（本次正在用的 zip）一律不删 —— 命中缓存时它可能已经很旧，
+ *     但后面 Expand-Archive 还要读它，删了这次安装就废了；
+ *   - 失败一律吞掉：缓存残留只是占盘，不能让它把安装搞失败。
+ */
+async function pruneChannelSdkCache(cacheDir, { keep = 3, maxAgeDays = 30, protect = [] } = {}) {
+  if (!cacheDir) return;
+  try {
+    const entries = await fsp.readdir(cacheDir, { withFileTypes: true });
+    const protectedNames = new Set(
+      (Array.isArray(protect) ? protect : [protect]).filter(Boolean).map((name) => String(name))
+    );
+    const zips = [];
+    for (const entry of entries) {
+      // 只认根目录里的普通 zip 文件：chunks 之类的子目录、manifest_* 都不在此列
+      if (!entry.isFile() || !/\.zip$/i.test(entry.name)) continue;
+      try {
+        const stat = await fsp.stat(path.join(cacheDir, entry.name));
+        zips.push({ name: entry.name, mtimeMs: stat.mtimeMs });
+      } catch {
+        /* 拿不到 mtime 的条目跳过，不做无依据的删除 */
+      }
+    }
+    // 新的在前：前 keep 个保留
+    zips.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    const cutoff = Date.now() - maxAgeDays * 86400000;
+    const tasks = [];
+    for (let index = keep; index < zips.length; index += 1) {
+      const item = zips[index];
+      if (protectedNames.has(item.name)) continue;
+      if (item.mtimeMs >= cutoff) continue;
+      tasks.push(fsp.unlink(path.join(cacheDir, item.name)).catch(() => {}));
+    }
+    await Promise.all(tasks);
+  } catch {
+    /* 清理失败不影响安装 */
+  }
 }
 
 async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal) {
@@ -979,6 +1067,10 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
     }
     await fsp.writeFile(cacheFile, buffer);
   }
+  // 拿到 zip 之后顺手把根目录里过期的旧渠道 SDK zip 清掉（见 pruneChannelSdkCache）。
+  // 放在这里而不是函数收口处：命中缓存那条路径之后也要清，而解压失败时旧 zip 已经
+  // 没用了，早点清掉更好。本次在用的 cacheFile 用 protect 点名保下来。
+  await pruneChannelSdkCache(cacheDir, { protect: [fileName] }).catch(() => {});
   if (signal?.cancelled) throw Object.assign(new Error('已取消'), { cancelled: true });
   /*
    * 解压前先把目标目录里的同名条目删掉。
@@ -1211,7 +1303,29 @@ async function prepareBilibiliRuntime({
   };
 }
 
-async function prepareSophon({
+/*
+ * prepareSophon 的对外壳：负责「边下边清」的最后一道收口。
+ *
+ * 2026-11-19 用户决定：「边下边清才是合理的情况吧」「而且之前别的用户下出来的缓存，
+ * 也得清了这个缓存吧，没留的必要」。所以这次安装无论成功还是中途失败（校验不过、
+ * 空间不足、用户取消……），都把 sophon-cache/chunks 整个清掉：本次用到的分块已经
+ * 写进目标文件了，上一版安装（或别的用户那时候）留下的分块也没有留的必要。
+ *
+ * 只清 chunks 子目录，绝不碰 cacheDir 根目录：B服渠道 SDK 的 zip 就放在根目录上，
+ * installChannelSdk 下次安装还要 readFile 复用它（见那里的缓存复用逻辑）。
+ *
+ * dryRun 只读清单、一个分块都不写，预览时顺手删掉用户缓存不合预期，这里跳过收口。
+ */
+async function prepareSophon(options) {
+  const chunkCacheDir = options && options.cacheDir ? path.join(options.cacheDir, 'chunks') : '';
+  try {
+    return await prepareSophonInner(options);
+  } finally {
+    if (!options || options.dryRun !== true) await clearChunkCache(chunkCacheDir);
+  }
+}
+
+async function prepareSophonInner({
   gameKey,
   channel,
   baseRoot,
@@ -1613,6 +1727,29 @@ async function prepareSophon({
    * 已经在跑的那几路没法中途掐断（文件要按 offset 写完），但后面排队的会立刻退出。
    */
   let fatalError = null;
+  /*
+   * 分块引用计数：还有多少个「待组装文件」需要某个分块。
+   *
+   * 2026-11-19 用户决定「边下边清」，但删分块必须躲开并发：FILE_CONCURRENCY 路文件
+   * 同时在跑，同一个分块完全可能被 A、B 两个文件共用（官方清单里相同内容的分块
+   * 在多个文件间复现）。如果 A 一校验通过就把分块删了，B 之后再去 fetchChunk 就
+   * 读不到了 —— 白白重下，还可能把 B 拖成校验失败。
+   *
+   * 所以按「整个安装过程中还需要它的文件数」计数：只有计数减到 0（最后一个需要它的
+   * 文件也已经校验通过）才真正 unlink。计数只建一次、只减不增，逻辑上不会泄漏。
+   * 取的是「文件的全部 chunk」而不是「本次真正 fetch 过的 chunk」—— 保守一点，
+   * 代价只是偶尔少删一个，反正 prepareSophon 收口还会把整个 chunks 目录清掉。
+   */
+  const chunkRefCount = new Map();
+  for (const pending of pendingFiles) {
+    const seen = new Set();
+    for (const chunk of pending.file.chunks) {
+      const md5 = chunk.uncompressedMd5;
+      if (!md5 || seen.has(md5)) continue;
+      seen.add(md5);
+      chunkRefCount.set(md5, (chunkRefCount.get(md5) || 0) + 1);
+    }
+  }
   await mapLimit(pendingFiles, parallel, async ({ file, target, selfSourced }) => {
     if (fatalError) return;
     try {
@@ -1628,6 +1765,19 @@ async function prepareSophon({
       // 直接 open('w') 会连带改掉基础客户端那份文件（详见 openForWrite 的注释）。
       const handle = await openForWrite(target);
       const inFlight = new Map();
+      /*
+       * 本文件从缓存里拿到的分块（md5 → 磁盘路径），等整文件 md5 校验通过后再删。
+       *
+       * 2026-11-19 用户决定：「边下边清才是合理的情况吧」。缓存只是组装的中间物，
+       * 硬链接链路完全不碰 sophon-cache，所以文件落地后缓存里那份就是多余的。
+       *
+       * 为什么攒到这里而不是写完一块就删：
+       *  1) 必须等 md5File 通过 —— 写一半失败还得靠缓存重试，提前删等于把重试路径也砍了。
+       *  2) 并发安全：chunk 是 takeChunk 窗口内并发取的，同一分块可能同时被另一路文件
+       *     正在用。所以这里只丢下「这个文件用过它」的记号，真正能不能删由上面的
+       *     chunkRefCount 决定（见校验通过后那一段）。
+       */
+      const fileCachePaths = new Map();
       const takeChunk = (index) => {
         const chunk = file.chunks[index];
         if (!inFlight.has(index)) {
@@ -1640,6 +1790,10 @@ async function prepareSophon({
               const localRaw = await readLocalChunk(baseRoot, localEntry, chunk, localHandles);
               if (localRaw) return { raw: localRaw, from: 'local' };
               const fetched = await fetchChunk(chunk, file.chunkPrefix, chunkCacheDir, signal);
+              // 记下这一块在磁盘上的落点；没落盘时 fetchChunk 给 null，就不记
+              if (fetched.cachePath && chunk.uncompressedMd5) {
+                fileCachePaths.set(chunk.uncompressedMd5, fetched.cachePath);
+              }
               return {
                 raw: fetched.raw,
                 from: fetched.fromCache ? 'cache' : 'net',
@@ -1687,6 +1841,36 @@ async function prepareSophon({
       const actual = await md5File(target);
       if (actual !== file.md5.toLowerCase()) {
         throw new Error(`文件校验失败：${file.file}`);
+      }
+      /*
+       * 校验通过了，这个文件才算真的落地 —— 现在才可以考虑回收它用到的分块缓存。
+       *
+       * 2026-11-19 用户决定：「边下边清才是合理的情况吧」。放在 md5File 通过之后
+       * 是硬要求：校验失败时上面的 throw 会跳过这里，缓存原样留着，重试还能命中。
+       *
+       * 回收口径（并发安全的关键）：
+       *  - 先把本文件「要用到」的分块引用计数减一（包括命中缓存和自己下的，且不管这一轮
+       *    是从本地复用还是从缓存命中，都算这个文件对它的一次需求）；
+       *  - 只有当计数降到 0，说明排队的其它文件都不再需要它了，才真正 unlink。
+       *  - 本文件没从缓存拿到路径（例如走了本地复用）也没关系：计数照样减，收口处
+       *    prepareSophon 的 finally 会把整个 chunks 目录兜底清掉。
+       * unlink 全部 best-effort（.catch 吞掉）：删失败只是多占点盘，不能影响安装结果。
+       * 被其它并发文件抢先删掉的情况也走这条 catch（ENOENT 无害）。
+       */
+      const seenForRelease = new Set();
+      for (const chunk of file.chunks) {
+        const md5 = chunk.uncompressedMd5;
+        if (!md5 || seenForRelease.has(md5)) continue;
+        seenForRelease.add(md5);
+        const left = (chunkRefCount.get(md5) || 1) - 1;
+        if (left > 0) {
+          // 还有别的文件要它，留着
+          chunkRefCount.set(md5, left);
+          continue;
+        }
+        chunkRefCount.delete(md5);
+        const cachePath = fileCachePaths.get(md5);
+        if (cachePath) await fsp.unlink(cachePath).catch(() => {});
       }
       verifiedBytes += file.size;
       downloaded += 1;
