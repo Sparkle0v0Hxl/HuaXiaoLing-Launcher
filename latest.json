@@ -1,28 +1,30 @@
 {
-  "version": "2.12.4",
-  "title": "花筱灵启动器 2.12.4",
+  "version": "2.12.5",
+  "title": "花筱灵启动器 2.12.5",
   "date": "2026-11-18",
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
-    "音乐页重做：三栏布局 + 平台标签歌单列表，我的队列和播放列表分开。",
-    "新增本地歌单、批量选择和 Shift 刷选，播放位置下次自动恢复。",
-    "直链和本地歌曲自动搜歌词，换源不再覆盖歌名。"
+    "主题扩展：新增 15 套界面皮肤，主题、皮肤、强调色可自由搭配。",
+    "新增界面不透明度调节，拖动实时生效，不糊背景图。",
+    "启动页改为固定深色，浅色主题下游戏卡片文字也清晰。",
+    "修复：增量更新一直退回整包，现在增量能正常应用。",
+    "修复：切换歌单时播放列表不再叠加旧歌单的歌。"
   ],
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.4/HuaXiaoLing-2.12.4-Portable.zip",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.5/HuaXiaoLing-2.12.5-Portable.zip",
   "deltas": [
     {
-      "from": "2.12.3",
-      "to": "2.12.4",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.4/delta-2.12.3-to-2.12.4.zip",
-      "sha256": "f7de062d7089ea2c3db6e113211c8bed68b68bd9d316255016cb9e7683b9ee8d",
-      "size": 84520
+      "from": "2.12.4",
+      "to": "2.12.5",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.5/delta-2.12.4-to-2.12.5.zip",
+      "sha256": "bc012ce0c26a82967694e93bfdcbf9227c486f904d685f97b24fae45d6bbd2fc",
+      "size": 112420
     }
   ],
-  "sha256": "f7ce80d65dd2f5fd583b242566db647717c7d96fd2f01e2fa8e0a6200ed70b56",
-  "size": 214333997,
+  "sha256": "2316c064772ad8091ecd5d021b7ad2f7331f9ebeb93db9520becdb55b307488f",
+  "size": 214351239,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "/DiBSECYD7k5tdOG8CWkVNhZag7uOuXEv4tYmh40RZW+dB0JHADqVhl83pV2CeHRU0XzBRRVupmIGw35D8jqCA=="
+    "value": "1ZkqEKsGhP33UGHocn0F/LBlbTPyXZi9F9wVjMuLbftZ5nu81J87gGbNIsWIxBTY3pvg9IHwneUO5EVl/NgRCQ=="
   }
 }
