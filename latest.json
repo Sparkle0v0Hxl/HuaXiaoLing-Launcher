@@ -1,35 +1,29 @@
 {
-  "version": "2.12.6",
-  "title": "花筱灵启动器 2.12.6",
+  "version": "2.12.7",
+  "title": "花筱灵启动器 2.12.7",
   "date": "2026-11-19",
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
-    "2.12.6。",
-    "改进：启动时检测已装游戏快 4.4 倍。",
-    "改进：解压更新包快 1.56 倍。",
-    "改进：终末地多服切换不再重复拷贝语音包，每个渠道省 3.7 GB。",
-    "清理：旧的语音包备份会自动删掉。",
-    "清理：游戏下载分块缓存改成边下边清，升级后自动清掉旧版本残留。",
-    "清理：安装包裁掉 53 个用不到的语言包，小约 47 MB。",
-    "修复：增量更新从 2.9.4 起每次都退回整包下载。",
-    "修复：歌单广场切换平台后点不动。",
-    "修复：补丁工具失败会留下半截文件，导致之后重试永久失败。"
+    "2.12.7。",
+    "修复：网易云二维码登录不显示（发布包漏带服务依赖）。",
+    "修复：更新弹窗文案堆成一整行看不清。",
+    "改进：更新弹窗文案精简，同类合并更好读。"
   ],
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.6/HuaXiaoLing-2.12.6-Portable.zip",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.7/HuaXiaoLing-2.12.7-Portable.zip",
   "deltas": [
     {
-      "from": "2.12.5",
-      "to": "2.12.6",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.6/delta-2.12.5-to-2.12.6.zip",
-      "sha256": "66599933d944c8bb53fc0672efc8dd04ae6fff2e1b4fa5db8259712057b476ba",
-      "size": 23577652
+      "from": "2.12.6",
+      "to": "2.12.7",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.12.7/delta-2.12.6-to-2.12.7.zip",
+      "sha256": "acfa34f75171e69122a584a25d805a7b73095a3c54d8b1df25ededa888115ceb",
+      "size": 33489142
     }
   ],
-  "sha256": "b518274944782a79da9776072f5444faa628e87b1ae2cf5fc9d7445417ec536d",
-  "size": 199812754,
+  "sha256": "0d73ca44ef8786fa6c4a85e47a0e7ae06a667876ef549005b9abbfa6fc93e5fd",
+  "size": 209230354,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "j96LmwF3duHMQPbbqR1GIV3mP3zQKym4DMDWK6Y+jaVFYQxIKgpQiS8M9sTAGqG51a5MkPc6ZRNcoAnyWV0kDQ=="
+    "value": "IQsmnmLny9W1wx4K5gaRVcxgI7vxmksNwQmXdc8HUC+gZpuETTEAsm5y+4VGE0hSrHqFYuKRATjeXA534qycDA=="
   }
 }
