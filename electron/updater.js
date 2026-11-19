@@ -234,6 +234,22 @@ function parseDeltas(data, base) {
 }
 
 /**
+ * 把清单里的 notes 规范化成「一行一条」的字符串。
+ *
+ * 清单格式几经变化：老版本 notes 是一整段字符串（自己按 \n 分行），
+ * 2.12.x 起改成数组。渲染层 splitNotes() 只认 \n 分行的字符串。
+ * 这里千万别用 String(array) —— JS 会把数组用逗号拼成一行（甲乙丙→甲,乙,丙），
+ * 渲染层再按 \n 拆就只剩一条，用户看到的就是「更新文案全堆在一起」。
+ * 数组必须用 \n 连起来，才能还原成一行一条。
+ */
+function normalizeManifestNotes(notes) {
+  if (Array.isArray(notes)) {
+    return notes.map((line) => String(line).trim()).filter(Boolean).join('\n');
+  }
+  return String(notes || '').trim();
+}
+
+/**
  * 读取并校验 manifest。
  *
  * 随包分发的那份 latest.json 只写「真正的清单在哪」（manifest 指针），
@@ -274,7 +290,7 @@ async function readManifest(location, timeout = MANIFEST_TIMEOUT) {
     version,
     title: String(data.title || '').trim(),
     date: String(data.date || '').trim(),
-    notes: String(data.notes || '').trim(),
+    notes: normalizeManifestNotes(data.notes),
     url: resolveAgainst(raw, data.url),
     sha256: String(data.sha256 || '').trim().toLowerCase(),
     size: Number(data.size) || 0,

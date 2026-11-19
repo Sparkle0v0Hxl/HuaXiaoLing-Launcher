@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.12.6-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.12.7-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.12.6**（正式版）
+**当前版本：v2.12.7**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.12.6-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.12.7-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -200,7 +200,28 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.12.6 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.12.7 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.12.7</b></summary>
+
+修复发布包漏带网易云服务依赖导致登录二维码不显示；修复更新弹窗文案堆成一整行；弹窗文案改简洁排版，两平台历史文案一并重写。
+
+
+**二维码登录**
+
+- 有用户反馈音乐页的网易云二维码登录不显示，但开发者本机正常。根因是打包时 electron-builder 把内置服务目录 resources\netease-api 下名为 node_modules 的目录当成生产依赖裁掉了，发布包里服务因找不到 axios 直接退出，二维码链路第一关就断了。本机一直用完整的运行副本，所以没暴露。现在打包配置里单独为这个 node_modules 加了一条复制规则，并在打包脚本里加了前后两道检查，缺依赖直接让打包失败，不会再悄悄发出坏包。
+
+**更新弹窗文案**
+
+- 更新清单里的 notes 是数组，客户端读的时候用了 String(数组)，JS 会用逗号把它拼成一整行，而渲染层只按换行拆分——结果所有要点堆在一条里，看着是一坨。现在读清单时先把数组按行拼好，渲染层就能正确拆成一条条。
+
+**排版固化**
+
+- 更新弹窗文案改成简洁排版：第一行是杀软白名单提示，第二行是版本号，后面是几条「动词前缀：短句」，同类合并、一行一件事。这个规则已经写进打包脚本，排版不合规直接打包失败，文案以后不会再乱。两平台以前发过的更新文案也按这个排版重写了一遍。
+
+</details>
+
 
 <details>
 <summary><b>v2.12.6</b></summary>
