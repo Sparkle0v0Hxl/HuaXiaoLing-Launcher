@@ -608,12 +608,20 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
     reason: error.message,
   }));
   const preAvailable = Boolean(pre && pre.ok && pre.available);
+  /*
+   * 本体「正式」更新已上线（远端 ResVersion 比本地新）——这和预下载是两件事：
+   * 预下载是「下一版还没上线、先下内容」，正式更新是「已经上线、该升了」。
+   * 两者都只能由官方启动器完成，但状态和文案完全不同，必须分开报。
+   */
+  const officialAvailable = Boolean(pre && pre.ok && pre.officialAvailable);
   const prePayload =
     pre && pre.ok
       ? {
           // 界面判断「要不要提预下载」得看这个，不能只看版本号非空 ——
           // 预下载撤了 / 已经正式上线之后，config 里的 PreReleaseVersion 还在
           preReleaseAvailable: Boolean(pre.available),
+          // 本体正式更新可用（只能官方下），界面据此把入口接到「打开官方更新」
+          officialAvailable,
           preReleaseBranch: pre.preReleaseBranch || '',
           preReleaseVersion: pre.preReleaseVersion || '',
           preReleaseStatus: pre.preReleaseStatus || '',
@@ -643,8 +651,30 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
     ...prePayload,
   });
 
+  /**
+   * 本体正式更新已上线时的统一返回。
+   *
+   * 和预下载同理：资源只有官方启动器下得动（登录态换 STS + PatcherXML0 私有加密
+   * 清单 + .sig 验签），所以同样标 officialOnly，界面只能把人送到官方启动页。
+   * 状态用 'update' 而不是 'available'，因为这不是「提前下好的内容」，而是
+   * 「已经该升级了」。
+   */
+  const officialResult = () => ({
+    kind: 'nte',
+    state: 'update',
+    scope: NTE_SCOPE_OFFICIAL,
+    officialOnly: true,
+    localVersion: (pre && pre.localVersion) || '',
+    latestVersion: (pre && pre.officialVersion) || '',
+    targetVersion: (pre && pre.officialVersion) || '',
+    versionUrl: iniUrl,
+    installRoot: root,
+    ...prePayload,
+  });
+
   if (!iniUrl) {
-    // 启动器清单地址都没拿到，但本体预下载照样可能查得到，不能因此什么都不说
+    // 启动器清单地址都没拿到，但本体更新/预下载照样可能查得到，不能因此什么都不说
+    if (officialAvailable) return officialResult();
     if (preAvailable) return preResult();
     return {
       kind: 'nte',
@@ -682,6 +712,8 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
         ...prePayload,
       };
     }
+    // 启动器侧没更新，但本体正式更新已上线（我们下不了，只能官方）
+    if (officialAvailable) return officialResult();
     if (preAvailable) return preResult();
     return {
       kind: 'nte',
@@ -695,7 +727,8 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
       ...prePayload,
     };
   } catch (error) {
-    // 启动器清单拉不到，但本体预下载查到了就照实报预下载，别把整条状态打成 error
+    // 启动器清单拉不到，但本体更新/预下载查到了就照实报，别把整条状态打成 error
+    if (officialAvailable) return officialResult();
     if (preAvailable) return preResult();
     return {
       kind: 'nte',

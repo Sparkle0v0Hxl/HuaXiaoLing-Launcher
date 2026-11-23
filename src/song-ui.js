@@ -4,7 +4,7 @@
  * 点歌台的视图层。
  *
  * 拆出来是为了两件事：
- *   1. 四个平台的登录（网易云扫码 / QQ 音乐 / 酷狗 / 酷我）统一到一个「音乐账号」面板；
+ *   1. 各平台的登录（网易云 / QQ 音乐 / 酷我，都走内置浏览器）统一到一个「音乐账号」面板；
  *   2. 点歌台重排成「左侧曲库导航 + 主区（搜索 / 队列 / 榜单 / 我的歌单）+ 右侧栏」。
  *
  * 左栏的存在理由：「我的歌单」原来挂在主区最底下，网易云账号歌单一多，
@@ -241,29 +241,24 @@ function krAccountPanelMarkup(platform) {
   if (platform === 'netease') {
     const apiDefault = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
     /*
-     * 二维码这里只是 160px 的小图 + 右边一段状态文字，不再套一层大卡片。
-     * 下面这些 id 是和 app.js / bindNeteaseQr 的契约（二维码出图、状态刷新、退出都靠它们），
-     * 换结构可以，名字不能动。
+     * 登录统一走内置浏览器（和 QQ 音乐一样），界面上不再放二维码 ——
+     * 2026-11-21 起网易云的登录页就是官网原样，扫码/手机号/邮箱都由官网自己提供。
+     * 这段里只剩「打开登录窗口 / 退出登录 / 本地服务地址」三样，
+     * id 是和 bindNeteaseService 的契约，换结构可以，名字不能动。
      */
     return `${head}
       <div class="modal-body kr-login-body">
-        <div class="kr-login-qr">
-          <div class="netease-qr-image" id="netease-qr-image">${icon('music')}</div>
-          <div class="kr-login-qr-copy">
-            <strong id="netease-login-status">等待获取二维码</strong>
-            <span id="netease-login-hint">用网易云音乐 App 扫一下，扫完在手机上确认。</span>
-            <div class="kr-login-qr-actions">
-              <button class="btn btn-ghost btn-sm" id="net-qr-refresh">${icon('refresh')}刷新二维码</button>
-              <button class="kr-login-link" id="net-acc-logout">退出登录</button>
-            </div>
-          </div>
+        <p class="kr-login-note">和 QQ 音乐一样：点下面的按钮会打开网易云官网，扫码 / 手机号 / 邮箱登录都由官网自己提供，登完窗口会自己关掉。</p>
+        <div class="kr-login-actions">
+          <button class="btn btn-primary" data-action="music-account-login" data-platform="netease">${icon('login')}打开登录窗口</button>
+          <button class="kr-login-link" id="net-acc-logout">退出登录</button>
         </div>
         <div class="kr-login-adv">
           <button class="kr-login-adv-toggle" id="kr-login-adv-toggle" aria-expanded="false">
             ${icon('chevron-down', 'xs')}<span>高级：本地服务地址</span>
           </button>
           <div class="kr-login-adv-body" id="kr-login-adv-body" hidden>
-            <span>扫码要连本机的 NeteaseCloudMusicApi，不确定就保持默认。</span>
+            <span>歌单同步与部分曲目播放要连本机的网易云服务，不确定就保持默认。</span>
             <div class="kr-login-adv-row">
               <input class="text-input" id="netease-login-api" value="${esc(apiDefault)}" placeholder="http://127.0.0.1:3100" spellcheck="false" />
               <button class="btn btn-ghost btn-sm" id="netease-service-start">${icon('play')}启动服务</button>
@@ -272,7 +267,6 @@ function krAccountPanelMarkup(platform) {
         </div>
       </div>`;
   }
-
   const notes = {
     qq: '弹出的官方登录页里，扫码 / QQ / 微信 / 手机验证码都行，登完窗口会自己关掉，歌单跟着同步过来。',
     kugou: '同样走官方登录页，Cookie 按域内判断，不会莫名其妙掉登录。登录之后能用的是榜单和搜索。',
@@ -316,17 +310,15 @@ function krAccountPanelMarkup(platform) {
 /**
  * 登录/退出之后，如果账号弹窗还开着，把它刷成最新状态。
  *
- * 网易云面板跳过：那边有自己的二维码轮询，重开等于把正在扫的码换掉。
+ * 2026-11-21 起网易云也走内置浏览器，面板里没有要保留的扫码状态，可以一起刷新。
  */
 function refreshMusicAccountsModal() {
   const modal = document.querySelector('.kr-login-modal');
   if (!modal) return;
-  const current = modal.dataset.platform || '';
-  if (current === 'netease') return;
-  openMusicAccountsModal(current);
+  openMusicAccountsModal(modal.dataset.platform || '');
 }
 
-/** 绑第一步的返回 / 网易云列表退出 / 高级折叠；第二步的二维码流程还是原来的 bindNeteaseQr。 */
+/** 绑第一步的返回 / 网易云列表退出 / 高级折叠；网易云那边的本地服务与退出在 bindNeteaseService。 */
 function bindMusicAccountsModal(platform) {
   document.querySelector('#kr-acct-back')?.addEventListener('click', () => openMusicAccountsModal());
 
@@ -355,137 +347,31 @@ function bindMusicAccountsModal(platform) {
     advBody.hidden = open;
   });
 
-  if (platform === 'netease') bindNeteaseQr();
+  if (platform === 'netease') bindNeteaseService();
 }
 
-/** 网易云的二维码流程（内嵌在账号面板里，也兼容独立调用）。 */
-function bindNeteaseQr() {
+/** 网易云面板：只剩本地服务地址与启动服务、退出登录；登录本身走内置浏览器。 */
+function bindNeteaseService() {
   const apiInput = document.querySelector('#netease-login-api');
-  const status = document.querySelector('#netease-login-status');
-  const hint = document.querySelector('#netease-login-hint');
-  const image = document.querySelector('#netease-qr-image');
-  const refresh = document.querySelector('#net-qr-refresh');
-  if (!apiInput || !refresh) return;
+  if (!apiInput) return;
 
-  /*
-   * 本地服务没起来时，后端给的是一整串 "Error invoking remote method … fetch failed"。
-   * 这里只把这句话翻译成人话，流程一行没动 —— 提示里直接告诉用户去哪儿点「启动服务」。
-   */
-  const qrErrorText = (error) => {
-    const raw = String(error?.message || error || '');
-    if (/fetch failed|ECONNREFUSED|ENOTFOUND|net::|Failed to fetch/i.test(raw)) {
-      return '连不上本机的网易云服务：展开下面的「高级」点「启动服务」，或者自己先把 NeteaseCloudMusicApi 跑起来。';
-    }
-    return humanError(error);
+  const rememberBase = () => {
+    const value = apiInput.value.trim() || 'http://127.0.0.1:3100';
+    apiInput.value = value;
+    localStorage.setItem('vela:netease-api', value);
+    return value;
   };
-
-  let timer = null;
-  let qrKey = '';
-  let checking = false;
-  let checkFailures = 0;
-  const MAX_CHECK_FAILURES = 5;
-  const stop = () => {
-    if (timer) clearInterval(timer);
-    timer = null;
-  };
-
-  /*
-   * 扫码轮询是每 2 秒一次的高频外网请求，网络抖动、内置服务转发卡住
-   * 都可能让单次 qrCheck 抛 TimeoutError。以前 catch 里直接 stop()，
-   * 一次超时就把整个登录流程判死（用户看到「登录检查失败」后二维码再也不动）。
-   * 现在：瞬时网络错误容错重试，连续失败到上限才真正停；checking 锁
-   * 避免 2 秒间隔里堆叠出多个并发请求，把本地服务越压越慢。
-   */
-  const isTransientCheckError = (error) =>
-    /timeout|aborted|fetch failed|ECONNREFUSED|ENOTFOUND|net::|Failed to fetch|HTTP 5\d\d/i.test(
-      String(error?.message || error || '')
-    );
-
-  const check = async () => {
-    if (!qrKey || checking) return;
-    checking = true;
-    try {
-      const result = await api.netease.qrCheck({ apiBase: apiInput.value.trim(), key: qrKey });
-      checkFailures = 0;
-      if (result.loggedIn) {
-        stop();
-        status.textContent = '登录成功';
-        hint.textContent = '歌单会自己同步过来，可以直接去「我的歌单」看。';
-        toast('网易云登录成功', 'success');
-        await refreshNeteaseLogin();
-        await refreshMusicLogin();
-        const chip = document.querySelector('#net-acc-state');
-        if (chip) chip.textContent = '已登录';
-        if (state.route === 'song') render({ preserveScroll: true });
-        // 三个平台的歌单统一在这一处刷新，登录完不用再手动点一次
-        await syncPlaylistsAfterLogin('netease');
-      } else if (result.code === 802) {
-        status.textContent = '已扫码，请在手机上确认';
-        hint.textContent = result.message || '确认后会自动完成登录。';
-      } else if (result.code === 800) {
-        status.textContent = '二维码已过期';
-        hint.textContent = '重新获取一个。';
-        stop();
-      } else {
-        hint.textContent = result.message || '等待扫码…';
-      }
-    } catch (error) {
-      checkFailures += 1;
-      if (isTransientCheckError(error) && checkFailures < MAX_CHECK_FAILURES) {
-        status.textContent = '网络有点慢，正在重试…';
-        hint.textContent = `检查登录状态暂时没连上（${checkFailures}/${MAX_CHECK_FAILURES}），会自动继续。`;
-        return;
-      }
-      stop();
-      status.textContent = '登录检查失败';
-      hint.textContent = qrErrorText(error);
-    } finally {
-      checking = false;
-    }
-  };
-
-  refresh.addEventListener('click', async () => {
-    stop();
-    qrKey = '';
-    checking = false;
-    checkFailures = 0;
-    refresh.disabled = true;
-    status.textContent = '正在获取二维码…';
-    hint.textContent = '连接本地 API';
-    try {
-      const apiBase = apiInput.value.trim();
-      localStorage.setItem('vela:netease-api', apiBase);
-      const result = await api.netease.qrCreate({ apiBase });
-      qrKey = result.key;
-      image.innerHTML = result.qrimg
-        ? `<img src="${esc(result.qrimg)}" alt="网易云登录二维码" />`
-        : icon('music');
-      status.textContent = '请使用网易云音乐扫码';
-      hint.textContent = '扫码后在手机上确认登录。';
-      timer = setInterval(check, 2000);
-    } catch (error) {
-      status.textContent = '获取二维码失败';
-      hint.textContent = qrErrorText(error);
-      // 拿码失败就把上一张码擦掉，免得用户对着一个已经死不掉的二维码扫
-      image.innerHTML = icon('music');
-    } finally {
-      refresh.disabled = false;
-    }
-  });
+  apiInput.addEventListener('change', rememberBase);
 
   document.querySelector('#netease-service-start')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
-    status.textContent = '正在启动本地服务…';
-    hint.textContent = '查找 NeteaseCloudMusicApi 并启动，需要几秒钟。';
     try {
-      const result = await api.netease.startService(apiInput.value.trim());
-      if (result?.apiBase) apiInput.value = result.apiBase;
-      status.textContent = result?.started ? '本地服务已启动' : '本地服务已经在运行';
-      refresh.click();
+      const result = await api.netease.startService(rememberBase());
+      if (result && result.apiBase) apiInput.value = result.apiBase;
+      toast(result && result.started ? '本地服务已启动' : '本地服务已经在运行', 'success');
     } catch (error) {
-      status.textContent = '自动启动服务失败';
-      hint.textContent = qrErrorText(error);
+      toast(humanError(error), 'error');
     } finally {
       button.disabled = false;
     }
@@ -496,21 +382,14 @@ function bindNeteaseQr() {
       await api.netease.logout();
       await refreshNeteaseLogin();
       invalidateAllPlaylists();
-      stop();
-      status.textContent = '已退出登录';
-      hint.textContent = '需要时重新获取二维码。';
-      image.innerHTML = icon('music');
       const chip = document.querySelector('#net-acc-state');
-      if (chip) chip.textContent = '扫码登录';
+      if (chip) chip.textContent = '未登录';
       toast('已退出网易云', 'success');
       if (state.route === 'song') render({ preserveScroll: true });
     } catch (error) {
       toast(error.message || '退出失败', 'error');
     }
   });
-
-  // 打开面板时自动准备二维码，少点一次
-  setTimeout(() => refresh.click(), 260);
 }
 
 /* ── 左侧曲库导航栏 ───────────────────────────────────────── */
@@ -969,7 +848,7 @@ function songQueueRowsMarkup(list = state.songs) {
 
     for (const { song, index } of shown) {
       rows.push(`
-              <div class="song-row ${sameSongKey(song, state.songs[state.songIndex]) ? 'active' : ''}${song.unavailable ? ' is-unavailable' : ''}${(state.queueSelected || []).includes(index) ? ' is-brush-selected' : ''}" draggable="true" data-index="${index}">
+              <div class="song-row ${sameSongKey(song, state.songs[state.songIndex]) ? 'active' : ''}${locateFlashClass(song)}${song.unavailable ? ' is-unavailable' : ''}${(state.queueSelected || []).includes(index) ? ' is-brush-selected' : ''}" draggable="true" data-index="${index}">
                 <button class="song-row-main" data-action="song-select" data-queue="picked" data-index="${index}" title="${song.unavailable ? esc(song.unavailableReason || '暂时无法播放') : ''}">
                   <span class="song-index">${sameSongKey(song, state.songs[state.songIndex]) ? icon('play') : index + 1}</span>
                   <span class="song-row-cover">${songCover(song) ? `<img src="${esc(songCover(song))}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : icon('music')}</span>
@@ -1028,6 +907,7 @@ function songQueueList(list = state.songs) {
           <strong>${esc(current.title || '未知曲目')}</strong>
           <small>${esc(current.artist || '未知歌手')}${current.origin === 'playlist' && current.from ? ` · 来自《${esc(current.from)}》` : ' · 自选'}</small>
         </span>
+        <button class="song-queue-now-locate" data-action="locate-current" title="在队列里定位到正在播放的这一首">${icon('pin', 'xs')}<span>定位</span></button>
         <span class="song-queue-now-pos">${sameSongKey(current, list[state.songIndex]) && list === state.songs ? `${state.songIndex + 1} / ${state.songs.length}` : '播放中'}</span>
       </div>`
     : '';

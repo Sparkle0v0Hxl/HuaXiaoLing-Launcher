@@ -15,6 +15,8 @@ const { createCancelSignal } = require('./cancel-signal');
 // 渠道能力表：哪个游戏在哪个渠道能修 / 能更新 / 能硬链接，全在 game-channels.js 里定，
 // 这里的 handler 只查表，不再自己写死渠道数组（用户 2026-11-16 定的规则）。
 const gameChannels = require('./game-channels');
+// 终末地官方托管启动：真的跑官方 Games.exe，由它亲自 CreateProcess 拉起游戏。
+const endfieldOfficial = require('./endfield-official');
 
 /**
  * 鸣潮客户端的「本体根」：主程序在 Client\Binaries\Win64 下（三层深），
@@ -54,8 +56,140 @@ const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
  * 所以是按名字逐个挑出来的，不是连续区间。
  */
 
+/**
+ * 终末地「官方托管启动」：真的跑官方 Games.exe，由它亲自拉起游戏。
+ *
+ * 为什么优先这条：官方客户端会校验「直接父进程是不是官方启动了」，
+ * 而旧方案（VelaEndfield 复制官方签名 exe 当父进程）本质是伪装进程身份。
+ * 这条链路不伪装任何东西 —— 官方启动器自己拉起游戏，我们只替用户点了那颗按钮。
+ *
+ * 返回 {handled:true, result} 表示已经处理完（成功或明确失败都算）；
+ * 返回 null 表示这条路不适用（没装官方启动器），调用方退回旧链路。
+ */
+async function tryOfficialLaunch(game, target, cwd, args, deps) {
+  const { writeLaunchLog, getLaunching, currentElevation, markLaunched, trackGameProcess, send, getOfficialGamesExe } = deps;
+  const id = game.id;
+  const launching = getLaunching();
+
+  /*
+   * 官方托管启动前的知情提示（2026-11-23）：这条链路确实要求本机装了
+   * 鹰角官方启动器，Games.exe 本身要管理员权限（首次会弹一次 UAC），
+   * 杀软首次可能拦一次要放行。以前一句都没说，用户遇到 UAC/杀软弹窗会
+   * 以为是启动器出问题。放在函数内部，只要尝试官方托管就先说清楚。
+   */
+  try {
+    if (typeof send === 'function') {
+      send('toast', {
+        type: 'info',
+        message: '终末地官方托管启动：需已安装鹰角官方启动器；首次运行会弹 UAC 请求管理员权限，杀软可能提示放行一次（加白名单即可）。',
+      });
+    }
+  } catch {
+    /* 提示失败不影响启动 */
+  }
+
+  // 官方启动器认的安装目录：优先官方日志里自己写的，其次服务器记录的原始目录。
+  const gameRoot =
+    (typeof endfieldOfficial.readGameInstallPath === 'function' && endfieldOfficial.readGameInstallPath()) ||
+    String((game.servers || []).find((s) => s.id === game.activeServerId)?.originalRoot || '').trim() ||
+    String(cwd || '').trim();
+  if (!gameRoot) return null;
+
+  // 用户在「设置 → 行为」里手填的 Games.exe 优先（自动发现找不到时的兜底）
+  const customExe = typeof getOfficialGamesExe === 'function' ? String(getOfficialGamesExe() || '').trim() : '';
+  const found = endfieldOfficial.findOfficialGames(customExe);
+  if (!found.ok) {
+    /*
+     * 识别不到官方启动器：不再像以前那样一声不吭退回旧链路 —— 那会让用户
+     * 完全不知道官方托管为什么没生效（旧链路也过不了官方父进程校验）。
+     * 这里给一条明确中文提示，告诉用户去装官方启动器 / 手填路径；
+     * 但仍保留 return null 让调用方退回旧链路做最后兜底。
+     */
+    writeLaunchLog(`launch ${id}: 没找到鹰角官方启动器，退回旧链路（手填路径=${customExe || '未设置'}）`);
+    try {
+      if (typeof send === 'function') {
+        send('toast', {
+          type: 'warning',
+          message: customExe
+            ? '手填的官方启动器路径无效（要指向 Games.exe），自动搜索也没找到。请在「设置 → 行为」里重新指定鹰角官方启动器的位置；这次先临时用旧的启动方式。'
+            : '没找到鹰角官方启动器（Games.exe），官方托管这次不可用，已临时改用旧的启动方式。要在「设置 → 行为」里手填 Games.exe 路径，或先装好鹰角官方启动器。',
+        });
+      }
+    } catch {
+      /* 提示失败不影响启动 */
+    }
+    return null;
+  }
+
+  const runRoot = String(cwd || path.dirname(target)).trim();
+  const elevated = typeof currentElevation === 'function' ? Boolean(currentElevation()) : false;
+  launching.set(id, Date.now());
+  writeLaunchLog(
+    `launch ${id}: 官方托管启动 gameRoot=${gameRoot} runRoot=${runRoot} elevated=${elevated ? 1 : 0}`
+  );
+  let result;
+  try {
+    result = await endfieldOfficial.launchViaOfficial({
+      gameRoot,
+      runRoot,
+      elevated,
+      customExe,
+      onProgress: (msg) => writeLaunchLog(`launch ${id}: [官方托管] ${msg}`),
+      onLog: (msg) => writeLaunchLog(`launch ${id}: ${msg}`),
+    });
+  } catch (error) {
+    result = { ok: false, error: '官方托管启动异常：' + error.message };
+  }
+
+  if (result && result.ok) {
+    try {
+      await markLaunched(game);
+      trackGameProcess(id, path.basename(target), Date.now()).catch(() => {});
+    } catch {
+      /* 记账失败不影响已经起来的游戏 */
+    }
+    writeLaunchLog(`launch ${id}: 官方托管启动成功 pid=${result.pid || 0} state=${result.state || ''}`);
+    return { handled: true, result: { ok: true, pid: result.pid, official: true, elevated, managed: true } };
+  }
+
+  launching.delete(id);
+  const message = (result && result.error) || '官方托管启动失败';
+  writeLaunchLog(`launch ${id}: 官方托管启动失败：${message}`);
+  /*
+   * 更新态 / 不可启动态属于「官方启动器说了现在不能点」，这是明确结论，
+   * 不该再退回旧链路白试一次（旧链路也过不了官方校验，只会多弹一次 UAC）。
+   * 其它失败（调试口没开、进程没起来）退回旧链路兜底。
+   */
+  if (result && (result.reason === 'update' || result.reason === 'not-startable')) {
+    return { handled: true, result: { ok: false, error: message, endfieldUpdate: result.reason === 'update' } };
+  }
+  /*
+   * 第三步：其它失败按原因给一条能看懂的中文提示，别让日志里那串英文/内部术语
+   * 直接砸到用户脸上。分类只看 message 里已经有的关键措辞，不改动失败判定本身。
+   * 仍保留 return null 退回旧链路兜底（回归脚本也断言这个分支存在）。
+   */
+  try {
+    if (typeof send === 'function') {
+      let hint = `官方托管启动失败：${message}。这次会退回旧的启动方式再试一次。`;
+      if (/安全软件|白名单|环境变量注入|调试口/.test(message)) {
+        hint = '官方启动器被安全软件拦了，或它的调试接口没打开。请把鹰角官方启动器加入杀软白名单后重试；这次先退回旧的启动方式。';
+      } else if (/管理员|UAC|RunAs|拒绝/.test(message)) {
+        hint = '没有拿到管理员权限（UAC 被拒绝或提权失败）。请在弹 UAC 时点「是」，或以管理员身份运行启动器；这次先退回旧的启动方式。';
+      } else if (/已经在运行/.test(message)) {
+        hint = '终末地已经在运行了，不用重复启动。';
+      } else if (/安装目录/.test(message)) {
+        hint = '没拿到终末地的安装目录，请先在设置里检测一次游戏路径；这次先退回旧的启动方式。';
+      }
+      send('toast', { type: 'error', message: hint });
+    }
+  } catch {
+    /* 提示失败不影响退回旧链路 */
+  }
+  return null;
+}
+
 function installGamesIpc(ctx) {
-  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, launchWithSignedParent, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame, clearRegistryCache } = ctx;
+  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, launchWithSignedParent, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame, clearRegistryCache, currentElevation } = ctx;
   /*
    * 下面这批是从 main.js 顶层直接传进来的（函数提升 / require 的常量）。
    * 拆分时漏掉过，导致 games:launch / games:update / games:detect 一调用就 ReferenceError。
@@ -65,7 +199,7 @@ function installGamesIpc(ctx) {
     yostarPacks, ARKNIGHTS_CN_CHANNELS, predownload, prepareSophon, storyResourcesEnabled,
     nevernessChannels, normalizeGame, publicGame, repairServerChannels, detectionChannel,
     serverForDetected, pruneStaleRunning, isEndfieldLegacyWorkRoot, WEGAME_LAUNCH_URI,
-    ensureEndfieldChannelRuntime, launchPreflightNotice, findNteGame, findNteLauncher,
+    ensureEndfieldChannelRuntime, breakSharedPersistentState, launchPreflightNotice, findNteGame, findNteLauncher,
     listRunningImages, activateWindowByImage, clearNteLingeringLauncher, splitArgs,
     startWithShellExecute, spawn, trackGameProcess, autoClickNtePredownload, autoClickNteStart,
     wuwaLaunch,
@@ -521,6 +655,25 @@ function installGamesIpc(ctx) {
           if (prepared) writeLaunchLog(`launch ${id}: endfield runtime ok=${prepared.ok !== false} built=${prepared.built === true} root=${prepared.runtimeRoot || ''}`);
           if (prepared && prepared.ok === false) return prepared;
           if (prepared) {
+            /*
+             * 闪断更新前的保险（2026-11-22）：老版本建的运行时里，Persistent 的
+             * index_main.json / pref_*.json / VFS\*.blc 可能还和别的渠道共用一个 inode。
+             * 游戏热更是同 inode 原地写，一次更新会把所有渠道的索引一起写新，
+             * 其他渠道没下对应 .chk，就会一直弹「文件缺失或损坏」。
+             * 启动前先把这些仍共享的状态文件断链成独立拷贝；健康树这里是 0 次拷贝。
+             */
+            if (prepared.runtimeRoot) {
+              try {
+                const deshed = await breakSharedPersistentState(prepared.runtimeRoot);
+                if (deshed.broke || deshed.failed) {
+                  writeLaunchLog(
+                    `launch ${id}: Persistent 状态断链 ${deshed.broke} 个（检查 ${deshed.checked}，失败 ${deshed.failed}，${(deshed.bytes / 1048576).toFixed(1)}MB）`
+                  );
+                }
+              } catch (error) {
+                writeLaunchLog(`launch ${id}: Persistent 状态断链异常 ${error.message}`);
+              }
+            }
             target = prepared.launchPath;
             game.target = prepared.launchPath;
             game.workDir = prepared.runtimeRoot;
@@ -581,7 +734,7 @@ function installGamesIpc(ctx) {
            * 会触发它的单实例「唤醒旧实例→旧实例退出→新实例秒退」，点了等于没点。
            */
           if (/^nte(game|launcher)\.exe$/i.test(path.basename(target))) {
-            if (purpose === 'predownload') {
+            if (purpose === 'predownload' || purpose === 'update') {
               /*
                * 预下载只借用官方启动页：它已经开着就直接拉到前台，绝不先杀掉。
                * 官方正在下载预下载资源时把它结束掉，等于把用户几十分钟的进度连进程一起收了。
@@ -727,8 +880,8 @@ function installGamesIpc(ctx) {
 
         if (lower.endsWith('.lnk') || lower.endsWith('.url')) {
           /*
-           * 终末地不允许走快捷方式：快捷方式可能指向官方启动器（那就白弹一次界面），
-           * 而且绕过签名父进程后游戏会报 10100。直接让用户指到本体。
+           * 终末地不支持快捷方式启动：快捷方式可能指向官方启动器（会多弹一次它的界面），
+           * 也让启动路径无法确定。让用户把路径直接指到 Endfield.exe。
            */
           if (game.builtinKey === 'endfield') {
             return {
@@ -750,17 +903,44 @@ function installGamesIpc(ctx) {
         }
 
         /*
-         * 终末地：不论 exe 叫什么名字（含用户改过名的 Endfield_cn.exe），一律经签名
-         * 父进程 —— 只要落到下面的通用启动，父进程就是花筱灵自己，游戏立刻报
-         * 10100「请通过官方启动器打开游戏」。指向平台进程的那种在上面已经被拦下。
+         * 终末地：不论 exe 叫什么名字（含用户改过名的 Endfield_cn.exe），一律走
+         * 启动辅助路径 —— 落到下面的通用启动时，游戏拿不到它期望的进程上下文，会在
+         * 进入登录界面之前就退出。指向平台进程的那种在上面已经被拦下。
          *
-         * 明日方舟**不走**这条链路：它不校验父进程，双击本体就能开。Xel-Launcher 里
-         * 也是同一条界线 —— 它的 decoy 父进程桥只对 Endfield / BiliEndfield /
-         * GlobalEndfield / PlayEndfield 四个渠道启用，Arknights 系一律普通启动。
-         * 套上去只会让每次开方舟都白跑一次 PowerShell，在没装终末地的机器上
-         * 还会必然失败。
+         * 明日方舟**不走**这条链路：它用普通启动即可。Xel-Launcher 里也是同一条界线
+         * —— 它的父进程辅助只对 Endfield / BiliEndfield / GlobalEndfield /
+         * PlayEndfield 四个渠道启用，Arknights 系一律普通启动。套上去只会让每次开
+         * 方舟都白跑一次辅助进程，在没装终末地的机器上还会必然失败。
          */
         if (game.builtinKey === 'endfield') {
+          /*
+           * 首选「官方托管启动」（2026-11-21 起）：真的把官方 Games.exe 拉起来，
+           * 由它自己用 CreateProcess 起游戏 —— 父进程就是真官方启动器，没有任何
+           * 伪装，官方那套「必须由官方启动器打开」的校验天然通过。
+           *
+           * 原理：官方启动器界面是 Qt WebEngine 网页，用
+           * QTWEBENGINE_REMOTE_DEBUGGING 开调试口后，发它自己的 bridge 事件
+           * click_main_btn，等价于「替用户点了那颗开始游戏按钮」。
+           * 跨渠道靠 junction 把安装目录指向对应渠道运行时（实测官方全盘接受），
+           * 点完立刻换回来，所以更新永远落到官服目录上。
+           */
+          const officialLaunch = await tryOfficialLaunch(game, target, cwd, args, {
+            writeLaunchLog,
+            getLaunching,
+            currentElevation,
+            markLaunched,
+            trackGameProcess,
+            send,
+            getOfficialGamesExe: () => {
+              try {
+                return String((getStore().data.settings || {}).endfieldOfficialGamesExe || '').trim();
+              } catch {
+                return '';
+              }
+            },
+          });
+          if (officialLaunch && officialLaunch.handled) return officialLaunch.result;
+
           const signed = await launchWithSignedParent(game, target, cwd, {
             requireElevation: true,
             strict: true,
@@ -868,8 +1048,8 @@ function installGamesIpc(ctx) {
           }
         }
 
-        // 预下载只是去官方页面下资源，不算「玩过这个游戏」——别去动最近游玩时间
-        if (purpose !== 'predownload') await markLaunched(game);
+        // 预下载 / 本体更新都只是去官方页面下资源，不算「玩过这个游戏」——别去动最近游玩时间
+        if (purpose !== 'predownload' && purpose !== 'update') await markLaunched(game);
 
         if (lower.endsWith('.exe') && !getRunning().has(id)) {
           const isNeverness = game.builtinKey === 'neverness';
@@ -904,6 +1084,12 @@ function installGamesIpc(ctx) {
             if (purpose === 'predownload') {
               // 只试着点官方页面上的「预下载」，绝不点「开始游戏」——那是直接进游戏
               autoClickNtePredownload(id);
+            } else if (purpose === 'update') {
+              /*
+               * 本体正式更新：官方启动页自己会先检测并下载资源，这里一个键都不点。
+               * 点「预下载」是错的（那是提前下下一版），点「开始游戏」也没意义
+               * （资源没更完它会自己拦下来），多一次无谓点击只是噪音。
+               */
             } else {
               // 异环直达登录窗后，帮忙把「开始游戏」也点了（UIA 找按钮，找不到就静默让人点）
               autoClickNteStart(id);

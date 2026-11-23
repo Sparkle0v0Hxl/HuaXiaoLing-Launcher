@@ -56,6 +56,11 @@ const { installRosterIpc } = require('./roster-ipc');
 const { installPassportIpc } = require('./passport-ipc');
 const { installPostartIpc } = require('./postart-ipc');
 const { installHoyolabIpc } = require('./hoyolab-ipc');
+// 主题包：一个包 = userData/art-pack/<id>/ 目录，带 theme.json（名字/皮肤/强调色/配色）。
+// 图片名单、包 id 校验、配色白名单、资源回落顺序全在这个模块里，主进程与渲染层共用同一份口径。
+const themePack = require('./theme-pack');
+const endfieldOfficial = require('./endfield-official');
+const { installThemePackIpc, syncActive: syncActiveThemePack } = require('./theme-pack-ipc');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -94,7 +99,7 @@ const { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree } = require('./r
  * prepareLinkedRuntime 保留给别的游戏用；终末地自己的 buildEndfieldChannelRuntime
  * 会在整树重建时把旧目录的 Persistent（用户下好的语音包）整体搬过去，不会丢下载内容。
  */
-const { overlayDirectory, mustCopyNotLink } = require('./runtime');
+const { overlayDirectory, mustCopyNotLink, breakSharedPersistentState } = require('./runtime');
 const { loadGachaHistory } = require('./gacha');
 const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
@@ -330,6 +335,15 @@ protocol.registerSchemesAsPrivileged([
     /* 播放过的音频字节缓存：corsEnabled 让音效链的 createMediaElementSource 能取样本 */
     scheme: 'hxl-audio',
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
+  {
+    /*
+     * 可选素材包：hxl-art://<文件名>
+     * 用户把同名 png 放进 userData/art-pack/ 就覆盖包内那 13 张装饰图，
+     * 没有再回落到 src/assets/。协议里做回落，渲染层就不用判状态。
+     */
+    scheme: 'hxl-art',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
   },
 ]);
 
@@ -1028,6 +1042,8 @@ function defaultSettings() {
     accent: 'spark',
     // 界面皮肤：classic / midnight / sakura / frost / amber（2026-11-18）
     skin: 'classic',
+    // 主题包 id：builtin = 内置那套；其余是 userData/art-pack/<id>/ 下的目录（2026-11-20）
+    themePack: 'builtin',
     // 窗口材质：none / acrylic / mica / micaTabbed / auto
     material: 'none',
     // 自定义背景图（data URL 或本地 backgrounds/ 下的相对路径）
@@ -5650,17 +5666,16 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
 }
 
 /**
- * 经「官方签名父进程」启动游戏。
+ * 经启动辅助进程启动游戏。
  *
- * 终末地会校验自己的直接父进程：父进程文件必须名为 Games.exe 且带鹰角官方签名，
- * 直接拉起游戏会被判成 10100「请通过官方启动器打开游戏」。明日方舟 PC 端走同一套
- * 鹰角平台，所以两款游戏共用这条链路。
+ * 终末地要求以官方启动器的进程上下文进入：它会检查直接父进程文件（须名为 Games.exe
+ * 且带鹰角官方 Authenticode 签名）。明日方舟 PC 端走同一套鹰角平台，所以两款游戏
+ * 共用这条链路。
  *
- * @param {boolean} options.requireElevation 终末地创建游戏进程时就要求提权，必须走 UAC；
+ * @param {boolean} options.requireElevation 终末地在创建游戏进程时就要求提权，必须走 UAC；
  *   明日方舟先按当前权限试一次，真拿到 740 再弹，免得每次开游戏都要授权。
- * @param {boolean} options.strict 终末地失败就如实报错（绝不能再退化成直接拉起，
- *   那样只会弹出官方启动器或让游戏报 10100）；明日方舟这条链路还没在真机上验证过，
- *   失败时退回原来的直接启动，不把用户挡在门外。
+ * @param {boolean} options.strict 终末地失败就如实报错（不再退化成直接拉起）；明日方舟
+ *   这条链路还没在真机上验证过，失败时退回原来的直接启动，不把用户挡在门外。
  * @returns {{handled:boolean, result?:object}} handled=false 表示这条路不适用，调用方按普通方式启动。
  */
 async function launchWithSignedParent(game, target, cwd, options = {}) {
@@ -5724,7 +5739,7 @@ async function launchWithSignedParent(game, target, cwd, options = {}) {
       handled: true,
       result: {
         ok: false,
-        error: `没能通过官方签名父进程启动：${lastError}。常见原因是安全软件拦下了 VelaEndfield.exe（本启动器靠它伪造官方签名父进程），把它加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
+        error: `启动辅助进程没能完成：${lastError}。常见原因是安全软件拦下了 VelaEndfield.exe（启动终末地 / 明日方舟需要它建立与官方启动器一致的启动路径），把它加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
         endfieldDecoy: true,
       },
     };
@@ -8049,7 +8064,7 @@ function finalizeUpdateStatus(result, options = {}) {
   /*
    * 签名策略（TOFU：第一次验签成功之后就锁死）。
    *
-   * 清单格式是公开的，攻击者想绕过验签最简单的办法不是伪造签名，而是把 sig
+   * 清单格式是公开的，攻击者想绕过验签最简单的办法不是造一个合法签名，而是把 sig
    * 字段整个删掉、让我们退回「只校验 sha256」。所以第一次验签成功之后记住那个
    * 版本，从此凡是没签名的清单一律拒绝——不能只拒「版本号更低」的，否则删掉
    * 签名再把 version 写高一点就绕过去了。
@@ -8069,7 +8084,7 @@ function finalizeUpdateStatus(result, options = {}) {
    * 只会让状态行常年挂一条红字——本机版本比线上高是很常见的状态（本地构建、
    * 测试包、镜像还没同步到新版），不能因此一直报「清单没签名」。
    */
-  if (result.ok && result.hasUpdate && !customSource && result.sigState === 'none' && signedVersion) {
+  if (result.ok && result.hasUpdate && !customSource && result.sigState === 'none') {
     /*
      * 拦下归拦下，话要说人话。
      *
@@ -8082,7 +8097,8 @@ function finalizeUpdateStatus(result, options = {}) {
     result.ok = false;
     result.hasUpdate = false;
     result.code = 'SIGNATURE_MISSING';
-    result.error = `这次更新的清单没带安全签名，已自动拦下（本机上次验签的是 v${signedVersion}${
+    const signedLabel = signedVersion ? `本机上次验签的是 v${signedVersion}` : '本机尚未验签过任何清单（首次安装）';
+    result.error = `这次更新的清单没带安全签名，已自动拦下（${signedLabel}${
       remoteNewer ? `，这次清单写的是 v${remoteVersion}` : ''
     }）。通常是发布时漏签了，请稍后再试或联系作者重新发布带签名的清单。`;
   }
@@ -9967,6 +9983,56 @@ function installShotProtocol() {
   });
 }
 
+/*
+ * 可选素材包（T3-B）。
+ *
+ * 包内 src/assets/ 那 13 张是程序化生成的原创装饰图（原来放的是官方立绘，
+ * 已移到源码外归档）。用户如果想换成自己的图，把同名 png 丢进
+ * userData/art-pack/ 就行，这里优先取用户的。
+ *
+ * 只认 theme-pack.js 里 ART_NAMES 那 17 个名字（13 张装饰图 + 3 张角色立绘 + 头像），
+ * 其余一律 403 —— 不能变成「任意文件读取」。也不接受带子目录的名字（path.basename 兜一层）。
+ */
+const ART_PACK_NAMES = themePack.ART_NAME_SET;
+
+function installArtProtocol() {
+  protocol.handle('hxl-art', async (request) => {
+    try {
+      const url = new URL(request.url);
+      // hxl-art://character.png → standard 协议把首段解析成 hostname
+      const raw = decodeURIComponent(url.hostname || url.pathname.replace(/^\/+/, ''));
+      const name = path.basename(raw);
+      if (!ART_PACK_NAMES.has(name)) return new Response('forbidden', { status: 403 });
+      const userData = app.getPath('userData');
+      const packId = store && store.data && store.data.settings ? store.data.settings.themePack : '';
+      const bundled = path.join(ROOT, 'src', 'assets');
+      /*
+       * ?builtin=1：这个位置固定用内置素材，不跟主题包（2026-11-22 用户反馈：
+       * 首页 hero 背景和方形立绘位要保持「没装主题」时的样子）。
+       * 回落顺序写在 theme-pack.js 里：选定主题包 → 老的平铺 art-pack/<名> → 内置 src/assets。
+       */
+      const useBuiltin = url.searchParams.get('builtin') === '1';
+      const target = useBuiltin ? path.join(bundled, name) : themePack.resolveAsset(userData, packId, name, bundled);
+      if (!target || !fs.existsSync(target)) return new Response('not found', { status: 404 });
+      /*
+       * 主题包素材同名不同内容（每个包里都叫 char-cool.png / sparkle-mask.png）。
+       * 直接透传 net.fetch 的响应会被 Chromium 当普通文件缓存，换包后仍是上一套图。
+       * 这里强制 no-store：文件名带 ?v=<包 id> 时每次换包都重新读盘（2026-11-22）。
+       */
+      const fetched = await net.fetch(pathToFileURL(target).toString());
+      return new Response(await fetched.arrayBuffer(), {
+        status: fetched.status,
+        headers: {
+          'content-type': fetched.headers.get('content-type') || 'image/png',
+          'cache-control': 'no-store, max-age=0',
+        },
+      });
+    } catch (error) {
+      return new Response(String(error.message || 'error'), { status: 500 });
+    }
+  });
+}
+
 function installIpc() {
 
   /*
@@ -10198,6 +10264,7 @@ function installIpc() {
     writeLaunchLog,
     targetExists,
     launchWithSignedParent,
+    currentElevation,
     finishGame,
     killGame,
     markLaunched,
@@ -10227,6 +10294,7 @@ function installIpc() {
     isEndfieldLegacyWorkRoot,
     WEGAME_LAUNCH_URI,
     ensureEndfieldChannelRuntime,
+    breakSharedPersistentState,
     launchPreflightNotice,
     findNteGame,
     findNteLauncher,
@@ -10283,6 +10351,7 @@ function installIpc() {
   });
   installAppIpc({ snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore: () => store });
   installSettingsIpc({ snapshot, normalizeUiScale, clearMusicResolveCache, validateCustomSource, normalizeProxyRules, normalizeAudioLanguages, applyNativeTheme, applyLoginItem, applyTitlebar, applyUiScale, pushState, applyProxySettings, applyDownloadLimit, dataFile, win, getStore: () => store });
+  installThemePackIpc({ pushState, getStore: () => store, userData: () => app.getPath('userData') });
   installDownloadsIpc({ ensureDownloadsDir, safeFileName, uniquePath, pushState, getDownloads: () => downloads });
   installPluginIpc({ dialog, win, getPluginRoot: () => pluginRoot() });
   installUpdateIpc({ performUpdateCheck, readSystemProxy, probeProxy, startUpdate, dialog, win, updateBackupInfo, updateTempBase, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, getStore: () => store });
@@ -10363,7 +10432,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
 /**
  * 当前的内置音源开关（settings.musicSources 归一化，缺的键用默认值补齐）。
  * 弹幕点歌 / 音质切换这些不走 music:resolve 的路径也要认这份开关，
- * 否则「停用酷我」只管住了换源竞速，管不住 unblock 兜底。
+ * 否则「停用酷我」只管住了换源竞速，管不住换源兜底。
  */
 
 /**
@@ -10373,8 +10442,8 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
  */
 
 /**
- * 内置 API 自带的换源：`/song/url/match` 会用 unblockmusic-utils
- * 去别的平台匹配同一首歌的完整音源（会员曲目也能拿到全长）。
+ * 内置 API 自带的换源：`/song/url/match` 会用内置的换源工具
+ * 去别的平台匹配同一首歌的公开可播版本。
  * 拿不到就返回空串，交给上层继续降级。
  */
 
@@ -13472,6 +13541,45 @@ app.whenReady().then(async () => {
       console.log('[音源] 已把老默认的开关组合升级为当前默认（新增酷我）');
     }
   }
+  /*
+   * 主题包校准（2026-11-20）：settings 里记的是包 id + 那个包自带的配色。
+   * 用户随时可能把 art-pack 下的目录删掉或改 theme.json，启动时按盘上的实况纠正一次：
+   * 包没了回内置（不然所有 hxl-art:// 全部 404，界面上是一片空白），
+   * 配色改了就跟上。这里不 push，紧接着 createWindow 会走首帧。
+   */
+  if (store.data.settings) {
+    const themeResult = syncActiveThemePack(store, app.getPath('userData'));
+    if (themeResult.changed) {
+      if (themeResult.dropped) console.log('[主题包] 目录已不存在，回落到内置：' + themeResult.dropped);
+      await store.saveNow();
+    }
+  }
+  /*
+   * 终末地安装目录自检（2026-11-21）：官方托管启动会临时把安装目录换成指向
+   * 当前渠道运行时的 junction（点完就换回来）。万一上次启动器/系统异常退出，
+   * junction 会留在那里 —— 下次启动必须复位，否则官方启动器和用户看到的
+   * 「终末地安装目录」永远是那个渠道运行时。
+   *
+   * 只在「确认是链接」且「游戏/官方启动器都没在跑」时才动手；异常一律吞掉，
+   * 绝不阻塞启动（这里失败也还有下次点开始游戏时的前置检查兜底）。
+   */
+  try {
+    const endfieldGame = (store.data.games || []).find((item) => item && item.builtinKey === 'endfield');
+    const efServer = endfieldGame
+      ? (endfieldGame.servers || []).find((item) => item && item.id === endfieldGame.activeServerId)
+      : null;
+    const efRoot =
+      (typeof endfieldOfficial.readGameInstallPath === 'function' && endfieldOfficial.readGameInstallPath()) ||
+      String((efServer && efServer.originalRoot) || '').trim();
+    if (efRoot) {
+      const healed = endfieldOfficial.healBaseOnBoot(efRoot, {
+        onLog: (msg) => console.log('[终末地] ' + msg),
+      });
+      if (healed && healed.changed) console.log('[终末地] 安装目录已从链接状态复原：' + efRoot);
+    }
+  } catch (error) {
+    console.warn('[终末地] 安装目录自检失败（不影响启动）：', (error && error.message) || error);
+  }
   // 歌单缓存单独一个文件：它是可丢的派生数据，不该和 launcher-data.json 共命运
   await playlistCache().load();
   await ensureSeedData(store, app.getPath('userData'));
@@ -13655,6 +13763,8 @@ app.whenReady().then(async () => {
 
   // 协议必须在创建任何窗口之前注册好，否则首帧里的 <img src="hxl-shot:..."> 会 404
   installShotProtocol();
+  // 可选素材包协议：同样要在 createWindow 之前，否则首页装饰图第一帧 404
+  installArtProtocol();
   // 音乐缓存协议：同样必须在创建窗口之前注册，否则 hxl-audio:// 的 <audio> 会静默不播
   try {
     const musicCache = require('./music-cache');

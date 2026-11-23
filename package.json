@@ -1,6 +1,6 @@
 {
   "name": "huaxiaoling-launcher",
-  "version": "2.12.7",
+  "version": "2.13.0",
   "private": true,
   "description": "花筱灵启动器 - 一个原创的桌面游戏启动器",
   "author": "HuaXiaoLing Studio",
@@ -38,6 +38,7 @@
       "build/icon.ico",
       "LICENSE",
       "README.md",
+      "PRIVACY.md",
       "更新说明.md",
       "package.json"
     ],
@@ -65,10 +66,6 @@
       {
         "from": "resources/netease-api/node_modules",
         "to": "netease-api/node_modules"
-      },
-      {
-        "from": "resources/lx-sources",
-        "to": "lx-sources"
       }
     ],
     "extraFiles": [

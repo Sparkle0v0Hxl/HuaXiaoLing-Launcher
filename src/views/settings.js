@@ -143,7 +143,7 @@ const SKIN_OPTIONS = [
   ['galaxy', '午夜星河'],
 ];
 const ACCENT_OPTIONS = [
-  ['spark', '花火', '#e8435a'],
+  ['spark', '暖红', '#e8435a'],
   ['gold', '金箔', '#f0c674'],
   ['sakura', '夜樱', '#f29ab2'],
   ['cyan', '青焰', '#6fe0d2'],
@@ -567,6 +567,24 @@ function storagePanelHtml() {
  * 现在改成分组要点：五组各三条短句，扫一眼就知道有没有想要的能力；
  * 版权与开源声明不属于「我能做什么」，收进底部折叠。
  */
+/** 主题包可编辑的素材槽位（只列启动器界面真正会用到的图） */
+const PACK_ART_SLOTS = [
+  ['character-face.png', '品牌头像·全局'],
+  ['char-sweet.png', '侧栏立绘'],
+  ['char-portrait.png', '启动页·右'],
+  ['charm-dock.png', '启动页·左'],
+  ['char-cool.png', '音乐遥控卡'],
+  ['sparkle-mask.png', '页面主挂饰'],
+  ['sparxie-charm.png', '页面副挂饰'],
+  ['charm-fireworks.png', '漂浮·烟花'],
+  ['charm-flame.png', '漂浮·焰'],
+  ['charm-stars.png', '漂浮·星'],
+  ['sparkle-hero.png', '首页右侧大图'],
+  ['sparkle-fullbody.png', '游戏封面·绝区零'],
+  ['sparxie-fullbody.png', '游戏封面·终末地'],
+  ['character.png', '首页背景 / 默认封面'],
+];
+
 function settingsView() {
   const settings = state.settings;
   const demos = state.games.filter((g) => g.demo).length;
@@ -578,6 +596,16 @@ function settingsView() {
   const themeOptions = THEME_OPTIONS;
   const skinOptions = SKIN_OPTIONS;
   const accents = ACCENT_OPTIONS;
+  // 主题包（2026-11-20）：state.themePacks 由 boot / 重新扫描填，null 表示还没拉到
+  const packs = Array.isArray(state.themePacks) ? state.themePacks : null;
+  const activePack = settings.themePack || 'builtin';
+  const activePackObj = packs ? packs.find((p) => p.id === activePack) || null : null;
+  const packAssets = activePackObj && Array.isArray(activePackObj.assets) ? activePackObj.assets : [];
+  const packCustoms = activePackObj && Array.isArray(activePackObj.customs) ? activePackObj.customs : [];
+  const flatAssets = Array.isArray(state.themeFlat) ? state.themeFlat : [];
+  const replacedCount = PACK_ART_SLOTS.filter(([f]) => packCustoms.includes(f) || flatAssets.includes(f)).length;
+  const isBuiltinPack = !activePackObj || activePackObj.builtin;
+  const artStamp = state.themeAssetStamp || 0;
   const tab = settingsTab();
   const group = (key, span) =>
     `settings-panel${key === tab ? ' is-active' : ''}${span ? ' settings-span' : ''}`;
@@ -605,7 +633,7 @@ function settingsView() {
         <div class="settings-grid">
         <section class="${group('appearance')}" ${groupAttr('appearance')}>
           <h2>${icon('sparkle')}外观</h2>
-          <p class="desc">主题、强调色和个人称呼。</p>
+          <p class="desc">主题、皮肤与主题包。</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>界面主题</strong><span>深色适合夜晚，浅色更适合白天。</span></div>
             <div class="setting-control">
@@ -632,55 +660,62 @@ function settingsView() {
               </div>
             </div>
           </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>强调色</strong><span>只出现在按钮、进度和少量细节上。</span></div>
-            <div class="setting-control">
-              <div class="swatches">
-                ${accents
-                  .map(
-                    ([key, label, color]) =>
-                      `<button class="swatch ${settings.accent === key ? 'active' : ''}" style="--swatch:${color}" data-action="set-accent" data-value="${key}" title="${label}" aria-label="${label}"></button>`
-                  )
-                  .join('')}
+          <div class="setting-row setting-row-stack">
+            <div class="setting-copy">
+              <strong>主题包</strong>
+              <span>一套图 + 一套配色；包放进 art-pack 文件夹，也可以去主题包站下载现成的。</span>
+            </div>
+            <div class="setting-control setting-control--stack">
+              <div class="theme-chips theme-packs">
+                ${packs
+                  ? packs
+                      .map(
+                        (pack) =>
+                          `<button class="theme-chip theme-chip-pack ${activePack === pack.id ? 'is-active' : ''}" data-action="set-theme-pack" data-value="${pack.id}" title="${pack.description || pack.name}">${pack.name}<em>${pack.builtin ? '内置' : pack.count + ' 张'}</em></button>`
+                      )
+                      .join('')
+                  : '<span class="theme-packs-hint">正在读取 art-pack 目录…</span>'}
+              </div>
+              <div class="theme-pack-actions">
+                <button class="btn btn-ghost btn-sm" data-action="open-theme-pack-dir">打开文件夹</button>
+                <button class="btn btn-ghost btn-sm" data-action="refresh-theme-packs">重新扫描</button>
+                <button class="btn btn-ghost btn-sm theme-pack-site" data-action="open-external" data-url="${THEME_PACK_SITE_URL}" title="在浏览器里打开主题包下载站（需联网）">下载主题包</button>
               </div>
             </div>
           </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>你的称呼</strong><span>显示在主页问候和左下角的个人资料中，也可以直接输入自定义称呼。</span></div>
-            <div class="setting-control" style="flex-direction:column;align-items:flex-end;gap:6px">
-              <input class="text-input" id="profile-name-input" maxlength="24" value="${esc(settings.profileName || '大小姐')}" style="width:150px" spellcheck="false" />
-              <div class="salutation-chips">
-                <button class="mini-chip ${settings.profileName === '大小姐' ? 'active' : ''}" data-action="set-salutation" data-value="大小姐">大小姐</button>
-                <button class="mini-chip ${settings.profileName === '主人' ? 'active' : ''}" data-action="set-salutation" data-value="主人">主人</button>
-                <button class="mini-chip ${settings.profileName === '大少爷' ? 'active' : ''}" data-action="set-salutation" data-value="大少爷">大少爷</button>
+          <div class="setting-row setting-row-stack">
+            <details class="theme-asset-panel">
+              <summary>
+                <strong>主题包素材</strong>
+                <span class="theme-asset-summary">${replacedCount ? PACK_ART_SLOTS.length + ' 个槽位 · 已替换 ' + replacedCount + ' 张' : PACK_ART_SLOTS.length + ' 个槽位 · 全部默认'}</span>
+              </summary>
+              <div class="theme-asset-wrap">
+              ${
+                isBuiltinPack
+                  ? '<div class="theme-asset-hint">内置包也能换：改动会写进用户目录覆盖内置图，不动安装文件，「还原」后回到内置原图。</div>'
+                  : `<div class="theme-asset-hint">正在编辑：${esc(activePackObj.name)}（${replacedCount} / ${PACK_ART_SLOTS.length} 张已替换）·「还原」回到这个包自带的图</div>`
+              }
+              <div class="theme-asset-grid">
+                ${PACK_ART_SLOTS.map(([file, label]) => {
+                  const custom = packCustoms.includes(file) || flatAssets.includes(file);
+                  return `<div class="theme-asset-card${custom ? ' is-custom' : ''}">
+                    <img src="hxl-art://${file}?v=${artStamp}" alt="" draggable="false" />
+                    <span class="theme-asset-name">${label}</span>
+                    <span class="theme-asset-tag">${custom ? '已替换' : '默认'}</span>
+                    <div class="theme-asset-ops">
+                      <button class="btn btn-ghost btn-sm" data-action="theme-asset-pick" data-value="${file}">更换</button>
+                      <button class="btn btn-ghost btn-sm" data-action="theme-asset-clear" data-value="${file}" ${custom ? '' : 'disabled'}>还原</button>
+                    </div>
+                  </div>`;
+                }).join('')}
               </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>头像</strong><span>显示在左下角的个人资料中。支持 PNG、JPG、WebP、GIF 和 SVG。</span></div>
-            <div class="setting-control">
-              <span class="avatar avatar-preview">${avatarContent(settings)}</span>
-              <button class="btn btn-ghost" data-action="change-avatar">${icon('image')}更换</button>
-              ${settings.avatar ? `<button class="btn btn-quiet" data-action="reset-avatar">恢复默认</button>` : ''}
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>页面装饰挂饰</strong><span>在启动页以外的页面，角落悬挂花火狐面、火花礼帽，并漂浮烟花 / 火焰 / 星空小精灵。</span></div>
-            <div class="setting-control">
-              <button class="switch ${state.settings.charms !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charms !== false}" data-action="toggle-charms" title="${state.settings.charms !== false ? '关闭' : '开启'}"></button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>角色背景水印</strong><span>在页面右下角铺一层淡淡的火花角色立绘水印，很淡、不挡阅读；可单独关闭。</span></div>
-            <div class="setting-control">
-              <button class="switch ${state.settings.charBg !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charBg !== false}" data-action="toggle-charbg" title="${state.settings.charBg !== false ? '关闭' : '开启'}"></button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-copy"><strong>侧栏立绘</strong><span>展开侧栏时，底部显示火花立绘。关掉后这一块不占高度，导航能一次显示更多项，不用滚。</span></div>
-            <div class="setting-control">
-              <button class="switch ${state.settings.sidebarChar !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.sidebarChar !== false}" data-action="toggle-sidebar-char" title="${state.settings.sidebarChar !== false ? '关闭' : '开启'}"></button>
-            </div>
+              <div class="theme-asset-new">
+                <input class="text-input" id="theme-pack-new-name" maxlength="24" placeholder="新主题包名字，如：我的黑塔" spellcheck="false" />
+                <button class="btn btn-ghost btn-sm" data-action="theme-pack-create">新建空白包</button>
+                <button class="btn btn-ghost btn-sm" data-action="theme-pack-duplicate" ${isBuiltinPack ? 'disabled' : ''}>复制当前包</button>
+              </div>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -750,8 +785,40 @@ function settingsView() {
         </section>
 
         <section class="${group('appearance')} ui-scale-panel" ${groupAttr('appearance')}>
-          <h2>${icon('type')}界面缩放</h2>
-          <p class="desc">整体字号与布局缩放</p>
+          <h2>${icon('type')}外观细节</h2>
+          <p class="desc">强调色、称呼、头像与界面缩放</p>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>强调色</strong><span>只出现在按钮、进度和少量细节上。</span></div>
+            <div class="setting-control">
+              <div class="swatches">
+                ${accents
+                  .map(
+                    ([key, label, color]) =>
+                      `<button class="swatch ${settings.accent === key ? 'active' : ''}" style="--swatch:${color}" data-action="set-accent" data-value="${key}" title="${label}" aria-label="${label}"></button>`
+                  )
+                  .join('')}
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>你的称呼</strong><span>显示在主页问候和左下角的个人资料中，也可以直接输入自定义称呼。</span></div>
+            <div class="setting-control" style="flex-direction:column;align-items:flex-end;gap:6px">
+              <input class="text-input" id="profile-name-input" maxlength="24" value="${esc(settings.profileName || '大小姐')}" style="width:150px" spellcheck="false" />
+              <div class="salutation-chips">
+                <button class="mini-chip ${settings.profileName === '大小姐' ? 'active' : ''}" data-action="set-salutation" data-value="大小姐">大小姐</button>
+                <button class="mini-chip ${settings.profileName === '主人' ? 'active' : ''}" data-action="set-salutation" data-value="主人">主人</button>
+                <button class="mini-chip ${settings.profileName === '大少爷' ? 'active' : ''}" data-action="set-salutation" data-value="大少爷">大少爷</button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>头像</strong><span>显示在左下角的个人资料中。支持 PNG、JPG、WebP、GIF 和 SVG。</span></div>
+            <div class="setting-control">
+              <span class="avatar avatar-preview">${avatarContent(settings)}</span>
+              <button class="btn btn-ghost" data-action="change-avatar">${icon('image')}更换</button>
+              ${settings.avatar ? `<button class="btn btn-quiet" data-action="reset-avatar">恢复默认</button>` : ''}
+            </div>
+          </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>缩放比例</strong><span>100% 是默认大小。放大后所有文字、按钮和图标一起等比变化，不会错位。</span></div>
             <div class="setting-control ui-scale-control">
@@ -768,6 +835,24 @@ function settingsView() {
             <div class="setting-copy"><strong>预览</strong><span>下面这段文字会跟着缩放一起变化，方便确认大小是否合适。</span></div>
             <div class="setting-control ui-scale-preview">
               <span class="ui-scale-sample">Aaa 大小姐 1234</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>页面装饰挂饰</strong><span>在启动页以外的页面，角落悬挂主题角色挂饰，并漂浮装饰光点。挂饰图案随当前主题包变化。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.charms !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charms !== false}" data-action="toggle-charms" title="${state.settings.charms !== false ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>角色背景水印</strong><span>在页面右下角铺一层淡淡的主题角色立绘水印，很淡、不挡阅读；可单独关闭。图案随当前主题包变化。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.charBg !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.charBg !== false}" data-action="toggle-charbg" title="${state.settings.charBg !== false ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>侧栏立绘</strong><span>展开侧栏时，底部显示当前主题的角色立绘。关掉后这一块不占高度，导航能一次显示更多项，不用滚。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.sidebarChar !== false ? 'on' : ''}" role="switch" aria-checked="${state.settings.sidebarChar !== false}" data-action="toggle-sidebar-char" title="${state.settings.sidebarChar !== false ? '关闭' : '开启'}"></button>
             </div>
           </div>
         </section>
@@ -860,6 +945,14 @@ function settingsView() {
           <div class="setting-row">
             <div class="setting-copy"><strong>异环通过官方启动器启动</strong><span>默认点击后打开 NTELauncher.exe，由官方处理版本更新和登录；关闭后直接启动 HTGame.exe。</span></div>
             <div class="setting-control">${switchMarkup('nevernessUseOfficialLauncher', settings.nevernessUseOfficialLauncher !== false)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>终末地官方启动器路径</strong><span>官方托管启动要用鹰角官方启动器（Games.exe）亲自拉起游戏。启动时会自动搜索它的位置；如果自动找不到，可以在这里手动指定 Games.exe 的真实路径。留空 = 自动搜索。注意：Games.exe 首次运行会弹 UAC 请求管理员权限，杀软可能要放行一次。</span></div>
+            <div class="setting-control">
+              <span class="path-text" title="${esc(settings.endfieldOfficialGamesExe || '')}">${esc(settings.endfieldOfficialGamesExe || '自动搜索（留空）')}</span>
+              <button class="btn btn-ghost" data-action="pick-endfield-official-games">选择 Games.exe</button>
+              ${settings.endfieldOfficialGamesExe ? `<button class="btn btn-quiet" data-action="reset-endfield-official-games">恢复自动</button>` : ''}
+            </div>
           </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、崩坏3、星穹铁道、绝区零、异环、终末地的启动程序。</span></div>
@@ -1239,7 +1332,7 @@ function settingsView() {
               <div class="about-groups">
                 ${[
                   ['更新', ['只下差异块，同盘有同内容就硬链接', '16 路并发，开跑前先算磁盘空间', '打不上自动回退完整包，清单带签名']],
-                  ['游戏', ['内置 7 款入口，也能添加任意本地游戏', '切服共用客户端，启动页可切 DX11/DX12', '渠道包按服下，带进度与断点续传']],
+                  ['游戏', ['内置 8 款入口，也能添加任意本地游戏', '切服共用客户端，启动页可切 DX11/DX12', '渠道包按服下，带进度与断点续传']],
                   ['战绩', ['米游社四款 + 终末地走森空岛', '便笺与周期玩法的星数、评级', '终末地可在页面上直接签到']],
                   ['工具', ['抽卡记录三池一页，保底与垫数', 'WebDAV 云备份，7 天一次、加密', '音乐台：多平台搜歌与弹幕点歌']],
                   ['排查', ['读系统代理并当场测速', '一键导出诊断 txt', '按七类清缓存，不动登录态']],
@@ -1255,7 +1348,7 @@ function settingsView() {
               </div>
               <details class="about-legal">
                 <summary>素材版权与开源说明</summary>
-                <p>界面与代码为原创实现；启动页与部分界面使用了《崩坏：星穹铁道》花火、火花等官方立绘素材，仅作爱好者桌面美化用途，版权归米哈游及各游戏官方所有。游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。</p>
+                <p>界面与代码为原创实现；启动器内置的装饰图与角色立绘为程序化生成的自制素材。主题包功能允许你自己放入喜欢的素材，凡是主题包里用到的官方立绘、光锥图或同人二创，版权归米哈游及各游戏官方 / 原作者所有，仅限本机自用，请勿分发、上传网盘或公开仓库。游戏版本号与封面会在联网时从官网同步并缓存，版权归各游戏官方所有。功能设计参考了 Starward（MIT）等开源启动器，不包含它们的代码或素材。</p>
                 <p>游戏列表、设置、歌单、抽卡记录和时长都保存在本地，默认不上传；只有你自己打开「抽卡记录云备份」之后，抽卡记录才会加密传到你自己填的那个网盘。</p>
               </details>
               <div class="about-links">

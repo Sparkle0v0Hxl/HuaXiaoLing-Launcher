@@ -53,6 +53,157 @@ function scrollSongPageToCurrent() {
   node.scrollIntoView({ block: 'center', behavior: 'auto' });
 }
 
+/*
+ * 「定位正在播放」（2026-11-20 用户需求：音乐页加个功能，定位到正在播放的音乐位置）。
+ *
+ * 参考 QQ 音乐 / 网易云的定位键：播放列表几千首、或歌单翻到一半时，
+ * 点一下就把当前播放那首滚回视野中央并闪两下，不用自己一路找。
+ *
+ * 三种场景按优先级处理：
+ *   1. 正开着歌单详情、且当前这首就在这张歌单里 → 在详情里定位（超出首屏渲染就先展开）；
+ *   2. 队列页 → 先解掉「过滤词把当前行滤掉」这层，再滚过去；
+ *   3. 都不是 → 展开底部「播放列表」浮层，在真正的播放列表（state.songs）里定位。
+ *
+ * 第 3 步是必要的：队列页展示的是「我的队列」（pickedSongs），
+ * 从歌单整张播放时当前这首可能根本不在里面 —— 光提示「不在队列里」没用，
+ * 用户真正要找的是播放列表里那一行。
+ */
+function locateCurrentPlaying() {
+  const current = state.songs && state.songs[state.songIndex];
+  if (!current) {
+    toast('还没有正在播放的歌', 'info');
+    return;
+  }
+  const detail = state.myPlaylists && state.myPlaylists.detail;
+  if (detail && Array.isArray(detail.songs) && detail.songs.length) {
+    const at = detail.songs.findIndex((song) => sameSongKey(song, current));
+    if (at >= 0) {
+      const key = `${detail.platform}:${detail.id || ''}`;
+      const expanded = Boolean((state.myPlaylists.detailExpanded || {})[key]);
+      // 当前这首排在首屏渲染窗口之后：先「显示全部」，否则那行根本不在 DOM 里
+      if (at >= DETAIL_RENDER_LIMIT && !expanded) {
+        state.myPlaylists.detailExpanded = state.myPlaylists.detailExpanded || {};
+        state.myPlaylists.detailExpanded[key] = true;
+        render({ preserveScroll: true });
+      }
+      setTimeout(() => flashSongRow(document.querySelector('.kr-detail-row .song-chart-song.is-current'), current), 40);
+      return;
+    }
+  }
+  // 切到队列页：详情钻取态必须清掉，否则主区还在画歌单详情，队列根本不出现
+  const goQueue = () => {
+    if (String(state.queueFilter || '').trim()) {
+      state.queueFilter = '';
+      render({ preserveScroll: true });
+    }
+    setTimeout(() => {
+      const row = document.querySelector('#song-queue .song-row.active');
+      if (flashSongRow(row, current)) return;
+      // 队列里没有 → 在底部播放列表浮层里定位（那里一定找得到）
+      if (!state.dockListOpen) {
+        state.dockListOpen = true;
+        render({ preserveScroll: true });
+      }
+      setTimeout(() => {
+        flashSongRow(document.querySelector('#song-dock-queue .dock-queue-row.is-active'), current);
+      }, 60);
+    }, 40);
+  };
+  const enterQueueTab = () => {
+    state.songTab = 'queue';
+    localStorage.setItem('vela:song-tab', 'queue');
+    if (state.myPlaylists) state.myPlaylists.detail = null;
+    state.localDetailId = null;
+    render({ preserveScroll: true });
+    setTimeout(goQueue, 60);
+  };
+  if (state.route !== 'song') {
+    navigate('song');
+    setTimeout(enterQueueTab, 90);
+    return;
+  }
+  enterQueueTab();
+}
+
+/*
+ * 定位的视觉反馈：滚到视野中央 + 闪两下。
+ *
+ * 用状态而不是直接改 DOM 节点：
+ *   · state.locateFlash = { song, until }，行 markup 里自己判断要不要挂 is-locating，
+ *     这样中途再来一次 render() 也不会把类冲掉（实测约 500ms 后必有一次重绘）；
+ *   · 到点清状态、顺手把还挂在 DOM 上的类摘掉，动画只播这一轮。
+ */
+let locateFlashTimer = 0;
+
+/** 行 markup 用：这一行是不是正在「被定位」并该闪烁。 */
+function locateFlashClass(song) {
+  const flash = state.locateFlash;
+  if (!flash || !flash.song || !song) return '';
+  if (Date.now() > flash.until) return '';
+  return sameSongKey(song, flash.song) ? ' is-locating' : '';
+}
+
+/**
+ * 「定位正在播放」闪烁期间，算出「让那一行停在视野中央」应滚到的 scrollTop。
+ *
+ * 给 render() 用：点歌台的路由里 updateChrome() 会异步 hydrateSong → ensureSongQuality，
+ * 完成后无条件重绘一次（实测约 570ms 后）。那次重绘把封面、歌手等异步内容补进行里，
+ * 行变高、内容总高也变，如果仍按重绘前的 scrollTop 还原，行就整体下移跑出视野。
+ * 返回 null 表示「这次不该由定位接管」，调用方照旧用原来的滚动记忆值。
+ */
+function locateFlashTargetTop(scroller) {
+  const flash = state.locateFlash;
+  if (!flash || !flash.song || !scroller) return null;
+  if (Date.now() > flash.until) return null;
+  const row = scroller.querySelector('.is-locating');
+  if (!row) return null;
+  const sRect = scroller.getBoundingClientRect();
+  const nRect = row.getBoundingClientRect();
+  const delta = nRect.top - sRect.top - (sRect.height - nRect.height) / 2;
+  return Math.max(0, Math.min(scroller.scrollTop + delta, scroller.scrollHeight - scroller.clientHeight));
+}
+
+/** 把某一行滚到视野中央，并让它闪两下；找不到节点返回 false。 */
+function flashSongRow(node, song) {
+  if (!node) return false; // ★必须是 false：调用点靠它决定要不要走「底部播放列表」兜底
+  if (song) {
+    state.locateFlash = { song, until: Date.now() + 1650 };
+    node.classList.remove('is-locating');
+    void node.offsetWidth; // 强制重排，连点两次也能重新播动画
+    node.classList.add('is-locating');
+    clearTimeout(locateFlashTimer);
+    locateFlashTimer = setTimeout(() => {
+      state.locateFlash = null;
+      const still = document.querySelector('.is-locating');
+      if (still) still.classList.remove('is-locating');
+    }, 1700);
+  }
+  const scroller = node.closest('.song-app-scroll');
+  if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+    // 用 rect 差值：行的 offsetParent 是 main、不是滚动容器，offsetTop 会算错
+    const sRect = scroller.getBoundingClientRect();
+    const nRect = node.getBoundingClientRect();
+    const delta = nRect.top - sRect.top - (sRect.height - nRect.height) / 2;
+    const top = Math.max(0, Math.min(scroller.scrollTop + delta, scroller.scrollHeight - scroller.clientHeight));
+    /*
+     * 不用 behavior:'smooth'：实测平滑滚动期间只要赶上一次 render()，
+     * .song-app-scroll 会被 songScrollMemo 还原成旧位置，最后停在半路上。
+     * 立刻到位 + 下一帧再校一次，比「滚到一半被拉回去」稳。
+     */
+    scroller.scrollTo({ top, behavior: 'auto' });
+    requestAnimationFrame(() => {
+      if (!node.isConnected) return;
+      const s2 = node.closest('.song-app-scroll');
+      if (!s2) return;
+      const d2 = node.getBoundingClientRect().top - s2.getBoundingClientRect().top - (s2.clientHeight - node.offsetHeight) / 2;
+      if (Math.abs(d2) > 2) s2.scrollTo({ top: Math.max(0, s2.scrollTop + d2), behavior: 'auto' });
+    });
+  } else {
+    node.scrollIntoView({ block: 'center', behavior: 'auto' });
+  }
+  return true;
+}
+
 function bindView() {
   bindQueueDragOnce();
   bindQueueBrushOnce();

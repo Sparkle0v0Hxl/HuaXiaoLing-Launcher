@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data: file: https:; media-src 'self' file: http: https: hxl-audio:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self'; connect-src 'self' wss://*.bilibili.com:* wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
+      content="default-src 'self'; img-src 'self' data: file: https: hxl-art:; media-src 'self' file: http: https: hxl-audio:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; font-src 'self'; connect-src 'self' wss://*.bilibili.com:* wss://*.bilibili.com; object-src 'none'; base-uri 'none';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>花筱灵启动器</title>
@@ -240,7 +240,7 @@
     <div class="app">
       <aside class="sidebar">
         <div class="brand" data-nav="start" role="button" tabindex="0" title="进入启动页" aria-label="进入启动页">
-          <img class="brand-mark" src="assets/character-face.png" alt="" aria-hidden="true">
+          <img class="brand-mark" src="hxl-art://character-face.png" alt="" aria-hidden="true">
           <div class="brand-text">
             <span class="brand-name">花筱灵</span>
             <span class="brand-en">HANABI STAGE</span>
@@ -298,10 +298,11 @@
           </nav>
         </div>
 
-        <!-- 火花立绘：展开时是侧栏底部的一块形象区（真的占位，不压在导航上），
+        <!-- 侧栏立绘（2026-11-20 换成本人立绘 char-cool，原来是紫玫瑰星轨的旧素材）：
+             展开时是侧栏底部的一块形象区（真的占位，不压在导航上），
              收起时整块隐藏。放在「收起侧栏」上面，视线落点是 导航 → 立绘 → 收起。 -->
         <div class="sidebar-char" aria-hidden="true">
-          <img src="assets/sparxie-fullbody.png" alt="" />
+          <img src="hxl-art://char-sweet.png" alt="" />
         </div>
 
         <button class="sidebar-toggle" data-action="toggle-sidebar" title="收起侧栏">
@@ -336,14 +337,14 @@
           </div>
         </header>
         <div class="view" id="view"></div>
-        <!-- 除启动页外所有页面常驻的装饰层：花火 / 火花挂饰 + 淡角色背景。pointer-events:none 不挡操作 -->
+        <!-- 除启动页外所有页面常驻的装饰层：角色挂饰 + 淡角色背景。pointer-events:none 不挡操作 -->
         <div class="page-deco" id="page-deco" aria-hidden="true">
-          <div class="page-deco-bg"><img src="assets/sparxie-fullbody.png" alt="" draggable="false" /></div>
-          <span class="page-deco-charm page-deco-charm--sparkle"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
-          <span class="page-deco-charm page-deco-charm--sparxie"><img src="assets/sparxie-charm.png" alt="" draggable="false" /></span>
-          <span class="page-deco-sprite page-deco-sprite--fireworks"><img src="assets/charm-fireworks.png" alt="" draggable="false" /></span>
-          <span class="page-deco-sprite page-deco-sprite--flame"><img src="assets/charm-flame.png" alt="" draggable="false" /></span>
-          <span class="page-deco-sprite page-deco-sprite--stars"><img src="assets/charm-stars.png" alt="" draggable="false" /></span>
+          <div class="page-deco-bg"><img src="hxl-art://char-sweet.png" alt="" draggable="false" /></div>
+          <span class="page-deco-charm page-deco-charm--sparkle"><img src="hxl-art://sparkle-mask.png" alt="" draggable="false" /></span>
+          <span class="page-deco-charm page-deco-charm--sparxie"><img src="hxl-art://sparxie-charm.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--fireworks"><img src="hxl-art://charm-fireworks.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--flame"><img src="hxl-art://charm-flame.png" alt="" draggable="false" /></span>
+          <span class="page-deco-sprite page-deco-sprite--stars"><img src="hxl-art://charm-stars.png" alt="" draggable="false" /></span>
         </div>
       </main>
     </div>

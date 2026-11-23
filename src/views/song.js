@@ -1761,7 +1761,7 @@ function updateSongChrome() {
     if (dockIcon) dockIcon.setAttribute('href', playing ? '#i-pause' : '#i-play');
   }
 
-  /* 主页双人卡（火花 · 音乐遥控）：同步歌名和播放键图标，不用整页重绘 */
+  /* 主页双人卡（音乐遥控）：同步歌名和播放键图标，不用整页重绘 */
   const duoTitle = document.querySelector('#duo-song-title');
   if (duoTitle) duoTitle.textContent = song ? song.title || '未知曲目' : '队列空着，去点歌';
   document.querySelectorAll('.duo-ctrl[data-action="duo-toggle"] .duo-ic').forEach((node) => {

@@ -660,7 +660,7 @@ function installServersIpc(ctx) {
          * （HoYoPlay 体系里没有崩坏3 B服），走进去就是 undefined.bilibili 直接崩。
          * 用户 2026-11-16 的规则是崩坏3 的 link（硬链接）三渠道全开，但 download/update
          * 只官服 —— 所以崩坏3 的 B服 / 国际服只做本地文件层面的生成，落到 prepareSophon 分支，
-         * 由它自己的清单守卫给出明确报错，而不是在这里伪造渠道 SDK。
+         * 由它自己的清单守卫给出明确报错，而不是在这里拼一个渠道 SDK 出来。
          */
         const result =
           server.channel === 'bilibili' && base.channel === 'official' && game.builtinKey !== 'bh3'

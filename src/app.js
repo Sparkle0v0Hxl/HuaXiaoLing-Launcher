@@ -41,6 +41,15 @@ const GITCODE_MANIFEST_URL = 'https://raw.gitcode.com/huahuozuikeai/hxl-update/r
  * 版本号用 URL 编码塞进 query，模板里对应的 input 会把预填值直接显示出来。
  */
 const REPO_NEW_ISSUE_URL = `${REPO_URL}/issues/new?template=bug_report.yml`;
+/**
+ * 主题包下载站（用户 2026-11-23 指定）。
+ *
+ * 主题包不随安装包发，也不进源码仓库——单独放在这个静态站上，
+ * 设置 → 外观的「主题包」一栏给一个按钮直接过去挑，省得用户自己找。
+ * 站点是纯静态托管，地址写死即可，不做可达性探测：连不上时
+ * openExternal 自己会失败，配合按钮上的「需联网」说明就够了。
+ */
+const THEME_PACK_SITE_URL = 'https://37l2m9tz2jw0adtxxq1.traesite.cn/index.html';
 const REPO_FEEDBACK_URL = () => {
   const version = (state.app && state.app.version) || '';
   return version ? `${REPO_NEW_ISSUE_URL}&version=${encodeURIComponent(version)}` : REPO_NEW_ISSUE_URL;
@@ -126,6 +135,16 @@ const state = {
   // 更新弹窗的配图：米游社画师同人图，key 是游戏的 builtinKey。
   // 主进程抓不到就是空表，versionHero() 会退回官网美术图，弹窗不会开天窗。
   postArt: {},
+  // 主题包列表（2026-11-20）：boot 时拉一次，设置页「重新扫描」时刷新。
+  // null = 还没拉过，设置页据此显示「正在读取」。
+  themePacks: null,
+  // 老平铺布局里已自定义的素材名（内置包换图就写到这里，用来标记"自定义"）
+  themeFlat: [],
+  themeAssetStamp: 0,
+  // 正在启动中（还没真正拉起）的游戏 id 列表。渲染层本地状态机：
+  // 点「开始游戏」立即置位 -> 按钮禁用显示「启动中…」；游戏真正 running 后才清除并切计时。
+  // 只用于防重复点击与中间态展示，不参与主进程快照（onState 不会覆盖它）。
+  launchingGames: [],
   route: 'home',
   filter: 'all',
   search: '',
@@ -1284,7 +1303,7 @@ document.addEventListener('change', async (event) => {
     toast('这个文件读不出内容', 'error');
     return;
   }
-  await importMusicSource({ text });
+  await importMusicSource({ text, name: file.name });
 });
 
 /* 点击涟漪：跟随指针的一层径向高光，圆角跟随宿主，不会溢到按钮外面。
@@ -1703,6 +1722,46 @@ media.addEventListener('change', () => {
   if ((state.settings.theme || 'dark') === 'system') applySettings();
 });
 
+/**
+ * 首次启动的隐私说明（只弹一次）。
+ *
+ * 目的不是让用户重读一遍 PRIVACY.md，而是让「我知道这程序在本地处理我的账号凭据」
+ * 这件事有一次明确的确认动作——个保法要求的告知义务，落到交互上就是这个。
+ * 点「我知道了」或关掉都算确认（不阻断使用），之后不再弹。
+ */
+function confirmPrivacyNotice() {
+  openModal(
+    `<div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div><h2>关于你的数据</h2></div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <p>花筱灵启动器会在<strong>你自己的电脑上</strong>保存游戏账号凭据（SToken、Cookie 等）、抽卡记录和设置，用于自动同步抽卡、快速登录。</p>
+          <p>这些数据<strong>只存在本地</strong>，凭据用 Windows 系统级加密（DPAPI）保护，<strong>不会上传到作者的服务器</strong>。</p>
+          <p>你可以随时在「账号中心」退出登录，或在「设置 → 数据」清理缓存；完整说明见 <strong>PRIVACY.md</strong>。</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" id="privacy-ack">我知道了</button>
+        </div>
+      </div>
+    </div>`,
+    {
+      onClose: () => {
+        localStorage.setItem('vela:privacy-ack', '1');
+      },
+    }
+  );
+  const ok = document.querySelector('#privacy-ack');
+  if (ok) {
+    ok.addEventListener('click', () => {
+      localStorage.setItem('vela:privacy-ack', '1');
+      closeModal();
+    });
+  }
+}
+
 async function boot() {
   try {
     const [snapshot, news] = await Promise.all([api.getState(), api.news.list()]);
@@ -1712,6 +1771,23 @@ async function boot() {
     state.downloads = snapshot.downloads || [];
     state.app = snapshot.app || {};
     state.news = Array.isArray(news) ? news : [];
+    /*
+     * 主题包列表（2026-11-20）：只读一次目录，很快，但失败不该拖垮启动 ——
+     * 所以单独 catch，拿到就填、拉不到就让设置页显示「正在读取」。
+     */
+    if (api.theme && typeof api.theme.list === 'function') {
+      api.theme
+        .list()
+        .then((result) => {
+          if (result && result.ok && Array.isArray(result.packs)) state.themePacks = result.packs;
+          else state.themePacks = [];
+          state.themeFlat = result && Array.isArray(result.flat) ? result.flat : [];
+          if (state.route === 'settings') render({ preserveScroll: true });
+        })
+        .catch(() => {
+          state.themePacks = [];
+        });
+    }
     state.startGameId = localStorage.getItem('vela:start-game') || '';
     state.route = state.games.length
       ? 'start'
@@ -1731,6 +1807,11 @@ async function boot() {
     if (typeof refreshSidebarAccount === 'function') refreshSidebarAccount();
     resumeLastSong();
     render({ preserveScroll: false });
+    /* 首次启动的隐私说明：只弹一次，确认后写 localStorage。
+       不阻塞主流程——弹窗关掉或确认都会继续，用户不需要读完整份 PRIVACY.md。 */
+    if (!localStorage.getItem('vela:privacy-ack') && typeof confirmPrivacyNotice === 'function') {
+      confirmPrivacyNotice();
+    }
     if (state.route === 'gacha') loadGacha();
     if (state.route === 'start') {
       const startGame =
@@ -1754,7 +1835,9 @@ async function boot() {
      * 超过一周才真去抓；抓不到就保持空表，versionHero() 会用官网图。
      * 慢一点也无所谓，所以不 await。
      */
-    loadPostArt().catch(() => {});
+    /* 2026-11-20 风险整改 T3-B：不再在启动时去米游社抓画师同人图。
+   * 更新弹窗配图已改用内置原创装饰图，state.postArt 已无消费者。
+   * 函数本体（services/update.js 的 loadPostArt）保留，将来做成用户自愿开启的开关再启用。 */
     /*
      * 侧栏「工具」分组的内容来自 game-features，启动时就预取一份，
      * 用户第一次点开工具组不至于看到「读取中…」。

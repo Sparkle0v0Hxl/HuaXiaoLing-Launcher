@@ -170,75 +170,46 @@ function versionHash(text) {
  * 更新弹窗的置顶图。
  *
  * 取图顺序：
- *   1. news.json 里这一版自己的 `image`（带找图来源）；
- *   2. 下面这张选好的官方美术图（按版本号挑一款游戏，来源写官网）；
- *   3. 再没有就用游戏库里那款游戏已经下载好的封面。
- * 第 2、3 步都不需要联网准备，所以每次发版一定有图。
+ *   1. news.json 里这一版自己的 `image`；
+ *   2. 下面这张按版本号挑的**内置原创装饰图**（hxl-art://，包内文件，不联网）；
+ *   3. 再没有就用游戏库里那款游戏已经下载好的封面（用户自己的游戏数据）。
+ *
+ * 2026-11-20 风险整改 T3-B：原来第 2 步写的是五款游戏的**官网宣发美术图**，
+ * 靠远程 URL 直接引用；另外还有一段「米游社画师图优先」会去抓二次创作。
+ * 两者都属于第三方美术作品，不该随启动器分发或默认展示，已全部换成本地原创图。
  */
 const HERO_ART = {
-  genshin: {
-    image:
-      'https://sdk-webstatic.mihoyo.com/upload/ann/2026/09/23/92220da84f2e0fbeb5b6ddfd09b22336_6625910379513968240_transformed.jpg',
-    source: 'https://ys.mihoyo.com/main/news/detail/21888',
-    credit: '原神官网',
-  },
-  starrail: {
-    image:
-      'https://sdk-webstatic.mihoyo.com/upload/ann/2026/09/15/0e28df09eb425be765a8f22f6b30c9c6_554111496134813712_transformed.png',
-    source: 'https://sr.mihoyo.com/main/news',
-    credit: '星穹铁道官网',
-  },
-  neverness: {
-    image: 'https://yh.wanmei.com/images/cover260924/box3Slide1.jpg',
-    source: 'https://yh.wanmei.com/',
-    credit: '异环官网',
-  },
-  zzz: {
-    image:
-      'https://launcher-webstatic.mihoyo.com/launcher-public/2026/10/20/c20eaf6a8a32d6342da4d5334be51bfe_5591770470767677066.png',
-    source: 'https://zzz.mihoyo.com/',
-    credit: '绝区零官网',
-  },
-  endfield: {
-    image: 'https://web.hycdn.cn/upload/image/20261016/79d9bdebd562b2b7421339c40d5c1199.jpg',
-    source: 'https://endfield.hypergryph.com/',
-    credit: '明日方舟：终末地官网',
-  },
+  genshin: { image: 'hxl-art://character.png', source: '', credit: '' },
+  starrail: { image: 'hxl-art://sparkle-hero.png', source: '', credit: '' },
+  neverness: { image: 'hxl-art://sparkle-mask.png', source: '', credit: '' },
+  zzz: { image: 'hxl-art://sparkle-fullbody.png', source: '', credit: '' },
+  endfield: { image: 'hxl-art://sparxie-fullbody.png', source: '', credit: '' },
+  arknights: { image: 'hxl-art://sparxie-charm.png', source: '', credit: '' },
+  bh3: { image: 'hxl-art://charm-stars.png', source: '', credit: '' },
+  wutheringwaves: { image: 'hxl-art://charm-fireworks.png', source: '', credit: '' },
 };
+
+/** 认不出的作品（将来新增游戏）也要有图，不许再退回官方封面。 */
+const HERO_ART_DEFAULT = { image: 'hxl-art://sparkle-hero.png', source: '', credit: '' };
 
 function versionHero(version) {
   const entry = releaseEntry(version);
   if (entry && entry.image) return entry;
   const games = (state.games || []).filter((game) => game.coverUrl || game.startCoverUrl);
-  if (!games.length) return entry;
-  const pick = games[versionHash(version) % games.length];
   /*
-   * 米游社画师图优先：它是联网抓的，带作者和帖子地址，
-   * 比官网美术图更适合放更新弹窗。抓不到就往下走官网那套。
+   * 2026-11-20 T3-B：这里原本还有一段「米游社画师图优先」——
+   * 去米游社抓别人画的同人图放进更新弹窗。同属第三方美术作品，已移除。
+   *
+   * 按游戏挑图：每款游戏一张内置原创装饰图（hxl-art://，包内文件，不联网）。
+   * ★没有任何一台机器会因为「游戏库封面」而显示官方美术图 —— 最后一级回落也是原创图。
    */
-  const artist = (state.postArt || {})[pick.builtinKey];
-  if (artist && artist.image) {
-    return {
-      ...(entry || {}),
-      image: artist.image,
-      imageSource: artist.source || '',
-      imageCredit: artist.credit || '',
-    };
-  }
-  const art = HERO_ART[pick.builtinKey];
-  if (art) {
-    return {
-      ...(entry || {}),
-      image: art.image,
-      imageSource: art.source,
-      imageCredit: art.credit,
-    };
-  }
+  const pick = games.length ? games[versionHash(version) % games.length] : null;
+  const art = (pick && HERO_ART[pick.builtinKey]) || HERO_ART_DEFAULT;
   return {
     ...(entry || {}),
-    image: pick.startCoverUrl || pick.coverUrl,
-    imageSource: pick.officialSite || '',
-    imageCredit: pick.officialSite ? `${pick.name} 官网` : '',
+    image: art.image,
+    imageSource: art.source,
+    imageCredit: art.credit,
   };
 }
 

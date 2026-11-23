@@ -72,7 +72,7 @@ function serverChannelTag(game, server) {
  * 服务器行左侧的图标。
  *
  * 参考图里每个服务器是一枚「图标 + 粗体字」的大按钮，图标是识别第一眼，
- * 所以按渠道分：官方=盾牌、B服=火花（渠道）、国际服=月/地球感、Play=播放、
+ * 所以按渠道分：官方=盾牌、B服=电视（渠道）、国际服=月/地球感、Play=播放、
  * Steam=下载、自建=服务器。认不出来就退回通用服务器图标。
  */
 function serverIconId(server) {
@@ -1117,9 +1117,14 @@ function predownloadInfo(server) {
 
 function predownloadMeta(info) {
   const meta = PREDOWNLOAD_STATES[String(info && info.state ? info.state : '')] || null;
-  // 异环的本体预下载只有官方能下，徽标别写成「可以预下载」（像是我们能下）
-  if (meta && info && info.officialOnly && String(info.state || '') === 'available') {
-    return { ...meta, label: '官方已开放预下载' };
+  /*
+   * 异环本体相关的状态只有官方能推进，徽标别写成「可以预下载 / 正式版已上线」
+   * （那像是我们能下、能装）。正式更新和预下载是两件事，分开说。
+   */
+  if (meta && info && info.officialOnly) {
+    const st = String(info.state || '');
+    if (st === 'available') return { ...meta, label: '官方已开放预下载' };
+    if (st === 'update') return { ...meta, label: '本体有新版本（官方更新）' };
   }
   return meta;
 }
@@ -1147,7 +1152,14 @@ function cardPredownloadEntry(game) {
           : '预下载新版本',
     },
     done: { cls: 'is-done', title: launcherOnly ? '应用启动器资源更新' : '应用预下载更新' },
-    update: { cls: 'is-update', title: launcherOnly ? '更新异环启动器资源（不含游戏本体）' : '应用官方更新' },
+    update: {
+      cls: 'is-update',
+      title: officialOnly
+        ? '异环本体有新版本，需打开官方启动器更新'
+        : launcherOnly
+          ? '更新异环启动器资源（不含游戏本体）'
+          : '应用官方更新',
+    },
     unsupported: { cls: 'is-block', title: '这个服务器不支持预下载，点开看原因' },
     none: { cls: 'is-idle', title: '查看预下载状态' },
   };
@@ -1267,6 +1279,12 @@ function predownloadDetail(info, busy) {
   if (info.officialOnly) {
     const bits = [];
     if (info.localVersion) bits.push(`本地 ${info.localVersion}`);
+    if (state === 'update') {
+      // 本体正式更新已上线：这是「该升级了」，不是「提前下好」，文案不能混
+      if (info.targetVersion) bits.push(`官方最新 ${info.targetVersion}`);
+      bits.push('游戏本体只能由官方启动器更新，点「打开官方更新」去官方启动页升级');
+      return bits.join(' · ');
+    }
     if (info.targetVersion) bits.push(`预下载 ${info.targetVersion}`);
     bits.push('官方已开放预下载，点「打开官方预下载」去官方启动页下载，下完到时间自动生效');
     return bits.join(' · ');
@@ -1797,17 +1815,22 @@ function openPredownloadModal(gameId, serverId) {
   start.addEventListener('click', async () => {
     if (officialOnly) {
       /*
-       * 本体预下载只能官方下（登录态换 STS + 私有加密清单 + .sig 验签）。
-       * 这里只负责把官方启动页拉起来，自动点「预下载」是尽力而为，点不到就让用户自己点。
+       * 本体资源只能官方下（登录态换 STS + 私有加密清单 + .sig 验签）。
+       * 正式更新和预下载分开走：更新什么都不点（官方自己会先更），预下载尽力点一下。
        */
+      const isUpdate = String((openedInfo && openedInfo.state) || '') === 'update';
       start.disabled = true;
       try {
-        const result = await api.games.launch(game.id, { purpose: 'predownload' });
+        const result = await api.games.launch(game.id, { purpose: isUpdate ? 'update' : 'predownload' });
         if (result && result.ok) {
           toast(
-            result.reused
-              ? '官方启动页已经开着，切过去点「预下载」就行'
-              : '已打开官方启动页，在里面点「预下载」开始下载',
+            isUpdate
+              ? result.reused
+                ? '官方启动页已经开着，切过去它会先更新本体'
+                : '已打开官方启动页，它会先检查并更新本体资源'
+              : result.reused
+                ? '官方启动页已经开着，切过去点「预下载」就行'
+                : '已打开官方启动页，在里面点「预下载」开始下载',
             'success'
           );
           const closeBtn = document.querySelector('.pd-modal [data-close]');

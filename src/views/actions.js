@@ -143,6 +143,22 @@ async function releaseChannelPacks(scope) {
   }
 }
 
+/**
+ * 局部切换「开始游戏」主按钮的启动中态（2026-11-23）。
+ * 不整页重绘 —— start 页有背景 <video>，整页 render 会把它重启、闪一下静态图。
+ * 游戏真正 running 后由 onState 的整页 render 重建整个 dock（切成运行计时态）。
+ */
+function paintStartLaunching(id, launching) {
+  const buttons = document.querySelectorAll('.start-dock-play[data-action="start-selected"]');
+  for (const btn of buttons) {
+    if (btn.dataset.id !== String(id)) continue;
+    btn.disabled = !!launching;
+    btn.classList.toggle('is-launching', !!launching);
+    const label = btn.querySelector('span');
+    if (label) label.textContent = launching ? '启动中…' : '开始游戏';
+  }
+}
+
 async function handleAction(action, id, element, event = null) {
   switch (action) {
     case 'roster-sort':
@@ -488,6 +504,11 @@ case 'music-accounts':
       next[sourceKey] = !next[sourceKey];
       await applySettingLocally({ musicSources: next });
       if (state.route === 'song') render({ preserveScroll: true });
+      const feature = (typeof MUSIC_SOURCE_FEATURES !== 'undefined' ? MUSIC_SOURCE_FEATURES : []).find((item) => item[0] === sourceKey);
+      if (feature) {
+        toast(next[sourceKey] ? `已开启 ${feature[1]}` : `已关闭 ${feature[1]}`, 'success');
+        break;
+      }
       const label = (MUSIC_SOURCE_LABELS.find((item) => item[0] === sourceKey) || [sourceKey, sourceKey])[1];
       toast(next[sourceKey] ? `已启用 ${label} 音源` : `已停用 ${label} 音源`, 'success');
       break;
@@ -509,6 +530,20 @@ case 'music-accounts':
       toast('已删除这个音源', 'success');
       break;
     }
+    case 'music-lx-remove': {
+      const name = String(element.dataset.name || '');
+      if (!name) break;
+      const result = await api.musicLxRemove(name).catch(() => null);
+      if (!result?.ok) {
+        toast(result?.reason || '删除失败', 'error');
+        break;
+      }
+      await refreshLxScripts();
+      render({ preserveScroll: true });
+      if (document.querySelector('#music-settings-body')) openMusicSettingsModal();
+      toast('已删除这个音源脚本', 'success');
+      break;
+    }
     case 'music-source-pick': {
       const picker = document.querySelector('#music-source-file');
       if (picker) picker.click();
@@ -527,7 +562,7 @@ case 'music-accounts':
       const field = document.querySelector('#music-source-url');
       const url = String(field?.value || '').trim();
       if (!url) {
-        toast('先填订阅地址', 'info');
+        toast('先填在线音源地址', 'info');
         break;
       }
       await importMusicSource({ url });
@@ -1117,6 +1152,10 @@ case 'music-accounts':
       }
       break;
     }
+    case 'locate-current': {
+      locateCurrentPlaying();
+      break;
+    }
     case 'dock-open-list':
       if ((state.songTab || 'queue') !== 'queue') {
         state.songTab = 'queue';
@@ -1284,27 +1323,61 @@ case 'music-accounts':
         else openGameModal(id);
         break;
       }
-      const result = await api.games.launch(id);
+      /*
+       * 启动中状态机（2026-11-23 用户要求）：点下去立刻置「启动中…」并禁用按钮，
+       * 防止 await launch 期间重复点击又拉起一个进程；游戏真正 running 后由
+       * onState 清掉 launchingGames，界面才切成运行计时态。
+       * 这段是同步的：两次快速点击到这里，先到的 push、后到的 includes 命中直接 break。
+       */
+      if (!Array.isArray(state.launchingGames)) state.launchingGames = [];
+      if (state.launchingGames.includes(id)) break;
+      state.launchingGames.push(id);
+      paintStartLaunching(id, true);
+      let result;
+      try {
+        result = await api.games.launch(id);
+      } catch (error) {
+        // launch 抛异常也要解锁，否则按钮永久禁用
+        state.launchingGames = state.launchingGames.filter((x) => x !== id);
+        paintStartLaunching(id, false);
+        throw error;
+      }
       if (result.ok) {
         playUiSound('launch');
-      } else if (result.elevationRequired) {
         /*
-         * 终末地的 740 是官方客户端硬限制（非提权创建进程直接 failed to create
-         * game process 740），绕不过去。能省掉的只有「每次都问」：让启动器自己以
-         * 管理员运行，提权一次、整场免问。只问一次，选哪边都记住（elevationAsked）。
+         * 兜底：15 秒内主进程没推 running（进程识别慢 / 压根没起来）就解锁，
+         * 免得「启动中…」永远转下去。正常路径下 onState 会更早清掉。
          */
-        const useAdmin = await confirmDialog({
-          title: '以后开游戏不再每次问权限',
-          message: `${result.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
-          confirmText: '以管理员重启',
-        });
-        await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
-        if (useAdmin) {
-          const relaunched = await api.relaunchAdmin({ launchGameId: id });
-          if (!relaunched.ok) toast(relaunched.error, 'error');
-        }
+        setTimeout(() => {
+          if (!state.launchingGames.includes(id)) return;
+          const stillGame = state.games.find((x) => x.id === id);
+          if (stillGame && stillGame.running) return;
+          state.launchingGames = state.launchingGames.filter((x) => x !== id);
+          paintStartLaunching(id, false);
+        }, 15000);
       } else {
-        toast(result.error, 'error');
+        // 提权重启 / 失败：先解锁（提权后是另一个进程实例，锁本来就带不过去）
+        state.launchingGames = state.launchingGames.filter((x) => x !== id);
+        paintStartLaunching(id, false);
+        if (result.elevationRequired) {
+          /*
+           * 终末地的 740 是官方客户端硬限制（非提权创建进程直接 failed to create
+           * game process 740），绕不过去。能省掉的只有「每次都问」：让启动器自己以
+           * 管理员运行，提权一次、整场免问。只问一次，选哪边都记住（elevationAsked）。
+           */
+          const useAdmin = await confirmDialog({
+            title: '以后开游戏不再每次问权限',
+            message: `${result.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
+            confirmText: '以管理员重启',
+          });
+          await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
+          if (useAdmin) {
+            const relaunched = await api.relaunchAdmin({ launchGameId: id });
+            if (!relaunched.ok) toast(relaunched.error, 'error');
+          }
+        } else {
+          toast(result.error, 'error');
+        }
       }
       break;
     }
@@ -1340,6 +1413,28 @@ case 'music-accounts':
       // 服务器胶囊：切换 + 直接启动（快速进游戏，和下拉里的「只切换」区分开）
       await switchServerProfile(element.dataset.game, element.dataset.server, { launch: true });
       break;
+    case 'open-nte-update': {
+      /*
+       * 异环本体正式更新：资源只有官方启动器下得动，我们只负责把官方启动页拉起来。
+       * purpose='update' 让主进程：不自动点「预下载」（那是下一版）、也不点「开始游戏」，
+       * 官方启动页自己会先检测并下载本体资源。
+       */
+      const game = state.games.find((item) => item.id === id);
+      if (!game) break;
+      const result = await api.games.launch(id, { purpose: 'update' });
+      if (result && result.ok) {
+        playUiSound('launch');
+        toast(
+          result.reused
+            ? '官方启动页已经开着，切过去它会先更新本体'
+            : '已打开官方启动页，它会先检查并更新本体资源',
+          'success'
+        );
+      } else {
+        toast((result && result.error) || '打开官方启动页失败', 'error');
+      }
+      break;
+    }
     case 'open-nte-predownload': {
       /*
        * 异环本体预下载：资源只有官方启动器下得动（登录态换腾讯云 STS + PatcherXML0
@@ -2368,7 +2463,7 @@ case 'music-accounts':
       await toggleFavorite(id);
       break;
     case 'duo-game': {
-      // 花火卡：直接开「最近在玩」那一场
+      // 左卡（游戏快启）：直接开「最近在玩」那一场
       const target = state.games.find((item) => item.id === element.dataset.game);
       if (!target) {
         toast('还没有开场记录，先在游戏库里挑一个吧', 'info');
@@ -2396,16 +2491,16 @@ case 'music-accounts':
       break;
     }
     case 'duo-song':
-      // 火花卡：去点歌台
+      // 右卡（音乐遥控）：去点歌台
       navigate('song');
       break;
     case 'duo-toggle':
-      // 火花卡上的播放/暂停键：点击落在键上，不会再冒泡去开点歌台
+      // 右卡上的播放/暂停键：点击落在键上，不会再冒泡去开点歌台
       playCurrentSong(true);
       break;
     case 'duo-next':
     case 'duo-prev': {
-      // 火花卡上的上一首/下一首：复用点歌台的切歌逻辑，但不整页重绘
+      // 右卡上的上一首/下一首：复用点歌台的切歌逻辑，但不整页重绘
       if (!state.songs.length) break;
       const forward = action === 'duo-next';
       const options = { skipRender: state.route !== 'song' };
@@ -3445,6 +3540,25 @@ case 'music-accounts':
       }
       break;
     }
+    case 'pick-endfield-official-games': {
+      const exe = await api.pick.executable();
+      if (exe) {
+        if (!/Games\.exe$/i.test(exe)) {
+          toast('请选鹰角官方启动器的 Games.exe（文件名要对）', 'error');
+          break;
+        }
+        await api.updateSettings({ endfieldOfficialGamesExe: exe });
+        toast('终末地官方启动器路径已设置', 'success');
+        render();
+      }
+      break;
+    }
+    case 'reset-endfield-official-games': {
+      await api.updateSettings({ endfieldOfficialGamesExe: '' });
+      toast('已恢复自动搜索官方启动器', 'success');
+      render();
+      break;
+    }
     case 'change-runtime-root': {
       const dir = await api.pick.directory();
       if (dir) {
@@ -3490,6 +3604,105 @@ case 'music-accounts':
       if (!accent || !ACCENT_OPTIONS.some(([key]) => key === accent)) break;
       await applySettingLocally({ accent });
       render({ preserveScroll: true });
+      break;
+    }
+    /*
+     * 主题包（2026-11-20）。换包换的是「所有 hxl-art:// 解析到哪」，图片靠协议回落，
+     * 所以切完要整页无缓存重绘一次 —— 只 preserveScroll 的话浏览器会拿旧的图片缓存。
+     * 配色由主进程写进 settings.themePackColors，回推后 applySettings() 统一注入。
+     */
+    case 'set-theme-pack': {
+      const id = element.dataset.value;
+      if (!id) break;
+      const result = await api.theme.apply(id);
+      if (!result || !result.ok) {
+        toast((result && result.error) || '切换主题包失败', 'warn');
+        break;
+      }
+      await api.getState().then(onState).catch(() => {});
+      render({ preserveScroll: false });
+      break;
+    }
+    case 'open-theme-pack-dir': {
+      const result = await api.theme.open();
+      if (!result || !result.ok) toast((result && result.error) || '打不开主题包文件夹', 'warn');
+      break;
+    }
+    case 'refresh-theme-packs': {
+      const result = await api.theme.refresh();
+      if (!result || !result.ok) {
+        toast((result && result.error) || '重新扫描失败', 'warn');
+        break;
+      }
+      state.themePacks = result.packs || [];
+      state.themeFlat = result.flat || [];
+      await api.getState().then(onState).catch(() => {});
+      render({ preserveScroll: true });
+      toast(`已扫描到 ${state.themePacks.length} 个主题包`, 'info');
+      break;
+    }
+    /*
+     * 主题包素材编辑（2026-11-22）：换图后必须换一个 ?v=，否则 <img> 会吃旧缓存；
+     * 换完顺手 refresh 一次，让包的「自定义张数」同步。
+     */
+    case 'theme-asset-pick': {
+      const name = element.dataset.value;
+      if (!name) break;
+      // 内置包也能换：主进程会把图写到用户目录的平铺层，覆盖内置图但不改安装包
+      const picked = await api.theme.pickAsset(name);
+      if (!picked || !picked.ok) {
+        if (!(picked && picked.canceled)) toast((picked && picked.error) || '换图失败', 'warn');
+        break;
+      }
+      state.themeAssetStamp = Date.now();
+      const listed = await api.theme.refresh();
+      if (listed && listed.ok) {
+        state.themePacks = listed.packs || [];
+        state.themeFlat = listed.flat || [];
+      }
+      render({ preserveScroll: true });
+      toast('已替换素材：' + name, 'success');
+      break;
+    }
+    case 'theme-asset-clear': {
+      const name = element.dataset.value;
+      if (!name) break;
+      const cleared = await api.theme.clearAsset(name);
+      if (!cleared || !cleared.ok) {
+        toast((cleared && cleared.error) || '还原失败', 'warn');
+        break;
+      }
+      state.themeAssetStamp = Date.now();
+      const listed = await api.theme.refresh();
+      if (listed && listed.ok) {
+        state.themePacks = listed.packs || [];
+        state.themeFlat = listed.flat || [];
+      }
+      render({ preserveScroll: true });
+      toast('已还原：' + name, 'success');
+      break;
+    }
+    case 'theme-pack-create':
+    case 'theme-pack-duplicate': {
+      const input = document.getElementById('theme-pack-new-name');
+      const name = input ? String(input.value || '').trim() : '';
+      const copyFrom = action === 'theme-pack-duplicate' ? state.settings.themePack : '';
+      const created = await api.theme.createPack({ name, copyFrom });
+      if (!created || !created.ok) {
+        toast((created && created.error) || '新建主题包失败', 'warn');
+        break;
+      }
+      const listed = await api.theme.refresh();
+      if (listed && listed.ok) state.themePacks = listed.packs || [];
+      const applied = await api.theme.apply(created.id);
+      if (!applied || !applied.ok) {
+        toast((applied && applied.error) || '新包已建好，但切换失败', 'warn');
+        break;
+      }
+      state.themeAssetStamp = Date.now();
+      await api.getState().then(onState).catch(() => {});
+      render({ preserveScroll: false });
+      toast('已新建并切换到：' + created.name, 'success');
       break;
     }
     case 'set-material': {

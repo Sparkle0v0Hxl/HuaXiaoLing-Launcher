@@ -106,6 +106,24 @@ function onState(next) {
   state.games = next.games || [];
   state.settings = incomingSettings;
   state.stats = next.stats || state.stats;
+  // 启动中状态机（2026-11-23）：主进程回推的游戏真正 running 后，清掉本地"启动中"标记，
+  // 让按钮从禁用态切成运行计时态。这个字段是渲染层本地的，不参与快照覆盖。
+  if (Array.isArray(state.launchingGames) && state.launchingGames.length) {
+    const runningIds = new Set(
+      state.games.filter((g) => g && g.running).map((g) => String(g.id))
+    );
+    const stillLaunching = state.launchingGames.filter((gameId) => {
+      if (runningIds.has(String(gameId))) {
+        // 真正起来了，解锁
+        if (typeof paintStartLaunching === 'function') paintStartLaunching(gameId, false);
+        return false;
+      }
+      return true;
+    });
+    if (stillLaunching.length !== state.launchingGames.length) {
+      state.launchingGames = stillLaunching;
+    }
+  }
   state.nteAccount = next.nteAccount || null;
   state.downloads = next.downloads || [];
   state.app = next.app || state.app;

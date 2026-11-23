@@ -270,6 +270,218 @@ function keepRendererSettings(next, fallback) {
   return merged;
 }
 
+/**
+ * 主题包配色 → 内联 CSS 变量（2026-11-20）
+ *
+ * theme.json 里那 7 个颜色键落到具体变量。给了 accent 时要同时算 --accent-rgb：
+ * --accent-soft / --accent-line 是用 rgba(var(--accent-rgb), …) 拼的，
+ * 只换 --accent 不换 rgb，悬停底色和描边会残留上一个颜色。
+ *
+ * 切回内置包时把上一次设过的一律 removeProperty —— 不能留着内联值，
+ * 否则用户换回内置皮肤会发现强调色怎么调都不对。
+ */
+const THEME_PACK_VARS = {
+  accent: ['--accent', '--accent-text'],
+  accent2: ['--accent-2', '--accent-2-text'],
+  bg: ['--bg'],
+  surface: ['--surface'],
+  text: ['--text'],
+  muted: ['--muted'],
+  gold: ['--gold', '--gold-text'],
+};
+let themePackVarsOn = [];
+
+function parseHexRgb(value) {
+  const text = String(value || '').trim();
+  let hex = text.replace(/^#/, '');
+  if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('');
+  if (!/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(hex)) return '';
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `${r}, ${g}, ${b}`;
+}
+
+/** #rrggbb → [r,g,b]，拿不到返回 null（主题包只认 hex，rgba 键不参与派生）。 */
+function hexToRgb(value) {
+  const triple = parseHexRgb(value);
+  if (!triple) return null;
+  return triple.split(',').map((n) => Number(n.trim()));
+}
+
+function mixRgb(a, b, t) {
+  const k = Math.max(0, Math.min(1, t));
+  return a.map((v, i) => Math.round(v + (b[i] - v) * k));
+}
+
+function rgbToHex(rgb) {
+  return `#${rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function rgbLuma(rgb) {
+  return (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+}
+
+/**
+ * 浅色主题下把包的深色配色翻成浅色（2026-11-22 用户反馈：浅色完全糊脸）。
+ *
+ * 主题包的 colors 是按深色场景配的（背景近黑、文字近白）。直接塞进浅色主题，
+ * 就成了「深底 + 浅色主题的深字」——一片糊。这里从包的背景色提一个浅色调：
+ * 背景往白里混 93%，卡片更白；文字用包底色压深，保留主题的色相。
+ */
+function lightPackColors(colors) {
+  const out = { ...colors };
+  const bg = hexToRgb(colors.bg);
+  if (!bg) return out;
+  out.bg = rgbToHex(mixRgb(bg, [252, 250, 255], 0.93));
+  out.surface = rgbToHex(mixRgb(bg, [255, 255, 255], 0.975));
+  out.text = rgbToHex(mixRgb(bg, [14, 11, 16], 0.8));
+  out.muted = rgbToHex(mixRgb(hexToRgb(out.text) || [40, 36, 44], [255, 255, 255], 0.45));
+  return out;
+}
+
+/** 浅色下 accent / gold 直接当文字色太浅，压深后给 *-text 用（背景/光晕仍用原色）。 */
+function applyLightPackTextColors(set, colors) {
+  const ink = [20, 16, 12];
+  const accent = hexToRgb(colors.accent);
+  const accent2 = hexToRgb(colors.accent2);
+  const gold = hexToRgb(colors.gold);
+  if (accent) set('--accent-text', rgbToHex(mixRgb(accent, ink, 0.5)));
+  if (accent2) set('--accent-2-text', rgbToHex(mixRgb(accent2, ink, 0.45)));
+  if (gold) set('--gold-text', rgbToHex(mixRgb(gold, ink, 0.6)));
+}
+
+/**
+ * 主题包只给了 7 个基准色，但界面最底层还靠 --bg-deep / --surface-2 / --surface-3 /
+ * --text-2 / --line / --line-strong / --panel-soft 这几层。不派生的话，换包只会
+ * 换外层底色，卡片、分割线、次级文字仍是上一套皮肤的颜色（2026-11-22 用户反馈）。
+ * 这里按基准色推导：深色主题把 surface 往 text 方向提亮，浅色主题同理压暗。
+ */
+function applyThemePackBaseColors(set, colors, light) {
+  const bg = hexToRgb(colors.bg);
+  const surface = hexToRgb(colors.surface);
+  const text = hexToRgb(colors.text);
+  const muted = hexToRgb(colors.muted);
+  const accent = hexToRgb(colors.accent);
+  const gold = hexToRgb(colors.gold);
+
+  if (bg) {
+    set('--bg-deep', rgbToHex(mixRgb(bg, [0, 0, 0], light ? 0.04 : rgbLuma(bg) < 0.5 ? 0.22 : 0.04)));
+    // 页面最底层的黑红/暖金辉光要用包的底色重算（见 styles.css 末尾 data-theme-pack 段）
+    set('--bg-rgb', bg.join(', '));
+    set('--glass', `rgba(${bg[0]}, ${bg[1]}, ${bg[2]}, ${light ? 0.78 : 0.72})`);
+  }
+  if (surface) {
+    const toward = text || (light ? [0, 0, 0] : [255, 255, 255]);
+    set('--surface-2', rgbToHex(mixRgb(surface, toward, light ? 0.035 : 0.055)));
+    set('--surface-3', rgbToHex(mixRgb(surface, toward, light ? 0.07 : 0.1)));
+    set('--surface-rgb', surface.join(', '));
+  }
+  if (text) {
+    const [r, g, b] = text;
+    if (muted) set('--text-2', rgbToHex(mixRgb(text, muted, 0.55)));
+    set('--line', `rgba(${r}, ${g}, ${b}, ${light ? 0.1 : 0.09})`);
+    set('--line-strong', `rgba(${r}, ${g}, ${b}, ${light ? 0.18 : 0.17})`);
+    set('--panel-soft', `rgba(${r}, ${g}, ${b}, 0.05)`);
+    // 浅色主题里 hero 仍是深色图卡，--hero-ink 必须留给皮肤（浅字），不能用包的深字色
+    if (!light) {
+      set('--hero-ink', rgbToHex(text));
+      set('--hero-muted', `rgba(${r}, ${g}, ${b}, 0.68)`);
+    }
+  }
+  if (accent) {
+    // 强调色上的文字：亮色强调配深字，暗色强调配浅字
+    const ink = rgbLuma(accent) > 0.55 ? mixRgb(accent, [0, 0, 0], 0.82) : mixRgb(accent, [255, 255, 255], 0.85);
+    set('--accent-ink', rgbToHex(ink));
+  }
+  if (gold) set('--gold-rgb', gold.join(', '));
+}
+
+/* ------------------------------------------------------------------ */
+/* 主题包页面挂饰：按角色元素手绘的内联 SVG（2026-11-22）                */
+/*                                                                     */
+/* 之前的做法是从角色立绘上裁一块当挂饰，用户明确否掉了：裁出来的东西   */
+/* 认不出是什么，52px 下只剩一团色块。现在改成按每个角色的标志性元素     */
+/* 手绘：人偶/狐面/罗盘/兔子电视……颜色取主题变量，换包自动换色。       */
+/* 落在 5 个既有槽位（主挂饰、副挂饰、3 个漂浮小精灵）上，不动布局。     */
+function applyThemePackColors(settings) {
+  const root = document.documentElement;
+  for (const name of themePackVarsOn) root.style.removeProperty(name);
+  themePackVarsOn = [];
+
+  const rawColors = settings && settings.themePackColors;
+  if (!rawColors || typeof rawColors !== 'object' || Array.isArray(rawColors)) {
+    delete root.dataset.themePack;
+    return;
+  }
+  // styles.css 末尾的 data-theme-pack 段专门重算“黑红底/暖金辉光”这些最底层字面色
+  if (Object.keys(rawColors).length) root.dataset.themePack = String(settings.themePack || 'pack');
+  else delete root.dataset.themePack;
+
+  const light = String(settings.theme || '') === 'light';
+  const colors = light ? lightPackColors(rawColors) : rawColors;
+
+  const set = (name, value) => {
+    root.style.setProperty(name, value);
+    themePackVarsOn.push(name);
+  };
+
+  for (const [key, vars] of Object.entries(THEME_PACK_VARS)) {
+    const value = typeof colors[key] === 'string' ? colors[key].trim() : '';
+    if (!value) continue;
+    for (const name of vars) set(name, value);
+    if (key === 'accent') {
+      const rgb = parseHexRgb(value);
+      // rgba()/rgb() 形式拿不到三元组时不硬算，宁可让半透明强调色走默认值
+      if (rgb) set('--accent-rgb', rgb);
+    }
+  }
+  applyThemePackBaseColors(set, colors, light);
+  if (light) applyLightPackTextColors(set, colors);
+}
+
+/*
+ * 主题包素材的缓存戳（2026-11-22，2026-11-23 修）
+ *
+ * hxl-art:// 的 URL 是固定的（hxl-art://char-cool.png），src 不变时 Chromium
+ * 会吃旧图。戳必须同时覆盖两种变更：
+ *   1. 换主题包      -> themePack id 变了
+ *   2. 同包内换素材  -> themeAssetStamp（pick/clear/createPack 时 Date.now()）变了
+ * 之前只用包 id，导致「同一个包里换了图，URL 不变，换两下没反应」。
+ * 现在把两者拼起来，任一变化都会换 URL，强制重新解析；主进程仍带 no-store 双保险。
+ */
+function artStamp() {
+  const id = String((state && state.settings && state.settings.themePack) || 'builtin');
+  const asset = Number((state && state.themeAssetStamp) || 0);
+  return `${encodeURIComponent(id) || 'builtin'}-${asset}`;
+}
+
+function stampArtUrls() {
+  const stamp = artStamp();
+  const withStamp = (raw) => {
+    const qIndex = raw.indexOf('?');
+    const base = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+    // ?builtin=1 这类参数必须保留，只替换/补上 v
+    const params = new URLSearchParams(qIndex >= 0 ? raw.slice(qIndex + 1) : '');
+    params.set('v', stamp);
+    return `${base}?${params.toString()}`;
+  };
+  document.querySelectorAll('img[src^="hxl-art://"]').forEach((img) => {
+    const raw = img.getAttribute('src') || '';
+    const next = withStamp(raw);
+    if (next !== raw) img.setAttribute('src', next);
+  });
+  // 启动页 hero-bg 这类是内联 background-image，不在 img 里
+  document.querySelectorAll('[style*="hxl-art://"]').forEach((el) => {
+    const raw = el.getAttribute('style') || '';
+    const next = raw.replace(
+      /hxl-art:\/\/([A-Za-z0-9._-]+)(\?[^"')\s]*)?/g,
+      (_m, name, query) => withStamp(`hxl-art://${name}${query || ''}`)
+    );
+    if (next !== raw) el.setAttribute('style', next);
+  });
+}
+
 function applySettings() {
   const settings = state.settings || {};
   const mode = settings.theme || 'dark';
@@ -289,6 +501,10 @@ function applySettings() {
   document.body.classList.toggle('charms-on', settings.charms !== false);
   document.body.classList.toggle('charbg-on', settings.charBg !== false);
   document.body.classList.toggle('no-sidebar-char', settings.sidebarChar === false);
+  // 主题包自带的配色：内联变量，盖住 [data-accent=\"xxx\"] 那批规则（2026-11-20）
+  applyThemePackColors(settings);
+  // 侧栏立绘等常驻节点不在 render 的 innerHTML 里，换包后要单独刷一次素材地址
+  stampArtUrls();
   // 界面不透明度（40–100）：只作用在侧栏/主内容/弹窗，背景图不受影响
   {
     const value = Math.max(40, Math.min(100, Number(settings.uiOpacity ?? 100)));
@@ -924,7 +1140,7 @@ function bindStartArtVideo() {
 }
 
 /**
- * 给顶栏小按钮挂上角色纹样：花火的笑脸面具 + 火花的兔子耳朵。
+ * 给顶栏小按钮挂上角色纹样（图案随当前主题包变化）。
  * 用真元素而不是伪元素 —— 这些按钮的 ::before 是光轨、::after 是底光，都占着。
  * 关闭键用冷白红，别和粉金混在一起。
  */
@@ -1308,9 +1524,19 @@ function render(options = {}) {
   handoffStartArt(prevArt);
   // 点歌台外层滚动位置还原：任何一次重绘都保住用户当前看到的位置
   if (state.route === 'song') {
-    const wantTop = options.resetSongScroll ? 0 : songScrollMemo.top;
+    let wantTop = options.resetSongScroll ? 0 : songScrollMemo.top;
     const wantLeft = options.resetSongScroll ? 0 : songScrollMemo.left;
     const songScrollEl = dom.view.querySelector('.song-app-scroll');
+    /*
+     * 「定位正在播放」的 1.65 秒闪烁期内，这次重绘要保证那一行仍在视野中央：
+     * 点歌台里 hydrateSong/ensureSongQuality 补完异步内容会触发一次重绘，
+     * 行变高后按旧 scrollTop 还原会让它整体下移出视口（实测约 570ms 后）。
+     * locateFlashTargetTop 会重算「居中」目标；用户手动滚动不触发 render，不会被抢。
+     */
+    if (songScrollEl && state.locateFlash && typeof locateFlashTargetTop === 'function') {
+      const flashTop = locateFlashTargetTop(songScrollEl);
+      if (flashTop != null) wantTop = flashTop;
+    }
     if (songScrollEl) {
       songScrollEl.scrollTop = wantTop;
       songScrollEl.scrollLeft = wantLeft;
@@ -1347,6 +1573,8 @@ function render(options = {}) {
   updateSongChrome();
   renderQuickPanel();
   decorateCharacterMotifs();
+  // 刚换进来的 innerHTML 里也有 hxl-art 立绘 / 挂饰，统一补缓存戳
+  stampArtUrls();
   /*
    * 启动页那块统一进度面板刚被 innerHTML 换成了空宿主，
    * 这里把 state.task 的内容补画回去，否则正在跑的任务会「消失」到下一次进度事件为止。

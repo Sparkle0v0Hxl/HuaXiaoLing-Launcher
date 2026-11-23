@@ -534,26 +534,53 @@ function openAddSongLinkModal() {
  * 等于把人挡在门外。改成常驻左栏后，进歌单只要一次点击；窄屏（<1100px）由 CSS 把它折成顶部横向 tab。
  */
 /* ── 点歌台「音源」卡片：内置音源勾选 + 第三方音源导入 ──────────
- * 数组顺序就是换源优先级：洛雪 → 网易云 → 咪咕 → 酷我 → QQ。
+ * 优先级（2026-11-21 用户要求）：自己导入的音源排第一 → 网易云 → 咪咕 → 酷我 → QQ。
  * 播放前会按这个顺序并发验证一遍地址，第一个真能放出声音的胜出，
  * 所以这里排的是「先试谁」，不是「只能试谁」。
- * QQ / 酷我的匿名接口对付费曲目一律要会员，所以默认只开洛雪 / 网易云 / 咪咕，
- * 用户想开哪家自己点 chip。
+ * QQ / 酷我的匿名接口对付费曲目一律要会员，所以默认只开网易云 / 咪咕 / 酷我，
+ * 用户想开哪家自己点标签。
  * 酷狗已经从内置音源里整条移除（不再显示、不再参与换源）。
  * 第三方音源是一份 JSON，描述「怎么搜」和「怎么取地址」两个接口，
- * 可以从文件导入，也可以用订阅地址导入。
+ * 可以从文件导入，也可以用订阅地址导入；导入后作为独立标签排在最前面。
  */
 
 const MUSIC_SOURCE_LABELS = [
-  ['lx', '洛雪音源'],
   ['netease', '网易云'],
   ['migu', '咪咕'],
   ['kuwo', '酷我'],
   ['qq', 'QQ 音乐'],
 ];
-const MUSIC_SOURCE_DEFAULTS = { lx: true, netease: true, migu: true, kuwo: true, qq: false };
+// 第三方音源不再内置：界面上不再有任何默认音源标签，只显示用户导入的脚本。
+// 第三方音源不在默认值里：只显示用户导入的脚本与 JSON 音源。
+const MUSIC_SOURCE_DEFAULTS = { netease: true, migu: true, kuwo: true, qq: false, swap: false };
+
+/**
+ * 已导入的第三方音源脚本（主进程扫描脚本目录得到）。
+ * 2026-11-21：之前从安装包拆出去的脚本改为「导入后落盘」，这里只负责展示与删除。
+ */
+let SCRIPT_LIST = [];
+
+async function refreshLxScripts() {
+  if (typeof api?.musicLxSources !== 'function') return;
+  try {
+    const info = await api.musicLxSources();
+    SCRIPT_LIST = Array.isArray(info?.scripts) ? info.scripts : [];
+  } catch {
+    SCRIPT_LIST = [];
+  }
+}
 /** 内置音源的合法键（顺序 = 优先级）：不在这个表里的平台一律视为已下线。 */
 const MUSIC_SOURCE_KEYS = MUSIC_SOURCE_LABELS.map(([key]) => key);
+
+/**
+ * 功能开关（不对应任何平台，只控制某条换源链路）。
+ *
+ * 2026-11-20（风险整改 T2-B）：同名换源会把别的平台上的同名曲地址拿来用，
+ * 默认关闭。这里单独一行开关，不混进上面的平台标签，避免被当成「又一个音源」。
+ */
+const MUSIC_SOURCE_FEATURES = [
+  ['swap', '同名换源', '允许用其它平台上的同名曲地址'],
+];
 
 /**
  * 归一化后的音源开关。
@@ -565,7 +592,7 @@ const MUSIC_SOURCE_KEYS = MUSIC_SOURCE_LABELS.map(([key]) => key);
 function musicSourceFlags() {
   const stored = (state.settings && state.settings.musicSources) || {};
   const flags = {};
-  for (const [key] of MUSIC_SOURCE_LABELS) {
+  for (const [key] of [...MUSIC_SOURCE_LABELS, ...MUSIC_SOURCE_FEATURES]) {
     flags[key] = typeof stored[key] === 'boolean' ? stored[key] : MUSIC_SOURCE_DEFAULTS[key];
   }
   return flags;
@@ -595,42 +622,64 @@ function musicSourceCardMarkup() {
    * 数据里的开关仍然生效：换源竞速、搜索、回退解析都会跳过停用的源。
    */
   const enabledLabels = MUSIC_SOURCE_LABELS.filter(([key]) => flags[key] !== false);
-  const chips = enabledLabels
+  const builtinChips = enabledLabels
     .map(
       ([key, label]) =>
         `<button class="song-source-chip active" data-action="toggle-music-source" data-id="${key}" title="点击停用">${esc(label)}</button>`
     )
     .join('');
+  /*
+   * 自己导入的音源也是标签，并且排在内置音源前面（2026-11-21 用户要求）。
+   * 一个标签里放「名字（点击启停）」和「×（删除）」两个按钮，所以外层用 span 包一层，
+   * 不能把 button 嵌进 button。
+   */
+  const customChips = customs
+    .map((def) => {
+      const enabled = def.enabled !== false;
+      const id = def.id || def.name || '';
+      return `<span class="song-source-chip-group${enabled ? '' : ' is-off'}">
+        <button class="song-source-custom-name" data-action="toggle-music-custom" data-id="${esc(id)}" title="${enabled ? '点击停用' : '点击启用'}">${esc(def.name || id)}</button>
+        <button class="song-source-custom-del" data-action="music-source-remove" data-id="${esc(id)}" title="删除这个音源">${icon('x', 'xs')}</button>
+      </span>`;
+    })
+    .join('');
+  /*
+   * 第三方音源脚本（导入的 .js）：也做成标签，排在内置音源前面。
+   * ready=false 的脚本照样显示（灰一点），用户能看出「导入成功了但还没注册处理器」。
+   */
+  const scriptChips = SCRIPT_LIST.map((script) => {
+    const ready = Boolean(script.ready);
+    const hint = script.error || (ready ? '已就绪' : '已加载，尚未注册处理器');
+    return `<span class="song-source-chip-group${ready ? '' : ' is-off'}" title="${esc(hint)}">
+      <span class="song-source-custom-name">${esc(script.name)}</span>
+      <button class="song-source-custom-del" data-action="music-lx-remove" data-name="${esc(script.name)}" title="删除这个脚本">${icon('x', 'xs')}</button>
+    </span>`;
+  }).join('');
   // 说明行只写顺序，不写「只有这几家」：关掉某一家只是跳过它，顺序本身不变
-  const orderNote = '按顺序试：洛雪 → 网易云 → 咪咕 → 酷我 → QQ；播放前先验证地址真能出声，自动选可用的那条';
-  const list = customs.length
-    ? customs
-        .map(
-          (def) => `
-        <span class="song-source-item ${def.enabled === false ? 'is-off' : ''}">
-          <button class="song-source-name" data-action="toggle-music-custom" data-id="${esc(def.id)}" title="启用 / 停用">${esc(def.name || def.id)}</button>
-          <button class="song-source-del" data-action="music-source-remove" data-id="${esc(def.id)}" title="删除">${icon('x', 'xs')}</button>
-        </span>`
-        )
-        .join('')
-    : '<p class="song-source-empty">还没有导入第三方音源</p>';
+  const orderNote = '按顺序试：自建音源 → 网易云 → 咪咕 → 酷我 → QQ；播放前先验证地址真能出声，自动选可用的那条';
   return `
     <section class="song-rail-card is-source">
       <div class="song-rail-head">
         <span>音源</span>
-        <small>${on ? `已启用 ${on} 个第三方` : '点标签切换'}</small>
+        <small>${customs.length ? `自建 ${on}/${customs.length} 个启用` : '点标签切换'}</small>
       </div>
-      <div class="song-source-chips">${chips}</div>
+      <div class="song-source-chips">${customChips}${scriptChips}${builtinChips}</div>
       <p class="song-source-empty">${esc(orderNote)}</p>
-      <div class="song-source-custom">${list}</div>
+      <div class="song-source-features">
+        ${MUSIC_SOURCE_FEATURES.map(
+          ([key, label, hint]) =>
+            `<button class="song-source-feature ${flags[key] === true ? 'is-on' : 'is-off'}" data-action="toggle-music-source" data-id="${key}" title="${esc(hint)}">${esc(label)}：${flags[key] === true ? '已开启' : '已关闭'}</button>`
+        ).join('')}
+      </div>
       <div class="song-source-url" id="song-source-url-row" hidden>
-        <input class="song-source-input" id="music-source-url" type="text" placeholder="粘贴音源 JSON 的订阅地址" />
+        <input class="song-source-input" id="music-source-url" type="text" placeholder="粘贴在线音源 / 订阅的 http(s) 地址" />
         <button class="song-rail-more" data-action="music-source-url-go">导入</button>
       </div>
       <div class="song-source-actions">
         <button class="song-rail-more" data-action="music-source-pick" title="导入本地音源文件">${icon('download', 'xs')}导入文件</button>
-        <button class="song-rail-more" data-action="music-source-subscribe" title="用订阅地址导入">${icon('link', 'xs')}订阅地址</button>
+        <button class="song-rail-more" data-action="music-source-subscribe" title="用网址导入在线音源">${icon('link', 'xs')}在线音源</button>
       </div>
+      <p class="song-source-empty">JSON 描述文件（search.url + url.url）、在线音源地址、第三方 .js 音源脚本也能导入。</p>
       <input type="file" id="music-source-file" accept=".json,application/json" hidden />
     </section>`;
 }
@@ -648,8 +697,12 @@ async function importMusicSource(input) {
   }
   state.settings.musicCustomSources = result.sources || [];
   render({ preserveScroll: true });
+  const lxAdded = Number(result.lxAdded) || 0;
+  if (lxAdded) await refreshLxScripts();
+  // 设置弹窗还开着就重铺一遍，新导入的标签要立刻出现
+  if (document.querySelector('#music-settings-body')) openMusicSettingsModal();
   const extra = (result.rejected || []).length ? `（${result.rejected.length} 个不合格已跳过）` : '';
-  toast(`已导入 ${result.added} 个音源${extra}`, 'success');
+  toast(lxAdded ? `已导入 ${lxAdded} 个音源脚本：${result.lxName || ''}` : `已导入 ${result.added} 个音源${extra}`, 'success');
 }
 
 function musicSourceFileText(file) {
@@ -848,7 +901,8 @@ function refreshLiveRoomsPanel() {
   return true;
 }
 
-function openMusicSettingsModal() {
+async function openMusicSettingsModal() {
+  await refreshLxScripts();
   openModal(
     `
     <div class="modal-backdrop" data-backdrop>
@@ -882,7 +936,7 @@ function dockQueueMarkup() {
   const total = songs.length;
   const at = total ? Math.min(Math.max(0, Number(state.songIndex) || 0), total - 1) : -1;
   const row = (song, index) =>
-    `<button class="dock-queue-row${index === at ? ' is-active' : ''}" data-action="song-select" data-index="${index}" title="${esc(
+    `<button class="dock-queue-row${index === at ? ' is-active' : ''}${locateFlashClass(song)}" data-action="song-select" data-index="${index}" title="${esc(
       `${song?.title || '未知曲目'}${song?.artist ? ' · ' + song.artist : ''}`
     )}">
       <span class="dock-queue-idx">${index === at ? icon('play', 'xs') : index + 1}</span>
@@ -982,7 +1036,10 @@ function karaokeViewMarkup() {
           <section class="song-rail-card is-now">
             <div class="song-rail-head">
               <span>${icon('headphones', 'xs')} 正在播放</span>
-              <small>${state.songs.length ? `播放列表 ${state.songs.length} 首` : '暂无曲目'}</small>
+              <span class="song-rail-head-tail">
+                <small>${state.songs.length ? `播放列表 ${state.songs.length} 首` : '暂无曲目'}</small>
+                ${current ? `<button class="song-rail-locate" data-action="locate-current" title="定位到正在播放的那一首">${icon('pin', 'xs')}</button>` : ''}
+              </span>
             </div>
             <div class="song-rail-now">
               <span class="song-rail-cover ${cover ? 'has-cover' : ''}">${cover ? `<img src="${esc(cover)}" alt="" referrerpolicy="no-referrer" />` : icon('music')}</span>
@@ -1146,6 +1203,15 @@ function playlistDetailMarkup(detail, platform) {
         </div>
         <div class="kr-detail-actions">
           <button class="kr-detail-play" data-action="my-playlist-play" data-platform="${esc(platform)}" data-id="${esc(detail.id || '')}" ${songs.length ? '' : 'disabled'}>${icon('play', 'xs')}整张播放</button>
+          ${
+            (() => {
+              const cur = state.songs[state.songIndex];
+              const at = cur ? songs.findIndex((song) => sameSongKey(song, cur)) : -1;
+              return at >= 0
+                ? `<button class="playlists-chip" data-action="locate-current" title="在这张歌单里定位到正在播放的这一首">${icon('pin', 'xs')}定位播放</button>`
+                : '';
+            })()
+          }
           <button class="playlists-chip" data-action="my-playlist-import" data-platform="${esc(platform)}" title="整张追加到队列末尾，不打断正在放的那首" ${songs.length ? '' : 'disabled'}>${icon('plus', 'xs')}整张入队</button>
           <button class="playlists-chip${state.detailSelectMode ? ' is-active' : ''}" data-action="detail-select-mode" title="勾选若干首加入我的队列">${state.detailSelectMode ? '退出选择' : '批量选择'}</button>
           ${
@@ -1213,7 +1279,7 @@ function playlistDetailMarkup(detail, platform) {
             const playing = sameSongKey(song, current);
             return `
           <div class="kr-detail-row${(state.detailSelected || []).includes(index) ? ' is-brush-selected' : ''}">
-            <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
+            <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}${locateFlashClass(song)}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
               <span class="song-chart-index">${playing ? '♪' : index + 1}</span>
               <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
               <span class="song-chart-copy">

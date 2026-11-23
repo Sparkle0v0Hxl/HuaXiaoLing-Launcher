@@ -108,6 +108,17 @@ contextBridge.exposeInMainWorld('launcher', {
     open: (input) => ipcRenderer.invoke('install:open', input),
   },
 
+  // 主题包（2026-11-20）：一个包 = userData/art-pack/<id>/ 目录，内含 theme.json + 图
+  theme: {
+    list: () => ipcRenderer.invoke('theme:list'),
+    apply: (id) => ipcRenderer.invoke('theme:apply', { id }),
+    refresh: () => ipcRenderer.invoke('theme:refresh'),
+    open: () => ipcRenderer.invoke('theme:open'),
+    pickAsset: (name) => ipcRenderer.invoke('theme:asset-pick', { name }),
+    clearAsset: (name) => ipcRenderer.invoke('theme:asset-clear', { name }),
+    createPack: (input) => ipcRenderer.invoke('theme:pack-create', input || {}),
+  },
+
   // 窗口材质（亚克力 / 云母）
   windowMaterial: {
     apply: (material) => ipcRenderer.invoke('window:material', { material }),
@@ -292,8 +303,11 @@ contextBridge.exposeInMainWorld('launcher', {
   musicLoginConfirm: () => ipcRenderer.invoke('music:login-confirm'),
   musicLoginDebug: () => ipcRenderer.invoke('music:login-debug'),
   musicStatus: () => ipcRenderer.invoke('music:status'),
-  // 第三方音源导入：传 { text }（本地文件内容）或 { url }（订阅地址）
+  // 第三方音源导入：传 { text, name }（本地文件内容）或 { url }（订阅地址）
   musicImportSources: (input) => ipcRenderer.invoke('music:sources-import', input),
+  // 第三方音源脚本：列出 / 删除已导入的脚本
+  musicLxSources: () => ipcRenderer.invoke('music:lx-list'),
+  musicLxRemove: (name) => ipcRenderer.invoke('music:lx-remove', name),
   musicLogout: (platform) => ipcRenderer.invoke('music:logout', platform),
   musicVerify: (platform) => ipcRenderer.invoke('music:verify', platform),
   musicMyPlaylists: (platform) => ipcRenderer.invoke('music:my-playlists', platform),
@@ -328,8 +342,6 @@ contextBridge.exposeInMainWorld('launcher', {
     songMeta: (input) => ipcRenderer.invoke('netease:song-meta', input),
     searchSong: (input) => ipcRenderer.invoke('netease:search-song', input),
     songUrl: (input) => ipcRenderer.invoke('netease:song-url', input),
-    qrCreate: (input) => ipcRenderer.invoke('netease:qr-create', input),
-    qrCheck: (input) => ipcRenderer.invoke('netease:qr-check', input),
     status: () => ipcRenderer.invoke('netease:status'),
     logout: () => ipcRenderer.invoke('netease:logout'),
   },

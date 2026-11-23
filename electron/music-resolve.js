@@ -8,11 +8,9 @@
  * - 酷狗：getSongInfo 直接返回「需要付费」，wwwapi 返回 30020。
  * 两家的音频地址都由服务端强制校验会员，客户端无法绕过，也不应该绕过。
  *
- * 所以这里走的是「**用网易云找同名曲**」这条路：
- * 内置的 NeteaseCloudMusicApi 自带 unblockmusic-utils，
- * 遇到 fee=1/4 或无 url 的曲子会自动匹配其他平台的免费音源，
- * 返回一个可以直接播放的地址。这样三家来源的曲目都能听到，
- * 也不需要用户给 QQ/酷狗充会员。
+ * 所以这里走的是「**用网易云找同名曲**」这条路：拿这首歌在同名曲库里
+ * 的公开可播版本（同一首歌本来就有免费可播的条目时），得到一个能放的
+ * 地址。会员专享、需要付费才能听的曲目不会因为这条路径变成免费。
  */
 
 const BROWSER_UA =
@@ -124,7 +122,7 @@ function sameSongEnough(wantTitle, wantArtist, gotTitle, gotArtist) {
  * 解析一首歌的可播放地址。
  * 返回 { url, title, artist, cover, neteaseId, level } 或 null。
  */
-async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
+async function resolvePlayableUrl(apiBase, song, level = 'exhigh', flags = null) {
   const keyword = searchKeyword(song);
   if (!keyword) return null;
 
@@ -148,16 +146,18 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
   const best = pickBest(candidates, song);
   if (!best?.id) return null;
 
-  // 先试换源接口：会员曲目只有它会返回完整音源
+  // 换源接口：默认不走（2026-11-20 风险整改 T2-B），用户打开「同名换源」后才试
   let matchedUrl = '';
-  try {
-    const matchJson = await neteaseGet(apiBase, '/song/url/match', { id: best.id });
-    if (typeof matchJson?.data === 'string') matchedUrl = matchJson.data;
-  } catch {
-    matchedUrl = '';
+  if (flags && flags.swap === true) {
+    try {
+      const matchJson = await neteaseGet(apiBase, '/song/url/match', { id: best.id });
+      if (typeof matchJson?.data === 'string') matchedUrl = matchJson.data;
+    } catch {
+      matchedUrl = '';
+    }
   }
 
-  // /song/url/v1 内部会自动触发 unblock（fee 1/4 或没有 url 时）
+  // /song/url/v1 只返回官方地址；付费/无地址的曲子这里拿不到可播链接
   let urlJson = null;
   try {
     urlJson = await neteaseGet(apiBase, '/song/url/v1', { id: best.id, level });
@@ -174,7 +174,7 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh') {
       neteaseId: best.id,
       level: 'standard',
       br: 0,
-      unblocked: true,
+      swapped: true,
     };
   }
   if (trialOnly) {

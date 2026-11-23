@@ -8,7 +8,7 @@
 - 仓库：<https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher>
 - 职责：整体设计、界面与交互、启动器内核（硬链接切换 / 官方更新 / 抽卡记录 / 音乐与点歌台 / 公告聚合）、便携化打包与发布维护
 
-角色插画与头像（`src/assets/character.png`、`src/assets/character-face.png`）同为作者本人原创，版权归作者所有。
+界面插画（`src/assets/` 下的 13 个 png）是程序化生成的抽象装饰图，版权归作者所有。本仓库不附带任何第三方游戏的官方立绘或角色形象；想换成自己的图，放进数据目录的 `art-pack/` 即可。
 
 ## 贡献者
 

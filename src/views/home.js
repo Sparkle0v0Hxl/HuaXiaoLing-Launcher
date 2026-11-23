@@ -57,9 +57,9 @@ function stageHero(latest, mood) {
   }
   return `
     <section class="hero">
-      <div class="hero-bg" style="background-image:${esc(cssUrl('assets/character.png'))}"></div>
+      <div class="hero-bg" style="background-image:${esc(cssUrl('hxl-art://character.png?builtin=1'))}"></div>
       <div class="hero-shade"></div>
-      <div class="hero-sparxie" aria-hidden="true"><img src="assets/sparkle-hero.png" alt="" draggable="false" /></div>
+      <div class="hero-sparxie" aria-hidden="true"><img src="hxl-art://sparkle-hero.png" alt="" draggable="false" /></div>
       <div class="hero-sparks" aria-hidden="true">
         <svg viewBox="0 0 260 260">
           <g fill="none" stroke="currentColor">
@@ -113,7 +113,7 @@ function stageHero(latest, mood) {
         </div>
       </div>
       <div class="hero-portrait" aria-hidden="true">
-        <img src="assets/character.png" alt="" draggable="false" />
+        <img src="hxl-art://character.png?builtin=1" alt="" draggable="false" />
       </div>
     </section>`;
 }
@@ -244,7 +244,7 @@ function startView() {
     ordered[0];
   const activeServer = (selected.servers || []).find((server) => server.id === selected.activeServerId);
   // 优先用「去文字」版本作为背景，避免官方图上的标题和我们的游戏名打架
-  const cover = selected.startCoverUrl || selected.coverUrl || cssUrl('assets/character.png');
+  const cover = selected.startCoverUrl || selected.coverUrl || cssUrl('hxl-art://character.png');
   const coverSrc = cover.replace(/^url\("|"\)$/g, '');
   // 背景候选：静态封面 / 官方动态视频。右上角可切换并固定（vela:pinned-bg）。
   const bgCands = bgCandidatesFor(selected);
@@ -277,7 +277,7 @@ function startView() {
              回主页走浮层第一项或 Esc，不再单独占一个键 -->
         <button class="chrome-btn chrome-menu" data-action="toggle-start-nav" title="打开侧栏（Esc 返回主界面）" aria-label="打开侧栏">${icon('menu')}</button>
         <div class="start-brand">
-          <img class="start-brand-mark" src="assets/character-face.png" alt="" aria-hidden="true" />
+          <img class="start-brand-mark" src="hxl-art://character-face.png" alt="" aria-hidden="true" />
           <div class="start-brand-copy">
             <strong>花筱灵</strong>
             <small>HANABI STAGE</small>
@@ -510,6 +510,14 @@ function startDockDownloadActions(game) {
           <span class="start-dock-update-label">更新中…</span>
         </button>`;
     }
+    // 启动中（还没真正拉起）：禁用按钮，防止在 await launch 期间重复点击。
+    // 游戏真正 running 后 onState 会清掉 launchingGames，这里随即切成运行中计时态。
+    if (Array.isArray(state.launchingGames) && state.launchingGames.includes(game.id)) {
+      return `<button class="start-dock-play is-launching" disabled title="正在启动游戏，拉起后自动切换为运行计时">
+          ${icon('play')}
+          <span class="start-dock-update-label">启动中…</span>
+        </button>`;
+    }
     const servers = game.servers || [];
     const server = servers.find((item) => item.active) || servers[0];
     const info = predownloadInfo(server);
@@ -521,6 +529,19 @@ function startDockDownloadActions(game) {
        * 结果版本没变，还以为是更新失败。
        */
       const launcherOnly = String(info.scope || '') === 'launcher';
+      /*
+       * 异环本体有正式更新（scope='official'）：这块我们一行都下不了 ——
+       * 资源走登录态换的腾讯云 STS + PatcherXML0 私有加密清单 + .sig 验签。
+       * 按钮只能把人送到官方启动页，绝不能接 start-update-game（那会调我们
+       * 自己的下载器，异环本体走不通，点了只会报错）。
+       */
+      if (info.officialOnly) {
+        const officialLabel = target ? `更新到 ${target}` : '去官方更新';
+        return `<button class="start-dock-play is-update" data-action="open-nte-update" data-id="${esc(game.id)}" title="异环本体只能由官方启动器更新，点这里打开官方启动页">
+          ${icon('download')}
+          <span class="start-dock-update-label">${esc(officialLabel)}</span>
+        </button>`;
+      }
       const label = launcherOnly ? '更新启动器' : '更新游戏';
       const hint = launcherOnly
         ? '只更新异环的启动器资源，游戏本体请打开官方启动器更新'
@@ -677,8 +698,8 @@ function startServerPanel(game) {
    */
   return `
     <div class="start-dock${open ? ' is-menu-open' : ''}" style="background:#121016;border-radius:18px">
-      <span class="start-dock-crest" aria-hidden="true"><img src="assets/sparxie.png" alt="" draggable="false" /></span>
-      <span class="start-dock-charm" aria-hidden="true"><img src="assets/sparkle-mask.png" alt="" draggable="false" /></span>
+      <span class="start-dock-crest" aria-hidden="true"><img src="hxl-art://char-portrait.png" alt="" draggable="false" /></span>
+      <span class="start-dock-charm" aria-hidden="true"><img src="hxl-art://charm-dock.png" alt="" draggable="false" /></span>
       <span class="start-dock-sparks" aria-hidden="true"><i></i><i></i><i></i></span>
       <div class="start-server-anchor">
         <div class="start-dock-server-head">
@@ -1188,11 +1209,11 @@ function wasStartVideoPaused(gameId) {
 }
 
 /**
- * 花火 / 火花：官方透明立绘（1306 / 1501），摆在主页当后台双人卡。
+ * 后台双人卡（主题角色立绘，图案随当前主题包变化），摆在主页。
  *
  * 这两张卡不是纯摆设：
- *   花火 = 游戏快启：显示最近游玩的封面和名字，点一下直接开那个游戏；
- *   火花 = 音乐遥控：显示正在播的歌，卡上自带 上一首/播放暂停/下一首 三个键，
+ *   左卡 = 游戏快启：显示最近游玩的封面和名字，点一下直接开那个游戏；
+ *   右卡 = 音乐遥控：显示正在播的歌，卡上自带 上一首/播放暂停/下一首 三个键，
  *          连了直播点歌还会亮牌子；点卡身其它位置进点歌台。
  * 数据都取自本机现有状态，播放键图标由 updateSongChrome() 在 play/pause 事件里同步。
  */
@@ -1258,16 +1279,16 @@ function characterDuoMarkup() {
       <button type="button" class="char-duo-card is-sparkle" data-action="duo-game" title="${esc(gameSub)}"${
         recent ? ` data-game="${esc(recent.id)}"` : ''
       }>
-        <img src="assets/sparkle-fullbody.png" alt="花火" />
+        <img src="hxl-art://char-sweet.png?builtin=1" alt="游戏快启" />
         <span class="char-duo-copy">
-          <strong>花火 <i class="duo-tag">游戏快启</i></strong>
+          <strong>游戏快启 <i class="duo-tag">最近在玩</i></strong>
           <span class="char-duo-stat">${gameBody}</span>
         </span>
       </button>
       <button type="button" class="char-duo-card is-sparxie" data-action="duo-song" title="${esc(songSub)}">
-        <img src="assets/sparxie-fullbody.png" alt="火花" />
+        <img src="hxl-art://char-cool.png?builtin=1" alt="音乐遥控" />
         <span class="char-duo-copy">
-          <strong>火花 <i class="duo-tag">音乐遥控</i></strong>
+          <strong>音乐遥控 <i class="duo-tag">正在播放</i></strong>
           <span class="char-duo-stat">${songBody}</span>
         </span>
       </button>
@@ -1424,7 +1445,7 @@ function homeView() {
       <div class="page home-page">
         ${head}
         <div class="empty">
-          <div class="empty-char" aria-hidden="true"><img src="assets/character-face.png" alt="" /></div>
+          <div class="empty-char" aria-hidden="true"><img src="hxl-art://character-face.png" alt="" /></div>
           <div class="empty-icon">${icon('gamepad')}</div>
           <h3>把第一款游戏放进来</h3>
           <p>选择游戏的启动程序，挑一张封面，剩下的交给花筱灵。游戏资料、游玩时长和设置都只保存在这台电脑上。</p>

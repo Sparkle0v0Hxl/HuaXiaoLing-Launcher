@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * 洛雪（LX Music）自定义音源运行时。
+ * 第三方音源脚本运行时（兼容常见脚本接口格式）。
  *
- * 洛雪音源脚本是一段跑在 `globalThis.lx` 沙箱里的 JS：脚本用
- * `on(EVENT_NAMES.request, handler)` 注册处理器，用
+ * 音源脚本是跑在沙箱里的 JS：从注入的全局对象上取接口，
+ * 用 `on(EVENT_NAMES.request, handler)` 注册处理器，用
  * `send(EVENT_NAMES.inited, { status, sources })` 声明自己支持哪些平台。
  * 它本身**不做歌名搜索**，只负责「平台 ID/歌名 → 可播放直链」的聚合换链，
  * 所以这里只实现 `action === 'musicUrl'` 这一条路径。
@@ -15,7 +15,7 @@
  *     不要 JSON.parse；
  *   · 脚本交回来的 URL 未必真能播（错误页 / 失效 CDN / 试听片段），统一用
  *     audio-probe 只读头部验一次身份，按「脚本加载顺序 → 平台顺序」取第一条通过的；
- *   · 任何内部异常都收敛成一句「洛雪音源没拿到可播放的链接」，绝不把主进程搞崩。
+ *   · 任何内部异常都收敛成一句「导入的音源没拿到可播放的链接」，绝不把主进程搞崩。
  *
  * 注意：这里不要 require('./music-source')，那会形成循环依赖。
  */
@@ -47,12 +47,12 @@ const MAX_REDIRECTS = 5;
 const PRIORITY_GRACE_MS = 150;
 const MAX_PARALLEL_PROBES = 6;
 const DEFAULT_QUALITY = '320k';
-const LX_VERSION = '2.11.0';
+const SCRIPT_API_VERSION = '2.11.0';
 const DEBUG = !!process.env.HXL_LX_DEBUG;
 
 /** 已加载缓存：{ dir, scripts, loadedAt, settled } */
 let CACHE = null;
-/** setLxSourceDir() 显式指定的目录，优先级最高 */
+/** setLxSourceDir() 显式指定的脚本目录，优先级最高 */
 let EXPLICIT_DIR = '';
 
 // ---------------------------------------------------------------- 基础工具
@@ -60,7 +60,7 @@ let EXPLICIT_DIR = '';
 function debugLog(...args) {
   if (!DEBUG) return;
   try {
-    console.log('[lx-source]', ...args);
+    console.log('[音源脚本]', ...args);
   } catch { /* ignore */ }
 }
 
@@ -99,7 +99,7 @@ function hasHeader(headers, name) {
   return Object.keys(headers).some((key) => key.toLowerCase() === lower);
 }
 
-// ---------------------------------------------------------------- lx 沙箱
+// ---------------------------------------------------------------- 脚本沙箱
 
 /** 把响应体按 content-type 转成脚本能直接用的形态：JSON → 已解析对象，其它 → string / Buffer */
 function buildResponseBody(buf, contentType) {
@@ -127,7 +127,7 @@ function buildResponseBody(buf, contentType) {
 }
 
 /**
- * callback 风格 HTTP 请求，对齐洛雪 `lx.request` 的语义。
+ * callback 风格 HTTP 请求，对齐脚本常见的 request 语义。
  * 关键契约：响应是 JSON 时 `resp.body` 必须是**已解析的 JS 对象**
  * （屿溪 / 长青 / 独家音源-v5 直接读 `resp.body.code`，给 Buffer/string 会让它们全部失效）。
  */
@@ -295,7 +295,7 @@ function lxRequest(rawUrl, options, callback) {
 }
 
 function makeConsole(scriptName) {
-  const prefix = `[lx:${scriptName}]`;
+  const prefix = `[脚本:${scriptName}]`;
   const emit = (level) => (...args) => debugLog(level, prefix, ...args);
   return {
     log: emit('log'),
@@ -388,7 +388,7 @@ function makeZlibUtils() {
 }
 
 /**
- * 造一个洛雪风格的沙箱，并返回事件收集器。
+ * 造一个脚本沙箱，并返回事件收集器。
  * @returns {{sandbox: object, state: {handlers: Function[], sources: string[], inited: boolean, meta: object}}}
  */
 function createLxSandbox(scriptName) {
@@ -426,8 +426,8 @@ function createLxSandbox(scriptName) {
         }
       } catch { /* ignore */ }
     },
-    env: { platform: process.platform, lang: 'zh_cn', version: LX_VERSION },
-    version: LX_VERSION,
+    env: { platform: process.platform, lang: 'zh_cn', version: SCRIPT_API_VERSION },
+    version: SCRIPT_API_VERSION,
     currentScriptInfo: { name: scriptName, version: '' },
     utils: {
       buffer: makeBufferUtils(),
@@ -465,12 +465,28 @@ function createLxSandbox(scriptName) {
 
 // ---------------------------------------------------------------- 目录与加载
 
+/**
+ * 音源脚本目录。优先级：显式指定 > 环境变量 > 用户数据目录下的脚本目录。
+ *
+ * 2026-11-20（风险整改 T2-B）：原来默认读安装包里的脚本目录，
+ * 也就是「随安装包分发第三方音源脚本」。那条路子已经去掉 —— 安装包里不再带任何
+ * 音源脚本，目录改成用户数据目录下，用户自己往里放。
+ * 目录不存在时 ensureLoaded() 里已经有 try/catch，只是空列表，不会抛错。
+ */
 function resolveDir() {
   if (EXPLICIT_DIR) return EXPLICIT_DIR;
   const fromEnv = process.env.HXL_LX_SOURCE_DIR;
   if (fromEnv && String(fromEnv).trim()) return path.resolve(String(fromEnv).trim());
-  const root = process.resourcesPath || path.join(__dirname, '..');
-  return path.join(root, 'lx-sources');
+  let base = '';
+  try {
+    // 懒取 electron.app：本模块在单元测试/纯 Node 环境下也可能被 require
+    const { app } = require('electron');
+    if (app && typeof app.getPath === 'function') base = app.getPath('userData');
+  } catch {
+    base = '';
+  }
+  if (!base) base = process.resourcesPath || path.join(__dirname, '..');
+  return path.join(base, 'lx-sources');
 }
 
 function looksLikeScript(file) {
@@ -584,7 +600,7 @@ function qualityFromLevel(level) {
   if (value === 'lossless' || value === 'hires' || value === 'flac' || value === 'flac24bit') return 'flac';
   if (value === 'exhigh' || value === 'higher' || value === '320' || value === '320k') return '320k';
   if (value === 'standard' || value === '128k' || value === '128') return '128k';
-  // 直接把洛雪音质名透传（master / atmos / hires 等脚本自己认）
+  // 直接把音质名透传（master / atmos / hires 等脚本自己认）
   if (['master', 'atmos', 'atmos_plus', '192k', '192', 'sky', 'jymaster', 'dolby'].includes(value)) return value;
   return '128k';
 }
@@ -745,7 +761,7 @@ function dispatchTasks(cache, musicInfo, quality) {
  * 流式换链：谁先交回一条能播的 URL 就用谁，不再等全军到齐。
  *
  * 旧实现用 Promise.allSettled 等所有脚本 × 平台，只要有一两个慢的就整轮拖到
- * timeout，洛雪排最高优先级反而几乎不可能被主链的 3 秒宽限窗口选中。
+ * timeout，脚本源排最高优先级反而几乎不可能被主链的 3 秒宽限窗口选中。
  * 现在每个任务一交回 URL 就立刻探测；第一个探测通过的立即结束。
  *
  * 排序保护：极短的批处理窗口（PRIORITY_GRACE_MS）内到达的候选，
@@ -868,10 +884,10 @@ function streamFirstPlayable(tasks, deadline) {
 }
 
 /**
- * 走洛雪音源拿一条能播的直链。
+ * 走导入的第三方音源拿一条能播的直链。
  * @param {object} song 主进程的歌曲对象（title / artist / neteaseId / id / hash / rid / album / cover）
  * @param {{quality?: string, timeout?: number}} [options]
- * @returns {Promise<{url: string, source: 'lx', matchedTitle: string, matchedArtist: string, matched: string, runtime: string, cover: string}>}
+ * @returns {Promise<{url: string, source: 'script', matchedTitle: string, matchedArtist: string, matched: string, runtime: string, cover: string}>}
  */
 async function resolveViaLx(song, options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
@@ -883,25 +899,26 @@ async function resolveViaLx(song, options = {}) {
     const cache = ensureLoaded();
     const musicInfo = buildMusicInfo(song);
 
-    // 先给「延迟注册」的脚本一个初始化窗口：有的脚本（独家音源-v5、长青 v1.2.0）
-    // 要先联网拿远程配置，在回调里才 on() + send()，同步执行完时一个 handler 都没有。
+    // 先给「延迟注册」的脚本一个初始化窗口：有的脚本要先联网拿远程配置，
+    // 在回调里才 on() + send()，同步执行完时一个 handler 都没有。
     // 窗口不超过总预算的 1/3；目录里啥都没有就不等。
     if (cache.scripts.some((script) => script.loaded)) {
       await settleHandlers(cache, Math.min(2500, Math.max(600, Math.floor(timeout / 3))));
     }
 
-    // 过了初始化窗口再实时读一次 handler 列表（独家/长青这时已经补上了）。
+    // 过了初始化窗口再实时读一次 handler 列表（延迟注册的这时已经补上了）。
     const tasks = dispatchTasks(cache, musicInfo, quality);
-    if (!tasks.length) throw new Error('洛雪音源没拿到可播放的链接');
+    if (!tasks.length) throw new Error('导入的音源没拿到可播放的链接');
 
     const { candidate, timeoutFallback } = await streamFirstPlayable(tasks, deadline);
-    if (!candidate) throw new Error('洛雪音源没拿到可播放的链接');
+    if (!candidate) throw new Error('导入的音源没拿到可播放的链接');
     const result = {
       url: candidate.url,
-      source: 'lx',
+      source: 'script',
       matchedTitle: (song && (song.title || song.name)) || '',
       matchedArtist: (song && (song.artist || song.singer)) || '',
-      matched: '洛雪',
+      // 标签用「具体脚本名」：导入的每个脚本都算一个音源
+      matched: candidate.script || '第三方音源',
       runtime: candidate.script,
       cover: (song && song.cover) || '',
     };
@@ -909,8 +926,8 @@ async function resolveViaLx(song, options = {}) {
     if (timeoutFallback) result.probePending = true;
     return result;
   } catch (error) {
-    if (DEBUG) debugLog('resolveViaLx 失败', error && error.message);
-    throw new Error('洛雪音源没拿到可播放的链接');
+    if (DEBUG) debugLog('脚本换源失败', error && error.message);
+    throw new Error('导入的音源没拿到可播放的链接');
   }
 }
 

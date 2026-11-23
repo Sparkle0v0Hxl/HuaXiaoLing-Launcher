@@ -1571,8 +1571,7 @@ async function refreshMusicLogin() {
  * 把榜单 / 歌单里的曲目变成点歌台可播放的条目。
  *
  * 走主进程的 music:resolve：它会用网易云找同名曲，
- * 内置 API 的 unblock 会自动补上免费音源，
- * 所以 QQ / 酷狗的曲目不需要会员也能听。
+ * 内置 API 的换源会自动补上公开可播的同名曲。
  */
 async function addChartSongToQueue(song, options = {}) {
   if (!song) return false;

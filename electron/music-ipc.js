@@ -47,6 +47,8 @@ const {
   disabledSourceOfUrl,
   probeAudioUrl,
 } = require('./music-source');
+// 第三方音源脚本运行时（2026-11-21：拆出去的脚本改为「导入后放进用户脚本目录」）
+const lxSource = require('./lx-source');
 /* 播放过的音频字节缓存（hxl-audio:// 协议由 main.js 注册） */
 const musicCache = require('./music-cache');
 
@@ -215,6 +217,26 @@ function installMusicIpc(ctx) {
             if (!saved) {
               console.error('[music-login] saveSecret 返回 false，系统加密不可用或写入失败');
             }
+
+            /*
+             * 网易云还要额外喂一份给 neteaseSession：
+             * 下游取歌单 / 取播放地址走的是本地 NeteaseCloudMusicApi，
+             * 它认的就是 cookie 里的 MUSIC_U。这里把整袋 cookie 拼成请求头存进去，
+             * 和老的二维码登录存的是同一个东西，所以下游一行都不用改。
+             */
+            if (key === 'netease') {
+              try {
+                const cookie = sanitizeNeteaseCookie(cookieHeader(bag));
+                if (cookie) {
+                  const apiBase = normalizeNeteaseBase('');
+                  setNeteaseSession({ apiBase, cookie });
+                  await saveSecret('netease', JSON.stringify({ apiBase, cookie })).catch(() => {});
+                }
+              } catch (error) {
+                console.error('[music-login] 同步网易云会话失败:', error);
+              }
+            }
+
             resolve({ ok: true, platform: key, cookies: payload, saved: Boolean(saved) });
           } catch (error) {
             reject(error);
@@ -561,6 +583,13 @@ function installMusicIpc(ctx) {
         },
       };
       for (const key of Object.keys(MUSIC_LOGIN_CONFIG)) {
+        // 网易云在 out.netease 里已经按 neteaseSession 算过了，这里跳过，
+        // 否则会用 music-netease 的空值把刚算好的登录态冲掉。
+        if (key === 'netease') {
+          const session = await loadMusicSession('netease', loadSecret);
+          out.netease.savedAt = session?.savedAt || null;
+          continue;
+        }
         const session = await loadMusicSession(key, loadSecret);
         out[key] = {
           label: MUSIC_LOGIN_CONFIG[key].label,
@@ -666,7 +695,6 @@ function installMusicIpc(ctx) {
       return { ok: true };
     });
 
-
     /**
      * 退出登录：本地凭证和登录窗口里的网页会话都要清掉。
      *
@@ -681,6 +709,15 @@ function installMusicIpc(ctx) {
       await saveSecret(`music-${key}`, '').catch((error) => {
         console.error('[music-logout] 清除本地凭证失败:', error);
       });
+      // 网易云还要清掉 neteaseSession 与它那份旧存储，否则界面会显示已登录
+      if (key === 'netease') {
+        try {
+          setNeteaseSession({ apiBase: '', cookie: '' });
+          await saveSecret('netease', '').catch(() => {});
+        } catch (error) {
+          console.error('[music-logout] 清理网易云会话失败:', error);
+        }
+      }
       try {
         const partition = session.fromPartition(`persist:music-${key}-login`);
         await partition.clearStorageData({
@@ -708,52 +745,238 @@ function installMusicIpc(ctx) {
      * 没登录或接口拿不到时返回 { ok:false, reason }，由界面提示，
      * 不要抛异常让用户看到一屏报错。
      */
-    /**
-     * 把 QQ / 酷狗 的曲目解析成可播放地址。
-     * 走网易云找同名曲 + 内置 unblock 兜底，所以不需要会员也能听。
+    /*
+     * 把曲目解析成可播放地址（multi-source fallback）。
+     *
+     * 说明（2026-11-20 风险整改 T2-B）：这条回退链只做「同名曲换源」——
+     * 也就是在这首歌「本来就有公开可播版本」时换一条能放的地址
+     * （例如同一首歌的免费版本、其它平台的同曲目），不针对会员曲目做绕行，
+     * 也不做任何解密或破解。
      */
     /*
-     * 把曲目解析成可以直接播放的地址。
-     *
      * 顺序（见 electron/music-source.js）：
-     * 点歌台的换源现在走「多源并发竞速」：所有启用的音源同时开跑，谁先出
-     * 地址用谁，结果缓存 20 分钟（详见 music-source.js）。
-     * 默认只启用第三方免费音源：本地 NeteaseCloudMusicApi（含 /song/url/match
-     * 换源解锁，VIP 曲目也能出地址）+ 咪咕；酷狗 / QQ 的匿名接口对付费曲目一律
-     * 要会员，酷我常把人往手机端引，三家默认不参与，用户可在设置里打开。
-     * 全部失败时再退回老的「网易云找同名曲 + unblock」那条路。
+     * 点歌台的换源走「多源并发竞速」——所有启用的音源同时开跑，谁先出地址
+     * 用谁，结果缓存 20 分钟（详见 music-source.js）。
+     * 默认只启用各平台自己的公开接口（本地 NeteaseCloudMusicApi + 咪咕）；
+     * 酷狗 / QQ / 酷我默认不参与，用户可在设置里自己打开。
+     * 全部失败时退回「网易云找同名曲」的回退路径。
      */
+    /*
+     * ── 第三方音源脚本（.js / 伪 .json）──
+     * 2026-11-21 用户要求：之前从安装包里拆出去的音源，必须能通过导入识别到。
+     * 这里只负责把脚本落进用户脚本目录，并清掉运行时缓存；
+     * 真正的执行仍然在脚本运行时的沙箱里（on/request/send 那套）。
+     */
+    const lxDir = () => {
+      try {
+        return lxSource.lxSourceInfo().dir;
+      } catch {
+        return path.join(app.getPath('userData'), 'lx-sources');
+      }
+    };
+    const saveLxScript = (name, content, link) => {
+      const dir = lxDir();
+      fs.mkdirSync(dir, { recursive: true });
+      let base = String(name || '');
+      if (!base && link) {
+        try {
+          base = path.basename(decodeURIComponent(new URL(link).pathname));
+        } catch {
+          base = '';
+        }
+      }
+      // 统一去掉扩展名再补 .js：从链接推出来的名字可能自带 .js，别拼成 src.js.js
+      base = base.replace(/\.(js|json)$/i, '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 60) || 'sound-source';
+      const file = path.join(dir, `${base}.js`);
+      fs.writeFileSync(file, String(content), 'utf8');
+      lxSource.setLxSourceDir(dir);
+      return path.basename(file, '.js');
+    };
+    const looksLikeSourceScript = (text) => {
+      const head = String(text || '').slice(0, 4000);
+      if (/module\.exports|require\s*\(|globalThis\.lx|\blx\.(?:on|request|send)\b/.test(head)) return true;
+      return !/^\s*[{[]/.test(head) && /(?:function|=>|\bconst\b|\blet\b|\bvar\b|\bon\s*\()/.test(head);
+    };
+
+    ipcMain.handle('music:lx-list', () => {
+      try {
+        return lxSource.lxSourceInfo();
+      } catch (error) {
+        return { available: false, dir: lxDir(), scripts: [], error: String(error?.message || error).slice(0, 160) };
+      }
+    });
+
+    ipcMain.handle('music:lx-remove', (_event, name) => {
+      const safe = String(name || '').replace(/[\\/:*?"<>|]/g, '').trim();
+      if (!safe) return { ok: false, reason: '名字为空' };
+      const dir = lxDir();
+      let removed = false;
+      for (const ext of ['.js', '.json']) {
+        const file = path.join(dir, safe + ext);
+        try {
+          if (fs.existsSync(file)) {
+            fs.unlinkSync(file);
+            removed = true;
+          }
+        } catch { /* ignore */ }
+      }
+      lxSource.setLxSourceDir(dir);
+      if (!removed) return { ok: false, reason: '没找到这个脚本' };
+      return { ok: true, scripts: lxSource.lxSourceInfo().scripts };
+    });
+
     ipcMain.handle('music:sources-import', async (_event, input) => {
-      let raw = '';
-      if (input?.text) {
-        raw = String(input.text).slice(0, 200000);
-      } else if (input?.url) {
-        const target = String(input.url).trim();
-        if (!/^https?:\/\//i.test(target)) return { ok: false, reason: '订阅地址必须是 http(s) 链接' };
+      /*
+       * 在线音源（订阅地址）下载。
+       * 2026-11-21：用户反馈「有些音源是网址的在线音源」，把常见拦路的情况都处理掉：
+       * - GitHub / Gitee 网页地址（…/blob/…）自动换成 raw 下载地址；
+       * - 带浏览器 UA / Accept，部分 CDN 会拒绝默认 UA；
+       * - 跟随跳转，HTTP 状态码原样报出来（404 / 403 一眼能看出）。
+       */
+      const fetchOnlineSource = async (target) => {
+        let parsedUrl = null;
+        try {
+          parsedUrl = new URL(target);
+        } catch {
+          return { ok: false, reason: '链接格式不对，要以 http(s):// 开头' };
+        }
+        if (!/^https?:$/.test(parsedUrl.protocol)) return { ok: false, reason: '只支持 http(s) 链接' };
+        if (/^(www\.)?github\.com$/i.test(parsedUrl.hostname)) {
+          parsedUrl.pathname = parsedUrl.pathname.replace('/blob/', '/raw/');
+        }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 15000);
         try {
-          const response = await fetch(target, { signal: controller.signal });
-          raw = await response.text();
+          const response = await fetch(parsedUrl.toString(), {
+            signal: controller.signal,
+            redirect: 'follow',
+            headers: {
+              accept: 'application/json, text/plain, */*',
+              'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) HuaXiaolingLauncher/2.12.7',
+            },
+          });
+          if (!response.ok) return { ok: false, reason: `下载失败：HTTP ${response.status}` };
+          return { ok: true, text: await response.text() };
         } catch (error) {
           return { ok: false, reason: `下载失败：${error.message}` };
         } finally {
           clearTimeout(timer);
         }
+      };
+
+      let raw = '';
+      if (input?.text) {
+        const text = String(input.text).slice(0, 200000).trim();
+        // 文件里只有一行网址 → 当成在线音源处理（有些人就是把链接存成 txt）
+        if (/^https?:\/\/\S+$/i.test(text) && text.length < 2048) {
+          const online = await fetchOnlineSource(text);
+          if (!online.ok) return online;
+          raw = online.text;
+        } else {
+          raw = text;
+        }
+      } else if (input?.url) {
+        const online = await fetchOnlineSource(String(input.url).trim());
+        if (!online.ok) return online;
+        raw = online.text;
       } else {
         return { ok: false, reason: '没有拿到音源内容' };
+      }
+
+      /*
+       * 统一清洗一下再解析（2026-11-21）：
+       * - Windows 记事本存 UTF-8 会带 BOM，JSON.parse 会直接报「不是合法 JSON」；
+       * - Notepad 的「Unicode」是 UTF-16，读出来全是 \0，也解析不了；
+       * - 第三方 .js 音源脚本压根不是 JSON，要明确告诉用户，而不是一句泛泛的报错。
+       */
+      raw = raw.replace(/^\uFEFF/, '').trim();
+      if (!raw) return { ok: false, reason: '文件是空的' };
+      if (/\u0000/.test(raw.slice(0, 400))) {
+        return { ok: false, reason: '文件是 UTF-16 编码，请另存为 UTF-8 后再导入' };
       }
 
       let parsed = null;
       try {
         parsed = JSON.parse(raw);
-      } catch {
-        return { ok: false, reason: '不是合法的 JSON' };
+      } catch (error) {
+        // 脚本不是 JSON：直接落进用户脚本目录，交给沙箱运行时（导入即识别）
+        if (looksLikeSourceScript(raw)) {
+          const saved = saveLxScript(input?.name, raw, input?.url);
+          return {
+            ok: true,
+            added: 1,
+            lxAdded: 1,
+            lxName: saved,
+            sources: Array.isArray(store.data.settings.musicCustomSources)
+              ? store.data.settings.musicCustomSources
+              : [],
+          };
+        }
+        const head = raw.slice(0, 200).toLowerCase();
+        if (head.startsWith('<!doctype') || head.startsWith('<html')) {
+          return { ok: false, reason: '拿到的是网页（HTML），不是音源 JSON：请换成直链 / raw 地址' };
+        }
+        return { ok: false, reason: `不是合法的 JSON：${String(error?.message || '').slice(0, 80)}` };
       }
+      // 兼容 { "sources": [ ... ] } 这种订阅包写法
+      if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.sources)) parsed = parsed.sources;
       const incoming = Array.isArray(parsed) ? parsed : [parsed];
+      /*
+       * 有的「音源」每项只给一个网址（指向另一份 JSON 描述），不是 .js 脚本。
+       * 这里跟一层：把那个网址抓下来当真正的描述用，name 沿用外层的。
+       * 最多处理 8 项，避免一份清单把我们拖进无限抓取。
+       */
+      let list = incoming;
+      const lxImported = [];
+      if (incoming.length && incoming.length <= 8) {
+        const resolved = [];
+        for (const def of incoming) {
+          const link =
+            def && typeof def === 'object' && typeof def.url === 'string' && !def.search ? def.url.trim() : '';
+          if (!link) {
+            resolved.push(def);
+            continue;
+          }
+          const online = await fetchOnlineSource(link);
+          if (!online.ok) {
+            resolved.push(def);
+            continue;
+          }
+          // .js 链接 / 内容是脚本 → 落进用户脚本目录，不再当 JSON 解析
+          if (/\.js(\?|#|$)/i.test(link) || looksLikeSourceScript(online.text)) {
+            lxImported.push(saveLxScript(def.name, online.text, link));
+            continue;
+          }
+          try {
+            let nested = JSON.parse(online.text.replace(/^\uFEFF/, '').trim());
+            if (nested && !Array.isArray(nested) && Array.isArray(nested.sources)) nested = nested.sources;
+            const items = Array.isArray(nested) ? nested : [nested];
+            for (const item of items) {
+              if (item && typeof item === 'object' && !item.name && def.name) item.name = String(def.name).slice(0, 60);
+              resolved.push(item);
+            }
+          } catch {
+            resolved.push(def);
+          }
+        }
+        list = resolved;
+      }
+      /*
+       * 音源清单：每项是 { name, url: 'https://…/xxx.js' }。
+       * 能下载的已在上面落进用户脚本目录；剩下没能下载的才提示。
+       */
+      const scriptOnly = list.filter(
+        (def) => def && typeof def === 'object' && typeof def.url === 'string' && !def.search
+      );
+      if (!lxImported.length && list.length && scriptOnly.length === list.length) {
+        return {
+          ok: false,
+          reason: '这是音源脚本清单（每项 url 指向 .js），但一个都没下载成功；检查链接是否可访问',
+        };
+      }
       const accepted = [];
       const rejected = [];
-      for (const def of incoming) {
+      for (const def of list) {
         const check = validateCustomSource(def);
         if (!check.ok) {
           rejected.push(`${def?.name || def?.id || '未命名'}：${check.reason}`);
@@ -768,11 +991,17 @@ function installMusicIpc(ctx) {
           enabled: true,
         });
       }
-      if (!accepted.length) return { ok: false, reason: rejected.join('；') || '里面没有可用的音源' };
-
       const current = Array.isArray(store.data.settings.musicCustomSources)
         ? store.data.settings.musicCustomSources
         : [];
+      if (!accepted.length) {
+        if (lxImported.length) {
+          clearMusicResolveCache();
+          pushState(true);
+          return { ok: true, sources: current, added: lxImported.length, lxAdded: lxImported.length, lxName: lxImported.join('、') };
+        }
+        return { ok: false, reason: rejected.join('；') || '里面没有可用的音源' };
+      }
       // 同 id 覆盖，最多存 20 个，免得被塞一堆死链把竞速拖垮
       const merged = current
         .filter((def) => !accepted.some((item) => item.id === def.id))
@@ -784,7 +1013,14 @@ function installMusicIpc(ctx) {
       clearMusicResolveCache();
       // 这个 IPC 不走 settings:update，得自己把新状态推给界面，否则卡片看不到刚导入的音源
       pushState(true);
-      return { ok: true, sources: merged, added: accepted.length, rejected };
+      return {
+        ok: true,
+        sources: merged,
+        added: accepted.length + lxImported.length,
+        lxAdded: lxImported.length,
+        lxName: lxImported.join('、'),
+        rejected,
+      };
     });
 
     ipcMain.handle('music:resolve', async (_event, input) => {
@@ -887,8 +1123,8 @@ function installMusicIpc(ctx) {
         attempts.push(String(error.message || '解析失败'));
       }
       /*
-       * 回退路径走的是本地网易云 API（unblock 会在服务端偷偷换成酷我等平台的
-       * 直链），这里同样要认音源开关：网易云被停用就整条跳过；拿回来的地址
+       * 回退路径走的是本地网易云 API（同名曲换源，可能返回其它平台的直链），
+       * 这里同样要认音源开关：网易云被停用就整条跳过；拿回来的地址
        * 宿主撞上被停用的音源（比如酷我、以及已删除的酷狗）就丢弃，
        * 不能因为「能放」就绕过开关。
        *
@@ -897,7 +1133,7 @@ function installMusicIpc(ctx) {
        */
       try {
         const flags = currentMusicSourceFlags();
-        const resolved = flags.netease === false ? null : await resolvePlayableUrl(apiBase, song, level);
+        const resolved = flags.netease === false ? null : await resolvePlayableUrl(apiBase, song, level, flags);
         if (resolved?.url) {
           const banned = disabledSourceOfUrl(resolved.url, flags);
           if (banned) {
@@ -1418,15 +1654,6 @@ function installMusicIpc(ctx) {
       };
     });
 
-    ipcMain.handle('netease:qr-create', async (_event, input) => {
-      const apiBase = normalizeNeteaseBase(input?.apiBase);
-      const keyJson = await neteaseGet(apiBase, '/login/qr/key');
-      const key = keyJson.data?.unikey;
-      if (!key) throw new Error('本地 API 没有返回二维码 key');
-      const qrJson = await neteaseGet(apiBase, '/login/qr/create', { key, qrimg: 'true' });
-      return { apiBase, key, qrimg: qrJson.data?.qrimg || '', qrurl: qrJson.data?.qrurl || '' };
-    });
-
     /**
      * 把 NeteaseCloudMusicApi 吐出来的 cookie 串修成合法的请求 Cookie 头。
      *
@@ -1453,21 +1680,6 @@ function installMusicIpc(ctx) {
       }
       return parts.join('; ');
     }
-
-    ipcMain.handle('netease:qr-check', async (_event, input) => {
-      const apiBase = normalizeNeteaseBase(input?.apiBase);
-      const json = await neteaseGet(apiBase, '/login/qr/check', { key: input?.key });
-      if (Number(json.code) === 803 && json.cookie) {
-        const cookie = sanitizeNeteaseCookie(json.cookie);
-        setNeteaseSession({ apiBase, cookie });
-        await saveSecret('netease', JSON.stringify({ apiBase, cookie })).catch(() => {});
-      }
-      return {
-        code: Number(json.code) || 0,
-        message: String(json.message || ''),
-        loggedIn: Boolean(getNeteaseSession().cookie && getNeteaseSession().apiBase === apiBase),
-      };
-    });
 
     ipcMain.handle('netease:status', async () => ({
       loggedIn: Boolean(getNeteaseSession().cookie),

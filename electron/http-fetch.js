@@ -5,7 +5,7 @@
  *
  * 为什么不用 Node 自带的 fetch：Node 只认自己内置的 CA 列表，不读系统证书库——
  * Steam++（Watt Toolkit）这类加速器的原理就是本地中间人代理 + 把自己的根证书装进
- * 系统证书库，Node fetch 对它伪造的证书一律校验失败；不开加速器国内又直连不上
+ * 系统证书库，Node fetch 只认内置 CA 列表、对着这套中间人证书一律校验失败；不开加速器国内又直连不上
  * GitHub，两头堵死（10-29 用户反馈：开了 Steam++ 检查更新失败，关了直连也失败）。
  * Chromium 网络栈两个问题都没有：
  *   - 证书走系统证书库，用户装了什么根证书就认什么；
@@ -115,9 +115,9 @@ function performRequest(url, options = {}, redirects = 0) {
         // 同 host 复用空闲连接：小文件下载省掉每次的 TCP/TLS 握手。
         // 走代理时用隧道的 Agent（每个代理一个池，同样是 keep-alive）
         agent: options.agent || (isHttps ? httpsAgent : httpAgent),
-        // 国内 CDN 的证书链在 Node 内置 CA 里可能缺一环；这条路径只是兜底，
-        // 不校验证书反而更不容易「两边都连不上」
-        rejectUnauthorized: false,
+        // 默认校验证书（风险整改 T5）。只有调用方显式传 insecure: true 才关校验。
+        // 更新链（清单 / 更新包）在 updater.js 里强制 insecure: false，不接受降级。
+        rejectUnauthorized: options.insecure === true ? false : true,
         timeout: options.timeout || 120000,
       },
       (response) => {
@@ -196,6 +196,8 @@ function performRequest(url, options = {}, redirects = 0) {
  *
  * 失败处理：代理挂掉就标记 5 分钟，期间直接走直连；直连挂掉同理。真正两条
  * 都不通时抛错，由上层（segmentFetch / httpFetch）退回 Chromium 栈。
+ *
+ * 证书校验（T5）：默认校验，只有 options.insecure === true 才放行不校验的请求。
  */
 async function nodeRequest(url, options = {}) {
   // 调用方自己指定了 agent（自测、特殊场景），不插手

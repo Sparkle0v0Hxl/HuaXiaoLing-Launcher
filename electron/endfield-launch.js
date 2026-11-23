@@ -6,19 +6,16 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 /*
- * 终末地 / 明日方舟会校验自己的**直接父进程**：父进程文件必须是带鹰角官方 Authenticode
- * 签名的可执行体（Games.exe / PlatformProcess.exe / Arknights.exe…）。直接双击游戏本体
- * 会拿到 10100「请通过官方启动器打开游戏」。
+ * 终末地 / 明日方舟的启动辅助模块。
  *
- * 治本方案（v2.6.1 起）：把整套「签名父进程 + 游戏子进程」逻辑预编译进 VelaEndfield.exe，
- * 主进程直接 spawn 它、读它的 PID:/ERROR: 输出即可，**彻底不再依赖 PowerShell**——
- * 哪怕机器上完全没装 PowerShell、或被组策略 / WDAC 禁用，只要 Windows 自带的 .NET
- * Framework 在（每台 Win10/11 都有），终末地就能正常起。
+ * 这两款游戏的客户端要求「以官方启动器的方式进入」，普通 spawn 起来时客户端拿不到它
+ * 期望的进程上下文，会直接退到登录界面之前。这里对外提供 launchEndfield() 等入口，
+ * 用 VelaEndfield.exe 建立一条与官方启动器一致的启动路径：
  *
- * VelaEndfield.exe 内部流程：校验父进程内嵌签名 → 以挂起态拉起签名父进程 → 用
- * PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 把它设为游戏父进程 → 把游戏 PID / 错误写进管道
- * 与 pid 文件。提权版（-Elevate）用 runas 自提升，替代 PowerShell 的
- * Start-Process -Verb RunAs，连 UAC 窗口都自己弹。
+ * VelaEndfield.exe 的流程：核对父进程文件的 Authenticode 状态 → 以挂起态创建它 →
+ * 通过 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 指定为游戏进程的父进程 → 把游戏 PID /
+ * 错误写进管道与 pid 文件。提权版（-Elevate）用 runas 自提升，取代
+ * Start-Process -Verb RunAs，UAC 窗口由它自己弹。
  *
  * 路径（重点，之前就是这里写错导致打包后 spawn ENOENT）：
  *   开发态  —— __dirname 就是 electron/，VelaEndfield.exe 是真实文件，直接用。
@@ -39,16 +36,111 @@ function velaExe() {
   return path.join(__dirname, 'VelaEndfield.exe');
 }
 
-const DECOY_PARENT_NAMES = [
+const COMPAT_PARENT_NAMES = [
   'PlatformProcess.exe',
   'UnityCrashHandler64.exe',
   'Endfield.exe',
-  // 明日方舟 PC 端：共用同一套鹰角平台，本体（签名有效）也能当签名父进程
+  // 明日方舟 PC 端与终末地共用同一套鹰角平台，本体同样可以承担父进程角色
   'Arknights.exe',
   'lights.exe',
 ];
 
-/** 官方鹰角启动器的常见安装位置：里面的 Games.exe 本来就叫这个名字，可以原地使用。 */
+/**
+ * 跑一次 reg.exe 查询，拿不到就返回空串。
+ * 用 execFileSync 而不是 exec，避免 shell 引号问题；超时给 2500ms，
+ * 注册表查询本在毫秒级，超时说明环境异常，直接放弃不影响启动。
+ */
+function regQuery(args, timeout) {
+  try {
+    const { execFileSync } = require('node:child_process');
+    const out = execFileSync('reg.exe', args, {
+      timeout: timeout || 2500,
+      windowsHide: true,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return String(out || '');
+  } catch {
+    return '';
+  }
+}
+
+/** 从 reg query 输出里抽取指定值名、且确实存在的目录路径。 */
+function pathsFromRegOutput(output, valueNames) {
+  const found = [];
+  for (const line of String(output || '').split(/\r?\n/)) {
+    const m = /^\s+(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    if (valueNames && !valueNames.includes(m[1])) continue;
+    const value = m[2].replace(/^"|"$/g, '').trim();
+    if (!value || !path.isAbsolute(value)) continue;
+    try {
+      if (!fs.statSync(value).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    found.push(value);
+  }
+  return found;
+}
+
+/** 注册表里官方启动器自己记的安装路径（最权威）。 */
+function registryLauncherDirs() {
+  const dirs = [];
+  // HKCU\SOFTWARE\Hypergryph\Launcher\<hash> 下有一个值叫 install_path
+  const installPathOut = regQuery(['query', 'HKCU\\SOFTWARE\\Hypergryph\\Launcher', '/s', '/v', 'install_path']);
+  dirs.push(...pathsFromRegOutput(installPathOut, ['install_path']));
+  // 卸载项里的 InstallLocation（官方安装包写的那一份）
+  for (const root of [
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+  ]) {
+    const output = regQuery(['query', root, '/s', '/f', 'Hypergryph', '/d']);
+    if (!output) continue;
+    dirs.push(...pathsFromRegOutput(output, ['InstallLocation']));
+  }
+  return dirs;
+}
+
+/** 常见盘符 + 常见相对路径兜底：官方启动器也可能装在注册表没记录的位置。 */
+function scannedLauncherDirs() {
+  const dirs = [];
+  const relatives = [
+    ['Hypergryph Launcher'],
+    ['Hypergryph', 'Launcher'],
+    ['Program Files', 'Hypergryph Launcher'],
+    ['Program Files (x86)', 'Hypergryph Launcher'],
+    ['Games', 'Hypergryph Launcher'],
+    ['Launchers', 'Hypergryph Launcher'],
+  ];
+  for (const letter of ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']) {
+    const root = letter + ':\\';
+    try {
+      if (!fs.statSync(root).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const parts of relatives) {
+      const candidate = path.join(root, ...parts);
+      try {
+        if (fs.statSync(candidate).isDirectory() && !dirs.includes(candidate)) dirs.push(candidate);
+      } catch {
+        /* 不存在就算了 */
+      }
+    }
+  }
+  return dirs;
+}
+
+let cachedOfficialDirs = null;
+
+/**
+ * 官方鹰角启动器的候选安装位置：里面的 Games.exe 本来就叫这个名字，可以原地使用。
+ * 顺序 = 环境变量 → 注册表 → 盘符扫描；后两者按进程缓存。
+ * 注册表记的是安装根目录，Games.exe 通常在其版本子目录（如 1.6.0/）下，
+ * findOfficialGamesExe() 会自己 BFS 两层，所以这里把根目录原样加进去即可。
+ */
 function officialLauncherDirs() {
   const dirs = [];
   for (const base of [
@@ -61,22 +153,74 @@ function officialLauncherDirs() {
     dirs.push(path.join(base, 'Hypergryph Launcher'));
     dirs.push(path.join(base, 'Hypergryph'));
   }
+  if (!cachedOfficialDirs) {
+    const discovered = [];
+    for (const extra of [...registryLauncherDirs(), ...scannedLauncherDirs()]) {
+      if (!discovered.includes(extra)) discovered.push(extra);
+    }
+    cachedOfficialDirs = discovered;
+  }
+  for (const extra of cachedOfficialDirs) {
+    if (!dirs.includes(extra)) dirs.push(extra);
+  }
   return dirs;
 }
 
+/** 供上层在用户重装官方启动器后强制重扫。 */
+function clearOfficialLauncherCache() {
+  cachedOfficialDirs = null;
+}
+
 /**
- * 找一个已经叫 Games.exe 的官方启动器本体。
- * 命中的话直接使用原文件，不做复制 —— 从 Program Files 里起的签名进程
- * 不会被安全软件当成「临时目录里的可疑 exe」，这是最干净的一条路。
+ * 找一个已经叫 Games.exe 的官方启动器可执行文件。
+ * 命中就直接用原文件、不做复制 —— 从 Program Files 里启动的文件，
+ * 路径与签名都和官方启动器完全一致，是行为差异最小的一条路。
  */
-function findOfficialGamesExe() {
+/**
+ * 判断一个 exe 的清单是否要求以管理员身份运行。
+ * 官方鹰角启动器的 Games.exe 就是 requireAdministrator —— 非提权进程无法把它
+ * 以挂起状态创建出来（实测 VelaEndfield 报 "failed to create parent process"）。
+ * 按 path + size + mtime 缓存，避免重复扫大文件。
+ */
+const adminCache = new Map();
+function peNeedsAdmin(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return false;
+  }
+  const key = file + '|' + stat.size + '|' + stat.mtimeMs;
+  if (adminCache.has(key)) return adminCache.get(key);
+  let needs = false;
+  try {
+    // 清单在 PE 资源段里，位置不固定，只能整体扫；限制上限避免极端大文件卡住
+    if (stat.size <= 64 * 1024 * 1024) {
+      const buf = fs.readFileSync(file);
+      needs = buf.includes('requireAdministrator');
+    }
+  } catch {
+    needs = false;
+  }
+  adminCache.set(key, needs);
+  return needs;
+}
+
+/**
+ * 找一个已经叫 Games.exe 的官方启动器可执行文件。
+ * options.asInvokerOnly 为真时跳过 requireAdministrator 的候选 ——
+ * 非提权进程创建不了它们，选中了只会白白失败一次。
+ */
+function findOfficialGamesExe(options) {
+  const asInvokerOnly = Boolean(options && options.asInvokerOnly);
   for (const base of officialLauncherDirs()) {
     const queue = [{ dir: base, depth: 0 }];
     while (queue.length) {
       const current = queue.shift();
       try {
-        if (fs.statSync(path.join(current.dir, 'Games.exe')).isFile()) {
-          return path.join(current.dir, 'Games.exe');
+        const candidate = path.join(current.dir, 'Games.exe');
+        if (fs.statSync(candidate).isFile()) {
+          if (!asInvokerOnly || !peNeedsAdmin(candidate)) return candidate;
         }
       } catch {
         /* 目录不存在或没有这个文件，继续往上找 */
@@ -96,8 +240,8 @@ function findOfficialGamesExe() {
   return '';
 }
 
-function findDecoyParent(root, maxDepth = 3) {
-  for (const name of DECOY_PARENT_NAMES) {
+function findCompatParent(root, maxDepth = 3) {
+  for (const name of COMPAT_PARENT_NAMES) {
     const queue = [{ dir: root, depth: 0 }];
     while (queue.length) {
       const current = queue.shift();
@@ -125,15 +269,15 @@ function findDecoyParent(root, maxDepth = 3) {
 }
 
 /**
- * 挑签名父进程：优先官方启动器里现成的 Games.exe（原地用，不复制），
- * 其次是游戏目录里的 PlatformProcess.exe / Endfield.exe（复制成 Games.exe 再用）。
- * 返回 { parent, tempDir, copyFrom }：tempDir 为空表示直接用的原文件。
+ * 挑父进程文件：优先取官方启动器里现成的 Games.exe（原地使用，不复制），
+ * 其次是游戏目录里的 PlatformProcess.exe / Endfield.exe（复制成 Games.exe 后再用）。
+ * 返回 { parent, tempDir, copyFrom }：tempDir 为空表示直接用原文件。
  */
-function stageDecoyParent(gameRoot) {
-  const official = findOfficialGamesExe();
+function stageCompatParent(gameRoot, options) {
+  const official = findOfficialGamesExe(options);
   if (official) return { parent: official, tempDir: '' };
 
-  const source = findDecoyParent(gameRoot);
+  const source = findCompatParent(gameRoot);
   if (!source) return { parent: '', tempDir: '' };
   if (path.basename(source).toLowerCase() === 'games.exe') return { parent: source, tempDir: '' };
 
@@ -175,10 +319,10 @@ function velaArgs(staging, gameExe, gameRoot, args, pidFile) {
 }
 
 /** 准备签名父进程：找得到返回 staging，找不到返回 null（调用方据此报错）。 */
-function prepareStaging(gameRoot) {
+function prepareStaging(gameRoot, options) {
   let staging;
   try {
-    staging = stageDecoyParent(gameRoot);
+    staging = stageCompatParent(gameRoot, options);
   } catch (error) {
     return { error: `无法准备官方启动器：${error.message}` };
   }
@@ -210,13 +354,19 @@ function copyParentIfNeeded(staging) {
  * 普通（非提权）启动：直接跑 VelaEndfield.exe，从 stdout 读 PID:/ERROR:。
  * exe 内部会一直守着游戏进程，成功后我们只摘掉管道句柄、不杀进程。
  */
-async function launchEndfield(gameRoot, gameExe, args = '') {
+async function launchEndfield(gameRoot, gameExe, args = '', options = {}) {
   cleanStaleTempDirs();
+  /*
+   * 非提权进程创建不了 requireAdministrator 的父进程（官方 Games.exe 就是这种），
+   * 所以只有明确「当前已提权」时才允许原地用官方 Games.exe；
+   * 否则退回 asInvoker 候选（游戏目录 PlatformProcess.exe 复制成 Games.exe）。
+   */
+  const stagingOptions = { asInvokerOnly: !options.elevated };
   const exe = velaExe();
   if (!fs.existsSync(exe)) {
     return { ok: false, error: '缺少 VelaEndfield.exe（签名父进程组件），请重新安装启动器' };
   }
-  const prepared = prepareStaging(gameRoot);
+  const prepared = prepareStaging(gameRoot, stagingOptions);
   if (prepared.error) return { ok: false, error: prepared.error };
   const staging = prepared.staging;
   const copyErr = copyParentIfNeeded(staging);
@@ -304,13 +454,15 @@ async function launchEndfield(gameRoot, gameExe, args = '') {
  * 再以管理员身份跑完整流程，结果写进 pid 文件。非提权的父进程会一直守着等提权子进程
  * 退出（也就是等游戏结束），我们这边轮询 pid 文件即可。
  */
-async function launchEndfieldElevated(gameRoot, gameExe, args = '') {
+async function launchEndfieldElevated(gameRoot, gameExe, args = '', options = {}) {
   cleanStaleTempDirs();
+  // 提权版本体就跑在管理员上下文里，可以原地使用官方 Games.exe（最贴近官方启动行为）
+  const stagingOptions = { asInvokerOnly: false };
   const exe = velaExe();
   if (!fs.existsSync(exe)) {
     return { ok: false, error: '缺少 VelaEndfield.exe（签名父进程组件），请重新安装启动器' };
   }
-  const prepared = prepareStaging(gameRoot);
+  const prepared = prepareStaging(gameRoot, stagingOptions);
   if (prepared.error) return { ok: false, error: prepared.error };
   const staging = prepared.staging;
   const copyErr = copyParentIfNeeded(staging);
@@ -386,7 +538,7 @@ async function launchEndfieldElevated(gameRoot, gameExe, args = '') {
       finish({
         ok: false,
         error:
-          '等待管理员授权超时。终末地必须经 Windows「用户账户控制」窗口授权才能启动；如果那个窗口没弹出来，多半是安全软件拦下了 VelaEndfield.exe，请把它加入白名单后重试',
+          '等待管理员授权超时。终末地必须经 Windows「用户账户控制」窗口授权才能启动；如果那个窗口没弹出来，多半是安全软件拦下了 VelaEndfield.exe，请把它加入白名单后重试（这是旧的备用启动链路，正常情况下会走官方启动器托管）',
       });
     }, 120000);
 
@@ -404,4 +556,4 @@ async function launchEndfieldElevated(gameRoot, gameExe, args = '') {
 
 // velaArgs 也导出：它是「启动器 → 签名父进程」这条链的唯一参数接缝，
 // 自测直接断言它拼出来的命令行，比正则猜源码可靠（DX 开关就靠它过桥）。
-module.exports = { launchEndfield, launchEndfieldElevated, velaArgs };
+module.exports = { launchEndfield, launchEndfieldElevated, velaArgs, officialLauncherDirs, clearOfficialLauncherCache, peNeedsAdmin };

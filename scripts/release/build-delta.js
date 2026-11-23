@@ -91,6 +91,10 @@ function isProtectedRel(rel) {
    * 清单的正确性由更新流程自己从远端拉取维护，不需要也不应该靠增量补丁同步。
    */
   if (r === 'latest.json') return true;
+  // deviceid.txt 是网易云服务遗留的「设备 ID 池」数据文件，服务并不读取它；
+  // 客户端 isProtected 也精确保护它，两侧必须对称，避免误删。
+  if (r === 'resources/netease-api/data/deviceid.txt') return true;
+
   if (/\.bak(-\S+)?$/i.test(r)) return true;
   if (/\.(tmp|temp|part|download|crdownload)$/i.test(r)) return true;
   if (/(^|\/)\.DS_Store$/i.test(r)) return true;

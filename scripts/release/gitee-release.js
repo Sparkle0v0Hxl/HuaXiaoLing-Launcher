@@ -122,7 +122,7 @@ async function attach(releaseId, filePath, label) {
   const tooBig = (file) => fs.statSync(file).size > GITEE_ASSET_LIMIT;
   const inlineOnly = [setup, zip, ...deltaFiles].filter(tooBig);
 
-  const notes = String(manifest.notes || '').split('\n').filter(Boolean);
+  const notes = Array.isArray(manifest.notes) ? manifest.notes.map((s) => String(s).trim()).filter(Boolean) : String(manifest.notes || '').split('\n').map((s) => s.trim()).filter(Boolean);
   const body = [
     `## 花筱灵启动器 ${VER}`,
     '',

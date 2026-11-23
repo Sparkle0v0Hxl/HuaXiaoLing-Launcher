@@ -75,6 +75,32 @@ const PLATFORM_CONFIG = {
     apiBase: 'https://wwwapi.kugou.com/',
     referer: 'https://www.kugou.com/',
   },
+  netease: {
+    label: '网易云音乐',
+    /*
+     * 网易云网页版首页右上角就有「登录」，点开是二维码 / 手机号 / 邮箱三种方式。
+     * 登录成功后主站会种下 MUSIC_U（会话令牌）与 __csrf（同源校验）。
+     *
+     * 2026-11-20（风险整改 T2-B）：原来网易云走的是「本地 NeteaseCloudMusicApi
+     * 代做扫码」那条链 —— 要先起本地服务，服务没起来就连二维码都不显示。
+     * 现在和 QQ 音乐统一：开内置浏览器让用户在官网真实登录，取 cookie。
+     * 拿到的 MUSIC_U 正好也是本地 API 认的凭证，下游一行不用改。
+     */
+    loginUrl: 'https://music.163.com/',
+    fallbackUrl: 'https://music.163.com/',
+    /*
+     * MUSIC_U 是真正的登录令牌；__csrf 是同源请求校验。
+     * 有些版本还会写 MUSIC_A / MUSIC_R_U，都算登录成功的证据。
+     * 分两组：第一组任意一个命中即算有令牌，第二组是辅助校验（可以为空）。
+     */
+    readyAny: [
+      ['MUSIC_U', 'MUSIC_A', 'MUSIC_R_U'],
+    ],
+    ready: [],
+    host: ['music.163.com', '163.com', 'netease.com'],
+    apiBase: 'https://music.163.com/api',
+    referer: 'https://music.163.com/',
+  },
   kuwo: {
     label: '酷我音乐',
     /*
@@ -139,7 +165,7 @@ const LOGIN_CLICK_SCRIPT = `
     if (alreadyOpen()) return true;
     return tryClick(['.top_login__link', '.login-link', '[class*="login__link"]', 'a[class*="login"]'], 'qq') ||
            // 酷狗首页的登录入口实测是 class="cmhead1_d5 _login"
-           tryClick(['._login', '.cmhead1_d5', '.header_login', '.top_login a', '[class*="login"] a'], 'kugou'); ||
+           tryClick(['._login', '.cmhead1_d5', '.header_login', '.top_login a', '[class*="login"] a'], 'kugou') ||
            // 酷我首页登录弹窗（Vue 组件 .reg_login）
            tryClick(['.reg_login', '.reg_text', 'a[class*="reg"]', '[class*="reg"]', '[class*="login"]'], 'kuwo');
   };
@@ -305,6 +331,24 @@ async function verifyMusicSession(platform, session, timeoutMs = 12000) {
       if (String(code) === '500003') return { ok: false, error: '登录已失效（服务端不认这份凭证）' };
       if (String(code) !== '0') return { ok: false, error: `接口返回 code ${code}` };
       return { ok: true };
+    }
+
+    if (platform === 'netease') {
+      /*
+       * 最轻量的「需要登录」接口：/api/nuser/account/get。
+       * 已登录返回 { code:200, account:{...}, profile:{...} }；
+       * 未登录返回 { code:200, account:null, profile:null } —— 所以不能只看 code。
+       */
+      const response = await fetch('https://music.163.com/api/nuser/account/get', {
+        headers,
+        signal: controller.signal,
+      });
+      if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+      const json = await response.json().catch(() => null);
+      if (!json || typeof json !== 'object') return { ok: false, error: '网易云返回内容不是 JSON' };
+      if (Number(json.code) !== 200) return { ok: false, error: `接口返回 code ${json.code}` };
+      if (!json.account) return { ok: false, error: '还没读到账号信息（可能还没扫完码）' };
+      return { ok: true, nickname: String(json.profile?.nickname || '') };
     }
 
     if (platform === 'kuwo') {

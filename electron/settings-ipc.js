@@ -6,6 +6,8 @@ const fsp = require('node:fs/promises');
 const fs = require('node:fs');
 
 const { loadSecret, saveSecret } = require('./secret-store');
+// 主题包的 id 规则与配色白名单只有一份（theme-pack.js），这里直接复用，避免两边漂移
+const themePack = require('./theme-pack');
 
 
 /**
@@ -68,6 +70,8 @@ function installSettingsIpc(ctx) {
         'updateSnoozeVersion',
         'updateSnoozeUntil',
         'endfieldPackRoot',
+        // 终末地官方启动器（Games.exe）手填路径：自动发现找不到时的兜底（2026-11-23）
+        'endfieldOfficialGamesExe',
         'starwardDbPath',
         'runtimeRoot',
         'downloadDir',
@@ -88,6 +92,9 @@ function installSettingsIpc(ctx) {
         'musicCacheLimitMB',
         // 界面皮肤（2026-11-18）：不在白名单里会被快照回推抹掉
         'skin',
+        // 主题包（2026-11-20）：id + 这个包自带的配色（由 theme-pack-ipc 写入）
+        'themePack',
+        'themePackColors',
       ];
       for (const key of allowed) {
         if (!(key in patch)) continue;
@@ -103,6 +110,21 @@ function installSettingsIpc(ctx) {
           if (['classic', 'midnight', 'sakura', 'frost', 'amber', 'ocean', 'sunset', 'forest', 'mono', 'golden', 'arctic', 'rose', 'tech', 'garden', 'galaxy'].includes(patch.skin)) {
             settings.skin = patch.skin;
           }
+        } else if (key === 'themePack') {
+          // 只做形状校验（合法 id / builtin），「包到底存不存在」由 theme-pack-ipc 判定：
+          // 这里如果把不存在的包写进去，用户删了目录就会看到一片白图。
+          const id = String(patch.themePack || '').trim();
+          if (themePack.validId(id) || id === themePack.BUILTIN_ID) settings.themePack = id;
+        } else if (key === 'themePackColors') {
+          const raw = patch.themePackColors;
+          const next = {};
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            for (const colorKey of themePack.COLOR_KEYS) {
+              const value = themePack.safeColor(raw[colorKey]);
+              if (value) next[colorKey] = value;
+            }
+          }
+          settings.themePackColors = next;
         } else if (key === 'accent') {
           if (['spark', 'gold', 'sakura', 'cyan', 'rose', 'jade', 'violet', 'amber'].includes(patch.accent)) {
             settings.accent = patch.accent;
@@ -136,6 +158,11 @@ function installSettingsIpc(ctx) {
           const dir = String(patch.endfieldPackRoot || '').trim();
           if (dir && fs.existsSync(dir)) settings.endfieldPackRoot = dir;
           if (!dir) settings.endfieldPackRoot = '';
+        } else if (key === 'endfieldOfficialGamesExe') {
+          // 官方启动器路径：必须是真实存在的 Games.exe，或留空恢复自动发现
+          const exe = String(patch.endfieldOfficialGamesExe || '').trim();
+          if (exe && fs.existsSync(exe) && /Games\.exe$/i.test(exe)) settings.endfieldOfficialGamesExe = exe;
+          if (!exe) settings.endfieldOfficialGamesExe = '';
         } else if (key === 'starwardDbPath') {
           const dbPath = String(patch.starwardDbPath || '').trim();
           if (dbPath && fs.existsSync(dbPath)) settings.starwardDbPath = dbPath;
@@ -177,12 +204,12 @@ function installSettingsIpc(ctx) {
           settings.backgroundRotate = patch.backgroundRotate !== false;
         } else if (key === 'musicSources') {
           // 内置音源开关：只认下面这几个已知键，值只认布尔。
-          // 数组顺序就是换源优先级：洛雪 → 网易云 → 咪咕 → 酷我 → QQ。
+          // 2026-11-21 起第三方音源不再内置，不再接收第三方音源开关；
           // 酷狗已整条移除，老设置里遗留的 kugou 键在这里被丢掉，不再写回。
           const incoming = patch.musicSources;
           const next = {};
           if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
-            for (const name of ['lx', 'netease', 'migu', 'kuwo', 'qq']) {
+            for (const name of ['netease', 'migu', 'kuwo', 'qq', 'swap']) {
               if (typeof incoming[name] === 'boolean') next[name] = incoming[name];
             }
           }

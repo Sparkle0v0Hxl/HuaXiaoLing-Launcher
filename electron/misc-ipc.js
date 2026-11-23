@@ -467,9 +467,41 @@ function installMiscIpc(ctx) {
       return `avatars/${fileName}`;
     });
 
+    const OPENABLE_EXT_BLOCK = new Set(['.exe', '.bat', '.cmd', '.ps1', '.scr', '.com']);
+    function isInsideRoot(p, root) {
+      const rel = path.relative(root, p);
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    }
+    function openableRoots() {
+      const roots = new Set();
+      for (const d of updateLogDirs()) {
+        if (d) roots.add(path.resolve(String(d)));
+      }
+      const store = getStore();
+      const dl = store?.data?.settings?.downloadDir;
+      if (dl) roots.add(path.resolve(String(dl)));
+      const shotRoots = store?.data?.settings?.screenshotRoots;
+      if (shotRoots && typeof shotRoots === 'object') {
+        for (const arr of Object.values(shotRoots)) {
+          for (const d of Array.isArray(arr) ? arr : []) {
+            if (d) roots.add(path.resolve(String(d)));
+          }
+        }
+      }
+      for (const game of store?.data?.games || []) {
+        for (const server of game.servers || []) {
+          if (server.root) roots.add(path.resolve(String(server.root)));
+          if (server.path) roots.add(path.resolve(path.dirname(String(server.path))));
+        }
+      }
+      return [...roots];
+    }
     ipcMain.handle('shell:open-path', async (_event, target) => {
       if (!target || typeof target !== 'string') return false;
-      const error = await shell.openPath(target);
+      const resolved = path.resolve(target);
+      if (OPENABLE_EXT_BLOCK.has(path.extname(resolved).toLowerCase())) return false;
+      if (!openableRoots().some((root) => isInsideRoot(resolved, root))) return false;
+      const error = await shell.openPath(resolved);
       if (error) throw new Error(error);
       return true;
     });

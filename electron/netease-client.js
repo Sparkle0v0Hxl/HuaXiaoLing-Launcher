@@ -141,11 +141,20 @@ async function startNeteaseService(apiBase) {
     path.join(process.resourcesPath || '', 'netease-api'),
     path.join(app.getAppPath(), 'netease-api'),
   ];
+  // 候选必须「入口齐全 + node_modules 关键依赖齐全」才算可用：老用户 data 里
+  // 可能留着残缺副本（有 app.js 却没 node_modules），只按入口挑会抢占、探活
+  // 失败后 :166 直接抛错、不回退到随包的完整版，本地服务照样起不来。
+  const requiredDeps = [
+    'node_modules/axios/package.json',
+    'node_modules/express/package.json',
+  ];
   for (const dir of candidates) {
     const entry = ['app.js', 'server.js', 'index.js']
       .map((name) => path.join(dir, name))
       .find((file) => fs.existsSync(file));
     if (!entry) continue;
+    if (!requiredDeps.every((r) => fs.existsSync(path.join(dir, ...r.split('/'))))) continue;
+
     const port = new URL(base).port || '3000';
     neteaseServiceProcess = spawn(process.execPath, [entry], {
       cwd: dir,
@@ -229,7 +238,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   const wanted = allowed.has(String(level)) ? String(level) : 'exhigh';
   const ladder = [...new Set([wanted, 'exhigh', 'higher', 'standard'])];
   let trial = null;
-  // 音源开关：网易云被停用时，原生直链和 unblock 换源都不走，只留跨平台兜底
+  // 音源开关：网易云被停用时，原生直链和同名曲换源都不走，只留跨平台兜底
   const flags = meta.flags || currentMusicSourceFlags();
   const neteaseAllowed = flags.netease !== false;
 
@@ -246,7 +255,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     }
     const item = json?.data?.[0];
     if (!item?.url) continue;
-    // unblock 可能把地址换成被停用平台的直链，撞上就当这条音质没拿到
+    // 换源可能把地址换成被停用平台的直链，撞上就当这条音质没拿到
     if (disabledSourceOfUrl(item.url, flags)) continue;
     const payload = {
       url: String(item.url),
@@ -263,11 +272,11 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     return payload;
   }
 
-  // 2) 换源：拿到完整音源就不必再降级（match 结果同样按开关过滤）
-  if (neteaseAllowed) {
+  // 2) 换源：默认不走，用户明确打开「同名换源」后才调用（结果同样按开关过滤）
+  if (neteaseAllowed && flags.swap === true) {
     const matched = await neteaseMatchUrl(apiBase, id);
     if (matched && !disabledSourceOfUrl(matched, flags)) {
-      return { url: matched, level: 'standard', br: 0, size: 0, type: 'flac', unblocked: true };
+      return { url: matched, level: 'standard', br: 0, size: 0, type: 'flac', swapped: true };
     }
   }
 

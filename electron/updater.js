@@ -26,10 +26,15 @@
  *   → 脚本等进程退出、逐项备份并覆盖、重新拉起
  *   → 升级后 45 秒内连续起不来就自动还原备份和旧版自检脚本
  *
- * 覆盖范围刻意写死成白名单：程序本体（exe、dll、pak、locales…）和 resources/app。
- * data / downloads / netease-api / endfield-packs 一律不碰——那是账号、抽卡、
- * 歌单、游戏和渠道包，覆盖了就是数据事故。白名单比对用的是「ZIP 里有什么」，
+ * 覆盖范围刻意写死成白名单：程序本体（exe、dll、pak、locales…）、resources/app
+ * 和随程序发布的内置服务 resources/netease-api。
+ * data / downloads / endfield-packs 一律不碰——那是账号、抽卡、歌单、游戏和渠道包，
+ * 覆盖了就是数据事故。白名单比对用的是「ZIP 里有什么」，
  * 而不是相信 robocopy 的镜像语义，所以旧版本残留的 .bak / 临时文件也不会被误删。
+ *
+ * netease-api 从「受保护」里移出（2.12.8）：它是纯代码的内置服务，用户账号态在
+ * userData/Partitions 而非这个目录。2.12.7 曾把它当「用户数据」保护，结果老用户
+ * 自更新时新包里补全的 node_modules 被跳过、二维码服务起不来。它必须随更新覆盖。
  */
 
 const fs = require('node:fs');
@@ -106,7 +111,8 @@ const MIN_DOWNLOAD_SPEED = 120 * 1024;
 /** 覆盖时永远不碰的东西：用户数据、内置服务、游戏渠道包。 */
 const PROTECTED_ROOT = new Set(['data', 'downloads']);
 const PROTECTED_CHILD = new Set([
-  'resources/netease-api',
+  // netease-api 已于 2.12.8 移出：随程序发布的内置服务，必须随更新覆盖，
+  // 否则老用户更新后依旧缺 node_modules、二维码出不来（见 updater.js 顶部注释）。
   'resources/endfield-packs',
   'resources/app/node_modules',
 ]);
@@ -189,6 +195,8 @@ async function fetchText(location, timeout = DEFAULT_TIMEOUT) {
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await httpFetch(location, {
+        // T5：清单获取强制校验证书，不允许降级到不校验的通道
+        insecure: false,
         signal: controller.signal,
         // 有的静态站点（对象存储、CDN）不认 Electron 的 UA，直接 403
         headers: {
@@ -470,6 +478,8 @@ async function downloadSingle({ url, dest, expectedSize, report }) {
     const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT);
     try {
       const response = await httpFetch(url, {
+        // T5：更新包下载强制校验证书，不允许降级
+        insecure: false,
         signal: controller.signal,
         headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
       });
@@ -665,6 +675,8 @@ async function probeSource(url, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await httpFetch(url, {
+      // T5：探测同样强制校验证书，避免「探测通了、下载却不校验」的错配
+      insecure: false,
       signal: controller.signal,
       headers: { 'user-agent': BROWSER_UA, accept: '*/*', range: `bytes=0-${PROBE_BYTES - 1}` },
     });
@@ -1465,6 +1477,10 @@ function isProtected(rel) {
   for (const guarded of PROTECTED_CHILD) {
     if (norm === guarded || norm.startsWith(`${guarded}/`)) return true;
   }
+  // 网易云服务的 deviceid.txt 是遗留的「设备 ID 池」数据文件，服务并不读取它；
+  // 精确保护它只是避免误删/误覆盖，绝不整目录保护——netease-api 其余文件，
+  // 尤其 node_modules，必须随更新覆盖。
+  if (norm === 'resources/netease-api/data/deviceid.txt') return true;
   // 用户自己留的备份、临时文件、编辑器存档
   if (/\.bak(-\S+)?$/i.test(norm)) return true;
   if (/\.(tmp|temp|part|download|crdownload)$/i.test(norm)) return true;

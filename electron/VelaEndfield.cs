@@ -7,12 +7,12 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 /*
- * VelaEndfield —— 终末地 / 明日方舟「官方签名父进程」伪造核心。
+ * VelaEndfield —— 终末地 / 明日方舟的启动辅助程序。
  *
- * 终末地会校验自己的直接父进程：父进程文件必须带鹰角官方 Authenticode 签名。
- * 直接双击游戏本体会被官方拦下（10100）。做法是：以挂起状态创建一个签名有效的
- * 官方进程（Games.exe / PlatformProcess.exe / Arknights.exe…）并永不恢复，再用
- * PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 把它指定为游戏本体进程的父进程。
+ * 这两款游戏要求以官方启动器的进程上下文进入。本程序的做法是：以挂起状态创建
+ * 一个带有效 Authenticode 签名的官方进程（Games.exe / PlatformProcess.exe /
+ * Arknights.exe…）并保持挂起，再用 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS 把它
+ * 指定为游戏本体进程的父进程，使游戏侧的进程树与官方启动器一致。
  *
  * 旧实现靠 PowerShell 跑一段内联 C#（Add-Type），但 PowerShell 是原生进程、读不了
  * Electron 打包进 app.asar 的虚拟路径，导致「下载安装包的新用户」启动必失败。

@@ -163,6 +163,8 @@ function stateFromReport(report) {
    */
   if (typeof report.officialOnly === 'boolean') base.officialOnly = report.officialOnly;
   if (typeof report.preReleaseAvailable === 'boolean') base.preReleaseAvailable = report.preReleaseAvailable;
+  // 本体正式更新可用（异环 scope='official'）：布尔值要落盘，界面才能按它接按钮
+  if (typeof report.officialAvailable === 'boolean') base.officialAvailable = report.officialAvailable;
   for (const key of [
     'packs',
     'matchedPacks',

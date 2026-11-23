@@ -18,7 +18,7 @@
  *   - A/B 实测：同一个父进程（PowerShell Start-Process）、同一个 exe，
  *     不带参数 → 进程退出；带 `-krqlv=hd` → 进程存活。
  *   - 对照参考项目 Haiyu（_haiyu/BundleGameResourceProvider.Launch.cs）也是直接 spawn
- *     本体 + 拼 `-krqlv=<hd|sd|uhd>`（外加可选的 `-krpkg=<type>`），并不伪造父进程。
+ *     本体 + 拼 `-krqlv=<hd|sd|uhd>`（外加可选的 `-krpkg=<type>`），也不介入父进程。
  *
  * 画质档位从哪来：客户端根目录的 `launcherDownloadConfig.json` 里 `bundles` 的键。
  * 官服 `{"appId":"10003",...,"bundles":{"HD":{...}}}`、B服 `{"appId":"10004",...,"bundles":{"HD":{...}}}`，

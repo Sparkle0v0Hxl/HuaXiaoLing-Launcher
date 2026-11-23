@@ -799,6 +799,76 @@ async function copyTree(sourceRoot, targetRoot) {
   }
 }
 
+/**
+ * 把旧运行时里「仍与别处共享 inode 的可写状态文件」断链成独立拷贝。
+ *
+ * 2026-11-22 用户反馈：只有游戏内闪断更新之后，切服才会一直报「文件缺失或损坏」，
+ * 而且 B 服热更后切官服坏、再切回 B 服也坏。现场规律是：本机每个服都会各自弹一次
+ * 闪断更新（Persistent 下 index_main.json / pref_*.json / VFS\*.blc 的 nlink=1），
+ * 出问题的机器上这些索引仍是老版本运行时留下的硬链接。
+ *
+ * 闪断更新对这批索引是**同 inode 原地写**（2026-11-07 事故已确认），硬链接状态下
+ * 一次热更会把所有渠道的索引一起写成新版本；别的渠道并没有下载对应的 .chk，
+ * 于是「索引说有 181 个，实际只有 137 个」→ 一直判缺失，且再下再写还是共享文件。
+ *
+ * .chk 不动：热更落地走 rename（2026-11-08 HGDownloadLog 一手证据），替换后只是
+ * 换 inode，另一侧不受影响；66GB 继续硬链接。
+ *
+ * 每次启动前跑一遍，健康树是 0 次拷贝，老树会一次性修好。
+ */
+async function breakSharedPersistentState(runRoot, options = {}) {
+  const root = path.join(runRoot, 'Endfield_Data', 'Persistent');
+  const result = { checked: 0, broke: 0, failed: 0, bytes: 0 };
+  try {
+    if (!(await fsp.stat(root)).isDirectory()) return result;
+  } catch {
+    return result;
+  }
+
+  async function walk(dir) {
+    let items;
+    try {
+      items = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const it of items) {
+      const full = path.join(dir, it.name);
+      if (it.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (/\.chk$/i.test(it.name)) continue;
+      result.checked += 1;
+      let st;
+      try {
+        st = await fsp.stat(full);
+      } catch {
+        continue;
+      }
+      if (st.nlink <= 1) continue;
+      const tmp = `${full}.vela-deshed`;
+      try {
+        // 先写到新 inode，再 rename 覆盖：copyFile 直接写已有硬链接会顺着 inode 写穿
+        await fsp.copyFile(full, tmp);
+        await fsp.utimes(tmp, st.atime, st.mtime);
+        await fsp.rename(tmp, full);
+        result.broke += 1;
+        result.bytes += st.size;
+      } catch (error) {
+        result.failed += 1;
+        try {
+          await fsp.rm(tmp, { force: true });
+        } catch {}
+        if (typeof options.onError === 'function') options.onError(full, error);
+      }
+    }
+  }
+
+  await walk(root);
+  return result;
+}
+
 module.exports = {
   prepareLinkedRuntime,
   walkFiles,
@@ -810,4 +880,6 @@ module.exports = {
   // 建单工作目录（以及基线刷新）时判断「拷贝还是硬链接」。
   mustCopyNotLink,
   isMutableIndexFile,
+  // 闪断更新前修复老树：Persistent 下仍共享 inode 的非 .chk 状态文件断链。
+  breakSharedPersistentState,
 };

@@ -51,7 +51,7 @@ function buildBody(VER, m) {
     '',
     '### 这一版改了什么',
     '',
-    ...String(m.notes || '').split('\n').filter(Boolean).map(l => `- ${l}`),
+    ...Array.isArray(m.notes) ? m.notes.map((s) => String(s).trim()).filter(Boolean) : String(m.notes || '').split('\n').map((s) => s.trim()).filter(Boolean).map(l => `- ${l}`),
     '',
     '### 下载',
     `- 安装版：\`HuaXiaoLing-${VER}-Setup.exe\`（向导安装，推荐）`,

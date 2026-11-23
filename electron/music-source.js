@@ -6,9 +6,10 @@
  * 背景（实测结论，2026-10）：
  * - 酷我 antiserver 免登录就能换出可流式播放的 MP3（连 VIP 曲目都有）；
  * - QQ 音乐匿名 CgiGetVkey 只有免费曲目给 purl，会员曲目 result=104003；
- * - 网易云走本地 NeteaseCloudMusicApi，unblock 能补一部分。
+ * - 网易云走本地 NeteaseCloudMusicApi，同名曲换源能补一部分。
  *
- * 解析顺序（2026-11 起）：洛雪 → 网易 → 咪咕 → 酷我 → QQ，最后是用户自建音源。
+ * 解析顺序（2026-11-21 起）：用户自建音源 → 网易 → 咪咕 → 酷我 → QQ。
+ * 第三方音源不再内置：只认用户导入的脚本，老设置里那个开关一律忽略。
  * 酷狗音源已彻底停用（换链接口只给会员曲目，跑一次纯拖慢整轮）。
  *
  * 但「拿到地址」不等于「地址能放」：各家的换链接口经常回错误页、失效 CDN、
@@ -20,22 +21,22 @@
 const { probeAudioUrl } = require('./audio-probe');
 
 /*
- * 洛雪（lx-music）音源是可选的：它要用户本机跑一个洛雪运行时才有东西可查。
- * 运行时不在时 lx-source 仍然能被 require（内部自己会报错），但万一整份文件都
+ * 第三方音源脚本是可选的：只有用户导入脚本后才有东西可查。
+ * 运行时不在时脚本模块仍然能被 require（内部自己会报错），但万一整份文件都
  * 还没就位，这里也不能把整个点歌台带崩，所以用 try/catch 兜住。
  */
 let lxSource = null;
 try {
   lxSource = require('./lx-source');
 } catch {
-  /* 洛雪运行时还没就位时忽略 */
+  /* 脚本运行时还没就位时忽略 */
 }
 
 /**
- * 音源优先级（左边最优先）。洛雪是聚合源，命中率最高所以排第一；
- * 酷狗已删除，不在表里。自定义音源不在此表内，排在所有内置源之后。
+ * 内置音源优先级（左边最优先）。酷狗已删除，不在表里。
+ * 用户自己导入的音源（JSON 描述 / 脚本）不在这张表里：priorityRank 用 custom 标记恒定排最前。
  */
-const SOURCE_PRIORITY = ['lx', 'netease', 'migu', 'kuwo', 'qq'];
+const SOURCE_PRIORITY = ['netease', 'migu', 'kuwo', 'qq'];
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -474,7 +475,7 @@ async function neteaseUrlById(apiBase, id, level, flags) {
         { headers: jsonHeaders, timeout: 12000 }
       );
       const info = json?.data?.[0];
-      // unblock 可能把地址换成别的平台的直链，撞上停用的音源不算拿到
+      // 换源可能把地址换成别的平台的直链，撞上停用的音源不算拿到
       if (info?.url && !info.freeTrialInfo && !disabledSourceOfUrl(info.url, flags)) {
         return {
           url: httpsify(info.url),
@@ -491,8 +492,9 @@ async function neteaseUrlById(apiBase, id, level, flags) {
     }
   }
 
-  // 换源：保证能完整听（match 内部按酷我等平台匹配，这里按开关过滤）
+  // 换源：默认不走。用户明确打开「同名换源」后才调用 match（内部按开关过滤）
   try {
+    if (!swapAllowed(flags)) throw new Error('未开启同名换源');
     const match = await fetchJson(`${base}/song/url/match?id=${encodeURIComponent(id)}`, {
       headers: jsonHeaders,
       timeout: 12000,
@@ -504,7 +506,7 @@ async function neteaseUrlById(apiBase, id, level, flags) {
         br: 0,
         source: 'netease',
         neteaseId: String(id),
-        unblocked: true,
+        swapped: true,
         via: 'match',
       };
     }
@@ -682,11 +684,17 @@ const RESOLVE_RACE_TIMEOUT = 12000;
  *   酷我    搜索✓ 换链✓  ← 唯一整条链路可用的
  *   QQ音乐  搜索✓ 换链✗ 匿名 vkey 服务端不出文件
  *
- * 所以默认开 洛雪 + 网易云 + 咪咕 + 酷我：前三个留着，用户哪天把本地服务架起来、
- * 洛雪运行时起来、或咪咕接口恢复，就自动多三条路；酷我是当下真正能出声音的那条。
+ * 所以默认开 网易云 + 咪咕 + 酷我：用户哪天把本地服务架起来、或咪咕接口恢复，
+ * 就自动多两条路；酷我是当下真正能出声音的那条。
  * QQ 仍默认关闭（实测换链不通，开了只会拖慢整轮）；酷狗已从音源表里删除。
+ * 第三方音源脚本不在默认值里：用户导入后由 resolveSourceUrl 单独挂进当轮解析。
  */
-const DEFAULT_SOURCE_FLAGS = { lx: true, netease: true, migu: true, kuwo: true, qq: false, kugou: true };
+/*
+ * 2026-11-21：第三方音源脚本彻底从内置音源表里移除。
+ * 安装包和源码都不带任何脚本，默认值里也不再保留第三方音源键；
+ * 用户在「音源」卡导入脚本后，由 resolveSourceUrl 单独把它挂进本轮解析。
+ */
+const DEFAULT_SOURCE_FLAGS = { netease: true, migu: true, kuwo: true, qq: false, kugou: true, swap: false };
 
 /**
  * 上一版默认值。只用来判断「用户是不是从来没动过音源开关」——
@@ -697,6 +705,17 @@ const DEFAULT_SOURCE_FLAGS = { lx: true, netease: true, migu: true, kuwo: true, 
  * normalizeSourceFlags 也会直接忽略它，不再影响迁移判定。
  */
 const LEGACY_DEFAULT_SOURCE_FLAGS = { netease: true, migu: true, kuwo: false, qq: false };
+
+/**
+ * 「同名曲换源」是否允许。
+ *
+ * 2026-11-20（风险整改 T2-B）：这条路径会把别的平台上的同名曲地址拿过来用，
+ * 属于「换源」，默认关闭。用户需要时在音源卡里自己打开 swap 开关。
+ * 默认关闭时：/song/url/match 一律不调用，只走各家自己的公开直链。
+ */
+function swapAllowed(flags) {
+  return Boolean(flags && flags.swap === true);
+}
 
 function normalizeSourceFlags(input) {
   if (!input || typeof input !== 'object') return null;
@@ -726,8 +745,8 @@ function migrateLegacySourceFlags(input) {
 }
 
 /*
- * 各音源返回的播放地址的宿主特征。网易云 API 的 unblock（/song/url/v1、
- * /song/url/match）会在服务端偷偷换成别的平台的直链（酷我优先），返回里
+ * 各音源返回的播放地址的宿主特征。网易云 API 的换源接口（/song/url/v1、
+ * /song/url/match）返回的地址可能来自别的平台（酷我优先），而返回里
  * 只标 source: 'netease'——这是「酷我停用了还在用酷我」的隐藏通道。
  * 用 URL 宿主反查它真正来自哪家，撞上被停用的音源就当这次尝试失败。
  */
@@ -833,7 +852,8 @@ function settleAllTasks(tasks, timeout = RESOLVE_RACE_TIMEOUT) {
         .then(
           (result) => {
             if (done) return;
-            ok.push({ id: String(task.id), result });
+            // custom / label 要跟着结果回传：自定义音源要排在内置源前面，还要用它的名字做标签
+            ok.push({ id: String(task.id), result, custom: task.custom, label: task.label });
             armGrace();
           },
           (error) => {
@@ -848,9 +868,15 @@ function settleAllTasks(tasks, timeout = RESOLVE_RACE_TIMEOUT) {
   });
 }
 
-/** 音源优先级名次；不在 SOURCE_PRIORITY 里的（比如自定义音源）统一排最后。 */
-function priorityRank(id) {
-  const index = SOURCE_PRIORITY.indexOf(String(id));
+/**
+ * 音源优先级名次（越小越优先）。
+ *
+ * 2026-11-21 用户要求：自己导入的音源排第一，然后才是内置源。
+ * 自定义音源没有固定 id，统一用 custom 标记判在第一档；同档之间保持导入顺序。
+ */
+function priorityRank(candidate) {
+  if (candidate.custom) return -1;
+  const index = SOURCE_PRIORITY.indexOf(String(candidate.id));
   return index < 0 ? SOURCE_PRIORITY.length : index;
 }
 
@@ -883,21 +909,20 @@ async function probeAndPickBest(tasks, timeout = RESOLVE_RACE_TIMEOUT) {
       continue;
     }
     /*
-     * 已删除音源（酷狗）的地址一律不认：网易云 unblock 会在服务端把结果换成
-     * 别家直链、却仍标 source:'netease'，不按宿主拦一道就可能「说删了还在用」。
+     * 已停用音源的地址一律不认：网易云的换源接口可能返回别家直链、却仍标
+     * source:'netease'，不按宿主拦一道就可能「说停用了还在用」。
      *
-     * 洛雪例外：它本身就是聚合源，返回的 CDN 宿主不代表「我们又接回了酷狗音源」，
-     * 拦掉只会把洛雪能放的歌误杀。要停用的是酷狗那个换链接口，不是它家 CDN 上的
-     * 音频文件。
+     * 自定义音源例外：它是用户自己导入的，本来就常拿别家 CDN 当播放地址，
+     * 按宿主拦会把用户刚导入的音源全部误杀（表现为「导入的音源识别不到」）。
      */
-    const blocked = id === 'lx' ? '' : blockedSourceOfUrl(url);
+    const blocked = item.custom ? '' : blockedSourceOfUrl(url);
     if (blocked) {
       errors.push(`${id}：地址来自已停用的音源（${blocked}），已丢弃`);
       continue;
     }
     if (seen.has(url)) continue;
     seen.add(url);
-    candidates.push({ id, result });
+    candidates.push({ id, result, custom: Boolean(item.custom), label: item.label });
   }
   if (!candidates.length) {
     throw new Error(errors.join('；') || '所有音源都没有给出播放地址');
@@ -915,7 +940,7 @@ async function probeAndPickBest(tasks, timeout = RESOLVE_RACE_TIMEOUT) {
   // 排序用下标而不是 Array.prototype.sort：自定义音源之间要保持原有的先后顺序
   const order = candidates
     .map((candidate, index) => ({ candidate, probe: probes[index], index }))
-    .sort((a, b) => priorityRank(a.candidate.id) - priorityRank(b.candidate.id) || a.index - b.index);
+    .sort((a, b) => priorityRank(a.candidate) - priorityRank(b.candidate) || a.index - b.index);
 
   const hit = order.find((item) => item.probe?.ok);
   if (hit) {
@@ -966,23 +991,33 @@ async function resolveSourceUrl(song, options = {}) {
   }
 
   const tasks = [];
-  const push = (id, run) => {
-    // 只有明确关掉的才跳过：没出现在 flags 里的 id（洛雪、自定义音源）视为允许
+  const push = (id, run, meta) => {
+    // 只有明确关掉的才跳过：没出现在 flags 里的 id（导入的音源）视为允许
     if (flags[id] === false) return;
-    tasks.push({ id, run });
+    tasks.push(Object.assign({ id, run }, meta || {}));
   };
 
-  // ⓪ 洛雪：聚合源，命中率最高，排在最前面（优先级靠 probeAndPickBest 决定，
-  //    这里先跑起来只是为了和别家并发，不让它拖长整轮时间）
-  if (lxSource && typeof lxSource.resolveViaLx === 'function') {
-    push('lx', () =>
-      lxSource.resolveViaLx(song, {
-        quality:
-          typeof lxSource.qualityFromLevel === 'function'
-            ? lxSource.qualityFromLevel(level)
-            : '320k',
-        timeout: 12000,
-      })
+  // ⓪ 用户导入的第三方音源脚本（用户数据目录下的脚本目录）：
+  //    源码和安装包都不带脚本，目录里有已就绪的才参与，没有就完全跳过。
+  let importedScripts = [];
+  try {
+    const info = typeof lxSource?.lxSourceInfo === 'function' ? lxSource.lxSourceInfo() : null;
+    importedScripts = (info && Array.isArray(info.scripts) ? info.scripts : []).filter((item) => item.ready);
+  } catch {
+    importedScripts = [];
+  }
+  if (importedScripts.length) {
+    push(
+      'imported',
+      () =>
+        lxSource.resolveViaLx(song, {
+          quality:
+            typeof lxSource.qualityFromLevel === 'function'
+              ? lxSource.qualityFromLevel(level)
+              : '320k',
+          timeout: 12000,
+        }),
+      { custom: true, label: importedScripts.map((item) => item.name).join('、') }
     );
   }
 
@@ -1014,7 +1049,7 @@ async function resolveSourceUrl(song, options = {}) {
     push('kugou', async () => ({ ...(await kugouSongUrl(song.hash)), matched: '原生' }));
   }
 
-  // ② 同名换源：所有启用的音源并发跑（洛雪已在 ⓪，酷狗已删除）
+  // ② 同名换源：所有启用的音源并发跑（导入的脚本已在 ⓪，酷狗已删除）
   if (keyword) {
     for (const id of ['netease', 'migu', 'kuwo', 'qq']) {
       const provider = KEYWORD_PROVIDERS[id];
@@ -1022,43 +1057,45 @@ async function resolveSourceUrl(song, options = {}) {
       push(id, () => byKeyword(provider, keyword, song, { apiBase, level, flags }));
     }
 
-    // ③ 用户在点歌台里自己导入的第三方音源
+    // ③ 用户在点歌台里自己导入的第三方音源：全部参与，并标记 custom 让它排第一
     const customs = Array.isArray(options.customSources) ? options.customSources : [];
     for (const def of customs) {
       if (!def || def.enabled === false) continue;
       if (!validateCustomSource(def).ok) continue;
       const provider = makeCustomProvider(def);
-      push(def.id || def.name, () => byKeyword(provider, keyword, song, {}));
+      push(def.id || def.name, () => byKeyword(provider, keyword, song, {}), {
+        custom: true,
+        label: String(def.name || def.id || '自建音源'),
+      });
     }
   }
 
   if (!tasks.length) throw new Error('没有可用的音源（设置里至少要开一个）');
 
   /*
-   * 洛雪绝对优先，不管这首歌是哪个平台的：先只让洛雪跑（它内部自己并发
-   * 7 个脚本、谁先交回能放的地址就用谁），拿到探测通过的地址就直接用；
-   * 洛雪整轮失败（没地址 / 探测全挂）才轮到网易云、咪咕、酷我、QQ。
+   * 导入的第三方音源脚本优先，不管这首歌是哪个平台的：先只让脚本跑
+   * （运行时内部自己并发多个脚本、谁先交回能放的地址就用谁），拿到探测通过的地址就直接用；
+   * 脚本整轮失败（没地址 / 探测全挂）才轮到网易云、咪咕、酷我、QQ。
    *
-   * 以前是所有源一起赛跑再按 SOURCE_PRIORITY 挑：洛雪要是慢过 3 秒汇总
-   * 窗口就被这一轮切掉，结果落回别家，表现为「装了洛雪却老放别家的链」。
-   * 两阶段的代价是洛雪失败时要多等一轮，但它是聚合源、实测零点几秒出链，
-   * 这个代价远小于「该用洛雪时没用上」。
+   * 以前是所有源一起赛跑再按 SOURCE_PRIORITY 挑：脚本要是慢过 3 秒汇总
+   * 窗口就被这一轮切掉，结果落回别家。两阶段的代价是脚本失败时要多等一轮，
+   * 但脚本实测零点几秒出链，这个代价远小于「导入了却老放别家的链」。
    */
-  const lxTasks = tasks.filter((task) => task.id === 'lx');
-  const restTasks = tasks.filter((task) => task.id !== 'lx');
-  let lxError = null;
-  let lxUnproven = null;
-  if (lxTasks.length) {
+  const importedTasks = tasks.filter((task) => task.id === 'imported');
+  const restTasks = tasks.filter((task) => task.id !== 'imported');
+  let importedError = null;
+  let importedUnproven = null;
+  if (importedTasks.length) {
     try {
-      const lxWinner = await probeAndPickBest(lxTasks);
-      if (!lxWinner.probeFailed) {
-        RESOLVE_CACHE.set(key, { at: now, result: lxWinner });
-        return lxWinner;
+      const importedWinner = await probeAndPickBest(importedTasks);
+      if (!importedWinner.probeFailed) {
+        RESOLVE_CACHE.set(key, { at: now, result: importedWinner });
+        return importedWinner;
       }
-      // 洛雪给了地址但探测没过：先别急着交出去，看看别家有没有能放的
-      lxUnproven = lxWinner;
+      // 脚本给了地址但探测没过：先别急着交出去，看看别家有没有能放的
+      importedUnproven = importedWinner;
     } catch (error) {
-      lxError = error;
+      importedError = error;
     }
   }
 
@@ -1069,24 +1106,24 @@ async function resolveSourceUrl(song, options = {}) {
         RESOLVE_CACHE.set(key, { at: now, result: winner });
         return winner;
       }
-      // 别家也只给了探测没过的地址：优先交还洛雪那条（用户点名洛雪优先）
-      if (lxUnproven) {
-        return { ...lxUnproven, probeFailed: true, reason: '洛雪地址探测未通过，其它音源也未通过探测' };
+      // 别家也只给了探测没过的地址：优先交还脚本那条（用户导入的优先）
+      if (importedUnproven) {
+        return { ...importedUnproven, probeFailed: true, reason: '导入的音源地址探测未通过，其它音源也未通过探测' };
       }
       return winner;
     } catch (error) {
-      if (lxUnproven) {
-        return { ...lxUnproven, probeFailed: true, reason: `洛雪地址探测未通过；其它音源：${error.message}` };
+      if (importedUnproven) {
+        return { ...importedUnproven, probeFailed: true, reason: `导入的音源地址探测未通过；其它音源：${error.message}` };
       }
       RESOLVE_FAIL.set(key, now);
-      throw lxError && !restTasks.length ? lxError : error;
+      throw importedError && !restTasks.length ? importedError : error;
     }
   }
 
-  // 只配了洛雪一个源
-  if (lxUnproven) return lxUnproven;
+  // 只配了导入的音源脚本
+  if (importedUnproven) return importedUnproven;
   RESOLVE_FAIL.set(key, now);
-  throw lxError || new Error('所有音源都没有给出播放地址');
+  throw importedError || new Error('所有音源都没有给出播放地址');
 }
 
 /** 手动清掉换源缓存（设置里改了音源开关时调用）。 */
@@ -1158,6 +1195,7 @@ module.exports = {
   makeCustomProvider,
   validateCustomSource,
   normalizeSourceFlags,
+  swapAllowed,
   migrateLegacySourceFlags,
   DEFAULT_SOURCE_FLAGS,
   SOURCE_PRIORITY,
