@@ -852,7 +852,7 @@ function installMusicIpc(ctx) {
             redirect: 'follow',
             headers: {
               accept: 'application/json, text/plain, */*',
-              'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) HuaXiaolingLauncher/2.12.7',
+              'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) HuaXiaolingLauncher/2.13.0',
             },
           });
           if (!response.ok) return { ok: false, reason: `下载失败：HTTP ${response.status}` };

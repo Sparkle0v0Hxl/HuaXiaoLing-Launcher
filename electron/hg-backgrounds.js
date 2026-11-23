@@ -21,7 +21,7 @@ const crypto = require('node:crypto');
 const { httpFetch } = require('./http-fetch');
 
 const LATEST_PAGE = 'https://ef-webview.hypergryph.com/version_briefing/latest';
-const UA = 'HuaXiaoLingLauncher/2.7.1';
+const UA = 'HuaXiaoLingLauncher/2.13.0';
 
 const MEMO_MS = 10 * 60 * 1000;
 let listMemo = { at: 0, value: [] };
