@@ -18,15 +18,15 @@
       "from": "2.12.7",
       "to": "2.13.0",
       "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.13.0/delta-2.12.7-to-2.13.0.zip",
-      "sha256": "97a8b5554c61a9d474bd7849ec15a2a1e73d35641cb4a492ecbb6dfdc4a35590",
-      "size": 4783540
+      "sha256": "7df39a6e342cc27b2c21d0106a61adbce436bb4ba9ffd368d5bf0fdfb6a4aa36",
+      "size": 4783604
     }
   ],
-  "sha256": "726df02eb064f91f04a1e3ea0a32546641da3a440c94438ae30ea0996e9c116f",
-  "size": 211880035,
+  "sha256": "67c4da00039cda991ea90a933cf9d7a5fd5b60288644ff7b855af5f471e995b6",
+  "size": 211880580,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "TY+hfW9V88GGNIWXzhJYqXE3ZGG4rzndl7NnKPDbGAFeFWoNusw3zlSP4Ue51vhV1ot/mr26uMWPFaiLKRpjDw=="
+    "value": "GcZ6DLSwDGIh6wp87hIbSumeC++kR98XBeiQ8Lq2jUAbDlqucbrVYM4+nc+MFGy93Sd6PBTSfT6CamzsbAjfDg=="
   }
 }
