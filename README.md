@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.13.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.13.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -18,7 +18,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.13.0**（正式版）
+**当前版本：v2.13.1**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -126,7 +126,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.13.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.13.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -203,7 +203,23 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.13.0 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.13.1 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.13.1</b></summary>
+
+B服生成后显示目录丢失、硬链接报 PowerShell 找不到、增量更新看着没变化、完整包下完卡住不重启 —— 这一版把这些都按根因修掉了。
+
+- 这版没有新功能，全部是照着用户反馈的现场问题改的根因。
+- B服生成完显示「目录已不在」：之前判断目录在不在用的是「是不是文件」这个判据，目录永远被判成不存在。现在目录存活性单独判据，只有真删了才提示。
+- B服生成完显示「客户端不完整」：生成流程是「链文件 → 装渠道 SDK → 写 config.ini」，中间 SDK 装失败时 config.ini 还停在官服版，于是被判成渠道不对。现在生成成功时会明确写下渠道状态，不再依赖读配置文件倒推。
+- 硬链接过程报 spawn powershell.exe ENOENT：解压 B服渠道 SDK 要调 PowerShell，之前直接写名字靠 PATH 找。有些机器 PATH 被安全软件改坏后就找不到，整个生成流程会卡在这一步。现在改成先按系统目录定位绝对路径，找不到才退回按名字找。
+- 增量更新看着没效果：增量包里一直带着「这版删掉了哪些文件」的清单，但覆盖脚本从来没读过它 —— 于是升级完旧音源脚本、二维码登录模块、qrcode 依赖全都留在原地，界面行为跟新版对不上。现在覆盖完会按清单清理，并顺手收掉留下的空目录。
+- 完整包下完卡住不重启：覆盖脚本最多等主进程 60 秒，而主进程原来只发一次退出请求，被托盘或杀软扫描拖住就干等。现在退出请求发出 3 秒后强制退一次，保证覆盖脚本能接手。
+- 另外把「网易云服务依赖自愈」补进了覆盖脚本：音乐页要用的 axios / express 被删掉时，升级时会自动补回来，不用重装。
+
+</details>
+
 
 <details>
 <summary><b>v2.13.0</b></summary>

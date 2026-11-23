@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
+const { powershellExe } = require('./ps-path');
 
 const endfieldLaunch = require('./endfield-launch');
 
@@ -709,16 +710,10 @@ function spawnOfficialLauncher(exe, uuid, port, elevated) {
     return { ok: false, error: `写启动脚本失败：${error.message}` };
   }
 
-  const powershell = path.join(
-    process.env.SystemRoot || 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  );
+  const powershell = powershellExe();
   try {
     const child = spawn(
-      fs.existsSync(powershell) ? powershell : 'powershell.exe',
+      powershell,
       [
         '-NoProfile',
         '-NonInteractive',

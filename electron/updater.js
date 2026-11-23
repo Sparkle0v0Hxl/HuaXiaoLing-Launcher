@@ -43,6 +43,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { spawn, execFile } = require('node:child_process');
+const { powershellExe } = require('./ps-path');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const { multiDownload } = require('./multi-download');
@@ -885,7 +886,7 @@ function sha256File(file) {
 function runPowerShell(script, timeoutMs = 10 * 60 * 1000) {
   return new Promise((resolve, reject) => {
     const child = spawn(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
       { windowsHide: true, stdio: 'ignore' }
     );
@@ -1788,21 +1789,14 @@ async function readUpdateError(file) {
 }
 
 /**
- * 用绝对路径找 PowerShell。
- * 走 PATH 的 'powershell.exe' 在某些机器上会失败（PATH 被改过、只装了 pwsh），
- * 这类失败在 detached + stdio:'ignore' 下完全静默，正是更新「卡在 100%」的来源之一。
+ * PowerShell 的绝对路径。
+ *
+ * 定位逻辑统一在 ./ps-path（SystemRoot 绝对路径，Sysnative 兜底）。走 PATH 的裸名字
+ * 在某些机器上会失败（PATH 被改过、只装了 pwsh），而这类失败在 detached +
+ * stdio:'ignore' 下完全静默 —— 正是「更新卡在 100%」的来源之一。
  */
 function powershellCommand() {
-  if (process.platform !== 'win32') return 'powershell.exe';
-  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-  const candidates = [
-    path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    path.join(root, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return 'powershell.exe';
+  return powershellExe();
 }
 
 /**
@@ -1844,6 +1838,14 @@ function buildApplyMeta(staged) {
     staging: staged.tempRoot || '',
     installer,
     applyJs,
+    /*
+     * 增量包独有的「删掉这些文件」清单（build-delta.js 写的 removed）。
+     *
+     * 从 2.10 起 delta.json 一直带着它，但覆盖脚本从来没读过 —— 于是每次增量升级
+     * 都只增不减，被淘汰的音源脚本、旧 qrcode 依赖会一直留在用户目录里。
+     * 现在原样交给 apply.js，由它按清单清理。
+     */
+    removed: Array.isArray(staged.removed) ? staged.removed : [],
   };
 }
 

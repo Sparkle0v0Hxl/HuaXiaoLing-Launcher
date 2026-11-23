@@ -48,6 +48,7 @@ const {
   screen,
 } = require('electron');
 const { loadSecret, saveSecret } = require('./secret-store');
+const { powershellExe } = require('./ps-path');
 // 可取消信号：既是真 AbortSignal、又带 cancelled/paused 老字段。
 // 各 IPC 分片里手造 `{ cancelled: false }` 的对象传到 fetch 会 TypeError，
 // 统一用这个工厂造（详见 cancel-signal.js 文件头）。
@@ -1345,6 +1346,37 @@ function targetExistsCached(target) {
   const value = targetExists(target);
   targetExistsCache.set(target, { at: now, value });
   if (targetExistsCache.size > 200) targetExistsCache.clear();
+  return value;
+}
+/*
+ * 「这个路径还在不在」——文件或目录都算。
+ *
+ * targetExists() 只认文件（isFile），它服务的是「启动程序 exe 在不在」这个问题，
+ * 那 30 多处调用都靠这个语义。但 server.root 是**目录**，拿 targetExists 去测它
+ * 恒为 false，界面就会把「好好的独立客户端目录」说成「目录已不在（被删除或移动过）」，
+ * 用户生成完 B服 一看就以为失败了。目录存活性必须单独有判据。
+ */
+function pathExists(target) {
+  if (!target) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return true;
+  try {
+    fs.statSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const pathExistsCache = new Map();
+function pathExistsCached(target) {
+  if (!target) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return true;
+  const now = Date.now();
+  const hit = pathExistsCache.get(target);
+  if (hit && now - hit.at < 1500) return hit.value;
+  const value = pathExists(target);
+  pathExistsCache.set(target, { at: now, value });
+  if (pathExistsCache.size > 200) pathExistsCache.clear();
   return value;
 }
 
@@ -6409,7 +6441,7 @@ function activateWindowByImage(image) {
   const encoded = Buffer.from(ps, 'utf16le').toString('base64');
   return new Promise((resolve) => {
     execFile(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { windowsHide: true, timeout: 8000 },
       () => resolve()
@@ -6519,7 +6551,7 @@ function autoClickNteButton(gameId, keyword, label, rounds = 60) {
   const attempt = () =>
     new Promise((resolve) => {
       execFile(
-        'powershell.exe',
+        powershellExe(),
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
         { windowsHide: true, timeout: 20000 },
         (error, stdout) => resolve(String(stdout || '').trim())
@@ -6590,7 +6622,7 @@ function exeCompanyChannel(exePath) {
     ].join('; ');
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     execFile(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { windowsHide: true, timeout: 8000 },
       (error, stdout) => {
@@ -6901,11 +6933,25 @@ async function discoverBuiltinServers() {
       // prepare*Runtime 会写一份渠道专属 config.ini，但若硬链接/合并链路漏写，
       // 别把这一行打回「需要重建」——用 VelaRuntimes 路径 + 渠道自证认它。
       // 终末地 / Yostar 三区 / 方舟国服各有自己的判据，一律不走这里。
+      /*
+       * 我们自己生成的渠道运行时（<盘>:\VelaRuntimes\<game>\<channel>）是完整客户端。
+       *
+       * 原来的判据只认「config.ini 与 SDK 自证出同一个渠道」。问题在于生成链路的
+       * 开关是串行的：hardlinkTree → 装渠道 SDK → 写 config.ini。中间任何一步失败
+       * （最典型的是解压渠道 SDK 时 PowerShell 起不来），config.ini 就停在从官服
+       * 硬链接过来的那版（cps=hyp_mihoyo），于是 resolveChannelFromRoot 判成 official、
+       * 与 server.channel 不符 → 这一行被打成 incomplete，界面显示「客户端不完整」；
+       * 而 server.path 指向的 exe 是好的，用户根本不知道发生了什么。
+       *
+       * 所以补一条：生成流程自己写了 runtimeLinked 标记的，就以它为准。
+       * 仍然是「路径在 VelaRuntimes 下 + 由我方生成」双条件，不会把随便一个目录认成客户端。
+       */
       const isMihoyoLinkedRuntime =
         isMihoyoRuntimeDir(dir, game.builtinKey) &&
-        (clientChannel.resolveChannelFromRoot(dir).channel === server.channel ||
-          clientChannel.pathChannelHint(server.path) === server.channel) &&
-        targetExists(server.path);
+        targetExists(server.path) &&
+        (server.runtimeLinked === true ||
+          clientChannel.resolveChannelFromRoot(dir).channel === server.channel ||
+          clientChannel.pathChannelHint(server.path) === server.channel);
       // 鸣潮 WeGame 版（rail_apps\Wuthering Waves(2002137)）没有 config.ini，
       // 它自己的身份文件是 rail_files\rail_game_identify.json + WeGameLauncher\。
       // 不认它的话每次启动都被标成「需要重建」，用户明明装好了却点不亮 WeGame 行。
@@ -7650,7 +7696,7 @@ function publicGame(game) {
          * 界面靠这两个字段分开说人话，否则删完 B服 的人只会看到「还没选择启动程序」，
          * 根本不知道是自己把共用的客户端目录删掉了。
          */
-        rootExists: Boolean(server.root) && targetExistsCached(server.root),
+        rootExists: Boolean(server.root) && pathExistsCached(server.root),
         active: server.id === game.activeServerId,
       };
     }),
@@ -8233,6 +8279,22 @@ async function applyStaged(staged) {
       setTimeout(() => {
         quitting = true;
         app.quit();
+        /*
+         * 强制退出兜底（「下载完整包后卡住不重启」的根因之一）。
+         *
+         * 覆盖脚本 waitForMainProcessExit 最多等 60 秒，等不到主进程退出就整次放弃，
+         * 用户看到的是「覆盖完了没反应、启动器还挂在旧版本」。app.quit() 本身不发
+         * 异步，但渲染层若卡在同步任务里、或某个窗口的 close 被拦下，进程就会一直活着。
+         * 这里给 3 秒宽限，之后直接 app.exit(0)：文件已经覆盖完，退出只是为了让
+         * 覆盖脚本能接手拉起新版本，不留半截状态。
+         */
+        setTimeout(() => {
+          try {
+            if (typeof app.exit === 'function') app.exit(0);
+          } catch {
+            /* 已经退了就什么都不做 */
+          }
+        }, 3000);
       }, 250);
     },
   });
@@ -9728,23 +9790,7 @@ function currentElevation() {
   return elevatedCache;
 }
 
-/** 本机 powershell.exe 绝对路径：PATH 被安全软件/定制系统改坏的机器上，
- * 裸写 'powershell.exe' 会 ENOENT，提权链整条瘫痪，所以直接按 SystemRoot 定位。 */
-function powershellExe() {
-  const candidate = path.join(
-    process.env.SystemRoot || process.env.windir || 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  );
-  try {
-    if (fs.existsSync(candidate)) return candidate;
-  } catch {
-    /* fall through */
-  }
-  return 'powershell.exe';
-}
+/* powershell.exe 的绝对路径定位统一走 ./ps-path（见该文件顶部注释）。 */
 
 function isElevated() {
   try {
@@ -9907,7 +9953,7 @@ function startWithShellExecute(target, args, cwd) {
     ].join('; ');
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     execFile(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { windowsHide: true, timeout: 20000 },
       (error, stdout, stderr) => {

@@ -691,8 +691,19 @@ function installServersIpc(ctx) {
         server.path = result.executable;
         server.root = targetRoot;
         server.sophonVersion = result.tag;
+        /*
+         * 生成成功后必须把判据类的标记一并写干净，否则下一次 discoverBuiltinServers
+         * 会用「上一次留下的坏标记」把刚生成好的这一行重新判成异常：
+         *   - runtimeLinked：终末地 needsRuntime、以及米哈游渠道运行时的自证标记，
+         *     生成出来的就是独立硬链接运行时，这里必须是 true；
+         *   - unavailable：之前 exe 短暂不在时打上的「暂时不可用」，现在文件在了要清掉；
+         *   - incomplete / packPath：同理会残留成「客户端不完整 / 需要重建」。
+         * 用户实测：B服 生成完一直显示「目录已不在 / 客户端不完整」，就是这些标记没写。
+         */
+        server.runtimeLinked = true;
         server.incomplete = false;
         server.packPath = '';
+        server.unavailable = false;
         game.activeServerId = server.id;
         game.target = result.executable;
         game.workDir = targetRoot;

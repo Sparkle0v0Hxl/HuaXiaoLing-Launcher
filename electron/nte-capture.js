@@ -11,6 +11,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const zlib = require('node:zlib');
 const { execFile } = require('node:child_process');
+const { powershellExe } = require('./ps-path');
 
 const REQUIRED_VERSION = '1.2.8';
 const CAPTURE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -60,7 +61,7 @@ function runFile(file, args, timeout = 30000) {
 }
 
 function runPowerShell(script, timeout = 120000) {
-  return runFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], timeout);
+  return runFile(powershellExe(), ['-NoProfile', '-NonInteractive', '-Command', script], timeout);
 }
 
 function psQuote(value) {

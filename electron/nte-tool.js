@@ -15,6 +15,7 @@ const fsp = require('node:fs/promises');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
+const { powershellExe } = require('./ps-path');
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -92,7 +93,7 @@ function unzipArchive(zipPath, destDir) {
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   return new Promise((resolve, reject) => {
     execFile(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { windowsHide: true, timeout: 120000 },
       (error, _stdout, stderr) => {

@@ -16,13 +16,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { powershellExe } = require('./ps-path');
 
 /** 从 exe 的文件版本信息里读版本号（米哈游 Unity 游戏都写了 FileVersion）。 */
 function fileVersion(exePath) {
   try {
     const script = `(Get-Item -LiteralPath '${String(exePath).replace(/'/g, "''")}').VersionInfo.FileVersion`;
     const out = execFileSync(
-      'powershell.exe',
+      powershellExe(),
       ['-NoProfile', '-NonInteractive', '-Command', script],
       { encoding: 'utf8', windowsHide: true, timeout: 8000 }
     );

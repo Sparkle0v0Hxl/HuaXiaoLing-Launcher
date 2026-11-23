@@ -15,6 +15,7 @@ const linkSource = require('./link-source');
 const clientChannel = require('./client-channel');
 const netThrottle = require('./net-throttle');
 const diskSpace = require('./disk-space');
+const { powershellExe } = require('./ps-path');
 
 const API = {
   cn: 'https://hyp-api.mihoyo.com/hyp/hyp-connect/api',
@@ -1092,7 +1093,7 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
     '} finally { $zip.Dispose() }',
     `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${outPath}' -Force`,
   ].join('; ');
-  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+  await execFileAsync(powershellExe(), ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
     timeout: 180000,
   });
