@@ -31,7 +31,8 @@ const TOKEN = (process.env.GITEE_TOKEN || '').trim();
 const DRY = process.env.DRY === '1';
 
 // 要同步的顶层项：源码 + 说明文档；★排除 latest.json（Gitee 镜像版由别的脚本维护）
-const TOPS = ['electron', 'src', 'build', 'scripts', 'package.json', 'LICENSE', 'AUTHORS.md', '启动-安全模式.bat', '更新说明.md'];
+// PRIVACY.md 与 docs/（README 里引用的截图）必须一起推，否则线上 404。
+const TOPS = ['electron', 'src', 'build', 'scripts', 'package.json', 'LICENSE', 'README.md', 'PRIVACY.md', 'AUTHORS.md', 'docs', '启动-安全模式.bat', '更新说明.md'];
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.tmp', 'shots', '.cache', '.build-tools']);
 const SKIP_EXT = /\.(log|lnk)$/i;
 const SKIP_NAME = /(^|\.)(bak|old)(\.|$|-)|\.bak-/i;

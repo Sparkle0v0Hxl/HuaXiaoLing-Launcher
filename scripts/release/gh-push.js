@@ -54,7 +54,8 @@ function repoPathOf(rel) {
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.tmp', 'shots', '.cache', '.build-tools']);
 const SKIP_EXT = /\.(log|lnk)$/i;
 const SKIP_NAME = /(^|\.)(bak|old)(\.|$|-)|\.bak-/i;
-const TOPS = ['electron', 'src', 'build', 'scripts', 'package.json', 'LICENSE', 'README.md', 'AUTHORS.md', '启动-安全模式.bat','更新说明.md','latest.json'];
+// PRIVACY.md 与 docs/（README 里引用的截图）必须一起推，否则线上 404。
+const TOPS = ['electron', 'src', 'build', 'scripts', 'package.json', 'LICENSE', 'README.md', 'PRIVACY.md', 'AUTHORS.md', 'docs', '启动-安全模式.bat','更新说明.md','latest.json'];
 /*
  * EXCLUDE=latest.json —— 发版链路的第 ① 步必须带上它。
  *
