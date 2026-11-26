@@ -25,20 +25,11 @@
     "清理：同步脚本备份只留最近3份，不再堆满磁盘。"
   ],
   "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/HuaXiaoLing-2.14.0-Portable.zip",
-  "deltas": [
-    {
-      "from": "2.13.1",
-      "to": "2.14.0",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/delta-2.13.1-to-2.14.0.zip",
-      "sha256": "5d1003e2b60e21054b977c5c815b2824e2b079531a9b84f3e19bd72ef5aa288b",
-      "size": 22662967
-    }
-  ],
-  "sha256": "958e0d6f50ddcf2011767ee2b8c4f0b0341c96902589a117c0c98430a801d00c",
+  "sha256": "397e7a5721e2718489e1a636bbe412f4f4ea8e9745a0024e8d7be8f181022d4c",
   "size": 213338121,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "SzomCSUIW7JuvO29RsXcQOqbbGltWHTTUf4Sim/hEQIYnv+rhwJogD7Veom7gO6jcKq26ZXwW7i4EHpqsCHYCw=="
+    "value": "ZhVL3L2U7QPda+BDIkXdumX7QbAKy1N3JGzaMD26G9pg7RQWOiaE8+7Y+kdBK8xY8bUWbCfc0amB6AWIYvWBBw=="
   }
 }
