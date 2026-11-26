@@ -618,8 +618,16 @@ const APP_VERSION = (() => {
  * 启动器正在运行时，它的单实例锁占着 —— 卸载器（同一份 asar 的另一个 exe）
  * 拿不到锁就会直接 app.quit()，用户点了卸载什么都不出现。卸载是一次性的
  * 独立进程，没有理由和正在跑的启动器互斥。
+ *
+ * ★ 两种进入方式都要认：
+ *   1) 命令行带 --uninstall —— 「设置 → 应用」里那条注册表记录走的这个；
+ *   2) exe 文件名是 Uninstall* —— 安装目录里那个硬链接快捷入口走的这个。
+ *      硬链接没法改命令行参数（双击就是裸启动），只能靠文件名判断。
+ *      硬链接的好处：和主程序是同一个文件，不多占 250 MB，也不会像以前那样
+ *      因为「复制出去的 exe 加载到同目录的启动器 asar」而跑成主界面。
  */
-const isUninstallMode = process.argv.includes('--uninstall');
+const isUninstallMode =
+  process.argv.includes('--uninstall') || /^uninstall/i.test(path.basename(process.execPath));
 /** 静默卸载：给「设置 → 应用」里那种不弹界面的卸载入口用（注册表 QuietUninstallString）。 */
 const isUninstallSilent = isUninstallMode && process.argv.includes('--silent');
 const gotLock = isUninstallMode ? true : app.requestSingleInstanceLock();

@@ -39,6 +39,16 @@ const path = require('node:path');
 /** 标记文件名（放 userData 下）。内容：{ [entryId]: { at, version } } */
 const MARKER_NAME = '.migrations.json';
 
+/**
+ * 主程序显示名，用来拼安装目录里的卸载入口文件名。
+ *
+ * 为什么写死：迁移模块刻意不依赖 Electron（不 require('electron')），
+ * 拿不到 app.getName()；而这个名字必须和安装器 installer/main.js 的
+ * APP_NAME、electron/main.js 里的 APP_EXE 完全一致，否则建出来的入口
+ * 名字对不上，用户看到的还是旧的那个。
+ */
+const APP_DISPLAY_NAME = '花筱灵启动器';
+
 /* ── 迁移表 ─────────────────────────────────────────────────────────── */
 
 /**
@@ -105,6 +115,17 @@ const MIGRATIONS = [
     paths: [],
     // 特殊处理：操作对象是注册表，不是 userData 里的文件。
     registryRepair: true,
+  },
+  {
+    id: 'uninstall-shortcut-v2',
+    since: '2.14.0',
+    desc: '安装目录里少一个能双击的卸载入口（用户习惯在文件夹里找 Uninstall）。'
+      + '新装用户由安装器直接建；老用户走完整包更新时不会重跑安装器，所以这里补建。'
+      + '用硬链接（不是复制）—— 和主程序是同一个文件，不额外占 250MB，'
+      + '主程序按 exe 文件名前缀 /^uninstall/i 认卸载模式。',
+    paths: [],
+    // 特殊处理：在安装目录建硬链接。
+    uninstallShortcut: true,
   },
 ];
 
@@ -219,7 +240,8 @@ async function runMigrations(options = {}) {
         if (repaired.removedNames.length > 0) {
           onLog(`[migrations] ${entry.id}：清掉旧卸载项 ${repaired.removedNames.join('、')}`);
         }
-        onLog(`[migrations] ${entry.id}：卸载入口已指向 ${installDir}`);
+        // dry-run 时上面那句会照着 installDir 打印，看起来像已经改了 —— 标明是预演
+        onLog(`[migrations] ${entry.id}：卸载入口${dryRun ? '将指向（预演）' : '已指向'} ${installDir}`);
         if (!dryRun) {
           markers[entry.id] = {
             ok: true,
@@ -236,6 +258,50 @@ async function runMigrations(options = {}) {
           failed: 0,
           removed: repaired.removedNames.length,
         });
+      } catch (error) {
+        onLog(`[migrations] ${entry.id} 失败：${error && error.message}`);
+        result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 1, removed: 0 });
+      }
+      continue;
+    }
+
+    /* ── 特殊：在安装目录补建可双击的卸载入口（硬链接）── */
+    if (entry.uninstallShortcut) {
+      try {
+        const installDir = path.dirname(process.execPath);
+        const appExe = process.execPath;
+        const uninstExe = path.join(installDir, `Uninstall ${APP_DISPLAY_NAME}.exe`);
+
+        // 已经在跑卸载模式（自己就是这个入口）→ 什么都不用做
+        if (path.basename(appExe).toLowerCase().startsWith('uninstall')) {
+          result.skipped += 1;
+          continue;
+        }
+        // 已存在就不动（不覆盖用户可能自己放的东西）
+        if (fs.existsSync(uninstExe)) {
+          result.skipped += 1;
+          if (!dryRun) {
+            markers[entry.id] = { ok: true, at: new Date().toISOString(), version, note: 'already exists' };
+            changed = true;
+          }
+          continue;
+        }
+        if (dryRun) {
+          result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 0, removed: 0 });
+          continue;
+        }
+        let made = 'link';
+        try {
+          fs.linkSync(appExe, uninstExe);
+        } catch {
+          // 非 NTFS（FAT32/exFAT）不支持硬链接，退回复制一份
+          fs.copyFileSync(appExe, uninstExe);
+          made = 'copy';
+        }
+        onLog(`[migrations] ${entry.id}：已在 ${installDir} 补建卸载入口（${made}）`);
+        markers[entry.id] = { ok: true, at: new Date().toISOString(), version, note: made };
+        changed = true;
+        result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 0, removed: 0 });
       } catch (error) {
         onLog(`[migrations] ${entry.id} 失败：${error && error.message}`);
         result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 1, removed: 0 });
