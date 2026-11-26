@@ -24,7 +24,7 @@
  *   必须判 `content-encoding` 手动解压；
  * - 没有「签名直链 + nocache 覆盖」那套 —— 清单 URL 直接由 cdnList[0].url + config.indexFile 拼；
  * - 下载直链 = `{cdnList[0].url}/{config.baseUrl}{dest}`（baseUrl 以 `/` 结尾，dest 用 `/` 分隔），
- *   2026-11-11 实网对国服清单抽样逐文件 md5 全对。
+ *   实网对国服清单抽样逐文件 md5 全对。
  */
 
 const fs = require('node:fs');
@@ -314,7 +314,7 @@ const BUNDLE_NAMES = ['HD', 'SD', 'UHD'];
 /**
  * 把外部传入的档位名规范化；不安全的一律当「没传」。
  *
- * 2026-11-18：不再只认 HD/SD/UHD 三档。官方 `bundles` 里将来若新增档位
+ * 不再只认 HD/SD/UHD 三档。官方 `bundles` 里将来若新增档位
  * （4K / ULTRA 之类），这里丢掉的话就会静默回退 HD、把玩家降级；
  * 真正的「官方到底有没有这一档」由 index.json 的 `bundles` 决定，
  * loadBundleIndex 找不到时再回退默认。这里只做「安全标识符」过滤。
@@ -331,7 +331,7 @@ function normalizeBundleName(name) {
  * 与 kuro-predownload.localBundleOf 是同一套判据，但这里**不能** require 那边
  * （kuro-predownload 反过来依赖本文件，会循环）。
  *
- * 2026-11-18 三档贯通：以前本文件全程只认 BUNDLE_DEFAULT（HD），SD/UHD 客户端
+ * 三档贯通：以前本文件全程只认 BUNDLE_DEFAULT（HD），SD/UHD 客户端
  * 做「更新 / 修复 / 跨服硬链接」都会被按 HD 清单处理 —— SD 用户白下 42 GB HD
  * 资源、UHD 用户直接被降级成 HD 并丢掉 60 GB 超清资源。
  *
@@ -817,7 +817,7 @@ function executableFor(profile) {
 /**
  * 原子替换一个小 JSON 文件，**保证目标文件在任何时刻都不会「消失」**。
  *
- * 2026-11-18 加固：以前 `launcherDownloadConfig.json` 的写法是
+ * 加固：以前 `launcherDownloadConfig.json` 的写法是
  *   写 .tmp → rm 正式文件 → rename(.tmp → 正式文件)
  * 中间那几毫秒里正式文件是不存在的：如果这时进程被强杀、机器断电、或者
  * 安全软件把文件锁住导致 rename 失败，目录里就只剩一个 `.tmp`，
@@ -1189,7 +1189,7 @@ async function planForGame({ profile, installRoot, fullVerify = false, bundle } 
 /*
  * 「必须拷贝」的路径段白名单（大小写不敏感）。
  *
- * 2026-11-17 修正：以前这里用的是「相对路径整段前缀相等」，而实际相对路径是
+ * 修正：以前这里用的是「相对路径整段前缀相等」，而实际相对路径是
  * `client/binaries/win64/thirdparty/krpcsdk_mainland/krsdkres/...`，
  * 永远不以 `kr_sdkres/` 开头 → 这条闸形同虚设，KRSDKRes 里的 cef.pak / libcef.dll
  * 仍然被硬链共享 inode。
@@ -1212,7 +1212,7 @@ const KURO_MUST_COPY_SEGMENTS = [
   'krsdkconfig.json',
   'bilibili',
   /*
-   * 2026-11-17 接手审计：KrPcSdk_Mainland **根目录**下的渠道 SDK 核心库
+   * 接手审计：KrPcSdk_Mainland **根目录**下的渠道 SDK 核心库
    * （libcrypto-3-x64.dll / libcurl.dll / libssl-3-x64.dll / sqlite3.dll /
    *  mfc140u.dll / msvcp140.dll / vcruntime140.dll / thinkingdata.dll /
    *  krsdk_zlib.dll / zlibwapi.dll / libkrsdkcurl.dll + 字体 TTF/OTF，共 16 个）

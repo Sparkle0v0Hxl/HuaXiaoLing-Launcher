@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>卸载 花筱灵启动器</title>
+  <link rel="stylesheet" href="uninstall.css" />
+</head>
+<body>
+  <!-- 背景：与安装程序同一张图，铺满整窗 -->
+  <div class="bg" aria-hidden="true"></div>
+
+  <header class="titlebar">
+    <div class="titlebar-left">
+      <span class="app-mark"><img src="assets/setup-logo.webp" alt="" /></span>
+      <span class="app-name">花筱灵启动器</span>
+    </div>
+    <div class="titlebar-actions">
+      <button type="button" class="win-btn" data-action="close" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="content">
+    <!-- 左列：品牌 + 操作面板。整体压在左侧留白上，
+         右侧整块留给背景里的角色，与安装器构图一致。 -->
+    <div class="col">
+    <!-- 品牌区：logo 缩小居中，文字收进右侧，紧凑横排 -->
+    <section class="brand">
+      <div class="brand-avatar">
+        <img src="assets/setup-logo.webp" alt="花筱灵" />
+      </div>
+      <div class="brand-text">
+        <h1 class="brand-title">花筱灵启动器</h1>
+        <p class="brand-sub" id="brandSub">准备卸载</p>
+        <p class="brand-note">多游戏统一启动 · 渠道切换 · 硬链接省空间</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <!-- 确认 -->
+      <div class="stage" id="stageConfirm">
+        <p class="un-title">确认卸载？</p>
+        <div class="un-block">
+          <p class="un-label">会移除</p>
+          <p class="un-note">程序文件、开始菜单与桌面快捷方式、系统里的卸载登记。</p>
+        </div>
+        <div class="un-block">
+          <p class="un-label un-label-keep">会保留</p>
+          <p class="un-keep" id="keepNote">data 目录里的游戏列表、设置、歌单、抽卡记录。</p>
+        </div>
+        <p class="un-dir" id="installDirNote"></p>
+      </div>
+
+      <!-- 进度 -->
+      <div class="stage is-hidden" id="stageProgress">
+        <div class="progress-head">
+          <span id="progressText">正在卸载…</span>
+          <span id="progressPercent">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        <p class="progress-current" id="progressCurrent"></p>
+      </div>
+
+      <!-- 完成 -->
+      <div class="stage is-hidden" id="stageDone">
+        <p class="done-title" id="doneTitle">卸载完成</p>
+        <p class="done-sub" id="doneSub"></p>
+      </div>
+
+      <footer class="actions">
+        <button type="button" class="btn btn-ghost" id="btnCancel">取消</button>
+        <button type="button" class="btn btn-primary" id="btnPrimary">确认卸载</button>
+      </footer>
+    </section>
+    </div>
+  </main>
+
+  <script src="uninstall.js"></script>
+</body>
+</html>

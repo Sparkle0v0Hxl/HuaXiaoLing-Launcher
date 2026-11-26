@@ -1,7 +1,7 @@
 # 花筱灵启动器
 
 [![作者](https://img.shields.io/badge/作者-Sparkle0v0Hxl-e2435a?style=flat-square&logo=github&logoColor=white)](https://github.com/Sparkle0v0Hxl)
-[![版本](https://img.shields.io/badge/版本-v2.13.1-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
+[![版本](https://img.shields.io/badge/版本-v2.14.0-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-3ddc97?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d6?style=flat-square&logo=windows&logoColor=white)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
 [![便携版](https://img.shields.io/badge/便携版-解压即用-ffb454?style=flat-square)](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/latest)
@@ -19,7 +19,7 @@
 > 必须带上：**启动器版本 · 系统版本 · 复现步骤 · `data\crash.log` 日志 · 问题截图或录屏**。
 > 只写「打不开」「闪退了」、不带日志和截图的一律会被要求补齐后再处理。
 
-**当前版本：v2.13.1**（正式版）
+**当前版本：v2.14.0**（正式版）
 
 一个**完全便携**的 Windows 游戏启动器。把《原神》《崩坏：星穹铁道》《绝区零》《鸣潮》《异环》《明日方舟：终末地》《明日方舟》《崩坏3》收进同一个舞台，支持多服务器客户端共存与一键切换，顺便把抽卡记录、音乐播放和官方公告也一起做了。
 
@@ -131,7 +131,7 @@
 
 ## 上手
 
-1. 解压 `HuaXiaoLing-2.13.1-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
+1. 解压 `HuaXiaoLing-2.14.0-Portable.zip`，整个文件夹放哪儿都行（建议非系统盘）；
 2. 双击 `花筱灵启动器.exe`；
 3. 内置游戏会自动扫描注册表和常见安装目录，没找到就在「启动页 → 齿轮 → 自动检测」或手动指定 exe；
 4. 想加别的游戏，主页点「添加游戏」。
@@ -209,7 +209,23 @@ pnpm pack
 每次功能更新都会写进启动器内的「动态」页，最新条目排在最前面，欢迎指南仍然保留在其后。
 
 <details>
-<summary><b>展开版本历史</b>（v2.13.1 → v1.0.0）</summary>
+<summary><b>展开版本历史</b>（v2.14.0 → v1.0.0）</summary>
+
+<details>
+<summary><b>v2.14.0</b></summary>
+
+安装器从 283MB 瘦到约 175MB、界面全部自绘、卸载改成程序内置窗口；顺带修掉管理员权限死锁、终末地官方托管超时、终末地预下载误判、音乐页搜索分类与模块循环依赖。
+
+- 安装器重做：安装包只带 resources，安装时复用安装器自己的 Electron 运行时，体积从 283MB 降到约 175MB。
+- 卸载改成程序内置：旧做法把安装器自己复制成 `Uninstall.exe`，但 Electron 只认执行文件同目录的 `resources\app.asar`，那份是启动器本体，所以双击它跑的是启动器。现在卸载由主程序认 `--uninstall` 参数，走专用卸载窗口，只保留 `data`。
+- 管理员权限判定：以前只靠 PowerShell `IsInRole`，且「拒绝过 UAC」存成永久布尔 —— 拒绝一次就永不提权，而清掉它的分支要求「已经是管理员」，互相锁死。现在三路探测（兼容层 / 令牌完整性 / PowerShell），拒绝状态改 10 分钟冷却。
+- 终末地官方托管必然超时：查询按钮状态的消息少了 `callbackEvent` 字段，官方前端靠它决定回包挂哪个事件，缺了就不回报。补上后点「开始」一秒起游戏。
+- 终末地预下载被误判不完整：校验产物用了正式更新清单（应该用预下载清单），字段名笔误导致恒取正式清单，于是判不完整并回落全量重下。
+- 音乐页搜索加「搜单曲 / 搜歌单」；歌名过长改成单行省略 + 悬停显示「歌名 · 歌手 · 专辑」全名。
+- 音乐模块循环依赖（`normalizeSourceFlags is not a function`）：改成惰性 require，搜索/换源/取地址恢复。
+
+</details>
+
 
 <details>
 <summary><b>v2.13.1</b></summary>
@@ -1201,8 +1217,10 @@ B服生成后显示目录丢失、硬链接报 PowerShell 找不到、增量更�
 ## 许可与致谢
 
 - 代码：MIT，见 [LICENSE](LICENSE)。
-- 界面插画（`src/assets/` 下 13 个 png）是本项目程序化生成的抽象装饰图（夜景烟花与舞台），随项目一起分发，不纳入 MIT 许可范围。
-- 本仓库不附带任何第三方游戏的官方立绘、角色形象或美术资源；早期版本里曾放过的几张官方形象图已从源码与安装包中移除。
+- 界面插画（`src/assets/` 下 13 个 png）分两类，均为本项目自制，随项目一起分发，不纳入 MIT 许可范围：
+  - **角色插画**（`character.png`、`character-face.png`、`char-portrait.png`、`char-cool.png`、`char-sweet.png`、`char-book.png`、`sparkle-hero.png`）—— 本项目的原创角色「花筱灵」（代号「花」）的几套服装、一张品牌 logo 与一张头部特写。角色设定（异色瞳、粉色系）为本项目自有，与任何第三方游戏角色无关。
+  - **装饰图**（`sparkle-mask.png`、`sparxie-charm.png`、`charm-dock.png`、`charm-fireworks.png`、`charm-flame.png`、`charm-stars.png`）—— 程序化生成的几何装饰（玫瑰、烟花、星芒、徽章），不含人物形象。
+- 本仓库不附带任何第三方游戏的官方立绘、角色形象或美术资源。早期发布版本中曾误放入数张《崩坏：星穹铁道》官方角色立绘，这些图已从当前源码移除，并且**不再随任何新版本分发**；如果你手上的版本仍含这些图，请更新到最新版。
 - 想换成自己的图：把同名 png 放进数据目录的 `art-pack/`（便携版 `data\art-pack\`，安装版 `%APPDATA%\花筱灵启动器\art-pack\`），启动器会自动优先使用你的图。
 - 不想自己做的，可以到 [主题包站](https://37l2m9tz2jw0adtxxq1.traesite.cn/index.html) 或 [HuaXiaoLing-ThemePacks](https://github.com/Sparkle0v0Hxl/HuaXiaoLing-ThemePacks) 仓库拿现成的包 —— 每个包都是 18 张图加一份 `theme.json`，解压进 `art-pack/` 就能用。
 

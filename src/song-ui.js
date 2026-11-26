@@ -19,9 +19,9 @@
 
 const SONG_TABS = [
   /*
-   * 2026-11-18：去掉「我的歌单」分页。
+   * 去掉「我的歌单」分页。
    * 左栏已经把歌单逐条列出来了，主区再摆一面歌单卡片墙属于同一件事做两遍，
-   * 用户原话「中间留那大块地方放歌单吗？作用重复了吧」。
+   * 
    * 现在主区只负责「队列 / 当前歌单曲目 / 歌单广场 / 榜单 / 搜索」。
    */
   ['queue', '队列'],
@@ -41,11 +41,17 @@ const NAV_SUBTITLES = {
 /* ── 搜索 ─────────────────────────────────────────────────── */
 
 /**
- * 搜索栏：关键字输入 + 平台选择 + 搜索按钮。
+ * 搜索栏：关键字输入 + 「搜什么」类型切换 + 平台选择 + 搜索按钮。
  * 放在标签页那一行的右侧，切哪个分页都在。
+ *
+ * 2026-11-25 加了「搜单曲 / 搜歌单」切换。用户原话：「搜索能分类一下吗？
+ * 目前歌名/歌手/专辑嘛，得分吧？然后再加个歌单上去搜索」——所以这里
+ * ① 把「搜单曲 / 搜歌单」摆成两个明确的切换，② 输入框 placeholder 跟着变，
+ * 让用户一眼知道这一搜会搜出什么。
  */
 function songSearchMarkup() {
   const s = state.songSearch;
+  const mode = s.mode === 'playlist' ? 'playlist' : 'song';
   const platforms = [
     ['all', '四平台'],
     ['qq', 'QQ 音乐'],
@@ -56,8 +62,15 @@ function songSearchMarkup() {
   return `
     <div class="song-search">
       <span class="song-search-icon">${icon('search', 'xs')}</span>
+      <div class="song-search-mode" role="tablist" aria-label="搜索类型">
+        <button class="song-search-mode-btn ${mode === 'song' ? 'on' : ''}" role="tab" aria-selected="${mode === 'song'}"
+          data-action="song-search-mode" data-mode="song" title="按歌名 / 歌手 / 专辑搜单曲">搜单曲</button>
+        <button class="song-search-mode-btn ${mode === 'playlist' ? 'on' : ''}" role="tab" aria-selected="${mode === 'playlist'}"
+          data-action="song-search-mode" data-mode="playlist" title="按关键词搜公开歌单">搜歌单</button>
+      </div>
       <input id="song-search-input" class="song-search-input" type="search" autocomplete="off"
-        placeholder="搜歌名 / 歌手 / 专辑" value="${esc(s.keyword)}" data-enter="song-search-run" />
+        placeholder="${mode === 'playlist' ? '搜歌单关键词（如：周杰伦、lofi）' : '搜歌名 / 歌手 / 专辑'}"
+        value="${esc(s.keyword)}" data-enter="song-search-run" />
       <select id="song-search-platform" class="song-search-platform" data-change="song-search-platform" title="搜哪个平台">
         ${platforms
           .map(([key, label]) => `<option value="${key}" ${s.platform === key ? 'selected' : ''}>${esc(label)}</option>`)
@@ -75,7 +88,9 @@ function songSearchRow(item, index) {
     ? `<img src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />`
     : icon('music');
   return `
-    <button class="song-search-row" data-action="song-search-add" data-index="${index}" title="加入歌单">
+    <button class="song-search-row" data-action="song-search-add" data-index="${index}" title="${esc(
+      item.title + (item.artist ? ' · ' + item.artist : '') + (item.album ? ' · ' + item.album : '')
+    )}">
       <span class="song-search-cover">${cover}</span>
       <span class="song-search-copy">
         <strong>${esc(item.title)}</strong>
@@ -88,6 +103,38 @@ function songSearchRow(item, index) {
 
 function songSearchPanel() {
   const s = state.songSearch;
+  const mode = s.mode === 'playlist' ? 'playlist' : 'song';
+
+  if (mode === 'playlist') {
+    if (s.loading) {
+      return `<div class="song-empty">${icon('search')}<strong>正在搜歌单…</strong><span>公开歌单搜索目前只有网易云提供接口。</span></div>`;
+    }
+    if (!s.done) {
+      return `<div class="song-empty">${icon('library')}<strong>搜公开歌单</strong><span>输入关键词，找到的整张歌单可以直接点开当播放列表。</span></div>`;
+    }
+    const err = s.playlistError ? `<p class="song-search-errors">${esc(s.playlistError)}</p>` : '';
+    const lists = s.playlistList || [];
+    if (!lists.length) {
+      return `<div class="song-empty">${icon('library')}<strong>没有找到「${esc(s.keyword)}」相关的歌单</strong><span>换个关键词试试；也可以切回「搜单曲」按歌名找。</span></div>${err}`;
+    }
+    return `
+      <div class="song-search-result">
+        <div class="song-search-head"><strong>${esc(s.keyword)}</strong><span>${lists.length} 张歌单</span></div>
+        ${err}
+        <div class="playlist-cards">
+          ${lists
+            .map((item) =>
+              playlistCardMarkup(
+                { ...item, platform: item.platform || 'netease' },
+                item.platform || 'netease',
+                false
+              )
+            )
+            .join('')}
+        </div>
+      </div>`;
+  }
+
   if (s.loading) {
     return `<div class="song-empty">${icon('search')}<strong>正在搜索…</strong><span>同时查四个平台的公开接口。</span></div>`;
   }
@@ -169,7 +216,7 @@ function musicAccountEntryMarkup() {
  * 传 platform：第二步，只显示那一个平台的登录面板。
  *
  * 以前是四张大卡片全堆在一个框里，网易云那张还带二维码 + API 输入框 + 启动服务按钮，
- * 一打开就是半个屏幕的空白和一堆技术字段 —— 用户的原话是「那么大个框，完全不好看」。
+ * 一打开就是半个屏幕的空白和一堆技术字段 —— 
  */
 function openMusicAccountsModal(focus = '') {
   const platform = MUSIC_ACCOUNTS.some(([key]) => key === focus) ? focus : '';
@@ -242,7 +289,7 @@ function krAccountPanelMarkup(platform) {
     const apiDefault = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
     /*
      * 登录统一走内置浏览器（和 QQ 音乐一样），界面上不再放二维码 ——
-     * 2026-11-21 起网易云的登录页就是官网原样，扫码/手机号/邮箱都由官网自己提供。
+     * 起网易云的登录页就是官网原样，扫码/手机号/邮箱都由官网自己提供。
      * 这段里只剩「打开登录窗口 / 退出登录 / 本地服务地址」三样，
      * id 是和 bindNeteaseService 的契约，换结构可以，名字不能动。
      */
@@ -310,7 +357,7 @@ function krAccountPanelMarkup(platform) {
 /**
  * 登录/退出之后，如果账号弹窗还开着，把它刷成最新状态。
  *
- * 2026-11-21 起网易云也走内置浏览器，面板里没有要保留的扫码状态，可以一起刷新。
+ * 起网易云也走内置浏览器，面板里没有要保留的扫码状态，可以一起刷新。
  */
 function refreshMusicAccountsModal() {
   const modal = document.querySelector('.kr-login-modal');
@@ -495,7 +542,7 @@ function krNavMarkup() {
    * 左栏分两组，不再是一排平铺：
    *   · 音乐库 = 你手里有的（队列里的歌、各平台收藏的歌单）
    *   · 发现   = 找新歌的（榜单、搜索）
-   * 原来四项混在「浏览」下，用户反馈「分不清我的歌在哪」——
+   * 原来四项混在「浏览」下，—
    * 队列和我的歌单被榜单/搜索夹在中间，看名字也分不出哪个是本地、哪个是云端。
    * 顺带给这两项挂一行小字，把「这是什么」写在名字下面。
    */
@@ -511,10 +558,10 @@ function krNavMarkup() {
       </button>`;
   };
   /*
-   * 2026-11-18：左栏回归「导航」本职。
+   * 左栏回归「导航」本职。
    *
    * 以前底下常驻一整块「平台歌单 + 同步全部 + 每个平台一行 ↻」，占掉将近一半高度，
-   * 而同步是低频操作 —— 用户原话「作用不多，还占个位置」。
+   * 而同步是低频操作 —— 
    * 现在同步入口收进「我的歌单」页头部（那里本来就有「同步全部 / 账号」），
    * 单平台的 ↻ 也留在了各自分组头上，左栏只保留导航和设置。
    * 同时把「歌单广场」独立成一项：原来它被塞在「我的歌单」页面底部，
@@ -538,12 +585,12 @@ function krNavMarkup() {
    *
    * 参考 QQ 音乐 / 网易云：左栏不是只放几个导航项，而是把账号里的歌单直接铺出来，
    * 点一下就进曲目。之前歌单只在主区的卡片墙里，左栏下半截空着一大片，
-   * 用户原话「左边空的那么多」。
+   * 
    * 顶部给平台切换（全部 / 网易云 / QQ / 酷狗），歌单多的账号也不会一条长龙滚到底。
    */
   const groups = state.myPlaylists.groups || [];
   /*
-   * 2026-11-18：只认「有 platform 且有歌单」的分组。
+   * 只认「有 platform 且有歌单」的分组。
    * 之前不过滤，某个 platform 为空的分组会把 musicPlatformLabel 的兜底「音乐」
    * 渲染成一个真实标签，看起来像多出一个莫名其妙的平台。
    */
@@ -575,7 +622,7 @@ function krNavMarkup() {
       <button class="kr-nav-pl-tab ${focusLocal ? 'is-active' : ''}" data-action="side-pl-platform" data-value="local">本地</button>
     </div>`;
   /*
-   * 2026-11-18：这一块改成**始终渲染**。
+   * 这一块改成**始终渲染**。
    * 之前用 sidePlaylists.length 作为开关，切到「本地」时远程歌单被清空、
    * sidePlaylists 变成 0，整块（连「新建歌单」按钮）一起消失了 ——
    * 正是用户说的「本地那里没新建歌单」。
@@ -692,7 +739,9 @@ function localPlaylistMarkup() {
                 .map(
                   (song, index) => `
                 <div class="kr-detail-row">
-                  <button class="song-chart-song kr-detail-song" data-action="local-playlist-song" data-id="${esc(pl.id)}" data-index="${index}" title="播放这首">
+                  <button class="song-chart-song kr-detail-song" data-action="local-playlist-song" data-id="${esc(pl.id)}" data-index="${index}" title="${esc(
+                    `${song.title || '未知曲目'}${song.artist ? ' · ' + song.artist : ''}`
+                  )}">
                     <span class="song-chart-index">${index + 1}</span>
                     <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
                     <span class="song-chart-copy"><strong>${esc(song.title || '未知曲目')}</strong><small>${esc(song.artist || '')}</small></span>
@@ -746,7 +795,7 @@ function krSectionHeadMarkup() {
  * 折叠后首屏节点数恒定，展开仍然全量渲染（用户主动要的，慢一点没关系）。
  */
 /*
- * 2026-11-18：30 → 8。
+ * 30 → 8。
  * 队列里经常叠着好几张歌单（2163 首 = 十几段），每段露 30 行的话，
  * 后面的歌单要滚很久才看得到。改成 8 行后，一屏能扫过好几个段头，
  * 想看某段再点「展开其余 N 首」。
@@ -804,9 +853,9 @@ function songQueueRowsMarkup(list = state.songs) {
       : all;
 
     /*
-     * 2026-11-18：恢复「按来源折叠」。
+     * 恢复「按来源折叠」。
      *
-     * 整张 1944 首的歌单铺进队列后，列表变成几千行，用户说「一堆歌很乱」。
+     * 整张 1944 首的歌单铺进队列后，列表变成几千行，。
      * 主流音乐软件（QQ 音乐 / 网易云「当前播放」）都是按来源分段、只展开当前段，
      * 这里照做：
      *   · 段长 ≤ 30 的照常平铺；
@@ -849,7 +898,15 @@ function songQueueRowsMarkup(list = state.songs) {
     for (const { song, index } of shown) {
       rows.push(`
               <div class="song-row ${sameSongKey(song, state.songs[state.songIndex]) ? 'active' : ''}${locateFlashClass(song)}${song.unavailable ? ' is-unavailable' : ''}${(state.queueSelected || []).includes(index) ? ' is-brush-selected' : ''}" draggable="true" data-index="${index}">
-                <button class="song-row-main" data-action="song-select" data-queue="picked" data-index="${index}" title="${song.unavailable ? esc(song.unavailableReason || '暂时无法播放') : ''}">
+                <button class="song-row-main" data-action="song-select" data-queue="picked" data-index="${index}" title="${esc(
+                  /*
+                   * 长歌名会被 CSS 省略号截断，这里把全名放 title，鼠标停一下就能看全。
+                   * 不可播放的行额外说明原因 —— 那句更要紧，优先显示它。
+                   */
+                  song.unavailable
+                    ? `${song.title || ''}${song.artist ? ' · ' + song.artist : ''}（暂时无法播放${song.unavailableReason ? '：' + song.unavailableReason : ''}）`
+                    : `${song.title || ''}${song.artist ? ' · ' + song.artist : ''}`
+                )}">
                   <span class="song-index">${sameSongKey(song, state.songs[state.songIndex]) ? icon('play') : index + 1}</span>
                   <span class="song-row-cover">${songCover(song) ? `<img src="${esc(songCover(song))}" alt="" loading="lazy" referrerpolicy="no-referrer" data-cover />` : icon('music')}</span>
                   <span class="song-row-copy">
@@ -968,7 +1025,7 @@ function songPlazaMarkup() {
     state.myPlaylists.plazaPlatform = 'netease';
   }
   /*
-   * 2026-11-19 修「点进歌单没反应 / 切到广场还是旧页面」：
+   * 修「点进歌单没反应 / 切到广场还是旧页面」：
    *
    * 广场和「我的歌单」共用一个 state.myPlaylists.detail（钻取态），
    * 但进广场这条路径以前既不判断也不清理它 ——

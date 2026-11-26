@@ -34,12 +34,7 @@ const ART_NAMES = [
   'character.png',
   'character-face.png',
   'sparkle-hero.png',
-  'sparkle-fullbody.png',
-  'sparxie-fullbody.png',
   'sparkle-mask.png',
-  'sparkle.png',
-  'sparxie.png',
-  'sparkle-figure.png',
   'sparxie-charm.png',
   'charm-fireworks.png',
   'charm-flame.png',
@@ -291,6 +286,19 @@ function resolveAsset(userData, packId, name, bundledRoot) {
     candidates.push(path.join(root, file));
   }
   candidates.push(path.join(String(bundledRoot || ''), file));
+
+  /*
+   * 包体积优化（2026-11-26）：内置素材已转成 WebP，但对外仍保留 .png 名字
+   * （主题包、老配置、设置页文案都按 .png 走）。这里在内置回落时补一次
+   * 同名的 .webp 候选，用户自己的 .png 覆盖仍然优先。
+   */
+  const altExt = String(file).replace(/\.(png|jpe?g)$/i, '.webp');
+  if (altExt !== file) {
+    candidates.push(path.join(String(bundledRoot || ''), altExt));
+    for (const c of [...candidates]) {
+      if (/\.(png|jpe?g)$/i.test(c)) candidates.push(c.replace(/\.(png|jpe?g)$/i, '.webp'));
+    }
+  }
 
   for (const candidate of candidates) {
     if (!candidate) continue;

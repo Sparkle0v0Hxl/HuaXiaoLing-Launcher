@@ -1,0 +1,349 @@
+/* ================================================================== */
+/* 花筱灵启动器 —— 卸载界面样式                                        */
+/* ================================================================== */
+/*
+ * 和安装程序用同一套视觉：同一张背景图、同一个圆形 logo、同一组粉紫配色。
+ * 卸载时用户看到的应该和装的时候是同一个东西，而不是忽然换成一个系统对话框。
+ *
+ * 尺寸也和安装程序一致（720×480），背景同理铺满整窗、左侧压暗保证文字可读。
+ */
+
+/* ── 基础 ─────────────────────────────────────────────────────────── */
+:root {
+  --ink:        #fdf2f8;
+  --ink-soft:   rgba(253, 242, 248, 0.72);
+  --ink-dim:    rgba(253, 242, 248, 0.48);
+  --accent:     #f472b6;
+  --accent-hi:  #fb7fb5;
+  --accent-lo:  #d94f95;
+  --panel-bg:   rgba(28, 16, 32, 0.62);
+  --panel-line: rgba(255, 255, 255, 0.14);
+  --ok:         #6ee7b7;
+  --warn:       #fbbf24;
+  --err:        #f87171;
+  --radius:     14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #1a0f1c;
+  color: var(--ink);
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ── 背景层 ───────────────────────────────────────────────────────── */
+.bg {
+  position: fixed;
+  inset: 0;
+  background-image: url("assets/setup-bg.webp");
+  background-size: cover;
+  background-position: center right;
+  background-repeat: no-repeat;
+  -webkit-mask-image: linear-gradient(to right, rgba(0, 0, 0, 0.22), #000 52%);
+  mask-image: linear-gradient(to right, rgba(0, 0, 0, 0.22), #000 52%);
+  z-index: 0;
+}
+
+.bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 18% 42%, rgba(20, 8, 26, 0.72) 0%, rgba(20, 8, 26, 0.28) 46%, transparent 72%),
+    linear-gradient(180deg, rgba(14, 6, 18, 0.55) 0%, transparent 26%, transparent 74%, rgba(14, 6, 18, 0.6) 100%);
+}
+
+/* ── 标题栏 ───────────────────────────────────────────────────────── */
+.titlebar {
+  position: relative;
+  z-index: 3;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 0 12px;
+  -webkit-app-region: drag;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.app-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.app-mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.app-name {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.titlebar-actions { display: flex; gap: 2px; -webkit-app-region: no-drag; }
+
+.win-btn {
+  width: 30px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.win-btn svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; }
+.win-btn:hover { background: rgba(255, 255, 255, 0.12); color: var(--ink); }
+.win-btn[data-action="close"]:hover { background: #e11d48; color: #fff; }
+
+/* ── 主体布局 ─────────────────────────────────────────────────────── */
+/* 品牌与操作面板收进左侧固定列，右侧整块留给背景里的角色：
+   与安装器保持同一构图，操作面板不再压在角色区域上。 */
+.content {
+  position: relative;
+  z-index: 2;
+  height: calc(100% - 38px);
+  display: flex;
+  padding: 0 20px 18px;
+  min-height: 0;
+}
+
+.col {
+  flex: 0 0 348px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+/* ── 左：品牌区（紧凑横排，logo 缩小居中） ─────────────────────────── */
+.brand {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 13px;
+  padding-left: 8px;
+  min-width: 0;
+}
+
+.brand-avatar {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.5),
+    0 0 0 6px rgba(244, 114, 182, 0.28),
+    0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.brand-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.brand-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.brand-sub {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+}
+
+.brand-note {
+  margin: 2px 0 0;
+  font-size: 10px;
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+}
+
+/* ── 右：操作面板 ─────────────────────────────────────────────────── */
+.panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 16px 14px;
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.stage { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.stage.is-hidden { display: none; }
+
+/* ── 卸载说明 ─────────────────────────────────────────────────────── */
+.un-title { margin: 0; font-size: 15px; font-weight: 700; }
+
+.un-block { display: flex; flex-direction: column; gap: 3px; }
+
+.un-label {
+  margin: 0;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--err);
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+
+.un-label-keep { color: var(--ok); }
+
+.un-note { margin: 0; font-size: 11.5px; color: var(--ink-soft); line-height: 1.6; }
+.un-keep { margin: 0; font-size: 11.5px; color: var(--ink-soft); line-height: 1.6; }
+
+.un-dir {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* ── 进度 ─────────────────────────────────────────────────────────── */
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+#progressPercent { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+
+.progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-lo), var(--accent), var(--accent-hi));
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.55);
+  transition: width 0.22s ease;
+}
+
+.progress-current {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 完成 ─────────────────────────────────────────────────────────── */
+.done-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--ok); }
+.done-sub { margin: 0; font-size: 11.5px; color: var(--ink-dim); line-height: 1.6; white-space: pre-line; }
+
+/* ── 按钮 ─────────────────────────────────────────────────────────── */
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.btn {
+  height: 32px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 0.1s ease, background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-lo), var(--accent));
+  color: #1a0a14;
+  box-shadow: 0 6px 18px rgba(244, 114, 182, 0.32);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hi));
+  box-shadow: 0 8px 22px rgba(244, 114, 182, 0.45);
+}
+
+/* 卸载是破坏性操作：确认按钮用警告色，避免用户手快 */
+.btn-danger {
+  background: linear-gradient(135deg, #b91c1c, #e11d48);
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(225, 29, 72, 0.35);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: linear-gradient(135deg, #dc2626, #f43f5e);
+  box-shadow: 0 8px 22px rgba(225, 29, 72, 0.5);
+}
+
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: var(--panel-line);
+  color: var(--ink-soft);
+}
+
+.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.13); color: var(--ink); }
+
+/* 小窗口保护 */
+@media (max-height: 430px) {
+  .brand-avatar { width: 44px; height: 44px; }
+  .brand { gap: 10px; }
+  .brand-title { font-size: 18px; }
+  .brand-note { display: none; }
+  .panel { padding: 12px 14px 10px; gap: 8px; }
+}

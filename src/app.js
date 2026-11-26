@@ -42,7 +42,7 @@ const GITCODE_MANIFEST_URL = 'https://raw.gitcode.com/huahuozuikeai/hxl-update/r
  */
 const REPO_NEW_ISSUE_URL = `${REPO_URL}/issues/new?template=bug_report.yml`;
 /**
- * 主题包下载站（用户 2026-11-23 指定）。
+ * 主题包下载站。
  *
  * 主题包不随安装包发，也不进源码仓库——单独放在这个静态站上，
  * 设置 → 外观的「主题包」一栏给一个按钮直接过去挑，省得用户自己找。
@@ -90,6 +90,9 @@ const state = {
   news: [],
   // 动态页分类筛选：all / release / guide
   newsFilter: 'all',
+    // 窗口状态（2026-11-24）：最小化 / 大窗口两个信号合并决定是否降级渲染
+    windowMinimized: false,
+    largeWindow: false,
   // 动态页「更新日志」是否展开全部版本（默认只显示最新几个，旧版本折叠）
   newsReleasesExpanded: false,
   // 游戏能力注册表（主进程 game-features.js 提供），tools 页据此渲染
@@ -232,7 +235,6 @@ const state = {
   /*
    * 我的队列（2026-11-18）。
    *
-   * 用户原话：「队列改成可以自己添加歌曲进去的那种，不要我点了歌单，就全进去了」。
    * 从这儿开始，「手动加的歌」和「当前在播的歌单」分开存：
    *   · state.songs       当前播放列表（点歌单会被替换，这是播放上下文）
    *   · state.pickedSongs 你自己一首首加进来的歌，持久保存，点歌单不会动它
@@ -260,14 +262,14 @@ const state = {
   queueSelected: [],
   /*
    * 歌单详情的批量选择（2026-11-18）。
-   * 用户反馈「批量选择对歌单无效」——之前只做了「我的队列」页，
+   * —之前只做了「我的队列」页，
    * 这里补上歌单详情页：选中若干首直接加进「我的队列」。
    */
   detailSelectMode: false,
   detailSelected: [],
   /*
    * 本地歌单（2026-11-18）。
-   * 用户要求「队列下面应该有个新建歌单吧」「批量选择也能选择进自己新建的歌单里」。
+   *
    * 结构：{ id, name, songs: [entry], createdAt }
    * 只存在本地，和账号歌单完全隔离。
    */
@@ -287,7 +289,23 @@ const state = {
    */
   livePanelOpen: null,
   // 点歌台搜索：无状态输入放在 input 里，结果只在内存
-  songSearch: { keyword: '', platform: 'all', loading: false, list: [], errors: [], done: false },
+  /*
+   * `mode` 是 2026-11-25 新增的「搜什么」：'song' 找单曲（默认）/ 'playlist' 找歌单。
+   * 用户当时的原话是「搜索能分类一下吗？目前歌名/歌手/专辑嘛，得分吧？然后再加个歌单上去搜索」——
+   * 前一半是「搜的结果要分得清歌名/歌手/专辑」，后一半是「加一类：歌单」。
+   * 歌单搜索结果放在 playlistList 里，和单曲列表分开存，切 tab 不用重搜。
+   */
+  songSearch: {
+    keyword: '',
+    platform: 'all',
+    mode: 'song',
+    loading: false,
+    list: [],
+    playlistList: [],
+    playlistError: '',
+    errors: [],
+    done: false,
+  },
   /*
    * 队列页的折叠与过滤（会话内状态，不落盘）：
    *   queueExpanded[段序号] = true/false，用户点过「展开/收起」的段按记忆来，
@@ -301,7 +319,7 @@ const state = {
   myPlaylists: {
     /*
      * 左栏「我的歌单」上次选中的平台标签（2026-11-18）。
-     * 用户要求「我的歌单那里，应该也保留上一次选择的标签」——
+     * —
      * all / netease / qq / kugou / local，落盘记住。
      */
     sidePlatform: localStorage.getItem('vela:side-platform') || 'all',
@@ -471,7 +489,7 @@ try {
   const savedSongs = JSON.parse(localStorage.getItem('vela:songs') || '[]');
   if (Array.isArray(savedSongs)) state.songs = savedSongs;
   /*
-   * 2026-11-18：连「听到第几首」一起恢复。
+   * 连「听到第几首」一起恢复。
    * 以前只存队列不存下标，关掉再开永远是第 1 首。
    */
   const savedIndex = Number(localStorage.getItem('vela:song-index') || 0);
@@ -1388,11 +1406,24 @@ document.addEventListener('click', async (event) => {
   /* 启动页背景面板：点在工具区之外就收起 */
   if (state.bgPanelOpen && !event.target.closest('.start-video-tools')) closeBgPanel();
 
-  /* 启动页唤出的侧栏：点在侧栏和菜单按钮之外的任意位置就收回 */
+  /*
+   * 启动页唤出的侧栏：点在侧栏和菜单按钮之外的任意位置就收回。
+   *
+   * 「启动页菜单键固定」开着时例外（2026-11-26 用户反馈）：
+   * 固定 = 真正钉住，点启动页空白处不该收回，只有
+   * 返回箭头 / 侧栏「收起侧栏」/ Esc / 离开启动页 才收。
+   * 否则那颗键「固定」了却一碰画面就整体收回，看着就是「没固定」。
+   */
   if (
     state.startNavOpen &&
+    state.settings?.startNavPinMenu !== true &&
     !event.target.closest('.sidebar') &&
-    !event.target.closest('.chrome-menu')
+    !event.target.closest('.chrome-menu') &&
+    /*
+     * 浮层「收回」键也是菜单键的一种：不加这一条，点它会先被这里判成「点外面」
+     * 收一次、再走 handleAction 的 toggle 又打开一次 —— 结果就是点了没反应。
+     */
+    !event.target.closest('.start-nav-pin-btn')
   ) {
     setStartNavOpen(false).catch(() => {});
   }
@@ -1729,6 +1760,134 @@ media.addEventListener('change', () => {
  * 这件事有一次明确的确认动作——个保法要求的告知义务，落到交互上就是这个。
  * 点「我知道了」或关掉都算确认（不阻断使用），之后不再弹。
  */
+/**
+ * 「要不要用管理员权限启动」的主动询问框（2026-11-25 加）。
+ *
+ * 为什么要有这个框：
+ *   终末地的启动授权由官方启动器把关，而官方启动器（Games.exe）的清单是
+ *   requireAdministrator。启动器自己不是管理员时，整条自动启动链路会退化成
+ *   「把官方启动器打开、让用户自己点」——用户看到的就是「怎么又弹启动器」。
+ *
+ *   以前的做法是**默默尝试提权**：只在设置里有个开关，从来不问。
+ *   用户的真实诉求（原话）：「你有做弹提示来让用户确认点击开启管理员权限吗？
+ *   用户一直不愿意开，你下次还提醒咋办？要不要弄个确认后，就不再显示，
+ *   然后就是不愿意的话，也多个按钮选择以后不再提醒」。
+ *
+ * 所以三个出口，各自对应一个持久化字段：
+ *   · 「开启」        → alwaysAdmin = true，重启后以管理员运行
+ *   · 「这次先不用」  → 只关掉弹窗，下次启动还能再问（elevationAsked 不动）
+ *   · 「以后不再提醒」→ elevationDontAsk = true，之后不再自动弹，只在设置里手动开
+ *
+ * 只在「确实需要、且没问过、且没被叫停」时才弹：
+ *   · 已经是管理员 → 不弹
+ *   · 用户已经开了开关 → 不弹
+ *   · 用户点了「不再提醒」→ 不弹
+ */
+/**
+ * 只在「真的要启动游戏、且确实需要提权」时问一次。
+ *
+ * 三个前置条件全部满足才弹，避免烦人：
+ *   · 当前不是管理员（是就别问）
+ *   · 用户没开过「总是以管理员身份运行」
+ *   · 用户没点过「以后不再提醒」
+ * 调用方保证只对终末地这类必须提权的游戏调它。
+ *
+ * @returns {Promise<boolean>} 用户是否当场选了「开启」
+ */
+function maybeAskElevationForGame() {
+  return new Promise((resolve) => {
+    const settings = state.settings || {};
+    if (state.app && state.app.elevated) return resolve(true);
+    if (settings.alwaysAdmin) return resolve(true);
+    if (settings.elevationDontAsk) return resolve(false);
+    confirmElevation(resolve);
+  });
+}
+
+function confirmElevation(done) {
+  openModal(
+    `<div class="modal-backdrop" data-backdrop>
+      <div class="modal narrow" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <div><h2>让游戏启动更顺？</h2></div>
+          <button class="modal-close" data-close title="关闭">${icon('x')}</button>
+        </div>
+        <div class="modal-body">
+          <p>终末地只能由<strong>鹰角官方启动器</strong>授权启动，而它<strong>必须管理员权限</strong>。</p>
+          <div class="elev-compare">
+            <div class="elev-row elev-on">
+              <span class="elev-tag">开启</span>
+              <p>点一下直接进游戏，官方启动器自动最小化、进游戏后自动关掉，以后不再问。</p>
+            </div>
+            <div class="elev-row">
+              <span class="elev-tag">不开</span>
+              <p>每次会弹出官方启动器，你得自己再点一次「开始游戏」，玩完还得手动关它。</p>
+            </div>
+          </div>
+          <p class="elev-tip">开启时会弹 <strong>Windows 权限窗口 → 点是</strong>；杀软拦截请<strong>允许并加白名单</strong>。权限只用于启动和关闭官方启动器。</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" id="elev-later">这次先不用</button>
+          <button class="btn btn-ghost" id="elev-never">以后不再提醒</button>
+          <button class="btn btn-primary" id="elev-yes">开启</button>
+        </div>
+      </div>
+    </div>`,
+    { onClose: () => {} }
+  );
+
+  const yes = document.querySelector('#elev-yes');
+  const later = document.querySelector('#elev-later');
+  const never = document.querySelector('#elev-never');
+
+  if (yes) {
+    yes.addEventListener('click', async () => {
+      try {
+        await api.updateSettings({ alwaysAdmin: true, elevationAsked: true, elevationDontAsk: false });
+      } catch {
+        /* 写设置失败也要把弹窗关掉，别把用户锁住 */
+      }
+      state.settings = { ...(state.settings || {}), alwaysAdmin: true, elevationDontAsk: false };
+      closeModal();
+      if (typeof done === 'function') done(true);
+    });
+  }
+
+  if (later) {
+    later.addEventListener('click', async () => {
+      // 只是这次不用：不动 elevationDontAsk，下次启动还能问
+      try {
+        await api.updateSettings({ elevationAsked: true });
+      } catch {
+        /* ignore */
+      }
+      /* 「这次先不用」：不动 dontAsk，下次启动/下次点游戏还能再问一次 */
+      closeModal();
+      if (typeof done === 'function') done(false);
+    });
+  }
+
+  if (never) {
+    never.addEventListener('click', async () => {
+      try {
+        await api.updateSettings({ elevationDontAsk: true, elevationAsked: true });
+      } catch {
+        /* ignore */
+      }
+      /*
+       * 关键：必须同步更新内存里的 state.settings。
+       * 只写进后端、不同步前端的话，紧接着的下一次判定（maybeAskElevationForGame）
+       * 还会看到 elevationDontAsk === false，把「不再提醒」当成没点过 → 又弹一次。
+       * 界面测试就是这么抓到的（点完再触发仍然弹）。
+       */
+      state.settings = { ...(state.settings || {}), elevationDontAsk: true, elevationAsked: true };
+      closeModal();
+      if (typeof done === 'function') done(false);
+      toast('好的，不再提醒。需要时可在「设置 → 行为」里打开。', 'info');
+    });
+  }
+}
+
 function confirmPrivacyNotice() {
   openModal(
     `<div class="modal-backdrop" data-backdrop>
@@ -1809,6 +1968,13 @@ async function boot() {
     render({ preserveScroll: false });
     /* 首次启动的隐私说明：只弹一次，确认后写 localStorage。
        不阻塞主流程——弹窗关掉或确认都会继续，用户不需要读完整份 PRIVACY.md。 */
+    /*
+     * 提权询问**不在这里弹**（2026-11-25 定稿）。
+     *
+     * 用户原话：「不要是我一点启动游戏，右下角就一堆提示了」。
+     * 打开启动器就弹框问权限，属于「还没说要玩就先拦一道」，很招人烦。
+     * 所以改成「点开始游戏、真正需要提权时」才问一次，见 maybeAskElevationForGame()。
+     */
     if (!localStorage.getItem('vela:privacy-ack') && typeof confirmPrivacyNotice === 'function') {
       confirmPrivacyNotice();
     }
@@ -1821,23 +1987,44 @@ async function boot() {
         )[0];
       if (startGame) loadGameNotices(startGame.id);
     }
-    api.starrail
-      .getFps()
-      .then((result) => {
-        state.starrailFps = result.fps || 60;
-        if (state.route === 'settings') render({ preserveScroll: true });
-      })
-      .catch(() => {});
-
-    api.onState(onState);
     /*
-     * 更新弹窗的配图（米游社画师同人图）。主进程先读本地缓存，
-     * 超过一周才真去抓；抓不到就保持空表，versionHero() 会用官网图。
-     * 慢一点也无所谓，所以不 await。
+     * 星铁帧率读取。api.starrail 理论上一定存在，但这里是 boot() 的中间环节 ——
+     * 一旦取不到就抛错，后面的 onState 订阅、主题包同步、隐私弹窗全都不会执行，
+     * 界面会整片空掉。所以能取就取，取不到就跳过，绝不中断启动。
      */
-    /* 2026-11-20 风险整改 T3-B：不再在启动时去米游社抓画师同人图。
-   * 更新弹窗配图已改用内置原创装饰图，state.postArt 已无消费者。
-   * 函数本体（services/update.js 的 loadPostArt）保留，将来做成用户自愿开启的开关再启用。 */
+    try {
+      if (api.starrail && typeof api.starrail.getFps === 'function') {
+        api.starrail
+          .getFps()
+          .then((result) => {
+            state.starrailFps = result.fps || 60;
+            if (state.route === 'settings') render({ preserveScroll: true });
+          })
+          .catch(() => {});
+      }
+    } catch {
+      /* 读不到就用默认值 */
+    }
+
+    /*
+     * 主进程推送的所有订阅都包一层 —— boot() 是一条长流水线，任何一个订阅甩出
+     * 异常，后面的主题包、画面渲染、隐私弹窗就全都不执行了，用户看到的是一整片
+     * 「启动器没有正常加载」。宁可少一个订阅，也不能让启动断在半路。
+     */
+    const subscribeSafely = (name, fn) => {
+      try {
+        if (typeof fn === 'function') fn();
+      } catch (error) {
+        console.error('[boot] 订阅 ' + name + ' 失败（已跳过，继续启动）：', error && error.message);
+      }
+    };
+
+    subscribeSafely('onState', () => api.onState(onState));
+    subscribeSafely('onToast', () => {
+      api.onToast((payload) => {
+        if (payload && payload.message) toast(payload.message, payload.type || 'info');
+      });
+    });
     /*
      * 侧栏「工具」分组的内容来自 game-features，启动时就预取一份，
      * 用户第一次点开工具组不至于看到「读取中…」。
@@ -1847,7 +2034,7 @@ async function boot() {
     /*
      * 开机就把画质配置读进渲染层缓存。
      *
-     * 用户的原话是「打开软件的时间直接去读取」：主进程会在窗口建好后自己
+     * 主进程会在窗口建好后自己
      * 串行预读一遍（primeGraphicsCache），这里再按启动页顺序把结果灌进
      * state.graphicsCache，用户点进画质页时首帧直接就是数据，连 loading 都没有。
      * 失败无所谓：点进画质页会走正常的读取路径。
@@ -1888,7 +2075,7 @@ async function boot() {
      * 「更新游戏」这条的进度：全部交给上方那块统一面板，按钮不再自己画进度。
      *
      * 原来这里会把百分比写进按钮的 --update-progress 变量、还会改按钮文案，
-     * 按钮上方有面板之后就是同一件事说两遍（用户 2026-11-11：「等会，简化掉那个」）。
+     * 按钮上方有面板之后就是同一件事说两遍。
      * 这里只保留 state.gameUpdate 的状态同步，DOM 交给 updateTaskPanel 与 home.js。
      */
     if (typeof api.onPredownloadProgress === 'function') {
@@ -1972,8 +2159,7 @@ async function boot() {
          * 结束帧要把启动页那块内联面板收掉。
          *
          * 以前这条订阅只 setTaskState，从不处理 done：任务跑完了，面板还停在
-         * 「第 5/5 步 · 完成」那一屏不消失（用户 2026-11-16 报障「硬链接完成，
-         * 内联面板不会自己收起来吗？」）。sophon / link 两条订阅都有这句「没任务
+         * 「第 5/5 步 · 完成」那一屏不消失。sophon / link 两条订阅都有这句「没任务
          * 就不显示」，这里补齐，三条进度频道的行为就一致了。
          */
         if (progress.phase === 'done') {
@@ -1992,7 +2178,7 @@ async function boot() {
         );
       });
     }
-    api.onUpdateAvailable((info) => {
+    subscribeSafely('onUpdateAvailable', () => api.onUpdateAvailable((info) => {
       if (!info || !info.hasUpdate) return;
       if (state.update && state.update.downloading) return;
       // 用户点过「稍后再说」：同一版本在推迟窗口内不再自动弹（手动检查更新仍会弹）
@@ -2000,7 +2186,7 @@ async function boot() {
       // 已经有一个更新弹窗开着，别重复打开
       if (document.querySelector('.update-modal')) return;
       openUpdateModal(info);
-    });
+    }));
     /*
      * 窗口全屏状态。
      *
@@ -2019,11 +2205,35 @@ async function boot() {
      * （CSS 见 styles.css 末尾的「空闲降跑」段）。主进程推 minimize 状态；
      * visibilitychange 是第二道闸，被别的窗口完全遮住时也停。音频不受影响。
      */
+    // 三个「该降级」的信号合并成一条判据：最小化 / 大窗口 / 页面不可见。
+    // 不能各调各的 setIdleMode，否则一个恢复就把另一个的降级覆盖掉了。
+    const applyIdleMode = () => {
+      setIdleMode(Boolean(state.windowMinimized || state.largeWindow || document.hidden));
+    };
+    /*
+     * 空闲降级：窗口最小化时停掉循环背景视频和装饰动画，别白烧 GPU。
+     * （backgroundThrottling 是 false，缩到任务栏后 CSS 动画和 video 解码照跑。）
+     * visibilitychange 是第二道闸，被别的窗口完全遮住时也停。音频不受影响。
+     */
     if (typeof api.onMinimizeChange === 'function') {
-      api.onMinimizeChange((value) => setIdleMode(!!value));
+      api.onMinimizeChange((value) => {
+        state.windowMinimized = !!value;
+        applyIdleMode();
+      });
+    }
+    /*
+     * 大窗口模式（2026-11-24）：窗口拉到 4K 这种超大尺寸时，全屏背景视频 + 几十个
+     * 装饰动画同时合成会把集显/老卡压垮（用户报「拉太大界面崩掉」）。
+     * 主进程按窗口面积判定，超过阈值推 true —— 走同一套 setIdleMode 降级。
+     */
+    if (typeof api.onLargeWindowChange === 'function') {
+      api.onLargeWindowChange((value) => {
+        state.largeWindow = !!value;
+        applyIdleMode();
+      });
     }
     document.addEventListener('visibilitychange', () => {
-      setIdleMode(document.hidden);
+      applyIdleMode();
     });
 
     /*
@@ -2063,7 +2273,7 @@ async function boot() {
      */
     startReleaseNotesWatch();
 
-    api.onUpdateProgress((progress) => {
+    subscribeSafely('onUpdateProgress', () => api.onUpdateProgress((progress) => {
       if (!progress) return;
       state.update = {
         ...state.update,
@@ -2086,7 +2296,7 @@ async function boot() {
        * 同一条进度也写进右下角那颗回弹胶囊（原来的任务坞已经撤掉了）。
        *
        * 弹窗只在你点「立即更新」的那一刻存在：切到别的页面、或者手滑关掉弹窗，
-       * 200MB 的下载就完全没有任何可见反馈——用户的原话是「更新没进度条」。
+       * 200MB 的下载就完全没有任何可见反馈——
        * 胶囊是全局的，不依赖当前页面，所以这里和游戏预下载走同一套显示。
        */
       const job = sophonJobs.find((item) => item.mode === 'launcher');
@@ -2102,13 +2312,13 @@ async function boot() {
         // patchTaskDockJob 已经是空壳（坞撤了），这里直接刷新胶囊
         renderTaskDock();
       }
-    });
-    api.onGachaUpdated(() => {
+    }));
+    subscribeSafely('onGachaUpdated', () => api.onGachaUpdated(() => {
       state.gacha = null;
       // 同步成功 = 链接还活着，过期提醒就该撤了
       if (state.gachaLinkExpired) state.gachaLinkExpired = null;
       if (state.route === 'gacha') loadGacha(true);
-    });
+    }));
     // 自动同步发现链接过期：抽卡记录页顶部挂常驻提醒（gacha.js 渲染），点「知道了」可手动关
     api.onGachaLinkExpired?.((event) => {
       if (!event?.game) return;
@@ -2116,11 +2326,11 @@ async function boot() {
       state.gachaLinkExpired[event.game] = { message: event.message || '' };
       if (state.route === 'gacha') loadGacha(true);
     });
-    api.onGameExited(() => {
+    subscribeSafely('onGameExited', () => api.onGameExited(() => {
       toast('游戏已退出，本次游玩时长已记录', 'info');
-    });
+    }));
 
-    api.onNteCapture((event) => {
+    subscribeSafely('onNteCapture', () => api.onNteCapture((event) => {
       if (!event) return;
       const current = state.nteCapture || {};
       if (event.phase === 'done') {
@@ -2149,7 +2359,7 @@ async function boot() {
         };
       }
       renderNteCapture();
-    });
+    }));
 
     window.__navigate = (route) => navigate(route, { silent: true });
     window.__state = () => state;

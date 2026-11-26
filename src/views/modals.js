@@ -736,27 +736,39 @@ const KURO_DIR_NAMES = {
 };
 
 /**
- * 未安装游戏的默认安装目录：跟随现有游戏安装盘。
- * 哪个内置游戏已经装好了，就把它的安装盘借过来（比如原神装在 D 盘，新游戏默认
- * D:\HuaXiaoLingGames\<builtinKey>）；一个都没装时退回 C 盘。
- * 目录名用 builtinKey 而不是中文名，避免个别老游戏对中文路径的兼容问题。
+ * 未安装游戏的默认安装目录。
+ *
+ * ★ 2026-11-25 改：以前这里是自己拼 `<盘符>\HuaXiaoLingGames\<builtinKey>`，
+ *   结果跟启动器的下载目录设置（`settings.downloadDir`，默认 `<程序目录>\花筱灵下载`）
+ *   完全脱节 —— 用户在设置里选的下载位置在这儿根本不生效，
+ *   还会在游戏盘根目录凭空长出一个 `HuaXiaoLingGames` 空文件夹。
+ *
+ *   现在统一：**优先用用户在设置里定的下载目录**，游戏目录建在它下面。
+ *   只有用户没设过时，才退回「跟着已装游戏的盘 + 花筱灵下载」。
+ *
+ *   目录名仍用 builtinKey（而不是中文名），因为个别老游戏对中文路径兼容差。
  */
 function defaultDownloadDir(game, channel = '') {
-  const installedRoot = ((state.games || []).map((item) =>
-    (item.servers || []).find((server) => server.exists && server.root)
-  ).find(Boolean) || {}).root || '';
-  // 盘符必须用正则整体取出（含冒号），再一次性拼接。
-  // 之前 slice(0,2)+' 截取后重新拼 ':' 的写法会拼出 "G:\:\..." 这种坏路径，
-  // 直接导致 mkdir ENOENT、空间预估失败。
-  const m = /^([a-zA-Z]:)[\\/]/.exec(installedRoot);
-  const drive = m ? m[1] : 'C:';
   const yostar = YOSTAR_DIR_NAMES[channel];
   const kuro = KURO_DIR_NAMES[channel];
   // 方舟用官方目录名（Arknights_EN 之类），库洛这里直接给完整叶名
   const leaf = yostar
     ? `${game.builtinKey || 'game'}-${yostar}`
     : (kuro || (game.builtinKey || 'game'));
-  return `${drive}\\HuaXiaoLingGames\\${leaf}`;
+
+  const configured = String((state.settings || {}).downloadDir || '').trim();
+  if (configured) return `${configured.replace(/[\\/]+$/, '')}\\${leaf}`;
+
+  /*
+   * 没设过下载目录：跟着已装游戏的盘放，目录名用「花筱灵下载」——
+   * 跟 settings 的默认值保持同一个名字，用户一看就知道这些是启动器下的东西。
+   */
+  const installedRoot = ((state.games || []).map((item) =>
+    (item.servers || []).find((server) => server.exists && server.root)
+  ).find(Boolean) || {}).root || '';
+  const m = /^([a-zA-Z]:)[\\/]/.exec(installedRoot);
+  const drive = m ? m[1] : 'C:';
+  return `${drive}\\花筱灵下载\\${leaf}`;
 }
 
 /**
@@ -764,7 +776,6 @@ function defaultDownloadDir(game, channel = '') {
  *
  * 这条入口以前只把进度打到启动页那颗按钮的一行字上（`dockUpdateText`），
  * 用户点完就只看见「正在更新…」，既没有百分比也没有覆盖量——原话是
- * 「这更新，你倒是给我加个百分比和覆盖了多少吧」。
  *
  * 现在开一个正式面板：顶部大百分比 + 剩余时间，中间三行子任务
  * （下载 / 安装 / 校验，各自完成量 · 总量 · 速度），底部进度条与停止按钮。
@@ -1913,7 +1924,7 @@ function dropStashedTaskModal() {
 
 function renderTaskDock() {
   /*
-   * 原来的「任务坞」已经撤掉（用户 2026-11-11：「以后别要任务坞了」），
+   * 原来的「任务坞」已经撤掉，
    * 中间那版右下角回弹胶囊（#task-pill）也按「都统一用面板」一起撤了。
    *
    * 现在唯一的进度出口是启动页「开始游戏」按钮上方那一块（#start-dock-task-host），

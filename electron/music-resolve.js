@@ -146,7 +146,7 @@ async function resolvePlayableUrl(apiBase, song, level = 'exhigh', flags = null)
   const best = pickBest(candidates, song);
   if (!best?.id) return null;
 
-  // 换源接口：默认不走（2026-11-20 风险整改 T2-B），用户打开「同名换源」后才试
+  // 换源接口默认不走：用户打开「同名换源」后才试
   let matchedUrl = '';
   if (flags && flags.swap === true) {
     try {

@@ -182,6 +182,9 @@ contextBridge.exposeInMainWorld('launcher', {
   // 窗口最小化状态（渲染层据此停循环视频 + 装饰动画省 GPU；音频不停）
   onMinimizeChange: (callback) => subscribe('window:minimize-state', callback),
 
+    // 大窗口模式（窗口拉到超大时降级：停循环视频 + 装饰动画，防 GPU 合成压力过大导致崩溃）
+    onLargeWindowChange: (callback) => subscribe('window:large-mode', callback),
+
   // 第一次点关闭按钮：主进程拦下 close 事件，让这里弹「收进托盘 / 退出程序」
   onCloseAsk: (callback) => subscribe('window:close-ask', callback),
 
@@ -228,6 +231,7 @@ contextBridge.exposeInMainWorld('launcher', {
     packDownload: (input) => ipcRenderer.invoke('endfield:channel-pack-download', input),
     packCancel: (input) => ipcRenderer.invoke('endfield:channel-pack-cancel', input),
     packList: () => ipcRenderer.invoke('endfield:channel-pack-list'),
+    resolveOfficialGamesExe: (picked) => ipcRenderer.invoke('endfield:resolve-official-games-exe', picked),
     onPackProgress: (callback) => subscribe('endfield:pack-progress', callback),
   },
 
@@ -335,6 +339,7 @@ contextBridge.exposeInMainWorld('launcher', {
   musicPlaylistSongs: (input) => ipcRenderer.invoke('music:playlist-songs', input),
   musicParsePlaylistLink: (url) => ipcRenderer.invoke('music:parse-playlist-link', { url }),
   musicPlaza: (platform, page) => ipcRenderer.invoke('music:plaza', { platform, page }),
+  musicSearchPlaylists: (input) => ipcRenderer.invoke('music:search-playlists', input),
   musicChartSongs: (input) => ipcRenderer.invoke('music:chart-songs', input),
   musicSearch: (input) => ipcRenderer.invoke('music:search', input),
   netease: {
@@ -396,6 +401,7 @@ contextBridge.exposeInMainWorld('launcher', {
   exportStartVideo: (gameId) => ipcRenderer.invoke('start:export-video', gameId),
   refreshStartArt: (gameId) => ipcRenderer.invoke('start:refresh-art', gameId),
   relaunchAdmin: (input) => ipcRenderer.invoke('app:relaunch-admin', input),
+  elevation: () => ipcRenderer.invoke('app:elevation'),
   quit: () => ipcRenderer.invoke('app:quit'),
 
   news: {

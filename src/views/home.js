@@ -3,7 +3,7 @@
 /**
  * 视图层：首页（home）与启动页（start）。
  *
- * 2026-10-31 从 app.js 拆出 —— 「前后端分离」第 5 批。
+ * 从 app.js 拆出 —— 「前后端分离」第 5 批。
  * 原本批次表把「服务器面板 + 切换引导」单列第 6 批，但它们在代码里本来就在
  * home 段内（startServerPanel / openServerSetupDialog / showServerSwitchGuideOnce
  * 全是启动页的一部分），硬切两段只会制造假边界，所以整段一起搬。
@@ -274,7 +274,9 @@ function startView() {
       ${hasVideo ? '<div class="start-text-veil" aria-hidden="true"></div>' : ''}
       <header class="start-top">
         <!-- 2.4.x：返回键换成「打开导航」——侧栏浮层直接去任何页面，
-             回主页走浮层第一项或 Esc，不再单独占一个键 -->
+             回主页走浮层第一项或 Esc，不再单独占一个键。
+             「菜单键固定」开着时，展开后这颗键由 body 下的 .start-nav-pin-btn
+             在原位置接管（画面被裁掉，这颗按不到），图标是返回箭头。 -->
         <button class="chrome-btn chrome-menu" data-action="toggle-start-nav" title="打开侧栏（Esc 返回主界面）" aria-label="打开侧栏">${icon('menu')}</button>
         <div class="start-brand">
           <img class="start-brand-mark" src="hxl-art://character-face.png" alt="" aria-hidden="true" />
@@ -633,7 +635,7 @@ function startServerPanel(game) {
   const fileName = active && active.path ? active.path.split(/[\\/]/).pop() : '';
   const activeBlock = active ? serverBlockHint(active) : null;
   // 「x / y 可用」只数真的能直接启动的：终末地那些「能切但独立运行时还没生成」的
-  // 行（needRuntime）不算，否则这一行永远写着全绿满额（用户 2026-11-16 报障）。
+  // 行（needRuntime）不算，否则这一行永远写着全绿满额。
   const ready = servers.filter((server) => server.exists && !server.incomplete && !server.needsRuntime).length;
   const open = Boolean(state.startServerMenu);
 
@@ -650,7 +652,7 @@ function startServerPanel(game) {
     const sub = file ? '' : (block ? block.short : '') || '';
     // 没装好的行点下去不是「切过去」，而是问「怎么把它补上」（硬链接 / 选路径 / 扫描）
     // 终末地「能切但独立运行时还没生成」的行也算没装好：点下去要弹那个面板，
-    // 而不是直接切服自愈（用户 2026-11-16 要求「和别的游戏一样」）。
+    // 而不是直接切服自愈。
     const usable = server.exists && !server.incomplete && !server.needsRuntime;
     return `
         <button class="start-server-item ${server.active ? 'is-active' : ''} ${
@@ -736,6 +738,40 @@ function startServerPanel(game) {
                   <span class="sw-srv-action-icon">${icon('settings')}</span>
                   <span class="sw-srv-action-copy"><strong>服务器管理</strong></span>
                 </button>
+                ${
+                  /*
+                   * 终末地的「官方启动器路径」放在这里，和上面两个按钮同一排。
+                   *
+                   * 以前它只挂在「设置 → 行为」里，用户要配它得先离开启动页、进设置、
+                   * 翻到那一行 —— 而它其实是「这个游戏的启动方式」的一部分，跟服务器
+                   * 管理是一类东西：都在答「怎么把这个游戏拉起来」。放到启动页这一排，
+                   * 用户不用去别处找。
+                   *
+                   * 非终末地不显示：官方托管只有终末地走这条链路。
+                   */
+                  game.builtinKey === 'endfield'
+                    ? (() => {
+                        const officialExe = String((state.settings || {}).endfieldOfficialGamesExe || '').trim();
+                        const shortName = officialExe ? officialExe.split(/[\\/]/).pop() : '自动搜索';
+                        return `<button class="sw-srv-action" data-action="start-pick-official-games" data-game="${esc(game.id)}"
+                          title="${esc(officialExe || '自动搜索鹰角官方启动器（Games.exe）的位置；点这里可以手动指定')}">
+                          <span class="sw-srv-action-icon">${icon(officialExe ? 'check' : 'search')}</span>
+                          <span class="sw-srv-action-copy"><strong>官方启动器</strong><small>${esc(shortName)}</small></span>
+                        </button>`;
+                      })()
+                    : game.builtinKey === 'azurpromilia'
+                    ? (() => {
+                        /* 蓝色星原同样必须走官方启动器（游戏校验父进程），也给一个入口 */
+                        const officialExe = String((state.settings || {}).azurLauncherExe || '').trim();
+                        const shortName = officialExe ? officialExe.split(/[\\/]/).pop() : '自动搜索';
+                        return `<button class="sw-srv-action" data-action="pick-azur-launcher" data-game="${esc(game.id)}"
+                          title="${esc(officialExe || '自动搜索蛮啾官方启动器（launcher.exe）的位置；点这里可以手动指定')}">
+                          <span class="sw-srv-action-icon">${icon(officialExe ? 'check' : 'search')}</span>
+                          <span class="sw-srv-action-copy"><strong>官方启动器</strong><small>${esc(shortName)}</small></span>
+                        </button>`;
+                      })()
+                    : ''
+                }
               </div>
               <div class="sw-srv-list">${items || '<p class="start-server-empty">还没有服务器</p>'}</div>
         </div>
@@ -935,7 +971,7 @@ function openServerSetupDialog(gameId, serverId) {
               </button>
             </li>
             ${
-              // WeGame 转换：只对鸣潮显示（用户 m27841 要求把这个入口从服务器管理挪进这个弹窗）
+              // WeGame 转换：只对鸣潮显示
               game.builtinKey === 'wutheringwaves'
                 ? `<li>
               <button class="setup-opt" data-setup="wegame">
@@ -961,11 +997,11 @@ function openServerSetupDialog(gameId, serverId) {
       closeModal();
       if (choice === 'link') {
         /*
-         * 2026-11-16：鸣潮不再走「直接 activate + 一条 toast」那条特判。
+         * 鸣潮不再走「直接 activate + 一条 toast」那条特判。
          *
          * 以前鸣潮在这一步是特例：点了只有一句「正在生成…」的 toast，然后几十秒
          * 什么反馈都没有，也没有空间估算、没有分阶段进度，面板也不会自己收起
-         * （用户报障「鸣潮内联面板点开的窗口，没和别的游戏统一」、
+         * （、
          * 「硬链接完成，内联面板不会自己收起来吗？」）。
          *
          * 现在和终末地 / 明日方舟 / 米哈游三游走同一套：openSophonModal 里

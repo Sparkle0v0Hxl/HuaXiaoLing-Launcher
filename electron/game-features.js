@@ -327,6 +327,46 @@ const GAMES = [
       note: '鹰角通行证；也可用 bilibili 账号（仅限 bilibili 渠道的鹰角启动器）',
     },
   },
+  {
+    key: 'wutheringwaves',
+    name: '鸣潮',
+    subtitle: 'Wuthering Waves',
+    vendor: 'kuro',
+    launcher: 'kuro',
+    accent: '#4fc3d9',
+    /*
+     * 库洛自家发行，官服 / B服 / 国际服三条线（seed.js 的 KURO_CHANNELS）。
+     *
+     * 抽卡记录走「游戏内分享链接」：链接写进 Client/Saved/Logs/Client*.log
+     * （ELog XOR 加密），kuro-gacha.js 解密后按 11 个卡池逐池查官方接口。
+     * 这条链不依赖登录态，所以 gacha 有、daily-note 没有 ——
+     * 库街区没有对外的战绩端点（见 LOGIN_PROVIDERS.kuro 的注释）。
+     */
+    login: {
+      provider: 'kuro',
+      methods: ['qrcode', 'sms', 'password'],
+      note: '库街区账号；目前只用于账号信息，抽卡记录靠游戏内分享链接，不需要登录',
+    },
+  },
+  {
+    key: 'azurpromilia',
+    name: '蓝色星原：旅谣',
+    subtitle: 'Azur Promilia',
+    vendor: 'manjuu',
+    launcher: 'azur',
+    accent: '#5fc7e8',
+    /*
+     * 蛮啾 / 上海蛮奈网络科技发行，当前只有官服一条线（AZUR_CHANNELS）。
+     *
+     * 这游戏必须由官方启动器（launcher.exe）亲自拉起：它会校验父进程，
+     * 直接 spawn AzurPromilia.exe 会被 ACE 拦成「安全组件发生异常」
+     * （见 electron/azur-launcher.js 开头那段实测结论）。
+     * 所以它的「安装与更新」不走 hyp/pack，走官方托管那条独立链路。
+     *
+     * 目前没有任何战绩 / 抽卡对外接口，能力表里只有本机数据。
+     */
+    login: null,
+  },
 ];
 
 const GAME_MAP = new Map(GAMES.map((item) => [item.key, item]));
@@ -483,6 +523,37 @@ const TRAITS = {
     screenshot: { kind: 'local' },
     'install-manager': { kind: 'pack', id: 'arknights' },
     notice: { kind: 'notice', api: 'arknights' },
+  },
+  wutheringwaves: {
+    /*
+     * 鸣潮目前只有本机数据 + 抽卡。
+     *
+     * 抽卡记录来自 kuro-gacha.js 写入的 imports 文件（game: 'wutheringwaves'），
+     * gacha.js 的 GAME_DEFS 里也有它，抽卡页能直接读到。
+     * 没有 daily-note：库街区没有对外战绩接口。
+     * 没有 graphics：库洛的配置不在注册表里，画质页靠 graphics-detect 按安装路径自动探测。
+     */
+    gacha: { kind: 'db', table: 'GachaImport' },
+    'play-time': { kind: 'local' },
+    screenshot: { kind: 'local' },
+    'install-manager': { kind: 'pack', id: 'wutheringwaves' },
+    notice: { kind: 'notice', api: 'wutheringwaves' },
+  },
+  azurpromilia: {
+    /*
+     * 蓝色星原的能力表。
+     *
+     * 公告（notice）：走蛮啾自家公告系统的 pagelatestlist，不需要登录，
+     * 只有一层 MD5 时间戳签名（见 main.js 的 fetchAzurNotices）。
+     * 官网 /home/news 就是这套接口渲染的，详情页 /home/news/detail/<id>/。
+     *
+     * 没有 gacha / daily-note：官方没开对外抽卡记录或战绩端点。
+     * install-manager 也不写：它的更新不是「比对清单再下载」那套，
+     * 而是必须交给官方启动器（launcher.exe）自己拉，走 azur-launcher.js。
+     */
+    'play-time': { kind: 'local' },
+    screenshot: { kind: 'local' },
+    notice: { kind: 'notice', api: 'azurpromilia' },
   },
 };
 

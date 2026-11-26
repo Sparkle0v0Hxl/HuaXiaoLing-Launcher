@@ -3,7 +3,7 @@
 /**
  * 视图层：抽卡记录页（gacha）。
  *
- * 2026-10-31 从 app.js 拆出 —— 「前后端分离」第 8 批。
+ * 从 app.js 拆出 —— 「前后端分离」第 8 批。
  *
  * 内容（在 app.js 里被 NTE 预下载窗、终末地打包弹窗打断成 4 段，这里按顺序合回一处）：
  *   · 固定展示表：GACHA_GAMES / gachaAllGames / gachaEnsureSelection

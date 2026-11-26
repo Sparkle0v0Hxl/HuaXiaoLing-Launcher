@@ -657,7 +657,7 @@ async function checkUpdate({ installRoot, channel = '', versionUrl = '', signal 
    * 和预下载同理：资源只有官方启动器下得动（登录态换 STS + PatcherXML0 私有加密
    * 清单 + .sig 验签），所以同样标 officialOnly，界面只能把人送到官方启动页。
    * 状态用 'update' 而不是 'available'，因为这不是「提前下好的内容」，而是
-   * 「已经该升级了」。
+   *
    */
   const officialResult = () => ({
     kind: 'nte',

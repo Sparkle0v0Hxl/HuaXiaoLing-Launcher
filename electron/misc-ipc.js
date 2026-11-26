@@ -212,7 +212,7 @@ function installMiscIpc(ctx) {
        */
 
       // 源优先取官方体系（官服 / B服）里装好的完整客户端；WeGame 自己不当源，
-      // 免得「自己转自己」被 pathsOverlap 拦住（用户 m29017「B服转换wegame能转吗」）。
+      // 免得「自己转自己」被 pathsOverlap 拦住。
       let sourceRoot = '';
       const officialSource = game
         ? (game.servers || []).find(
@@ -238,7 +238,7 @@ function installMiscIpc(ctx) {
       }
       const sourceReady = Boolean(sourceRoot && wuwaExeAt(sourceRoot));
       // 目标：下载中(downloading\2002137) 与 已安装(rail_apps\Wuthering Waves(2002137))
-      // 都认 —— WeGame 装完会把目录从 downloading 迁到 rail_apps（用户 m28189/m28195）。
+      // 都认 —— WeGame 装完会把目录从 downloading 迁到 rail_apps。
       const wuwaRoots = findWeGameWuwaRoots();
       const roots = findWeGameDownloadRoots();
       let targetRoot = wuwaRoots[0] || '';
@@ -269,7 +269,7 @@ function installMiscIpc(ctx) {
     });
 
     /*
-     * 2026-11-17 修 bug 3（转换后回填 WeGame 服务器行）。
+     * 修 bug 3（转换后回填 WeGame 服务器行）。
      *
      * 做什么：把鸣潮 game 的「WeGame」渠道行的 server.path / server.root 填上，
      * 并标记 confirmed = true，让界面点「WeGame 版」不再是空的。
@@ -293,7 +293,7 @@ function installMiscIpc(ctx) {
         const server = servers.find((item) => String(item.channel || '') === 'wegame');
         if (!server) return false;
         /*
-         * 2026-11-17 审查（rev-wuwa B2）：这里原来无条件覆盖 —— 只要点一次「转换」，
+         * 审查（rev-wuwa B2）：这里原来无条件覆盖 —— 只要点一次「转换」，
          * 就把用户手填过的 WeGame 路径（可能是另一个安装位）改成当前这次的目标目录，
          * 还顺手把 confirmed 置 true。
          *
@@ -353,7 +353,7 @@ function installMiscIpc(ctx) {
       }
       if (wuwaExeAt(targetRoot)) {
         // WeGame 版已经装好（rail_apps 里有完整主程序）：不再往里硬链覆盖，
-        // 否则会把它自己的渠道件冲掉（用户 m28159「我wegame端下好能启动了」）。
+        // 否则会把它自己的渠道件冲掉。
         const alreadyDone = { jobId: crypto.randomUUID(), ok: true, already: true, phase: 'done' };
         // 已经是装好的 WeGame 版：同样回填服务器行（否则这一行永远空着）。
         await backfillWeGameServerRow(targetRoot);
@@ -379,7 +379,7 @@ function installMiscIpc(ctx) {
             'launcherDownloadConfig',
             'Client/Config',
             /*
-             * 2026-11-17 修 bug 2（渠道身份）：
+             * 修 bug 2（渠道身份）：
              * 渠道身份写在
              *   Client/Binaries/Win64/ThirdParty/KrPcSdk_Mainland/KRSDKRes/KRSDKConfig.json
              * （官服 KR_ChannelId=19 / B服 46 / KR_AppId=com.kurogame.mingchao.bilibili）。
@@ -400,7 +400,7 @@ function installMiscIpc(ctx) {
             'crashsight_data',
           ],
           /*
-           * 2026-11-18：这两棵目录「根本不处理」，既不算硬链也不算复制。
+           * 这两棵目录「根本不处理」，既不算硬链也不算复制。
            *
            * 实测本机官服 108.13 GiB / 1804 个文件转换 WeGame 时，「必须复制」共
            * 4.75 GiB，其中 3.88 GiB 是纯垃圾：
@@ -413,7 +413,7 @@ function installMiscIpc(ctx) {
           skipPrefixes: ['Client/Saved/PSO'],
         });
         /*
-         * 2026-11-17 修 bug 3：转换完成后回填鸣潮的 WeGame 服务器行。
+         * 修 bug 3：转换完成后回填鸣潮的 WeGame 服务器行。
          * 以前只发 link:progress / link:done，从不回填 —— WeGame 行的
          * server.path / server.root 恒空，界面点「WeGame 版」永远像没配好。
          *
@@ -427,7 +427,7 @@ function installMiscIpc(ctx) {
         const done = { jobId, ok: true, ...result, phase: 'done' };
         // 任务面板只认 link:progress 的 done 帧（src/app.js 的 onLinkProgress
         // 在 phase==='done' 时 setTaskState(null)）。以前只发 link:done，弹窗
-        // 收尾了、启动页却永远卡在「硬链接生成 100%」（用户 m28159）。
+        // 收尾了、启动页却永远卡在「硬链接生成 100%」。
         send('link:progress', { gameId: 'builtin-wutheringwaves', ...done });
         send('link:done', { jobId, gameId: 'builtin-wutheringwaves', ...done });
         return { ok: true, jobId, ...result };

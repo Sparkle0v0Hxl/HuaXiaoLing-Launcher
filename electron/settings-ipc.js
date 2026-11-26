@@ -29,12 +29,15 @@ function installSettingsIpc(ctx) {
         'theme',
         'accent',
         'sidebarCollapsed',
+        // 启动页唤出侧栏时菜单键钉在原位（挡着就点不回来那个问题的开关，2026-11-26）
+        'startNavPinMenu',
         'quickPanelPinned',
         'uiScale',
         'alwaysAdmin',
         // 「开游戏要管理员」这件事问过一次没有：界面点过「以管理员重启」或
         // 「每次弹一次」之后置 true，免得每次启动都重新问
         'elevationAsked',
+        'elevationDontAsk',
         'elevationDeclined',
         'nevernessUseOfficialLauncher',
         'closeToTray',
@@ -72,6 +75,14 @@ function installSettingsIpc(ctx) {
         'endfieldPackRoot',
         // 终末地官方启动器（Games.exe）手填路径：自动发现找不到时的兜底（2026-11-23）
         'endfieldOfficialGamesExe',
+        // 蓝色星原官方启动器（launcher.exe）手填路径：自动发现找不到时的兜底
+        'azurLauncherExe',
+        // 终末地启动方式：'full' = 全自动（调试口 + 点按钮）；'manual' = 只拉起启动器让用户自己点
+        'endfieldLaunchMode',
+        // 自动模式连续失败次数与最近一次失败原因（用于自动退回 manual）
+        'endfieldAutoFailCount',
+        'endfieldAutoFailReason',
+        'endfieldAutoFailAt',
         'starwardDbPath',
         'runtimeRoot',
         'downloadDir',
@@ -131,16 +142,52 @@ function installSettingsIpc(ctx) {
           }
         } else if (key === 'sidebarCollapsed') {
           settings.sidebarCollapsed = patch.sidebarCollapsed === true;
+        } else if (key === 'startNavPinMenu') {
+          settings.startNavPinMenu = patch.startNavPinMenu === true;
         } else if (key === 'uiScale') {
           settings.uiScale = normalizeUiScale(patch.uiScale);
         } else if (key === 'quickPanelPinned') {
           settings.quickPanelPinned = patch.quickPanelPinned === true;
         } else if (key === 'alwaysAdmin') {
           settings.alwaysAdmin = patch.alwaysAdmin === true;
-          // 重新打开这个开关＝用户愿意再看到授权窗口
-          if (settings.alwaysAdmin) settings.elevationDeclined = false;
+          /*
+           * 重新打开这个开关＝用户愿意再看到授权窗口。
+           * 两个字段都要清：只清布尔不清时间戳的话，用户刚打开开关，
+           * 启动判定那边仍会因为「10 分钟内拒过」把你挡在普通权限上。
+           */
+          if (settings.alwaysAdmin) {
+            settings.elevationDeclined = false;
+            settings.elevationDeclinedAt = 0;
+            settings.elevationDontAsk = false;
+          }
+        } else if (key === 'elevationDontAsk') {
+          // 「以后不再提醒」：只影响要不要弹询问框，不影响权限本身
+          settings.elevationDontAsk = patch.elevationDontAsk === true;
         } else if (key === 'elevationDeclined') {
           settings.elevationDeclined = patch.elevationDeclined === true;
+          if (settings.elevationDeclined) settings.elevationDeclinedAt = Date.now();
+          else settings.elevationDeclinedAt = 0;
+        } else if (key === 'endfieldLaunchMode') {
+          // 只接受两个值，别的（含 null）一律按全自动处理，免得写坏设置把功能关死
+          settings.endfieldLaunchMode = patch.endfieldLaunchMode === 'manual' ? 'manual' : 'full';
+          // 用户手动改模式时清掉失败计数，给自动模式一次重新开始的机会
+          settings.endfieldAutoFailCount = 0;
+          settings.endfieldAutoFailReason = '';
+          settings.endfieldAutoFailAt = 0;
+        } else if (key === 'endfieldAutoFailCount') {
+          settings.endfieldAutoFailCount = Math.max(0, parseInt(patch.endfieldAutoFailCount, 10) || 0);
+        } else if (key === 'endfieldAutoFailReason') {
+          settings.endfieldAutoFailReason = String(patch.endfieldAutoFailReason || '').slice(0, 300);
+        } else if (key === 'endfieldAutoFailAt') {
+          settings.endfieldAutoFailAt = Number(patch.endfieldAutoFailAt || 0);
+        } else if (key === 'azurLauncherExe') {
+          // 只接受 launcher.exe 的绝对路径；空串表示恢复自动搜索
+          const raw = String(patch.azurLauncherExe || '').trim();
+          if (!raw) {
+            settings.azurLauncherExe = '';
+          } else if (/^[a-zA-Z]:[\/]/.test(raw) && /launcher\.exe$/i.test(raw)) {
+            settings.azurLauncherExe = raw;
+          }
         } else if (key === 'nevernessUseOfficialLauncher') {
           settings.nevernessUseOfficialLauncher = patch.nevernessUseOfficialLauncher !== false;
         } else if (key === 'closeAction') {
@@ -204,7 +251,7 @@ function installSettingsIpc(ctx) {
           settings.backgroundRotate = patch.backgroundRotate !== false;
         } else if (key === 'musicSources') {
           // 内置音源开关：只认下面这几个已知键，值只认布尔。
-          // 2026-11-21 起第三方音源不再内置，不再接收第三方音源开关；
+          // 起第三方音源不再内置，不再接收第三方音源开关；
           // 酷狗已整条移除，老设置里遗留的 kugou 键在这里被丢掉，不再写回。
           const incoming = patch.musicSources;
           const next = {};

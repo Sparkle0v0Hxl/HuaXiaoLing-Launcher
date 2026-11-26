@@ -144,6 +144,47 @@ const GAME_DEFS = [
     standard: [1],
     weaponBanners: [],
   },
+  /*
+   * 鸣潮。
+   *
+   * 它一直读不到记录，不是因为同步没跑通 —— kuro-gacha.js 早就把 11 个卡池
+   * 拉回来写进 gacha-imports.json 了，问题在这里：loadGachaHistory 只遍历
+   * GAME_DEFS，而这张表里没有 wutheringwaves，数据躺在文件里、界面上一栏都没有。
+   *
+   * 和米哈游那套的区别：
+   *   - 没有本机 sqlite 库（table 空），记录全部来自 imports 文件；
+   *   - 五星制（fiveRank 5 / fourRank 4），限定角色 80 抽硬保底；
+   *   - 池子按 GachaType 分：1 角色活动 / 2 武器活动 / 3 角色常驻 / 4 武器常驻，
+   *     其余（新手、感恩、新旅、联动）都是常驻性质的活动池，归到 character。
+   *     武器池靠 ItemType（kuro-gacha 写的是接口里的 resourceType）判，
+   *     但接口对武器不下发统一文案，所以同时用 GachaType 兜一层。
+   */
+  {
+    key: 'wutheringwaves',
+    name: '鸣潮',
+    table: '',
+    infoTable: '',
+    infoId: 'Id',
+    infoName: 'Name',
+    infoIcon: 'Icon',
+    fiveRank: 5,
+    fourRank: 4,
+    banners: {
+      1: '角色活动唤取',
+      2: '武器活动唤取',
+      3: '角色常驻唤取',
+      4: '武器常驻唤取',
+      5: '新手唤取',
+      6: '新手自选唤取',
+      7: '感恩定向唤取',
+      8: '角色新旅唤取',
+      9: '武器新旅唤取',
+      10: '角色联动唤取',
+      11: '武器联动唤取',
+    },
+    standard: [3, 4],
+    weaponBanners: [2, 4, 9, 11],
+  },
 ];
 
 let sqlModule = null;

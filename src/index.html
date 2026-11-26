@@ -349,6 +349,21 @@
       </main>
     </div>
 
+    <!--
+      启动页抽屉展开后的「收回」浮层键（2026-11-26）。
+      原菜单键长在 .start-screen 里，抽屉一展开，画面整体让开 push，那颗键就
+      落到 start-screen 的裁剪区外面去了 —— 位置看着还在左上角，实际点不到
+      （overflow:hidden 把超出部分裁掉了，命中测试也一并裁掉）。
+      这颗挂在 body 下、z-index 压过抽屉和遮罩，位置/尺寸与收起态那颗完全重合，
+      展开时只换它上阵，视觉上就是「同一颗键没动，图标变成了返回箭头」。
+    -->
+    <button
+      class="chrome-btn start-nav-pin-btn"
+      data-action="toggle-start-nav"
+      title="收起侧栏"
+      aria-label="收起侧栏"
+    ><svg class="icon"><use href="#i-chevron-left"></use></svg></button>
+
     <div id="modal-root"></div>
     <!--
       任务坞与右下角回弹胶囊都已撤掉（用户 2026-11-11：都统一用面板）。

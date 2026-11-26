@@ -1665,7 +1665,7 @@ async function apply({ staged, onReadyToQuit }) {
    *
    * 老版本是「spawn 完立刻 app.quit()」：脚本要是压根没起来（PowerShell 被策略拦住、
    * 被杀软拦下、脚本自己一上来就报错），启动器已经关了，用户看到的就是
-   * 「下载到 100% 之后窗口消失，再也没回来」。
+   *
    * 现在脚本一进来就写 apply-started.json，等不到这个文件就不退出，把错误抛给界面。
    */
   const statusDir = updateStatusDir(meta.target);

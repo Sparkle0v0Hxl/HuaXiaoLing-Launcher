@@ -241,7 +241,7 @@ async function syncWuwaGacha({ installRoot, userData, onProgress, manualLink }) 
   /*
    * 用户手动粘的链接**优先**。
    *
-   * 2026-11-17 审查发现：原来是把手动链接插在 links 头部（`[manual, ...links]`），
+   * 审查发现：原来是把手动链接插在 links 头部（`[manual, ...links]`），
    * 但下面挑链接用的是**倒序**（从末尾往前找第一条能解析的）——
    * 于是只要日志里能提出任意一条链接，用户粘的那条永远排在最后、永远轮不到。
    * 「字段名对不上」那次修的是值送不到，这次修的是送到了却排不上用。

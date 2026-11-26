@@ -3,7 +3,7 @@
 /**
  * 视图层：服务器与更新面板（servers）。
  *
- * 2026-10-31 从 app.js 拆出 —— 「前后端分离」第 7 批。
+ * 从 app.js 拆出 —— 「前后端分离」第 7 批。
  *
  * 内容（四块，共用同一批服务器数据）：
  *   · 服务器状态与卡片：serverState / serverChannelTag / serverIconId /
@@ -841,14 +841,13 @@ function serverRow(game, server) {
    * 已下载的语音包（Endfield_Data\Persistent）会保留，不会被删。
    * 判定保持「非官服 + 目录可用」：官服直启本体，没有可重建的运行时可言。
    *
-   * 2026-11-16 起放宽成「非官服就显示」：运行时还没生成的渠道也必须有这个入口，
+   * 起放宽成「非官服就显示」：运行时还没生成的渠道也必须有这个入口，
    * 而且和别的游戏一样走 openServerSetupDialog 那套面板（生成 → 下差异分块 →
    * 完成变绿可切），不再直接闷头 prepare-endfield 只弹一条 toast。
    */
   const canPrepare = game.builtinKey === 'endfield' && server.channel !== 'official';
   /*
-   * 「转换为 WeGame 版」直达按钮（用户 2026-11-17 报障：
-   * 「那官服怎么切换 wegame 服？不是还有一套教程吗」）。
+   * 「转换为 WeGame 版」直达按钮。
    *
    * 那套四步教程一直都在（src/views/modals.js 的 openWeGameConvertModal：
    * 在 WeGame 建下载任务 → 暂停并完全退出 WeGame → 回这里点开始转换 →

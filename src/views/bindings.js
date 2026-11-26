@@ -34,7 +34,7 @@ function bindCoverFallbacks(root = document) {
 /*
  * 进音乐页时把「当前播放的那首」滚到可视区（2026-11-18）。
  *
- * 用户要求：「再次打开启动器，点音乐页，页面跳到我上次选择的歌曲位置」。
+ * 。
  * songIndex 已经持久化，这里只负责把对应行滚进视野 —— 每次从别的页进音乐页做一次，
  * 页内其他重绘不触发，免得用户正在看别处时被突然拉走。
  */
@@ -622,7 +622,7 @@ function bindQueueDragOnce() {
 /**
  * 队列批量选择：按住 Shift 拖动刷选（2026-11-18）。
  *
- * 用户要求「批量操作的时候，可以按住鼠标往下划，快速选择」。
+ * 。
  * 普通拖动留给排序（HTML5 drag），所以这里用 Shift + 拖动做刷选，两者不打架。
  * 松开后顶部出现操作条：加入播放 / 从队列删除 / 取消。
  */
@@ -636,7 +636,7 @@ function bindQueueBrushOnce() {
   let anchor = -1;
   let selected = new Set();
 
-  // 2026-11-18：歌单详情页也要能刷选，所以两种行都认
+  // 歌单详情页也要能刷选，所以两种行都认
   const rows = () => Array.from(document.querySelectorAll('#song-queue .song-row, .kr-detail-row'));
 
   const paint = () => {

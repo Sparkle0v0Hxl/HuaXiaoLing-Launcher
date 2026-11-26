@@ -439,6 +439,44 @@ let storageUsage = null;
 let storageLoading = false;
 let storageError = '';
 
+/*
+ * 当前进程是不是管理员：界面上要看得见。
+ *
+ * 用户反复报「明明给了权限，界面还是说没提权」。以前这一行只有一句静态说明，
+ * 用户没法判断到底是「启动器没探到」还是「自己其实点了否」。这里把探测来源
+ * 也带上（integrity-0x3000 / compat-layer / powershell / unknown），
+ * 出问题时看这一段字就够了，不用去翻 launch.log。
+ */
+let elevationInfo = null;
+let elevationLoading = false;
+
+function elevationText() {
+  if (elevationLoading) return '检测中…';
+  if (!elevationInfo) return '';
+  if (elevationInfo.elevated === true) return `当前：管理员（${elevationInfo.via}）`;
+  if (elevationInfo.elevated === false) return `当前：普通权限（${elevationInfo.via}）`;
+  return '当前：权限状态未探明';
+}
+
+function ensureElevationInfo(force = false) {
+  if (elevationLoading) return;
+  if (!force && elevationInfo) return;
+  if (!api.elevation || typeof api.elevation !== 'function') return;
+  elevationLoading = true;
+  const run = async () => {
+    try {
+      elevationInfo = await api.elevation();
+    } catch {
+      elevationInfo = null;
+    } finally {
+      elevationLoading = false;
+      const el = document.querySelector('#elevation-state');
+      if (el) el.textContent = elevationText();
+    }
+  };
+  setTimeout(run, 0);
+}
+
 function storageSize(bytes) {
   const size = Number(bytes) || 0;
   if (size < 1024) return `${size} B`;
@@ -493,9 +531,7 @@ function ensureMusicCacheStats(force = false) {
 function ensureStorageUsage() {
   if (storageUsage || storageLoading || storageError) return;
   refreshStorageUsage();
-}
-
-function refreshStorageUsage(force = false) {
+}function refreshStorageUsage(force = false) {
   if (storageLoading && !force) return;
   if (!api.storage || typeof api.storage.usage !== 'function') {
     storageError = '当前版本不支持文件统计';
@@ -580,8 +616,6 @@ const PACK_ART_SLOTS = [
   ['charm-flame.png', '漂浮·焰'],
   ['charm-stars.png', '漂浮·星'],
   ['sparkle-hero.png', '首页右侧大图'],
-  ['sparkle-fullbody.png', '游戏封面·绝区零'],
-  ['sparxie-fullbody.png', '游戏封面·终末地'],
   ['character.png', '首页背景 / 默认封面'],
 ];
 
@@ -929,7 +963,7 @@ function settingsView() {
 
         <section class="${group('behavior', true)}" ${groupAttr('behavior')}>
           <h2>${icon('settings')}行为</h2>
-          <p class="desc">托盘、开机自启与同步开关</p>
+          <p class="desc">托盘、开机自启、启动页行为与同步开关</p>
           <div class="setting-row">
             <div class="setting-copy"><strong>关闭时收进托盘</strong><span>开启：点右上角 ✕ 只是收进托盘，画面还在后台跑，双击托盘图标可以回来。关闭：点 ✕ 直接退出启动器。第一次点 ✕ 时问过一次，之后都以这里为准。</span></div>
             <div class="setting-control">${switchMarkup('closeToTray', settings.closeToTray)}</div>
@@ -943,8 +977,25 @@ function settingsView() {
             <div class="setting-control">${switchMarkup('minimizeOnLaunch', settings.minimizeOnLaunch)}</div>
           </div>
           <div class="setting-row">
+            <div class="setting-copy"><strong>启动页菜单键固定</strong><span>在启动页点左上角菜单键唤出侧栏时，这颗键留在原地、图标变成返回箭头，侧栏真正固定住——点启动页空白处不会收回，要收起就点这颗返回箭头、侧栏里的「收起侧栏」或按 Esc；logo 图和文字会缩进侧栏顶部当作标题。关掉后它跟着画面一起让开，点画面空白就收回。</span></div>
+            <div class="setting-control">
+              <button class="switch ${state.settings.startNavPinMenu === true ? 'on' : ''}" role="switch" aria-checked="${state.settings.startNavPinMenu === true}" data-action="toggle-start-nav-pin" title="${state.settings.startNavPinMenu === true ? '关闭' : '开启'}"></button>
+            </div>
+          </div>
+          <div class="setting-row">
             <div class="setting-copy"><strong>异环通过官方启动器启动</strong><span>默认点击后打开 NTELauncher.exe，由官方处理版本更新和登录；关闭后直接启动 HTGame.exe。</span></div>
             <div class="setting-control">${switchMarkup('nevernessUseOfficialLauncher', settings.nevernessUseOfficialLauncher !== false)}</div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>终末地启动方式</strong><span>${settings.endfieldLaunchMode === 'manual'
+              ? '当前：手动 —— 只把官方启动器拉起来并最小化，你在它里面点一次「开始游戏」，进游戏后它会自动关掉。'
+              : '当前：全自动 —— 点一下就进游戏，官方启动器自动最小化、进游戏后自动关掉。'}<br>全自动需要给官方启动器开一个本地调试端口来替点按钮。万一哪天鹰角开始查启动链路，切到「手动」就不碰调试端口，代价是每次多让你点一下。自动模式连续失败 3 次会自动降级成手动。</span></div>
+            <div class="setting-control">
+              <div class="segmented">
+                <button class="${settings.endfieldLaunchMode === 'manual' ? '' : 'active'}" data-action="set-endfield-launch-mode" data-value="full">全自动</button>
+                <button class="${settings.endfieldLaunchMode === 'manual' ? 'active' : ''}" data-action="set-endfield-launch-mode" data-value="manual">手动</button>
+              </div>
+            </div>
           </div>
           <div class="setting-row">
             <div class="setting-copy"><strong>终末地官方启动器路径</strong><span>官方托管启动要用鹰角官方启动器（Games.exe）亲自拉起游戏。启动时会自动搜索它的位置；如果自动找不到，可以在这里手动指定 Games.exe 的真实路径。留空 = 自动搜索。注意：Games.exe 首次运行会弹 UAC 请求管理员权限，杀软可能要放行一次。</span></div>
@@ -955,7 +1006,15 @@ function settingsView() {
             </div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、崩坏3、星穹铁道、绝区零、异环、终末地的启动程序。</span></div>
+            <div class="setting-copy"><strong>蓝色星原官方启动器路径</strong><span>蓝色星原必须由蛮啾官方启动器（launcher.exe）拉起 —— 游戏会校验父进程，直接启动会被拦。启动器会自动搜索；找不到时可在这里手动指定 launcher.exe。留空 = 自动搜索。注意：它要求管理员权限，首次会弹一次 UAC。</span></div>
+            <div class="setting-control">
+              <span class="path-text" title="${esc(settings.azurLauncherExe || '')}">${esc(settings.azurLauncherExe || '自动搜索（留空）')}</span>
+              <button class="btn btn-ghost" data-action="pick-azur-launcher">选择 launcher.exe</button>
+              ${settings.azurLauncherExe ? `<button class="btn btn-quiet" data-action="reset-azur-launcher">恢复自动</button>` : ''}
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-copy"><strong>检测已安装的游戏</strong><span>重新扫描注册表和常见安装目录，自动填入原神、崩坏3、星穹铁道、绝区零、异环、终末地、蓝色星原的启动程序。</span></div>
             <div class="setting-control"><button class="btn btn-ghost" data-action="detect-all">${icon('refresh')}立即检测</button></div>
           </div>
           <div class="setting-row">
@@ -1180,7 +1239,7 @@ function settingsView() {
             <div class="setting-control">${switchMarkup('alwaysAdmin', settings.alwaysAdmin)}</div>
           </div>
           <div class="setting-row">
-            <div class="setting-copy"><strong>管理员权限</strong><span>终末地启动必须提权。启动器不是管理员时会单独弹 UAC；已经是管理员（比如开了上一项）就不会再弹，这是正常的。</span></div>
+            <div class="setting-copy"><strong>管理员权限</strong><span>终末地启动必须提权。启动器不是管理员时会单独弹 UAC；已经是管理员（比如开了上一项）就不会再弹，这是正常的。${(() => { ensureElevationInfo(); return `<b id="elevation-state">${elevationText()}</b>`; })()}</span></div>
             <div class="setting-control">
               <button class="btn btn-ghost" data-action="relaunch-admin">以管理员身份重启</button>
             </div>

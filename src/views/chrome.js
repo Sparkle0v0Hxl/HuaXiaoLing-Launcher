@@ -3,7 +3,7 @@
 /**
  * 视图层：chrome（外壳状态）与路由。
  *
- * 2026-10-31 从 app.js 拆出 —— 「前后端分离」第 4 批，也是 `src/views/` 的第一块。
+ * 从 app.js 拆出 —— 「前后端分离」第 4 批，也是 `src/views/` 的第一块。
  *
  * 这里装的是「整个界面怎么切」的控制流，不是某个页面的内容：
  *   · 设置落地：applyBackdrop / applySettings / applySettingLocally
@@ -497,7 +497,9 @@ function applySettings() {
   document.documentElement.dataset.accent = settings.accent || 'spark';
   // 皮肤只影响底色倾向，明暗仍由 theme 决定（2026-11-18）
   document.documentElement.dataset.skin = settings.skin || 'classic';
-  document.body.classList.toggle('sidebar-collapsed', settings.sidebarCollapsed === true);
+  syncSidebarCollapsed();
+  // 启动页唤出侧栏：菜单键钉在原位（可关，见 styles.css 的 start-nav-pin）
+  document.body.classList.toggle('start-nav-pin', settings.startNavPinMenu === true);
   document.body.classList.toggle('charms-on', settings.charms !== false);
   document.body.classList.toggle('charbg-on', settings.charBg !== false);
   document.body.classList.toggle('no-sidebar-char', settings.sidebarChar === false);
@@ -551,14 +553,52 @@ async function applySettingLocally(patch) {
   return true;
 }
 
+/*
+ * 启动页抽屉打开期间，侧栏必须按展开态呈现（2026-11-26）。
+ *
+ * 侧栏在别的页面被收成 72px 图标条之后，启动页抽屉如果也按 72px 打开，
+ * 用户看到的只是一条图标栏，会觉得「侧栏根本没固定开」。抽屉的语义是
+ * 完整导航，所以打开时临时摘掉 sidebar-collapsed，关闭时再按设置恢复。
+ * 侧栏在启动页是 position:fixed，摘类不会推动画面，只影响抽屉自身宽度。
+ */
+function startNavDrawerOpen() {
+  /* 只有「固定」开着时，抽屉宽度才由抽屉自己管；关闭固定时周期行为回退到旧逻辑 */
+  return (
+    state.startNavOpen === true &&
+    document.body.classList.contains('start-mode') &&
+    state.settings?.startNavPinMenu === true
+  );
+}
+
+function syncSidebarCollapsed() {
+  /*
+   * 抽屉开着时，宽度归抽屉自己管：
+   *   · 左上角菜单键 → 开 / 关整个抽屉；
+   *   · 侧栏底部「收起侧栏」→ 只切侧栏宽度（238 ↔ 72），抽屉不关。
+   * 所以这时不让设置回写把宽度改回去，由 toggleStartNavDrawerWidth() 自己维护。
+   */
+  if (!startNavDrawerOpen()) {
+    document.body.classList.toggle('sidebar-collapsed', state.settings?.sidebarCollapsed === true);
+  }
+  syncSidebarToggleLabel();
+}
+
+/* 底部那颗键的文案/图标跟着「当前实际宽度」走，抽屉开着时也一样 */
+function syncSidebarToggleLabel() {
+  const collapsed = document.body.classList.contains('sidebar-collapsed');
+  document.querySelectorAll('.sidebar-toggle').forEach((button) => {
+    button.title = collapsed ? '展开侧栏' : '收起侧栏';
+    const label = button.querySelector('span');
+    if (label) label.textContent = collapsed ? '展开侧栏' : '收起侧栏';
+  });
+}
+
 function updateChrome() {
   const settings = state.settings || {};
-  document.body.classList.toggle('sidebar-collapsed', settings.sidebarCollapsed === true);
-  document.querySelectorAll('.sidebar-toggle').forEach((button) => {
-    button.title = settings.sidebarCollapsed ? '展开侧栏' : '收起侧栏';
-    const label = button.querySelector('span');
-    if (label) label.textContent = settings.sidebarCollapsed ? '展开侧栏' : '收起侧栏';
-  });
+  syncSidebarCollapsed();
+  // 启动页唤出侧栏：菜单键钉在原位（可关，见 styles.css 的 start-nav-pin）
+  document.body.classList.toggle('start-nav-pin', settings.startNavPinMenu === true);
+  syncSidebarToggleLabel();
   /* 侧栏这块跟着当前通行证账号走，没有登录才回落到设置里的名字和头像 */
   const displayName = sidebarDisplayName(settings);
   if (dom.profileName) dom.profileName.textContent = displayName;
@@ -665,10 +705,168 @@ function applyStartNavWidth(delta) {
   Promise.resolve(api.startNavResize(Math.round(delta))).catch(() => {});
 }
 
-async function setStartNavOpen(open, options = {}) {
-  if (state.startNavOpen === open) return;
-  state.startNavOpen = open;
+/*
+ * 抽屉开着时，侧栏底部「收起侧栏」只切侧栏自己：238 ↔ 72，抽屉不关（2026-11-26）。
+ *
+ * 之前这颗键在抽屉里被特判成「关抽屉」，和左上角菜单键的职责混在一起。
+ * 现在的分工：
+ *   · 左上角菜单键（展开后是返回箭头）→ 开 / 关整个抽屉；
+ *   · 底部「收起侧栏 / 展开侧栏」→ 只改侧栏宽度，抽屉保持打开。
+ * 宽度变了要同步改窗口外扩量（--start-nav-push / startNavResize），否则会剩下
+ * 或缺少一条空白；同时把新状态写回设置，别的页面和下次收起时保持一致。
+ */
+function toggleStartNavDrawerWidth() {
+  if (state.startNavOpen !== true) return;
   const bar = document.querySelector('.sidebar');
+  if (!bar) return;
+  const nextCollapsed = !document.body.classList.contains('sidebar-collapsed');
+  /* 停一帧宽度过渡：先让宽度落地，再按新宽度重设窗口，避免中间出现半宽空条 */
+  bar.style.transition = 'none';
+  document.body.classList.toggle('sidebar-collapsed', nextCollapsed);
+  void bar.offsetWidth;
+  const width = Math.round(bar.getBoundingClientRect().width) || (nextCollapsed ? 72 : 220);
+  requestAnimationFrame(() => {
+    bar.style.transition = '';
+  });
+  if (state.startNavExpanded) {
+    applyStartNavWidth(width);
+  } else {
+    document.documentElement.style.setProperty('--start-nav-push', `${width}px`);
+  }
+  state.settings.sidebarCollapsed = nextCollapsed;
+  Promise.resolve(api.updateSettings({ sidebarCollapsed: nextCollapsed })).catch(() => {});
+  syncSidebarToggleLabel();
+  requestAnimationFrame(() => positionStartNavPinBtn());
+  setTimeout(positionStartNavPinBtn, 240);
+}
+
+/**
+ * 浮层「收回」键对齐原菜单键。
+ *
+ * 抽屉展开时，画面整体让开 push，原来那颗键跟着画面移出去，还会掉到
+ * start-screen 的裁剪区外（看得见、点不到）。所以展开时由 body 下这颗浮层键
+ * 接手，它必须和原键在屏幕上的落点完全一致 —— 量出来写进内联样式，别写死。
+ */
+function positionStartNavPinBtn() {
+  const btn = document.querySelector('.start-nav-pin-btn');
+  const anchor = document.querySelector('.start-top .chrome-menu');
+  if (!btn || !anchor) return;
+  const rect = anchor.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  /*
+   * 注意：这里必须按「当前」位置量，而不是写死收起态的坐标。
+   *
+   * 抽屉展开后画面会让开一个侧栏宽（外扩时窗口左沿左移，内推时 translateX），
+   * 原菜单键在窗口坐标系里也跟着右移同样的距离。之前固定写 28px，结果这颗
+   * 浮层键正好落在侧栏上 —— 用户反馈「收起的小箭头做到侧栏里了」。
+   * 现在改为跟随原键，始终留在启动页画面左上角，不进入侧栏。
+   */
+  btn.style.left = `${Math.round(rect.left)}px`;
+  btn.style.top = `${Math.round(rect.top)}px`;
+  btn.style.width = `${Math.round(rect.width)}px`;
+  btn.style.height = `${Math.round(rect.height)}px`;
+}
+
+function syncStartNavPinBtn(pushValue) {
+  /* 收起态先对齐一次：这是展开动画的起点，也是展开前的兜底 */
+  positionStartNavPinBtn();
+
+  /*
+   * 启动页那块抬头（logo 图 + 「花筱灵 / HANABI STAGE」）飞到抽屉顶部那颗 logo 上。
+   *
+   * 对齐用**两颗 logo 图**（.start-brand-mark / .brand-mark）来算，不用整块品牌区：
+   * 整块右侧带着一串文字，按整块对齐会让图形落在偏左的位置。
+   *
+   * 这里量到的都还是「收起态」的值（调用点保证 start-nav-open / start-nav-pin
+   * 都还没挂上）；抽屉 logo 展开后会自己下移 46px 给「收回」键让位，这里补上。
+   *
+   * 位移里要减掉 push：这里量到的 from 是**展开前**的位置，而终态时整个
+   * .start-screen 已经让开了一个侧栏宽（内推 translateX / 外扩视口原点左移），
+   * 元素会被父级带着再走一次 —— 不减就正好多飞一个侧栏宽。
+   */
+  const brand = document.querySelector('.start-brand');
+  const srcMark = brand && brand.querySelector('.start-brand-mark');
+  const sideMark = document.querySelector('.sidebar .brand .brand-mark');
+  if (!brand || !srcMark || !sideMark) return;
+
+  /** 抽屉顶部不再给「收回」键让位（键已跟随启动页画面，不会压在侧栏 logo 上） */
+  const SIDE_BRAND_DROP = 0;
+
+  const from = brand.getBoundingClientRect();
+  const src = srcMark.getBoundingClientRect();
+  const dst = sideMark.getBoundingClientRect();
+  if (!from.width || !from.height || !src.width || !src.height || !dst.width || !dst.height) return;
+
+  // 缩放：让启动页那颗 logo 图正好缩成抽屉 logo 图的大小
+  const scale = Math.max(0.15, Math.min(1, dst.width / src.width));
+
+  /*
+   * 位移：让「启动页 logo 图的中心」落到「抽屉 logo 图的中心」。
+   *
+   * 缩放基准是整块品牌的 transform-origin(left center) —— 缩放时整块按左沿
+   * 为轴收缩，块内每个点的位置都会按 scale 往左收。所以不能只看块的中心，
+   * 要把 logo 图在块内的偏移一起带上：
+   *     块内偏移  ox = src.left - from.left
+   *     缩放后    ox' = ox * scale
+   *     块平移后  src 中心 = from.left + tx + ox' + src.width*scale/2
+   * 解出 tx。纵向同理（origin 在纵向中点，缩放不改变纵向位置，用块中心即可）。
+   */
+  const wantCx = dst.left + dst.width / 2;
+  const wantCy = dst.top + SIDE_BRAND_DROP + dst.height / 2;
+
+  const ox = src.left - from.left;
+  const srcCxAfter = from.left + ox * scale + (src.width * scale) / 2;
+  const tx = wantCx - srcCxAfter - (Number(pushValue) || 0);
+
+  // 纵向：origin 在 left center，缩放后块中心不动
+  const blockCy = from.top + from.height / 2;
+  const ty = wantCy - blockCy;
+
+  document.documentElement.style.setProperty('--pin-fly-x', `${Math.round(tx)}px`);
+  document.documentElement.style.setProperty('--pin-fly-y', `${Math.round(ty)}px`);
+  document.documentElement.style.setProperty('--pin-fly-scale', scale.toFixed(3));
+}
+
+/*
+ * 窗口尺寸 / 界面缩放变化后重新对齐浮层键。
+ * 函数在模块求值时注册，用 window 上的标记保证不会重复挂监听。
+ */
+if (!window.__hxlStartNavPinResizeBound) {
+  window.__hxlStartNavPinResizeBound = true;
+  window.addEventListener('resize', () => {
+    if (document.body.classList.contains('start-nav-open')) positionStartNavPinBtn();
+  });
+}
+
+async function setStartNavOpen(open, options = {}) {
+  /*
+   * 状态和画面必须一致才提前返回。
+   * 出现过「state 已经 false、画面还开着」的错位：这时点箭头会走 open 分支，
+   * 看着就是「点了没反应 / 卡住」。所以只要画面与目标状态不一致就继续往下修。
+   */
+  if (state.startNavOpen === open) {
+    const visualOpen = document.body.classList.contains('start-nav-open');
+    if (visualOpen === open) return;
+  }
+  state.startNavOpen = open;
+  /*
+   * 「用户希望抽屉是开着的」这个意图要跨页面记住：
+   * 离开启动页时窗口必须收回（别的页不需要那条外扩），但那只是视觉收起，
+   * 不代表用户把抽屉关了。下次回到启动页要按这个意图重新展开。
+   * 只有用户主动关（返回箭头 / Esc / 点画面收）才清掉 —— 导航收起带 keepWanted。
+   */
+  /*
+   * 跨页保持展开只在「固定」开着时生效；关掉固定就走旧逻辑（离开就收、回来不重开）。
+   */
+  if (open && state.settings?.startNavPinMenu === true) state.startNavPinned = true;
+  else if (!open && options.keepWanted !== true) state.startNavPinned = false;
+  const bar = document.querySelector('.sidebar');
+  /*
+   * 抽屉宽度就按侧栏自己的状态来（2026-11-26 最终口径）：
+   * 用户在侧栏底部点过「收起侧栏」，抽屉就只展开那条 72px 图标栏；
+   * 侧栏是展开态时才开 238。**不要**在这里强行展开 ——
+   * 用户明确说过「明明点了收起来的，启动页怎么默认全展开」。
+   */
   const measured = bar ? Math.round(bar.getBoundingClientRect().width) : 0;
   // 展开态 220、收起态 72（图标条）：量出来当补间终点，画面补偿量、窗口外扩量共用它
   const push = measured > 0 ? measured : 220;
@@ -688,8 +886,11 @@ async function setStartNavOpen(open, options = {}) {
     } else {
       warmStartNavRoom();
     }
-    // 等这一下的时间里用户可能又点回去了：那就什么都别做
-    if (state.startNavOpen !== true) return;
+    // 等这一下的时间里用户可能又点回去了：那就什么都别做（顺手恢复收起态）
+    if (state.startNavOpen !== true) {
+      syncSidebarCollapsed();
+      return;
+    }
     const outward = room >= push;
     const wasOutward = document.body.classList.contains('start-nav-outward');
     state.startNavExpanded = outward;
@@ -709,8 +910,39 @@ async function setStartNavOpen(open, options = {}) {
       );
       document.documentElement.style.setProperty('--start-nav-base-w', `${baseW}px`);
     }
+    /*
+     * 浮层「收回」键的落点：量一下收起态那颗原键现在在屏幕上的位置。
+     * 写死 left/top 会在界面缩放、窗口变窄（padding 用 clamp 会缩）时错开几像素，
+     * 而它要在展开瞬间和原键严丝合缝地重合，所以按实测值给。
+     *
+     * 必须在挂 start-nav-open 之前量 —— 挂上之后原键就淡出并随画面让开了，
+     * 那时量到的是它被推开后的位置。
+     */
+    syncStartNavPinBtn(push);
+    /*
+     * 2026-11-26：立刻把浮层键挪到「展开后」的位置。
+     *
+     * 展开后原菜单键会随画面右移 push（外扩是窗口左移、内推是 translateX），
+     * 而窗口 resize / resize 监听是异步的 —— 只等它来校正的话，展开后的前
+     * 100~200ms 里这颗键还停在展开前的坐标（实测 120ms 时在 x=28，展开后应在
+     * x=100），用户这时候点箭头就会点空，表现为「返回启动页后箭头失效」。
+     * 这里按已知的 push 直接补上，等 resize 事件再精修。
+     */
+    {
+      const pinBtn = document.querySelector('.start-nav-pin-btn');
+      const oldLeft = pinBtn ? Number.parseFloat(pinBtn.style.left) : NaN;
+      if (pinBtn && Number.isFinite(oldLeft)) {
+        pinBtn.style.left = `${Math.round(oldLeft + push)}px`;
+      }
+    }
     document.body.classList.toggle('start-nav-outward', outward);
     document.body.classList.add('start-nav-open');
+    syncSidebarToggleLabel();
+    /*
+     * 不再用 rAF 立刻重量：窗口还没变宽时量到的还是展开前坐标，会把上面的
+     * push 修正覆盖回去。最终位置由 window resize 监听 + 下面这个兜底定时器校正。
+     */
+    setTimeout(positionStartNavPinBtn, START_NAV_MS + 40);
     if (!outward) {
       /*
        * 内推：全屏 / 最大化 / 窗口贴着屏幕左边缘，没有地方让窗口长，只能把画面
@@ -757,13 +989,24 @@ async function setStartNavOpen(open, options = {}) {
       'start-nav-anim',
       'start-nav-closing'
     );
+    // 抽屉关了：把用户原本的「侧栏收起」状态还回去
+    syncSidebarCollapsed();
     Promise.resolve(api.startNavCollapse()).catch(() => {});
   };
 
   if (!state.startNavExpanded) {
     // 内推模式：窗口没动过，把展开量归零，画面自己滑回去（transform 是常驻的）
     document.documentElement.style.setProperty('--start-nav-push', '0px');
+    document.documentElement.style.removeProperty('--start-nav-base-w');
     document.body.classList.remove('start-nav-open', 'start-nav-outward');
+    state.startNavExpanded = false;
+    /*
+     * 兜底还原窗口：正常内推时 startNavBase 是空的，这句是无害 no-op；
+     * 但如果画面状态和 expanded 标记错位（窗口其实被撑大过），这句能把多出来的
+     * 宽度收回去，避免「关了抽屉窗口还宽一条、下次启动也宽」。
+     */
+    Promise.resolve(api.startNavCollapse()).catch(() => {});
+    syncSidebarCollapsed();
     setTimeout(resyncAfterStartNav, START_NAV_MS + 40);
     return;
   }
@@ -782,11 +1025,24 @@ async function setStartNavOpen(open, options = {}) {
 function navigate(route, options = {}) {
   if (route === 'library') route = 'home';
   if (!PAGE_META[route]) route = 'home';
-  // 启动页唤出的侧栏开着时跳走：顺手收回。
-  // 离开启动页时必须「立刻」收：画面马上要换成别的页，等 0.36s 动画的话，
-  // 外层窗口还多着一条侧栏的宽度，新页面会先按窄画面画一帧再跳回来。
-  if (state.startNavOpen) {
-    setStartNavOpen(false, { instant: route !== 'start' }).catch(() => {});
+  /*
+   * 启动页唤出的侧栏开着时跳走：顺手收回。
+   *
+   * 只收「离开启动页」这一种情况。以前这里没判断目标路由，条件是
+   *   if (state.startNavOpen) setStartNavOpen(false, { instant: route !== 'start' })
+   * 于是从别的页点回启动页时（route === 'start'）也会执行一句
+   * setStartNavOpen(false)，带着 0.36s 动画把侧栏收回去 ——
+   * 用户看到的就是「从别的页回来，侧栏自己收了」。
+   *
+   * 回到启动页应该保留用户上次的展开状态，不该替他收。
+   */
+  const wantReopenDrawer =
+    state.settings?.startNavPinMenu === true && state.startNavPinned === true;
+  if (state.startNavOpen && route !== 'start') {
+    // 离开启动页时必须「立刻」收：画面马上要换成别的页，等 0.36s 动画的话，
+    // 外层窗口还多着一条侧栏的宽度，新页面会先按窄画面画一帧再跳回来。
+    // keepWanted：这只是离开页面，不是用户要关抽屉。
+    setStartNavOpen(false, { instant: true, keepWanted: true }).catch(() => {});
   }
   const changed = route !== state.route;
   /*
@@ -799,6 +1055,14 @@ function navigate(route, options = {}) {
   state.route = route;
   if (!document.body.classList.contains('sophon-minimized')) closeModal();
   render({ preserveScroll: false });
+  /*
+   * 回到启动页：按 pinned 意图同步重开抽屉。
+   * 不再用 60ms 定时器 —— 用户如果在定时器到点前点了箭头关闭，定时器还会把它
+   * 弹回来，看起来就是「箭头不生效 / 卡住」。这里在 render 之后立刻恢复。
+   */
+  if (route === 'start' && wantReopenDrawer && state.startNavOpen !== true) {
+    setStartNavOpen(true, { instant: true }).catch(() => {});
+  }
   if (route !== 'gacha') stopGachaRefresh();
   if (route !== 'start') stopStartRunningTimer();
   // 离开插件页就把所有 Worker 停掉：它们没必要在后台占着 CPU 和内存
@@ -1422,7 +1686,27 @@ async function refreshSidebarAccount(force, prefer) {
 }
 
 function render(options = {}) {
-  if (!state.games.length && !state.app.version) return;
+  /*
+   * boot() 还没拿到状态前不要画。
+   *
+   * 判据是「游戏列表空 且 拿不到版本号」——也就是主进程 getState() 根本没回来。
+   * 正常情况下 boot() 拿到状态后会再 render 一次。
+   *
+   * 但它有个副作用：只要 getState() 返回的数据缺了 games 或 app.version，
+   * 之后所有 render() 都会在这里静默返回，界面上什么都不变，用户看到的是
+   * 「点了没反应 / 页面空白」。所以这里留一行日志，出问题时能从控制台看出来。
+   */
+  if (!state.games.length && !state.app.version) {
+    if (!render.warned) {
+      render.warned = true;
+      console.warn(
+        '[render] 状态还没就绪（games 为空且没有 app.version），本次及后续渲染会被跳过。' +
+          '如果界面一直空白，说明主进程 getState() 返回的数据不完整。'
+      );
+    }
+    return;
+  }
+  render.warned = false;
   document.body.classList.toggle('start-mode', state.route === 'start');
   /*
    * 侧栏的滑入过渡要等启动页「站稳」之后才启用。

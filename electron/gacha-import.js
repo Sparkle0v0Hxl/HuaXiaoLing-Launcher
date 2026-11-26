@@ -13,7 +13,7 @@ const path = require('node:path');
  *
  * 崩坏3 已整块移除（官方从未开放补给记录接口，公共 API 域名都不存在）。
  */
-const GAMES = new Set(['genshin', 'starrail', 'zzz', 'endfield', 'arknights', 'neverness']);
+const GAMES = new Set(['genshin', 'starrail', 'zzz', 'endfield', 'arknights', 'neverness', 'wutheringwaves']);
 
 function importsPath(userData) {
   return path.join(userData, 'gacha-imports.json');

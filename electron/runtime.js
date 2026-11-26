@@ -3,6 +3,16 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
+
+/*
+ * 文件记账库（借鉴 Starward 的 GameFileDatabase）。
+ * 硬链接/拷贝完把落位文件记进去，之后判断「运行时完不完整」靠查表 + NTFS FileId，
+ * 不再依赖 launcher-data.json 里一个布尔字段。
+ */
+const gameFileDb = require('./game-file-db');
+/* 硬链接安全守卫：占用探测 / EPERM 中文提示（2026-11-26） */
+const hardlinkGuard = require('./hardlink-guard');
 
 function shouldSkipDir(name) {
   return ['.git', 'node_modules', '.vela-linked-runtime', 'crashsightlog', 'sdklogs'].includes(
@@ -71,7 +81,7 @@ async function walkFiles(root, signal, onProgress) {
  * 硬链接 = 两条路径指向同一份数据，谁写都会改到对方。所以只有真正只读的资源
  * 才能链接；任何游戏运行时会改写的文件都必须拷贝，否则渠道之间会互相污染。
  *
- * 2026-11-07 真实事故：终末地切服后官服一直报「检查资源完整性时发现异常」并反复
+ * 真实事故：终末地切服后官服一直报「检查资源完整性时发现异常」并反复
  * 下载 1059MB。根因是 Endfield_Data\Persistent 下的 index_main.json / pref_main.json
  * 和各 VFS 目录的 .blc 索引被硬链接了 —— 国际服下载语音包改写索引后，官服目录里的
  * index_main.json 直接变成了国际服那份（inode 相同、大小 283452 而非官服的 276964），
@@ -80,7 +90,7 @@ async function walkFiles(root, signal, onProgress) {
  *
  * 资源 .chk 是只读的，继续硬链接（66GB 不必重复占盘）；索引类小文件一律拷贝。
  *
- * 2026-11-08 补充（HGDownloadLog.log:1669-1682 一手证据）：游戏**下载落地**的过程是
+ * 补充（HGDownloadLog.log:1669-1682 一手证据）：游戏**下载落地**的过程是
  * 「旧文件 rename 成 .bak → temp rename 成正式名 → 删 .bak」，全程 rename、没有任何
  * 原地覆写。Windows 同卷 rename 只改目录项、不动 inode 数据，所以 .chk/.blc 就算被
  * 硬链接，被替换后也只是这条链接指向新 inode，另一侧那份 inode 一个字节都不会变 ——
@@ -218,7 +228,7 @@ const MUST_COPY_ROOT_FILES = [
 ];
 
 /*
- * 硬链接例外白名单（2026-11-17 用户报障「转换 WeGame 端怎么占那么大」查出来的）。
+ * 硬链接例外白名单（2026-11-17 查出来的）。
  *
  * 鸣潮的客户端资源实际放在 `Client\Saved\Resources\`（pak 分块 + 视频，官方版本体
  * 里这一块就 48 GB）。而相对路径里带 'saved' 段，会命中 MUTABLE_DIR_SEGMENTS，
@@ -311,7 +321,7 @@ function mustCopyNotLink(rel) {
   /*
    * 下载中 / 临时状态的文件一律拷贝 —— 必须排在最前面，连白名单都不能放行。
    *
-   * 2026-11-17 审查发现：这段以前只写在 isHardlinkAllowed() 内部（命中后缀就
+   * 审查发现：这段以前只写在 isHardlinkAllowed() 内部（命中后缀就
    * return false =「不走白名单例外」）。但白名单之外的地方仍然会掉进下面那套
    * 通用判据，而 .kuro-tmp / .part / .partial / .download / .crdownload 这五个
    * 后缀一个都不在 MUTABLE_EXTS 里 —— 于是非白名单路径下的临时文件照样被判
@@ -365,98 +375,309 @@ function mustCopyNotLink(rel) {
  *    才退化成拷贝，且拷贝同样要先断链。
  */
 async function placeOneFile({ rel, full, destination, shouldCopy }) {
-  const parkAway = async () => {
-    const parked = `${destination}.hxl-old-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    try {
-      await fsp.rename(destination, parked);
-      return parked;
-    } catch (error) {
-      // 目标不存在：本来就没有可写穿的 inode，直接往下写新文件。
-      if (error && error.code === 'ENOENT') return '';
-      /*
-       * 改名挪不开 = 目标存在但被占用 / ACL 没权限（官方安装器用管理员身份写的文件，
-       * 普通用户没有 DELETE 权限）。**绝不退回原地覆盖写** —— 目标多半是硬链接，
-       * copyFile 会写穿到基础客户端，硬链接架构下不可逆。
-       */
-      throw new Error(
-        `无法替换 ${rel}：目标被其它进程占用或权限不足（${String(error && error.message ? error.message : error)}）。` +
-        '为避免沿硬链接写穿其它渠道的客户端，已拒绝原地覆盖写，请关闭占用该文件的程序后重试。'
-      );
-    }
-  };
+  /*
+   * ── 原子替换（借鉴 Starward 的 HardLinkService.TryHardLink）──────────────
+   *
+   * Starward 的做法：
+   *   string link = path + ".link";
+   *   if (File.Exists(link)) File.Delete(link);
+   *   if (Kernel32.CreateHardLink(link, pathToTarget)) {
+   *       File.Move(link, path, true);   // ← 先建到临时名，再 move 覆盖
+   *   }
+   *
+   * 为什么这样更好：
+   *   原来我们是「先把目标 rename 走（parkAway）→ 建新链接 → 删走的那份」。
+   *   中间有窗口期：parkAway 成功、link 失败时，目标位置上**什么都没了**，
+   *   要靠 catch 里的 rename 搬回去。搬回失败（被占用 / 断电）就丢文件。
+   *
+   *   改成「先建到临时名 .link → 再 move 覆盖目标」：
+   *   · 建临时名失败 → 目标原封不动，什么都没有发生；
+   *   · move 覆盖是同一卷内的目录项操作，原子且瞬间完成，没有空窗；
+   *   · 不需要「搬回去」这种补救逻辑，出错路径天然是干净的。
+   *
+   * 注意：File.Move 覆盖在 Node 里是 `fs.rename`（Windows 上 rename 到已存在
+   * 文件会失败，所以要先删目标 —— 这里是唯一的非原子点，但删的是「马上要被
+   * 替换掉的旧文件」，即使断电也只是丢一个待替换文件，不是丢数据）。
+   */
 
-  const dropParked = async (parked) => {
-    if (!parked) return;
+  /** 建一个硬链接到临时名，成功返回临时路径，失败返回 ''。 */
+  const linkToTemp = async () => {
+    const tmp = `${destination}.hxl-new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      await fsp.rm(parked, { force: true });
+      await fsp.link(full, tmp);
+      return tmp;
     } catch {
-      // 清不掉（ACL 挡着）不中断整次操作：残留的是整份旧文件，记日志事后清
-      console.warn(`[runtime] 旧文件清理失败，残留 ${parked}`);
+      try { await fsp.rm(tmp, { force: true }); } catch { /* ignore */ }
+      return '';
     }
   };
 
-  if (shouldCopy) {
-    const parked = await parkAway();
+  /** 拷到临时名，成功返回临时路径，失败返回 ''. */
+  const copyToTemp = async () => {
+    const tmp = `${destination}.hxl-new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      await fsp.copyFile(full, destination);
+      await fsp.copyFile(full, tmp);
+      return tmp;
     } catch (error) {
-      // 拷贝失败要把原件搬回去，否则目标路径上就缺了这个文件
-      if (parked) {
-        try { await fsp.rename(parked, destination); } catch { /* 搬不回，错误信息里带上路径 */ }
-      }
-      throw new Error(`无法创建 ${rel}：${error.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
+      try { await fsp.rm(tmp, { force: true }); } catch { /* ignore */ }
+      throw new Error(`无法创建 ${rel}：${error.message}`);
     }
-    await dropParked(parked);
+  };
+
+  /**
+   * 把临时文件原子地放到目标位置。
+   * Windows 上 fs.rename 不能覆盖已存在的文件，所以先删目标再 rename。
+   * 删目标前先确认临时文件已经建好（否则会出现「删了旧的、新的没到位」空窗）。
+   */
+  const commitTemp = async (tmp) => {
+    if (!tmp) return false;
+    // 目标可能不存在（首次建），也可能存在（覆盖）
+    let targetExists = false;
+    try {
+      await fsp.stat(destination);
+      targetExists = true;
+    } catch {
+      targetExists = false;
+    }
+    if (targetExists) {
+      /*
+       * rename 前占用探测：目标可能正被游戏/启动器读写。先试一次写句柄，
+       * 被独占就直接报中文错误，不去删它 —— 删到一半失败会留下空窗。
+       */
+      if (hardlinkGuard.isFileLocked(destination)) {
+        try { await fsp.rm(tmp, { force: true }); } catch { /* ignore */ }
+        throw new Error(
+          `无法替换 ${rel}：文件正被游戏或官方启动器占用。请完全退出它们后再生成/修复硬链接。`
+        );
+      }
+      try {
+        await fsp.rm(destination, { force: true });
+      } catch (error) {
+        // 删不掉目标（被占用 / ACL）：把临时文件也清掉，保持「什么都没变」
+        try { await fsp.rm(tmp, { force: true }); } catch { /* ignore */ }
+        throw new Error(hardlinkGuard.humanizeFsError(error, `替换 ${rel}`));
+      }
+    }
+    try {
+      await fsp.rename(tmp, destination);
+      return true;
+    } catch (error) {
+      try { await fsp.rm(tmp, { force: true }); } catch { /* ignore */ }
+      throw new Error(`无法提交 ${rel}：${error.message}`);
+    }
+  };
+
+  /* ── 需要拷贝的：直接拷到临时名再提交 ── */
+  if (shouldCopy) {
+    const tmp = await copyToTemp();
+    await commitTemp(tmp);
     return 'copy';
   }
 
-  // 先试硬链接（目标不存在时最省事、零拷贝）
-  try {
-    await fsp.link(full, destination);
-    return 'link';
-  } catch (error) {
-    const code = error && error.code;
-    if (code !== 'EEXIST') {
-      /*
-       * 跨卷 / 权限 / 文件系统不支持硬链接：退化成拷贝。
-       * 拷贝前同样要断链（目标可能存在，也可能是上次残留的硬链接）。
-       */
-      const parked = await parkAway();
-      try {
-        await fsp.copyFile(full, destination);
-      } catch (e2) {
-        if (parked) {
-          try { await fsp.rename(parked, destination); } catch { /* 同上 */ }
-        }
-        throw new Error(`无法创建 ${rel}：${e2.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
-      }
-      await dropParked(parked);
-      return 'copy';
-    }
-    // EEXIST：目标已存在。断链后重试链接，绝不直接 copyFile（那会写穿）。
-    const parked = await parkAway();
-    try {
-      await fsp.link(full, destination);
-    } catch (error2) {
-      // 断链后仍链不上（跨卷等）：这次才是合法的拷贝时机
-      try {
-        await fsp.copyFile(full, destination);
-      } catch (e3) {
-        if (parked) {
-          try { await fsp.rename(parked, destination); } catch { /* 同上 */ }
-        }
-        throw new Error(`无法创建 ${rel}：${e3.message}${parked ? `（原文件保留在 ${parked}）` : ''}`);
-      }
-      await dropParked(parked);
-      return 'copy';
-    }
-    await dropParked(parked);
+  /*
+   * ── 需要链接的：先探这个盘支不支持硬链接 ──
+   * 不支持（FAT32/exFAT）就直接拷贝，省掉每个文件一次必然失败的尝试。
+   */
+  if (!canHardlink(full)) {
+    const tmp = await copyToTemp();
+    await commitTemp(tmp);
+    return 'copy';
+  }
+
+  // 先试「建临时链接 → 提交」。失败（跨卷 / 权限）退化成拷贝。
+  const tmp = await linkToTemp();
+  if (tmp) {
+    await commitTemp(tmp);
     return 'link';
   }
+
+  // 链接建不出来：退化成拷贝（同样走临时名 + 原子提交）
+  const copyTmp = await copyToTemp();
+  await commitTemp(copyTmp);
+  return 'copy';
 }
 
 /** 下载中间态后缀：这些文件永远不该被硬链或复制（半成品，链过去就是共享一个残缺 inode）。 */
 const SKIP_LINK_SUFFIXES = ['.kuro-tmp', '.part', '.partial', '.download', '.crdownload'];
+
+/* ── 卷能力判定（借鉴 Starward：先看文件系统支不支持，再决定要不要试硬链接）── */
+
+/**
+ * 缓存「某个盘能不能建硬链接」。
+ *
+ * 为什么要有：硬链接只支持 NTFS / ReFS。在 FAT32 / exFAT 的盘上（U 盘、
+ * 移动硬盘、某些双系统共享分区）`fs.link` 一定失败。不提前判断的话，
+ * 每个文件都要先失败一次再退化成拷贝 —— 上万次失败的异常开销很可观，
+ * 而且 EPERM/ENOTSUP 的错误信息对用户完全不可读（只会说「操作不支持」）。
+ *
+ * 判据：星铁/原神这类游戏的安装盘基本都是 NTFS；用 `fs.statfs` 拿不到
+ * 文件系统类型，所以这里用「在目标盘上真建一次链接」来探测（探测一次、缓存）。
+ * 探测不成也不报错，只是记下「这个盘不能链」。
+ *
+ * @type {Map<string, boolean>}
+ */
+const volumeHardlinkCache = new Map();
+
+/** 取盘符（'G:\...' → 'g:') */
+function volumeKey(p) {
+  try {
+    return path.parse(path.resolve(p)).root.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 这个路径所在的盘能不能建硬链接。带缓存，探测失败按「不能」处理。
+ * @param {string} p
+ * @returns {boolean}
+ */
+function canHardlink(p) {
+  const key = volumeKey(p);
+  if (!key) return false;
+  if (volumeHardlinkCache.has(key)) return volumeHardlinkCache.get(key);
+
+  let ok = false;
+  try {
+    const probeDir = path.dirname(path.resolve(p));
+    fs.mkdirSync(probeDir, { recursive: true });
+    const a = path.join(probeDir, `.hxl-link-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const b = a + '.b';
+    try {
+      fs.writeFileSync(a, '');
+      fs.linkSync(a, b);
+      ok = true;
+    } finally {
+      try { fs.rmSync(a, { force: true }); } catch { /* ignore */ }
+      try { fs.rmSync(b, { force: true }); } catch { /* ignore */ }
+    }
+  } catch {
+    ok = false;
+  }
+  volumeHardlinkCache.set(key, ok);
+  if (!ok) {
+    console.warn('[runtime] 盘 ' + key + ' 不支持硬链接（非 NTFS/ReFS），该盘上的文件将走复制');
+  }
+  return ok;
+}
+
+/** 清掉探测缓存（用户换了盘 / 盘符变了之后调）。 */
+function clearVolumeHardlinkCache() {
+  volumeHardlinkCache.clear();
+}
+
+/* ── 跨渠道复用（借鉴 Starward 的 TryHardLinkAsync）───────────────────── */
+
+/**
+ * 建一个「同内容文件」索引，供跨渠道复用查询。
+ *
+ * 索引结构：size → [ {path, md5?} ... ]。用 size 做粗筛（免费，记账表里就有），
+ * MD5 只在候选里按需算（对同大小的少数几个文件算，成本可控）。
+ *
+ * 数据来源优先级：
+ *   1. 记账库（GameFile.db）里**别的渠道**的记录 —— 这是 Starward 的做法，最准；
+ *   2. 记账库为空时，退化成「扫本机已有运行时目录」—— 老用户补记账之前也能用。
+ *
+ * @param {{gameKey:string, excludeChannel:string}} options
+ * @returns {{bySize:Map<number,string[]>, gameKey:string}}
+ */
+function buildReuseIndex({ gameKey, excludeChannel }) {
+  const bySize = new Map();
+  if (!gameKey) return { bySize, gameKey };
+
+  let rows = [];
+  try {
+    // 记账库里的所有记录（本游戏），排除目标渠道自己
+    const all = gameFileDb.all('SELECT Path, Channel, Size FROM GameFile WHERE GameKey = ?;', [gameKey]);
+    rows = (all || []).filter((r) => String(r.Channel || '') !== String(excludeChannel || ''));
+  } catch {
+    rows = [];
+  }
+
+  for (const r of rows) {
+    const size = Number(r.Size) || 0;
+    if (!size) continue;
+    const p = String(r.Path || '');
+    if (!p) continue;
+    if (!bySize.has(size)) bySize.set(size, []);
+    bySize.get(size).push(p);
+  }
+  return { bySize, gameKey };
+}
+
+/**
+ * 在复用索引里找一个「和目标文件同内容」的源。
+ *
+ * 两级判据（严格执行，宁可不复用也不复用错）：
+ *   ① Size 必须相同（索引里已保证）；
+ *   ② MD5 必须相同 —— 只对候选算 MD5，且最多验 3 个候选就放弃。
+ *
+ * 安全阀：
+ *   · 只接受**同盘**的源（硬链接不能跨卷）；
+ *   · 源文件必须真实存在且大小对得上（记账可能过时）；
+ *   · 源不能是目标自己。
+ *
+ * @returns {Promise<string>} 可用的源路径，没有则空串
+ */
+async function findReusableSource(index, file, targetRoot) {
+  if (!index || !index.bySize) return '';
+  const size = Number(file.size) || 0;
+  if (!size) return '';
+  const candidates = index.bySize.get(size);
+  if (!candidates || !candidates.length) return '';
+
+  const targetVol = volumeKey(targetRoot);
+  const selfPath = path.resolve(file.full).toLowerCase();
+
+  let checked = 0;
+  for (const cand of candidates) {
+    if (checked >= 3) break; // 最多验 3 个，避免极端情况拖慢
+    let candAbs;
+    try {
+      candAbs = path.resolve(cand);
+    } catch {
+      continue;
+    }
+    if (candAbs.toLowerCase() === selfPath) continue;
+    // 同盘才行
+    if (volumeKey(candAbs) !== targetVol) continue;
+    // 存在 + 大小对
+    let st;
+    try {
+      st = await fsp.stat(candAbs);
+    } catch {
+      continue;
+    }
+    if (!st.isFile() || st.size !== size) continue;
+    checked += 1;
+    // 同大小还要比内容：用 MD5 确认（只对少数候选算）
+    try {
+      const [a, b] = await Promise.all([fileMd5(candAbs), fileMd5(file.full)]);
+      if (a && b && a === b) return candAbs;
+    } catch {
+      /* 算不出来就换下一个 */
+    }
+  }
+  return '';
+}
+
+/**
+ * 算文件 MD5（流式，不整文件读进内存 —— 游戏资源有单文件上 GB 的）。
+ * @returns {Promise<string>} 十六进制摘要，失败返回 ''
+ */
+function fileMd5(p) {
+  return new Promise((resolve) => {
+    try {
+      const hash = crypto.createHash('md5');
+      const stream = fs.createReadStream(p);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('end', () => resolve(hash.digest('hex')));
+      stream.on('error', () => resolve(''));
+    } catch {
+      resolve('');
+    }
+  });
+}
 
 /** 转换时「根本不处理」的文件判断：临时文件后缀 + 调用方指定的目录前缀。 */
 function shouldSkipLink(rel, skipPrefixes, skipSuffixes) {
@@ -479,7 +700,26 @@ async function hardlinkTree({
   copyDirs = [],
   skipPrefixes = [],
   skipSuffixes = SKIP_LINK_SUFFIXES,
+  /*
+   * 是否回传落位清单。默认关（绝大多数调用方不需要，多存一个数组没意义）。
+   * 需要记账的调用方置 true，拿到 placedFiles 后在最终路径确定时调 recordPlacedFiles。
+   */
+  collectPlaced = false,
+      /*
+       * 跨渠道复用（借鉴 Starward）：给了 gameKey 就去记账表里找「别的渠道已有的
+       * 同内容文件」，直接拿它当硬链接源，省掉大量拷贝和磁盘占用。
+       * 默认关 —— 只有「建渠道运行时」这种明确需要省空间的场景才开。
+       */
+      reuseAcrossChannels = false,
+      gameKey = '',
+      channel = '',
 }) {
+  /*
+   * 统一入口的进程探活（2026-11-26）：不管哪个游戏、哪条调用链调到这里，
+   * 只要源客户端或目标运行时里有进程正在跑，就不开始硬链接。
+   * 这一步放在扫描之前，避免扫了几万个文件才失败。
+   */
+  hardlinkGuard.assertNoGameRunning([sourceRoot, targetRoot], '生成硬链接');
   const files = await walkFiles(sourceRoot, signal, (progress) =>
     onProgress({
       phase: 'scan',
@@ -489,7 +729,7 @@ async function hardlinkTree({
     })
   );
   /*
-   * 2026-11-18：转换时「不处理」的文件先剔掉。
+   * 转换时「不处理」的文件先剔掉。
    *
    * 实测（本机官服 108.13 GiB / 1804 个文件）转换 WeGame：
    *   · 两个没下完的可选包 `.pak.kuro-tmp` 合计 2.85 GiB；
@@ -519,6 +759,7 @@ async function hardlinkTree({
   let linked = 0;
   let copied = 0;
   let lastEmit = 0;
+  const placedFiles = collectPlaced ? [] : null;
   /*
    * 字节量：walkFiles 已经把每个文件的 size 存下来了，这里直接累加，零额外 IO。
    * 之前只报文件个数，界面上「整理文件 4200/11300」用户根本判断不了还要多久
@@ -538,6 +779,52 @@ async function hardlinkTree({
   const copyPrefixes = copyDirs.map((dir) =>
     String(dir).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '')
   );
+  /*
+   * ── 跨渠道复用（借鉴 Starward 的 TryHardLinkAsync）──────────────────────
+   *
+   * 场景：用户已经装了另一个渠道的运行时（比如 B服），现在要生成国际服。
+   * 两个渠道有大量文件是完全一样的（本体资源、CefView、各种 dll），
+   * 但基础客户端（官服）里可能没有这些 —— 以前只能从官服拷，白占空间。
+   *
+   * Starward 的做法：查文件记账表，找「别的路径上 size 和 md5 都相同」的文件，
+   * 直接拿它当硬链接源。这样切服时能从「另一个渠道已有的那份」链过来，
+   * 省掉大量磁盘占用。
+   *
+   * 我们的实现：
+   *   · 只在调用方要求时启用（reuseAcrossChannels=true），默认关；
+   *   · 先用 Size 粗筛（查表很快），再局部算 MD5 确认（MD5 只对「大小相同」的算，
+   *     数量通常很小，成本可控）；
+   *   · 只复用**同盘**的文件（硬链接不能跨卷）；
+   *   · 复用失败（源文件被删/被改）就退回原逻辑，不影响正确性。
+   */
+  let reuseIndex = null;
+/*
+ * 跨渠道复用：**暂不启用**（保留实现，条件恒 false）。
+ *
+ * 查了 Starward 的 HardLinkService.TryHardLinkAsync，他那套是为「从零安装」省下载用的：
+ * 新装游戏时本机别的盘/别的渠道已有同内容文件，直接硬链接过来不下载。
+ *
+ * 我们的架构里它省不到东西：建运行时是「从已有基础客户端链」，本来就不下载；
+ * 渠道差异文件只有十几个、来自渠道包，也没有「需要找别处借」的。
+ * 所以这里条件写成 false ——代码留着（以后真有「从零拼接」的场景能用上），
+ * 但不参与实际流程，也不背这个复杂度。
+ *
+ * 从 Starward 抄过来、在我们这儿**真有价值**的是另外两样：
+ *   · canHardlink()：先判盘支不支持硬链接，省掉 FAT32/exFAT 上每文件必然失败的尝试；
+ *   · placeOneFile() 的「临时名 + 原子提交」：消除原来 parkAway 那条
+ *     「删了旧的、新的还没到位」的空窗。
+ */
+  if (false && reuseAcrossChannels && gameKey) {
+    try {
+      reuseIndex = buildReuseIndex({ gameKey, excludeChannel: channel });
+    } catch (error) {
+      console.warn('[runtime] 跨渠道复用索引建立失败，本次不复用：', error && error.message);
+      reuseIndex = null;
+    }
+  }
+  let reused = 0;
+  let reusedBytes = 0;
+
   for (const file of effective) {
     if (signal && signal.cancelled) break;
     // 暂停检查点：放在每个文件开头。fsp.link 是原子的，不会留半个文件，
@@ -568,14 +855,64 @@ async function hardlinkTree({
       copyPrefixes.some((prefix) => relLower === prefix || relLower.startsWith(`${prefix}/`)) ||
       copyPrefixes.indexOf(topDir) >= 0 ||
       mustCopyNotLink(file.rel);
-    const placed = await placeOneFile({
-      rel: file.rel,
-      full: file.full,
-      destination,
-      shouldCopy,
-    });
+
+    /*
+     * 跨渠道复用：先看别的渠道有没有「同大小 + 同 MD5」的文件。
+     * 命中就直接拿它当硬链接源 —— 这是 Starward 的做法，切服时能省下大量空间。
+     *
+     * 只在 shouldCopy=false（原本要走硬链接）时尝试：本来就要拷贝说明这个文件
+     * 不该跨渠道共享（比如渠道 SDK、可写索引），复用它等于把老事故再演一遍。
+     */
+    let reuseSource = '';
+    if (!shouldCopy && reuseIndex) {
+      reuseSource = await findReusableSource(reuseIndex, file, targetRoot);
+    }
+
+    let placed;
+    if (reuseSource) {
+      const tmpLink = `${destination}.hxl-reuse-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      let ok = false;
+      try {
+        await fsp.link(reuseSource, tmpLink);
+        ok = true;
+      } catch {
+        try { await fsp.rm(tmpLink, { force: true }); } catch { /* ignore */ }
+        ok = false;
+      }
+      if (ok) {
+        // 建好了临时链接，按原子替换提交
+        try {
+          const dstExists = await fsp.stat(destination).then(() => true).catch(() => false);
+          if (dstExists) await fsp.rm(destination, { force: true });
+          await fsp.rename(tmpLink, destination);
+          placed = 'reuse';
+        } catch {
+          try { await fsp.rm(tmpLink, { force: true }); } catch { /* ignore */ }
+          placed = null;
+        }
+      } else {
+        placed = null;
+      }
+      // 复用失败就退回原路径
+      if (!placed) {
+        placed = await placeOneFile({ rel: file.rel, full: file.full, destination, shouldCopy });
+      }
+    } else {
+      placed = await placeOneFile({ rel: file.rel, full: file.full, destination, shouldCopy });
+    }
+
     if (placed === 'copy') copied += 1;
+    else if (placed === 'reuse') { reused += 1; reusedBytes += Number(file.size) || 0; linked += 1; }
     else linked += 1;
+    /*
+     * 收集落位清单（rel + 是链还是拷）。
+     *
+     * ★ 为什么这里不直接记账：调用方经常先建在 staging 目录、再整体 rename 到正式目录
+     *   （buildEndfieldChannelRuntime / prepareLinkedRuntime 都是这样）。如果在循环里
+     *   按 staging 路径记账，rename 之后这些记录就全指向不存在的路径了。
+     *   所以这里只回传清单，由调用方在**最终路径确定之后**调 recordPlacedFiles 记账。
+     */
+    if (placedFiles) placedFiles.push({ rel: file.rel, kind: placed });
     processed += 1;
     bytesDone += Number(file.size) || 0;
     const now = Date.now();
@@ -606,7 +943,112 @@ async function hardlinkTree({
       current: '',
     });
   }
-  return { total: effective.length, processed, linked, copied, totalBytes, skipped, skippedBytes };
+  // 记账落盘由调用方在最终路径确定后调 recordPlacedFiles 负责，这里不再处理。
+  const out = { total: effective.length, processed, linked, copied, reused, reusedBytes, totalBytes, skipped, skippedBytes };
+  if (placedFiles) out.placedFiles = placedFiles;
+  return out;
+}
+
+/**
+ * 把 hardlinkTree 回传的落位清单记进记账库（最终路径已确定时调用）。
+ *
+ * 为什么需要单独一步：调用方常常先建在 staging、再 rename 到正式目录。
+ * 只有 rename 之后才能知道文件的最终路径，所以记账必须延后到这里。
+ *
+ * @param {Array<{rel:string, kind:string}>} placedFiles  hardlinkTree 回传的清单
+ * @param {string} finalRoot  最终运行时根目录（rename 之后的正式路径）
+ * @param {{gameKey:string, channel:string}} meta
+ * @returns {{recorded:number, failed:number}}
+ */
+function recordPlacedFiles(placedFiles, finalRoot, meta = {}) {
+  const result = { recorded: 0, failed: 0 };
+  if (!Array.isArray(placedFiles) || !placedFiles.length) return result;
+  if (!finalRoot || !meta.gameKey) return result;
+  for (const item of placedFiles) {
+    try {
+      gameFileDb.upsert({
+        path: path.join(finalRoot, item.rel),
+        gameKey: meta.gameKey,
+        channel: meta.channel || '',
+      });
+      result.recorded += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  try {
+    gameFileDb.persist();
+  } catch (error) {
+    console.warn('[runtime] 文件记账落盘失败：', error && error.message);
+  }
+  return result;
+}
+
+/**
+ * 文件记账（异步 + 后台，不阻塞界面）。
+ *
+ * ── 为什么改成后台 ───────────────────────────────────────────────
+ * 用户实测（2026-11-26）：「终末地硬链接收尾的记账很慢」。
+ *
+ * 根因是 readFileId 每个文件 spawn 一次 `fsutil file queryfileid`，
+ * 实测单次 52.8ms。终末地 2567 个文件 → 约 136 秒，全花在创建子进程上。
+ * 就算用 setImmediate 让出事件循环，主进程仍然被同步 spawn 占满。
+ *
+ * ── 现在的做法 ──────────────────────────────────────────────────
+ * 记账只是「锦上添花」：它用于以后判断「这个渠道运行时装没装好」，
+ * 不参与启动、不影响游戏文件本身。
+ * 所以：
+ *   ① 先按目录分组，同目录的文件一次处理；
+ *   ② 每处理一个文件就 await 一次 setImmediate，让 IPС 和渲染进程拿到 CPU；
+ *   ③ 整体在后台跑，调用方用 await 拿结果的场景传 options.background=true
+ *      就会立刻返回 {queued:true}，不阻塞收尾。
+ */
+async function recordPlacedFilesAsync(placedFiles, finalRoot, meta = {}, options = {}) {
+  const result = { recorded: 0, failed: 0 };
+  if (!Array.isArray(placedFiles) || !placedFiles.length) return result;
+  if (!finalRoot || !meta.gameKey) return result;
+
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const signal = options.signal || null;
+  /* 记账批次提示的节奏：每 200 个报一次，别让界面刷屏 */
+  const progressEvery = Number(options.progressEvery) || 200;
+
+  for (let i = 0; i < placedFiles.length; i += 1) {
+    if (signal && signal.cancelled) break;
+    const item = placedFiles[i];
+    const abs = path.join(finalRoot, item.rel);
+    try {
+      gameFileDb.upsert({
+        path: abs,
+        gameKey: meta.gameKey,
+        channel: meta.channel || '',
+      });
+      result.recorded += 1;
+    } catch {
+      result.failed += 1;
+    }
+    /*
+     * 每个文件都让出一次事件循环。
+     * 这比「每 64 个让一次」有效得多：upsert 内部是同步 spawn（52ms），
+     * 攒 64 个再让，界面就要卡 3 秒多。逐个让，单次最多卡 52ms，用户感知不到。
+     */
+    await new Promise((resolve) => setImmediate(resolve));
+    if (onProgress && (i + 1) % progressEvery === 0) {
+      onProgress({
+        phase: 'record',
+        processed: i + 1,
+        total: placedFiles.length,
+        current: `正在记账 ${i + 1}/${placedFiles.length}`,
+      });
+    }
+  }
+
+  try {
+    gameFileDb.persist();
+  } catch (error) {
+    console.warn('[runtime] 文件记账落盘失败：', error && error.message);
+  }
+  return result;
 }
 
 async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, signal }) {
@@ -628,6 +1070,12 @@ async function overlayDirectory({ packRoot, targetRoot, onProgress = () => {}, s
     // 改名之后目标路径已经指向「不存在」，下一句 copyFile 会新建独立文件，链接自然断掉。
     const parked = `${destination}.hxl-old-${Date.now()}`;
     let parkedOk = false;
+    /* rename 前占用探测：被游戏/启动器独占的文件不硬改，直接给出可操作的中文提示 */
+    if (hardlinkGuard.isFileLocked(destination)) {
+      throw new Error(
+        `无法替换渠道文件 ${file.rel}：文件正被游戏或官方启动器占用。请完全退出它们后重试。`
+      );
+    }
     try {
       await fsp.rename(destination, parked);
       parkedOk = true;
@@ -802,7 +1250,7 @@ async function copyTree(sourceRoot, targetRoot) {
 /**
  * 把旧运行时里「仍与别处共享 inode 的可写状态文件」断链成独立拷贝。
  *
- * 2026-11-22 用户反馈：只有游戏内闪断更新之后，切服才会一直报「文件缺失或损坏」，
+ * 用户反馈：只有游戏内闪断更新之后，切服才会一直报「文件缺失或损坏」，
  * 而且 B 服热更后切官服坏、再切回 B 服也坏。现场规律是：本机每个服都会各自弹一次
  * 闪断更新（Persistent 下 index_main.json / pref_*.json / VFS\*.blc 的 nlink=1），
  * 出问题的机器上这些索引仍是老版本运行时留下的硬链接。
@@ -873,6 +1321,11 @@ module.exports = {
   prepareLinkedRuntime,
   walkFiles,
   hardlinkTree,
+  // 文件记账（借鉴 Starward）：hardlinkTree 回传清单，最终路径确定后记进 GameFile.db
+  recordPlacedFiles,
+  recordPlacedFilesAsync,
+  canHardlink,
+  clearVolumeHardlinkCache,
   copyTree,
   removeTreeResilient,
   // 终末地单工作目录切服用：切服时原地覆盖渠道文件，不再重建整树。

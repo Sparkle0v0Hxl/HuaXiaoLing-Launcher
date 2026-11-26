@@ -135,7 +135,7 @@ const RATE_LIMIT_MIN_COOLDOWN = 10 * 60 * 1000;
 /*
  * 同一个游戏同一时间只允许一条同步在跑。
  *
- * 2026-11-11 用户手动点同步拿到「visit too frequently」，一部分原因就在这里：
+ * 用户手动点同步拿到「visit too frequently」，一部分原因就在这里：
  * 后台自动同步（20 秒一轮）刚打过一轮，用户又点了一次手动同步，两条链同时
  * 翻页 → 请求数翻倍 → 直接被限流。加锁后第二条会明确告诉用户「正在同步」，
  * 而不是一起去撞限流。
@@ -266,7 +266,7 @@ async function syncGachaLocked({ game, installRoot, userData, onProgress, provid
     for (let page = startPage; page <= 200; page += 1) {
       /*
        * 每次请求之间留出间隔。以前这里是不间断连发，星铁全量要几百次请求，
-       * 第一次导入 100% 撞限流（用户 2026-11-11 报的「visit too frequently」）。
+       * 第一次导入 100% 撞限流。
        */
       await sleep(REQUEST_GAP);
       let list;

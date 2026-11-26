@@ -82,11 +82,11 @@ const { DownloadManager } = require('./downloads');
 /*
  * 升级后自动清掉旧版本遗留的分块缓存（userData/sophon-cache/chunks）。
  *
- * 2026-11-19 用户决定：「而且之前别的用户下出来的缓存，也得清了这个缓存吧，没留的必要」。
+ * 2026-11-19 。
  * 本机实测那份缓存堆了 10.99 GB / 10588 个文件，全是旧版只写不删的残留。
  * 新版（sophon.js 的边下边清）不再产生堆积，这个模块只负责清老版本留下的那份。
  *
- * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ * ⚠ 顶层 require —— 必须登记
  */
 const { purgeLegacyChunkCache } = require('./cache-purge');
 const hgBackgrounds = require('./hg-backgrounds');
@@ -100,7 +100,10 @@ const { prepareLinkedRuntime, walkFiles, hardlinkTree, copyTree } = require('./r
  * prepareLinkedRuntime 保留给别的游戏用；终末地自己的 buildEndfieldChannelRuntime
  * 会在整树重建时把旧目录的 Persistent（用户下好的语音包）整体搬过去，不会丢下载内容。
  */
-const { overlayDirectory, mustCopyNotLink, breakSharedPersistentState } = require('./runtime');
+const { overlayDirectory, mustCopyNotLink, breakSharedPersistentState, recordPlacedFiles, recordPlacedFilesAsync } = require('./runtime');
+const gameFileDb = require('./game-file-db');
+const { runMigrations } = require('./migrations');
+const endfieldIsolation = require('./endfield-isolation');
 const { loadGachaHistory } = require('./gacha');
 const nteCapture = require('./nte-capture');
 const nevernessPredownload = require('./neverness-predownload');
@@ -110,13 +113,13 @@ const { loadGachaMeta } = require('./gacha-meta');
 const { ensureErasedBackground } = require('./background-clean');
 // 启动页官方动态背景（星铁 / 绝区零 / 崩坏3 的官方 webm 都从这个接口按游戏取）。
 // 之前这里漏了引用，调用处抛 ReferenceError 又被空 catch 吞掉，表现就是
-// 「这些游戏一直没有动态背景，背景按钮也跟着消失」。
+//
 const { officialBackgrounds } = require('./start-artwork');
 const { httpFetch, nodeRequest, setRequestLogger } = require('./http-fetch');
 // node:https 的代理隧道：Chromium 栈自动吃系统代理但只有 6 条连接，
 // node 能开 16 条却不认代理。这一层把两边补起来（顶层 require，要进打包清单）。
 const proxyTunnel = require('./proxy-agent');
-// 全局下载限速：所有下载链路共享一个带宽上限（用户要求「全统一」）
+// 全局下载限速：所有下载链路共享一个带宽上限（）
 const netThrottle = require('./net-throttle');
 // 运行诊断：网络请求留痕 + 一键导出。挂在 http-fetch 上，只记元数据不记内容。
 const diagnostics = require('./diagnostics');
@@ -261,6 +264,9 @@ const {
   PROFILES: ENDFIELD_PACK_PROFILES,
   updateEndfieldGame,
   checkEndfieldGame,
+  verifyLocalMatchesRemote,
+  // 复核「本地是否已是最新」时要拿完整清单（含 .blc/.chk），不能只用 checkEndfieldGame 的摘要
+  loadRemoteManifest,
   fetchLatest,
   profileForChannel,
   // 一键下载：终末地全新安装走官方分卷整包（7z 解压），找不到 7-Zip 时用 findSevenZip 判断
@@ -274,7 +280,6 @@ async function fetchLatestForChannel(channel) {
   if (!profile) throw new Error('没有对应的更新渠道');
   return fetchLatest(profile);
 }
-const { launchEndfield, launchEndfieldElevated } = require('./endfield-launch');
 // 渲染后端（DX11 / DX12）：支持范围与参数口径都集中在 render-api.js，启动时拼在用户参数前面
 const renderApi = require('./render-api');
 const { prepareSophon, prepareBilibiliRuntime, normalizeAudioLanguages, fetchLauncherConfig } = require('./sophon');
@@ -290,7 +295,7 @@ const nevernessChannels = require('./neverness-channels');
  * （Yostar REST + CRC64 vs 鹰角加密分卷）、主程序不同，所以既不能走 profileForChannel
  * （那是鹰角清单），也不能像国服官服/B服那样从同一个安装目录硬链接拼出来。
  *
- * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ * ⚠ 顶层 require —— 必须登记
  */
 const yostarPacks = require('./yostar-packs');
 /*
@@ -299,14 +304,14 @@ const yostarPacks = require('./yostar-packs');
  * 官服↔B服内容 99.24% 相同（847/816 个文件 md5 一致），硬链接切服收益 98.8%；
  * 国际服与国服 pak 全部不同（0.4%），只做检测/下载/更新，不做硬链接互切。
  *
- * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ * ⚠ 顶层 require —— 必须登记
  */
 const kuroPacks = require('./kuro-packs');
 /**
  * 鸣潮启动参数：客户端断言「必须由启动器启动」，缺 -krqlv=<画质档位> 就自杀
  * （Fatal error: kuro: Use launcher to start game!）。详见 electron/wuwa-launch.js。
  *
- * ⚠ 顶层 require —— 必须登记 H:\HXL-pack\pack.js 的 ASAR_MUST_HAVE，漏包=打开就崩。
+ * ⚠ 顶层 require —— 必须登记
  */
 const wuwaLaunch = require('./wuwa-launch');
 // 进度计量器：给各条下载/更新链路补速度与剩余时间（纯计算，无 IO、无依赖）
@@ -607,7 +612,17 @@ const APP_VERSION = (() => {
   return app.getVersion();
 })();
 
-const gotLock = app.requestSingleInstanceLock();
+/*
+ * 卸载模式：跳过单实例锁。
+ *
+ * 启动器正在运行时，它的单实例锁占着 —— 卸载器（同一份 asar 的另一个 exe）
+ * 拿不到锁就会直接 app.quit()，用户点了卸载什么都不出现。卸载是一次性的
+ * 独立进程，没有理由和正在跑的启动器互斥。
+ */
+const isUninstallMode = process.argv.includes('--uninstall');
+/** 静默卸载：给「设置 → 应用」里那种不弹界面的卸载入口用（注册表 QuietUninstallString）。 */
+const isUninstallSilent = isUninstallMode && process.argv.includes('--silent');
+const gotLock = isUninstallMode ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 }
@@ -700,7 +715,7 @@ function loadIconImage(file) {
  * 窗口显式图标（1x=32px、2x=64px 双表示，均已按小尺寸锐化）。
  *
  * 必须显式设，不能指望 exe 图标自动回落：实测（探针取证，见
- * .workbuddy/memory/2026-10-29.md）不设 icon 时窗口只有类图标、没有
+
  * WM_SETICON，任务栏在 AppUserModelId 无对应快捷方式时走 Explorer 的
  * 图标缓存回落——缓存一旦粘了坏结果就一直是白纸，且不随 exe 更新刷新。
  * WM_SETICON 是 Explorer 实时读取的最高优先级来源，设了就绕开缓存。
@@ -1060,6 +1075,15 @@ function defaultSettings() {
     // 官方背景轮播：每 26 秒换下一张官方主视觉（只对官方同步下来的图生效）
     backgroundRotate: true,
     sidebarCollapsed: true,
+    /*
+     * 启动页唤出侧栏时，左上角那颗菜单键是否钉在原位（2026-11-26 做成可选开关）。
+     *
+     * 默认 false = 原来那套：键和品牌跟着画面一起让开、淡出，收起靠抽屉自己的
+     * 入口（底部「收起侧栏」/ 头像 / 点画面 / Esc）。
+     * 打开 = 键留在原位、图标变成返回箭头，再点一下收回；logo 图和字飞进抽屉
+     * 顶部那个 logo 的位置。
+     */
+    startNavPinMenu: false,
     uiRevision: 2,
     // 界面缩放：100% 为原始大小，范围 80% - 130%
     uiScale: 100,
@@ -1067,10 +1091,34 @@ function defaultSettings() {
     alwaysAdmin: null,
     // 是否已经就「开游戏要管理员」问过一次：只问一次，选过就按选过的走
     elevationAsked: false,
+    /*
+     * 用户点了「以后不再提醒」（2026-11-25 加）。
+     * 和 elevationDeclined 的区别：那个是「这次拒绝了」（10 分钟后还能再试），
+     * 这个是「别再问了」—— 之后只在设置里手动开，启动器不再自动弹询问框。
+     * 从设置里打开「总是以管理员身份运行」会自动清掉它。
+     */
+    elevationDontAsk: false,
     // 用户在上一次 UAC 弹窗里点了「否」。记住这个选择，
     // 不要每次冷启动都再弹一次授权（否则启动器一开就被拦住）。
     // 在设置里重新打开「总是以管理员身份运行」会把它清掉。
     elevationDeclined: false,
+    /* 「最近一次拒绝提权」的时刻（毫秒时间戳）。0 = 没有拒绝记录。
+     * 只存时间戳不存永久布尔：布尔一旦写成 true，判定条件里 !elevationDeclined
+     * 永远不成立 → 再也不尝试提权 → 也永远不可能「已经是管理员」→ 反向自愈
+     * 那条（只有已是管理员才清）永远不触发，卡成死锁。 */
+    elevationDeclinedAt: 0,
+    /*
+     * 终末地启动方式（2026-11-25 用户定）：
+     *   'full'   全自动 —— 给官方启动器开调试口，用 CDP 点「开始游戏」，
+     *            进游戏后自动关掉启动器。体验最好。
+     *   'manual' 手动 —— 只把官方启动器拉起来并最小化，用户自己点一次。
+     *            不碰调试口，是「哪天官方查启动链路」时的退路。
+     * 默认 full；自动模式连续失败会自动退回 manual（见 endfieldAutoFail*）。
+     */
+    endfieldLaunchMode: 'full',
+    endfieldAutoFailCount: 0,
+    endfieldAutoFailReason: '',
+    endfieldAutoFailAt: 0,
     nevernessUseOfficialLauncher: true,
     closeToTray: true,
     /*
@@ -1422,7 +1470,7 @@ function declaredChannelOf(exePath) {
   if (hit && now - hit.at < 2000) return hit.value;
   const value = {
     /*
-     * 2026-11-17：config 通道改用 resolveChannelFromRoot（config.ini + 文件层渠道 SDK 复核）。
+     * config 通道改用 resolveChannelFromRoot（config.ini + 文件层渠道 SDK 复核）。
      * 第三方三服切换器会把官服目录的 config.ini 改成 cps=bilibili，光看 ini 会把
      * 官服本体当成 B服客户端 —— 于是 B服 行被判成「有可用客户端」（绿灯），
      * 实际用的还是官服那份，账号态和渠道配置全串。
@@ -1614,6 +1662,10 @@ const GAME_DETECTION = {  genshin: {
       'HuaXiaoLingGames\\arknights-Arknights_EN\\Arknights.exe',
       'HuaXiaoLingGames\\arknights-Arknights_JP\\Arknights.exe',
       'HuaXiaoLingGames\\arknights-Arknights_KR\\Arknights.exe',
+      // 2026-11-25 起默认装到「花筱灵下载」，老路径仍然保留（两个都认）
+      '花筱灵下载\\arknights-Arknights_EN\\Arknights.exe',
+      '花筱灵下载\\arknights-Arknights_JP\\Arknights.exe',
+      '花筱灵下载\\arknights-Arknights_KR\\Arknights.exe',
     ],
     // PlatformProcess.exe 只在鹰角启动器的子目录里出现，不能当作游戏入口
     relative: ['Arknights.exe', 'games\\Arknights Game\\Arknights.exe'],
@@ -1636,6 +1688,9 @@ const GAME_DETECTION = {  genshin: {
       'HuaXiaoLingGames\\wutheringwaves-official\\Client-Win64-Shipping.exe',
       'HuaXiaoLingGames\\wutheringwaves-bilibili\\Client-Win64-Shipping.exe',
       'HuaXiaoLingGames\\wutheringwaves-global\\Client-Win64-Shipping.exe',
+      '花筱灵下载\\wutheringwaves-official\\Client-Win64-Shipping.exe',
+      '花筱灵下载\\wutheringwaves-bilibili\\Client-Win64-Shipping.exe',
+      '花筱灵下载\\wutheringwaves-global\\Client-Win64-Shipping.exe',
       // WeGame 版：下载中在 downloading\2002137，装好后 WeGame 会把整个目录搬到
       // rail_apps\Wuthering Waves(2002137)。写目录而非 exe 路径，checkPath 会按
       // relative 两层探测主程序（UE 的可执行文件在 Client\Binaries\Win64 下）。
@@ -1647,6 +1702,39 @@ const GAME_DETECTION = {  genshin: {
       'Client\\Binaries\\Win64\\Client-Win64-Shipping.exe',
       'Wuthering Waves.exe',
     ],
+  },
+
+  /*
+   * 蓝色星原：旅谣（2026-11-26 接入，蛮啾 / 上海蛮奈网络科技）。
+   *
+   * 主程序 AzurPromilia.exe 是 asInvoker（不需提权），但**不能直接启动** ——
+   * 游戏进程的父进程必须是官方 launcher.exe，否则界面报「请通过启动器打开」，
+   * 硬起还会触发 ACE「安全组件发生异常」（2026-11-26 实测）。
+   *
+   * 所以这里的路径只用于「识别安装位置 / 判断装没装」，
+   * 真正的启动走 electron/azur-launcher.js 的官方启动器托管。
+   *
+   * 注册表实测：
+   *   HKCU\Software\AzurPromilia\35_C000  →  Path / Version / VersionName / Exe
+   *   HKCU\Software\AzurPromilia\Game_35_C000_SC1003V → uuid
+   *   HKCU\Software\Manjuu_Game
+   */
+  azurpromilia: {
+    exe: 'AzurPromilia.exe',
+    registry: [
+      'HKCU\\Software\\AzurPromilia',
+      'HKCU\\Software\\Manjuu_Game',
+      'HKLM\\SOFTWARE\\AzurPromilia',
+      'HKLM\\SOFTWARE\\WOW6432Node\\AzurPromilia',
+    ],
+    paths: [
+      'AzurPromilia_Game\\AzurPromilia.exe',
+      'AzurPromilia\\AzurPromilia.exe',
+      'Manjuu\\AzurPromilia\\AzurPromilia.exe',
+      'Games\\AzurPromilia_Game\\AzurPromilia.exe',
+      '花筱灵下载\\azurpromilia\\AzurPromilia.exe',
+    ],
+    relative: ['AzurPromilia.exe'],
   },
 };
 
@@ -1664,6 +1752,8 @@ const OFFICIAL_SITES = {
   neverness: 'https://nte.perfectworld.com/en/',
   // 鸣潮官网（库洛）
   wutheringwaves: 'https://www.kurogames.com/',
+  // 蓝色星原：旅谣官网（蛮啾 / 上海蛮奈网络科技，2026-11-26 接入）
+  azurpromilia: 'https://azurpromilia.manjuu.com/',
 };
 
 const BROWSER_UA =
@@ -1695,7 +1785,7 @@ const BASIC_GAME_IDS = {
 // 2.10.x 增量：鸣潮（库洛），公告来自 kurobbs + 国际服 ArticleMenu。
 // 缺表时下面用 store.data.games 的 builtinKey 动态兜底，但显式列上更稳：
 // 游戏记录还没建（新用户首次启动）时也要能拿到公告。
-const NOTICE_GAME_KEYS = ['genshin', 'starrail', 'zzz', 'endfield', 'neverness', 'arknights', 'bh3', 'wutheringwaves'];
+const NOTICE_GAME_KEYS = ['genshin', 'starrail', 'zzz', 'endfield', 'neverness', 'arknights', 'bh3', 'wutheringwaves', 'azurpromilia'];
 const NOTICE_CACHE_TTL = 5 * 60 * 1000;
 const noticeCache = new Map();
 
@@ -2141,6 +2231,56 @@ async function pickKuroCover() {
  * 实测 29.4MB / 200）。与卡片封面 coverImage 同源，但官网 og:image 不是它，
  * 必须单独取。走 ensureAnimatedStartBackgrounds → cacheStartVideo 落到 backgrounds/。
  */
+/**
+ * 蓝色星原启动页动态背景（2026-11-26 接入）。
+ *
+ * 官网是 SPA，视频地址写在 assets/index-*.js 里，文件名带构建 hash
+ * （实测当前 kv-D8QVMDES.mp4，3840x2160 / 15 秒 / 30 MB）。
+ * 每次发版 hash 会变，所以不能写死 URL。两步解析：
+ *   ① 抓官网首页 → 找到主 JS 文件名
+ *   ② 抓主 JS → 正则取 kv-*.mp4 的完整地址
+ *
+ * 拿不到返回空串，调用方退回静态图（startCover），不阻断任何流程。
+ */
+async function pickAzurStartVideo() {
+  const SITE = 'https://azurpromilia.manjuu.com/';
+  const ASSET_BASE = 'https://webstatic.manjuu.com/web/static/azurpromilia.manjuu.com/assets/';
+
+  const grab = async (url, timeout) => {
+    const res = await fetch(url, {
+      headers: { 'user-agent': BROWSER_UA, accept: '*/*' },
+      signal: AbortSignal.timeout(timeout || 20000),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.text();
+  };
+
+  try {
+    const html = await grab(SITE, 15000);
+    const jsMatch = /assets\/(index-[A-Za-z0-9_-]+\.js)/.exec(html);
+    const jsName = jsMatch ? jsMatch[1] : '';
+
+    const candidates = [];
+    if (jsName) {
+      try {
+        const js = await grab(ASSET_BASE + jsName, 25000);
+        for (const m of js.matchAll(/assets\/(kv-[A-Za-z0-9_-]+\.mp4)/g)) candidates.push(m[1]);
+        if (!candidates.length) {
+          for (const m of js.matchAll(/assets\/([A-Za-z0-9_-]+\.mp4)/g)) candidates.push(m[1]);
+        }
+      } catch {
+        /* 主 JS 拉不到就往下走 */
+      }
+    }
+
+    if (!candidates.length) return '';
+    const pick = candidates.find((c) => c.startsWith('kv-')) || candidates[0];
+    return ASSET_BASE + pick;
+  } catch {
+    return '';
+  }
+}
+
 async function pickKuroStartVideo() {
   for (const url of [
     'https://media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/zh/MainMenu.json',
@@ -2247,6 +2387,80 @@ async function fetchKuroNotices() {
   return deduped;
 }
 
+/*
+ * 蓝色星原公告（2026-11-26）：蛮啾自家的公告系统，官网 /home/news 就是它渲染的。
+ *
+ * 之前以为蓝原「没有公告」，是因为只在主站 azurpromilia.manjuu.com 的 index-*.js
+ * 里翻了一圈 —— 那是宣传页，本来就没有公告位。真正的新闻页是独立的 /home 子站，
+ * 接口写在它的 App-*.js 里：
+ *   GET  /announce/web/announcement/pagelatestlist?gameId=35
+ *   GET  /announce/web/announcement/getdetail?gameId=35&id=<id>
+ *
+ * 鉴权只有一层 MD5 签名，不需要登录：
+ *   sign = md5(String(timestamp) + querystring)
+ * 必须带 gameId=35（35 = 蓝原，官方前端 index-*.js 的 GAME_ID 常量），
+ * 且 querystring 参与签名时字段顺序要和实际发送顺序一致 —— 所以这里固定用
+ * 同一个字符串既拼 URL 又算签名，不要让它俩各写一遍。
+ *
+ * 返回体里 type 只有两种：notice（公告）/ activity（活动），映射成中文。
+ * 详情页是 SPA，正文要再调 getdetail 拿 contentUrl；列表页只需要标题和跳转链接，
+ * 所以这里不额外发详情请求，把 link 指向官网详情页即可。
+ */
+const AZUR_NOTICE_GAME_ID = '35';
+const AZUR_API_BASE = 'https://api-grp.manjuu.com';
+
+/** 蓝原公告接口的签名请求头。querystring 必须与实际发送的完全一致。 */
+function azurSignHeaders(queryString) {
+  const timestamp = Date.now();
+  const sign = crypto
+    .createHash('md5')
+    .update(String(timestamp) + queryString)
+    .digest('hex');
+  return {
+    'user-agent': BROWSER_UA,
+    'Content-Type': 'application/json',
+    'device-id': crypto.randomUUID(),
+    'grp-trace-id': '',
+    'sdk-version': '2.4.1',
+    lang: 'zh-Hans',
+    timestamp: String(timestamp),
+    sign,
+  };
+}
+
+async function fetchAzurNotices() {
+  const query = new URLSearchParams({
+    gameId: AZUR_NOTICE_GAME_ID,
+    pageSize: '10',
+  }).toString();
+  const response = await fetch(`${AZUR_API_BASE}/announce/web/announcement/pagelatestlist?${query}`, {
+    headers: azurSignHeaders(query),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const json = await response.json();
+  if (!json || json.code !== 0) {
+    throw new Error(`公告接口返回 ${json && json.code}：${(json && json.msg) || '未知错误'}`);
+  }
+  const rows = Array.isArray(json.data?.rows) ? json.data.rows : [];
+  const typeLabels = { notice: '公告', activity: '活动' };
+  const items = [];
+  for (const row of rows) {
+    if (!row?.id || !row?.title) continue;
+    items.push({
+      title: String(row.title),
+      link: `https://azurpromilia.manjuu.com/home/news/detail/${row.id}/`,
+      // startTime 是毫秒时间戳；缺失时留空，前端会隐藏日期那一栏
+      date: row.startTime ? new Date(Number(row.startTime)).toISOString().slice(0, 10) : '',
+      type: typeLabels[String(row.type || '')] || '公告',
+      // 列表接口给的是 356x200 横图，和别的游戏一样当封面用
+      image: row.pcCoverImageUrl ? String(row.pcCoverImageUrl) : '',
+    });
+    if (items.length >= 8) break;
+  }
+  return items;
+}
+
 async function fetchGameNotices(gameKey, force = false) {
   const cached = noticeCache.get(gameKey);
   if (!force && cached && Date.now() - cached.at < NOTICE_CACHE_TTL) return cached.items;
@@ -2261,6 +2475,8 @@ async function fetchGameNotices(gameKey, force = false) {
     else if (gameKey === 'bh3') items = await fetchBh3Notices();
     // 鸣潮：库街区 + 官网 CDN（2026-11-12）
     else if (gameKey === 'wutheringwaves') items = await fetchKuroNotices();
+    // 蓝色星原：蛮啾公告系统（官网 /home/news 同源，2026-11-26）
+    else if (gameKey === 'azurpromilia') items = await fetchAzurNotices();
   } catch (error) {
     console.warn(`官方公告读取失败（${gameKey}）：`, error.message);
     items = [];
@@ -2322,9 +2538,17 @@ async function fetchVersionArtwork(gameKey) {
         .filter((item) => item.background?.url)
         .sort((a, b) => uploadedAt(b).localeCompare(uploadedAt(a)))[0];
       const videoItem = backgrounds.find((item) => item.video?.url);
-      if (imageItem?.background?.url || videoItem?.video?.url) {
+      /*
+       * 星铁：官方每个新版本先发一张动态图（带 video），版本中途才会补卡池静态图。
+       * 启动页背景要用这张动态图用到版本结束，所以有 video 时版本图取「同一条动态图
+       * 自带的静态图」，而不是上传日期最新的那张（那通常是版本中途补的卡池图）——
+       * 否则卡池图会被下载并去字，去字后字发糊，正是用户不想看到的。
+       */
+      const versionImageItem =
+        gameKey === 'starrail' && videoItem?.background?.url ? videoItem : imageItem;
+      if (versionImageItem?.background?.url || videoItem?.video?.url) {
         return {
-          image: imageItem?.background?.url || '',
+          image: versionImageItem?.background?.url || '',
           video: videoItem?.video?.url || '',
         };
       }
@@ -2757,7 +2981,7 @@ async function cacheStartVideo(source, relativePath, local = false) {
 // 它的 builtin 封面当作普通初始图，首次同步就会被官网最新 KV 覆盖成 official-arknights。
 //
 // 2.4.4 修正：内置的 builtin-bh3.svg 只是一张深色占位插画，摆在主页卡片上几乎看不见，
-// 用户反馈「崩坏3 封面图没有了」。官方去文字主视觉（ensureBh3StartCover 拉下来的
+// 。官方去文字主视觉（ensureBh3StartCover 拉下来的
 // official-bh3-clean2）本来就是真图，直接把它当卡片封面用，并一起钉住不让同步覆盖。
 const PINNED_BUILTIN_COVERS = /^covers\/(?:builtin-bh3\.(?:jpg|jpeg|png|webp|svg)|official-bh3-clean2\.(?:png|jpg|jpeg|webp))$/i;
 // 崩坏3 卡片的官方主视觉（与启动页背景同一张，本地已有就用，没有才退回内置 SVG）
@@ -3179,6 +3403,10 @@ function ensureAnimatedStartBackgrounds(options = {}) {
         // 官网 MainMenu.json 的 pcTopPicture.backgroundVideo（29.4MB mp4），
         // 与卡片封面 coverImage 同源；走 cacheStartVideo 落到 backgrounds/。
         source = await pickKuroStartVideo();
+      } else if (key === 'azurpromilia') {
+        // 官网 index-*.js 里的 kv-*.mp4（4K / 15 秒），文件 hash 每次发版会变，
+        // 所以按「首页 → 主 JS → 视频地址」两级解析，不写死 URL。
+        source = await pickAzurStartVideo();
       }
 
       // 没有官方视频（原神）：静态图 + 前端缓动镜头
@@ -3342,7 +3570,7 @@ async function syncOfficialGame(game, backgrounds) {
     result.error = error.message;
   }
 
-  // 鸣潮卡片封面（用户 m28925「抽屉的卡片封面和主页的卡片封面没换」）：
+  // 鸣潮卡片封面：
   // 官网 og:image 是 /favicon.ico（模糊 logo 大图），且官网 fetch 可能整个失败，
   // 所以必须在 try/catch 之外无条件取 MainMenu.json 的 pcTopPicture.coverImage。
   if (game.builtinKey === 'wutheringwaves') {
@@ -3358,7 +3586,7 @@ async function syncOfficialGame(game, backgrounds) {
   const versionArtwork = customCover ? { image: '', video: '' } : await fetchVersionArtwork(game.builtinKey);
   const fromVersionArt = Boolean(versionArtwork.image);
   // 鸣潮强制用 MainMenu 的 pcTopPicture.coverImage：官网 og:image 是 favicon、
-  // latestBackground 也可能塞官网图，都会盖掉正确封面（用户 m28925）。
+  // latestBackground 也可能塞官网图，都会盖掉正确封面。
   const imageUrl =
     game.builtinKey === 'wutheringwaves' && ogImage
       ? ogImage
@@ -3724,7 +3952,7 @@ function pathsOverlap(left, right) {
  * 鸣潮 WeGame 版目录定位（2026-11-12）：WeGame 下载中是
  * `<盘>:\WeGameApps\downloading\2002137`，装好之后会把整个目录搬到
  * `<盘>:\WeGameApps\rail_apps\Wuthering Waves(2002137)`（实测装完 downloading
- * 目录直接消失）。用户要求两个路径都能识别到（m28189/m28195/m28196）。
+ * 目录直接消失）。用户要求两个路径都能识别到。
  *
  * 这里必须在模块级：ensureKuroRuntime 是模块级函数，之前把 helper 写在
  * installIpc() 里，它一调用就 ReferenceError —— 切服直接崩。probe / convert /
@@ -3755,8 +3983,7 @@ function wuwaExeAt(root) {
  * 米哈游那套「根目录有 config.ini 才是完整客户端」的约定对鸣潮完全不成立 ——
  * 真实官服本体 `G:\Wuthering Waves Game` 根本没有 config.ini。于是老判据
  * 会把好好的客户端当成「资源替换包（增量包）」标成需要重建，官服行整行变灰、
- * 还要求用户重新选路径（用户 m29419「官服一点到 WeGame，官服选项就灰掉了」/
- * m29420「要重新选路径」）。传 exe 或它所在目录都行，返回找到的本体根目录。
+ * 还要求用户重新选路径。传 exe 或它所在目录都行，返回找到的本体根目录。
  */
 function wuwaClientRootOf(dirOrExe) {
   let dir = String(dirOrExe || '').trim();
@@ -3873,6 +4100,161 @@ function isEndfieldLegacyWorkRoot(dir) {
   } catch {
     return false;
   }
+}
+
+/**
+ * 这一行终末地的客户端现在能不能直接启动？—— **唯一权威判据**。
+ *
+ * 为什么要有这个函数：
+ *   以前「客户端完整不完整」这件事散在 26 处各写各的判据：
+ *   有的看 config.ini，有的看 runtimeLinked 字段，有的看目录标记，有的只看 exe 在不在。
+ *   三套判据不一致的直接后果（用户报障，反复出现）：
+ *     · 硬链接运行时明明生成好了、.hxl-endfield-runtime-v2 标记也在、后端也认它是完整客户端，
+ *       但 launcher-data.json 里的 runtimeLinked 字段丢了（配置回滚 / 从旧版本升级 /
+ *       手工改过配置 / 切服「尽力而为」分支没写回），界面就一直挂着「缺独立目录」；
+ *     · 用户点「生成」重建一遍也没用，因为重建完字段可能又没写回去。
+ *
+ * 设计原则（与 Starward 同一思路）：**以文件系统事实为准，配置字段只做辅助**。
+ *   字段对了说明记账没坏；字段坏了只要目录是好的，就不该判成缺。
+ *
+ * @param {object} game   游戏对象（要读 builtinKey / servers）
+ * @param {object} server 服务器行
+ * @returns {{ready:boolean, reason:string}}
+ *   reason 取值：'official-direct' | 'runtime-dir' | 'runtime-field' |
+ *                'config-ini' | 'missing-exe' | 'missing-runtime' | 'not-endfield'
+ */
+function endfieldClientReady(game, server) {
+  if (!server) return { ready: false, reason: 'missing-exe' };
+  if (!game || game.builtinKey !== 'endfield') return { ready: false, reason: 'not-endfield' };
+
+  const channel = String(server.channel || '');
+  const exe = String(server.path || '');
+  const exeOk = Boolean(exe) && targetExists(exe);
+
+  // 官服：直启官方本体，只要 exe 在就算就绪（不需要独立运行时）
+  if (channel === 'official') {
+    return exeOk ? { ready: true, reason: 'official-direct' } : { ready: false, reason: 'missing-exe' };
+  }
+
+  // 非官服：必须有自己的独立运行时
+  const runtimeDir = String(server.root || '');
+
+  // 走的是「旧单 work 混合目录」→ 就算 exe 在也不能用（启动 3~9 秒就崩）
+  if (runtimeDir && isEndfieldLegacyWorkRoot(runtimeDir)) {
+    return { ready: false, reason: 'missing-runtime' };
+  }
+
+  /*
+   * ① 查记账库（借鉴 Starward 的 GameFileDatabase）——**最权威**。
+   *
+   * 这是替代「看一个布尔字段」的正解：记账里存了这个渠道运行时每个文件的
+   * 路径 + Size + NTFS FileId。文件都在、大小没变、FileId 没变，就说明这份
+   * 运行时是完好的 —— 不看任何 launcher-data.json 字段，也就不存在
+   * 「字段丢了界面就永久报错、重建也修不回来」那个老问题。
+   *
+   * 校验是有成本的（要 stat 上千个文件），所以只在该渠道的记录存在时才做，
+   * 且 checkFileId 只在文件数不多时开（fsutil 是 spawn，上万次会慢到不可用）。
+   */
+  if (runtimeDir) {
+    try {
+      const rows = gameFileDb.listChannelFiles('endfield', channel);
+      if (rows.length) {
+        // 记录里的路径必须落在当前 runtimeDir 下，否则是旧目录的记账（运行时搬过家）
+        const dirNorm = path.resolve(runtimeDir).toLowerCase();
+        const inDir = rows.filter((r) => String(r.Path || '').toLowerCase().startsWith(dirNorm + path.sep));
+        if (inDir.length) {
+          const checkFileId = inDir.length <= 200; // 小规模才逐个核 FileId
+          const v = gameFileDb.verify(inDir, { checkFileId });
+          if (v.ok) {
+            return { ready: true, reason: 'db-verified', files: v.total };
+          }
+          /*
+           * 记账说有问题：文件缺了 / 大小变了 / FileId 变了。
+           * 这时**不能**直接判不就绪 —— 用户可能刚更新过客户端，记账还没来得及更新。
+           * 往下走目录标记那条路；真要重建，调用方的 needsRebuild 会重新记账。
+           */
+        }
+      }
+    } catch {
+      /* 记账库没开或读失败：往下走目录标记判据 */
+    }
+  }
+
+  // ② 目录标记在 + exe 在 → 就绪（事实优先，不看字段）
+  const dirHasMarker = Boolean(runtimeDir) && isEndfieldRuntimeDir(runtimeDir);
+  if (dirHasMarker && exeOk) {
+    return { ready: true, reason: 'runtime-dir' };
+  }
+  // ③ 字段说生成过 + exe 在 → 就绪（目录标记可能被清过，但记账还在、exe 也在）
+  if (server.runtimeLinked === true && exeOk) {
+    return { ready: true, reason: 'runtime-field' };
+  }
+  // ④ 运行时目录里有 config.ini（老架构运行时）也算
+  if (runtimeDir && exeOk) {
+    try {
+      if (fs.existsSync(path.join(path.dirname(exe), 'config.ini'))) {
+        return { ready: true, reason: 'config-ini' };
+      }
+    } catch {
+      /* 读不到就当没有 */
+    }
+  }
+
+  return { ready: false, reason: exeOk ? 'missing-runtime' : 'missing-exe' };
+}
+
+/*
+ * 老用户升级上来的记账补齐。
+ *
+ * 场景：用户从旧版本升级，运行时目录是旧版建的、GameFile.db 里一条记录都没有。
+ * 不做这个的话，这批人永远走「目录标记」那个旧判据 —— 能跑，但享受不到
+ * 「查表验证完整性」的好处（文件被删/被改要等启动失败才发现）。
+ *
+ * 做法：启动后**后台**扫一遍已有运行时目录，把文件补记进库。
+ *   · 不阻塞启动：放在 setTimeout 里，且全程 try/catch；
+ *   · 已经有记录的渠道直接跳过（幂等）；
+ *   · 只读目录、只写库，绝不碰运行时里的文件。
+ */
+async function backfillGameFileDb(game) {
+  const report = { channels: 0, files: 0 };
+  if (!game || game.builtinKey !== 'endfield') return report;
+  if (!gameFileDb.isOpen()) return report;
+
+  for (const server of game.servers || []) {
+    const channel = String(server.channel || '');
+    if (!channel) continue;
+    const runtimeDir = String(server.root || '');
+    if (!runtimeDir || !fs.existsSync(runtimeDir)) continue;
+    // 官服直启本体，不需要记账（它的完整性由官方启动器维护）
+    if (channel === 'official') continue;
+    // 旧 work 混合目录不配记账（本来就要作废）
+    if (isEndfieldLegacyWorkRoot(runtimeDir)) continue;
+    // 已经有记录就不重复补
+    try {
+      const existing = gameFileDb.listChannelFiles('endfield', channel);
+      if (existing.length > 0) continue;
+    } catch {
+      continue;
+    }
+    try {
+      const files = await walkFiles(runtimeDir);
+      if (!files.length) continue;
+      for (const f of files) {
+        try {
+          gameFileDb.upsert({ path: f.full, gameKey: 'endfield', channel });
+        } catch {
+          /* 单个文件失败不影响其它 */
+        }
+      }
+      gameFileDb.persist();
+      report.channels += 1;
+      report.files += files.length;
+      writeLaunchLog('[endfield] 记账补齐：' + channel + ' 补了 ' + files.length + ' 个文件（' + runtimeDir + '）');
+    } catch (error) {
+      writeLaunchLog('[endfield] 记账补齐失败 ' + channel + '：' + (error && error.message));
+    }
+  }
+  return report;
 }
 
 function readEndfieldRuntimeMarker(runtimeRoot) {
@@ -4022,7 +4404,7 @@ function endfieldBaseServer(game, excludeId = '') {
 // 二进制（Endfield.exe / UnityPlayer.dll / ACE 两颗 / CrashSight64.dll）是源渠道版，
 // 与目标 SDK 不配套会 6 秒崩；五个渠道包都已补上各自目标版的 5 颗，overlay 会先
 // 断链再 copy 成目标版，壳与件刷成同一套，不会混搭。Play / Steam 同样在表内
-// （用户 2026-11-10 拍板本轮一起做）：它们的 5 颗由各自 Gryphline 官方清单按同名
+// 它们的 5 颗由各自 Gryphline 官方清单按同名
 // 路径下载，不是硬编码内容，清单没给时既有 channelPackFilesReady 门禁判未就绪。
 const ENDFIELD_RUNTIME_BASE_FAMILY = {
   official: ['official', 'bilibili', 'global', 'play', 'steam'],
@@ -4177,6 +4559,9 @@ function discoverServerRoots() {
       'YostarGames\\Arknights_JP',
       'YostarGames\\Arknights_KR',
       'HuaXiaoLingGames',
+      // 2026-11-25 起游戏默认下载到「花筱灵下载」（跟设置里的下载目录一致），
+      // 老版本装到 HuaXiaoLingGames 的也要继续认出来，两个都扫。
+      '花筱灵下载',
       // 鸣潮 WeGame 版：下载中与已安装（装完 WeGame 会把目录从 downloading
       // 搬到 rail_apps），都纳入 exe 扫描根。walkExecutables 按当前游戏的
       // exe 名过滤，别的游戏不会误匹配。
@@ -4291,7 +4676,7 @@ async function syncNewerFiles(srcDir, dstDir) {
 /*
  * 每个终末地渠道「运行时里绝对不能有」的其它渠道专属件。
  *
- * 2026-10-31 报障：切到国际服点开始游戏，进程 3 秒就退，Windows 事件日志是
+ * 报障：切到国际服点开始游戏，进程 3 秒就退，Windows 事件日志是
  * BEX64 / 0xc0000005（模块 unknown），Faulting 路径指向 global\Endfield.exe。
  * 根因是运行时里同时躺着两套平台 SDK：国服/B服 的 hgsdk.dll（从基础客户端
  * 硬链接/补缺进来的）和国际服包自带的 gfsdk.dll + glfoundation.dll。
@@ -5040,6 +5425,8 @@ async function buildEndfieldChannelRuntime({
   const stagingPersistent = path.join(stagingRoot, 'Endfield_Data', 'Persistent');
   // staging 是否已经就位成正式目录：决定 catch 里能不能删 staging。
   let placed = false;
+  // hardlinkTree 回传的落位清单：rename 到正式目录后再按最终路径记账（见 recordPlacedFiles）
+  let placedFiles = null;
   await fsp.mkdir(path.dirname(runtimeRoot), { recursive: true });
   await fsp.rm(stagingRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 }).catch(() => {});
   try {
@@ -5049,7 +5436,10 @@ async function buildEndfieldChannelRuntime({
       copyDirs,
       onProgress,
       signal,
+      collectPlaced: true,
+        gameKey: 'endfield',
     });
+    placedFiles = linkResult.placedFiles || null;
     if (signal && signal.cancelled) throw new Error('已取消');
     // 渠道包不在这里铺：铺完基础树就 rename 就位，随后由 applyEndfieldChannelToWork
     // 统一做「purge → overlay → reconcile → refill」。渠道包只有十几个文件，铺两次没必要。
@@ -5128,6 +5518,51 @@ async function buildEndfieldChannelRuntime({
       throw error;
     }
     placed = true;
+    /*
+     * 文件记账（借鉴 Starward）：把这一轮落位的文件记进 GameFile.db。
+     *
+     * 放在 rename 之后：hardlinkTree 是在 staging 目录里建的，rename 到 runtimeRoot
+     * 之后路径才最终确定，这时记账才指向真实位置。
+     *
+     * 有了这份记账，以后判断「这个渠道的运行时装没装好」就不用再猜 launcher-data.json
+     * 里那个 runtimeLinked 布尔字段了 —— 查表看文件在不在、FileId 对不对就行。
+     * 这正是用户反复报的「硬链接完了还说客户端不完整」的根治方向。
+     */
+    if (placedFiles && placedFiles.length) {
+      /*
+       * 记账放到后台，不阻塞收尾。
+       *
+       * 用户实测（2026-11-26）：「终末地硬链接收尾的记账很慢」。
+       * 根因：readFileId 每个文件 spawn 一次 fsutil，实测 52.8ms/次，
+       * 2567 个文件就是约 136 秒 —— 全耗在创建子进程上，界面看起来卡死。
+       *
+       * 但记账本身只是辅助数据（用于以后判断运行时完不完整），
+       * 不影响游戏文件、不影响启动。所以这里直接 fire-and-forget：
+       * 收尾立刻返回，记账在后台慢慢跑，跑完自己落盘。
+       */
+      const placedSnapshot = placedFiles.slice();
+      const rootSnapshot = runtimeRoot;
+      const channelSnapshot = channel;
+      setImmediate(() => {
+        recordPlacedFilesAsync(placedSnapshot, rootSnapshot, {
+          gameKey: 'endfield',
+          channel: channelSnapshot,
+        }, {
+          onProgress,
+          signal,
+          progressEvery: 400,
+        })
+          .then((rec) => {
+            writeLaunchLog(
+              `[endfield] 文件记账（后台完成）：${rec.recorded} 条${rec.failed ? `（失败 ${rec.failed}）` : ''} → ${rootSnapshot}`
+            );
+          })
+          .catch((error) => {
+            writeLaunchLog(`[endfield] 文件记账失败（不影响运行时本身）：${error && error.message}`);
+          });
+      });
+      writeLaunchLog(`[endfield] 文件记账已转后台（${placedFiles.length} 个文件），收尾不等它`);
+    }
     /*
      * ★ 语音包误弹修复（2026-11-13）：
      * 官服版 Persistent 的 4 个索引 json（index_initial/index_main/pref_initial/pref_main）
@@ -5411,6 +5846,40 @@ async function applyEndfieldChannelToWork({ workRoot, baseRoot, packDir, channel
   // 渠道身份（app.info / boot.config）最后写：渠道包若自带就被 overlay 覆盖成对的，
   // 不带的（官服 / B服）在这里按目标厂商改写，见 ENDFIELD_CHANNEL_IDENTITY 的注释。
   const identityResult = await applyEndfieldChannelIdentity({ workRoot, baseRoot, packDir, channel });
+
+  /*
+   * 渠道隔离性当场自检（借鉴 Starward 的「以文件系统事实为准」）。
+   *
+   * 放在这里是因为：**隔离问题就是在这一步产生的**（purge 清漏了 → SDK 混入；
+   * overlay 没覆盖到 → 差异文件链错；reconcile 误删了 → 缺通用件）。当场发现，
+   * 用户还没点「开始游戏」，就不会撞上「点开始 3 秒闪退」再回来报障。
+   *
+   * 只查根目录一层（+ sdkdata 一层）—— 隔离问题全部发生在这一层，开销是几次
+   * readdir、几十毫秒。刻意不做递归 inode 比对：那要 stat 上万个文件，属于
+   * 「离线体检」的活（见工作区 _verify-endfield-channel-isolation.js），
+   * 不该塞进用户每次切服的路径里。
+   *
+   * 检查失败绝不阻断生成流程 —— 一条日志 + 一条 toast 就够。
+   */
+  try {
+    const iso = endfieldIsolation.checkChannelRuntimeIsolation(workRoot, channel);
+    if (!iso.ok) {
+      writeLaunchLog(
+        '[endfield] ⚠ 渠道隔离自检发现问题（' + channel + '，检查 ' + iso.checked + ' 个根条目）：' +
+        iso.problems.join('；')
+      );
+      send('toast', {
+        type: 'error',
+        message:
+          '「' + channel + '」运行时自检发现问题：' + iso.problems[0] +
+          (iso.problems.length > 1 ? ' 等 ' + iso.problems.length + ' 项' : '') +
+          '。建议在服务器行上点「重新生成」。',
+      });
+    }
+  } catch (error) {
+    writeLaunchLog('[endfield] 渠道隔离自检自身异常（不影响生成）：' + (error && error.message));
+  }
+
   return { overlay: overlayResult.processed || 0, purged: purgedBefore + purgedAfter, identity: identityResult.written || 0 };
 }
 
@@ -5697,87 +6166,6 @@ async function ensureEndfieldChannelRuntime(game, server, options = {}) {
   };
 }
 
-/**
- * 经启动辅助进程启动游戏。
- *
- * 终末地要求以官方启动器的进程上下文进入：它会检查直接父进程文件（须名为 Games.exe
- * 且带鹰角官方 Authenticode 签名）。明日方舟 PC 端走同一套鹰角平台，所以两款游戏
- * 共用这条链路。
- *
- * @param {boolean} options.requireElevation 终末地在创建游戏进程时就要求提权，必须走 UAC；
- *   明日方舟先按当前权限试一次，真拿到 740 再弹，免得每次开游戏都要授权。
- * @param {boolean} options.strict 终末地失败就如实报错（不再退化成直接拉起）；明日方舟
- *   这条链路还没在真机上验证过，失败时退回原来的直接启动，不把用户挡在门外。
- * @returns {{handled:boolean, result?:object}} handled=false 表示这条路不适用，调用方按普通方式启动。
- */
-async function launchWithSignedParent(game, target, cwd, options = {}) {
-  const id = game.id;
-  const base = path.basename(target);
-  const { requireElevation = true, strict = true, args = game.args } = options;
-  const isElevated = currentElevation();
-  /*
-   * 第一次遇到「必须提权」的游戏：先问一次要不要让启动器自己以管理员运行。
-   *
-   * 以前这里直接 Start-Process -Verb RunAs 起游戏 —— 每点一次「开始游戏」就弹
-   * 一次 UAC，用户的原话是「老是要什么管理员启动，特别难用」。游戏侧 740
-   * （实测非提权创建进程直接 failed to create game process 740）是硬限制，
-   * 唯一能省掉的是「让父进程已经是管理员」：提权一次，整场都不再问。
-   * elevationAsked 记「问过了没有」，只问一次；选过就按选过的走。
-   */
-  if (requireElevation && !isElevated && store.data.settings.elevationAsked !== true) {
-    return {
-      handled: true,
-      result: {
-        ok: false,
-        elevationRequired: true,
-        elevationUndecided: true,
-        error: '终末地 / 明日方舟创建游戏进程需要管理员权限，这是官方客户端自己的限制，绕不过去。',
-      },
-    };
-  }
-  const plans = requireElevation
-    ? isElevated
-      ? [false, true]
-      : [true]
-    : isElevated
-      ? [false]
-      : [false, true];
-
-  let lastError = '';
-  for (const useUac of plans) {
-    launching.set(id, Date.now());
-    const result = useUac
-      ? await launchEndfieldElevated(cwd, target, args)
-      : await launchEndfield(cwd, target, args);
-    if (result.ok) {
-      await markLaunched(game);
-      writeLaunchLog(`launch ${id}: 签名父进程=${result.parent || ''} uac=${useUac ? 1 : 0} exe=${base}`);
-      trackGameProcess(id, base, Date.now()).catch(() => {});
-      return {
-        handled: true,
-        result: { ok: true, pid: result.pid, official: true, elevated: useUac },
-      };
-    }
-    lastError = result.error;
-    launching.delete(id);
-    writeLaunchLog(`launch ${id}: 签名父进程失败（uac=${useUac ? 1 : 0}）：${result.error}`);
-    if (useUac) break;
-    // 不是权限问题就别再试 UAC 了（父进程缺失、签名无效这些试多少次都一样）
-    if (!/740|elevation|管理员/i.test(result.error)) break;
-  }
-
-  if (strict) {
-    return {
-      handled: true,
-      result: {
-        ok: false,
-        error: `启动辅助进程没能完成：${lastError}。常见原因是安全软件拦下了 VelaEndfield.exe（启动终末地 / 明日方舟需要它建立与官方启动器一致的启动路径），把它加入白名单后重试；也可以在设置里打开「始终以管理员身份启动」。`,
-        endfieldDecoy: true,
-      },
-    };
-  }
-  return { handled: false };
-}
 
 // 官服保持历史上的「尽力而为」语义：设置/差异包缺失时不阻断普通启动。
 async function ensureEndfieldOfficialRuntime(game, server) {
@@ -6164,7 +6552,7 @@ async function ensureArknightsRuntime(game, server, options = {}) {
 async function ensureKuroRuntime(game, server, options = {}) {
   if (game.builtinKey !== 'wutheringwaves') return false;
   const channel = String(server.channel || '');
-  // 国际服与其它渠道差异约 98%，不做硬链接互切（用户 m28992）；WeGame 版自己就是
+  // 国际服与其它渠道差异约 98%，不做硬链接互切；WeGame 版自己就是
   // 一份完整客户端、启动走 wegame:// URI，也不需要生成运行时。
   if (channel === 'global' || channel === 'wegame') return false;
   if (!['official', 'bilibili'].includes(channel)) return false;
@@ -6172,7 +6560,7 @@ async function ensureKuroRuntime(game, server, options = {}) {
   const emit = typeof options.onProgress === 'function' ? options.onProgress : () => {};
 
   /*
-   * 用户 m29011 / m28992：已经装好的渠道客户端（官服、B服都一样）点「切换」就该
+   *  / ：已经装好的渠道客户端（官服、B服都一样）点「切换」就该
    * 直接切，不该再跑一遍硬链接生成；官服也不是什么「权威源」，只是恰好装好了而已。
    * 只有「这个渠道还没有能启动的客户端」时才生成运行时，入口是设置弹窗里的
    * 「硬链接生成一份」（会走到 servers:activate，守卫已在那里放宽）。
@@ -6184,7 +6572,7 @@ async function ensureKuroRuntime(game, server, options = {}) {
     Boolean(server.root) &&
     !String(server.root).includes('VelaRuntimes') &&
     /*
-     * 2026-11-17：还要确认这份客户端「自己声明的渠道」就是这一行。
+     * 还要确认这份客户端「自己声明的渠道」就是这一行。
      * 老数据里 B服 行可能指着官服本体（被第三方三服切换器改过 config.ini，
      * 目录其实是官服的），这时界面显示绿灯、点切换却启动的还是官服。
      * 渠道对不上就不算「已装好」，继续往下走去生成一份独立的。
@@ -6199,7 +6587,7 @@ async function ensureKuroRuntime(game, server, options = {}) {
   if (alreadyInstalled) return false;
 
   // 先找「另一个渠道」的完整客户端当源：官服 / B服 / WeGame 任意互相为源
-  // （用户 m27540 / m29016 / m29017 / m29018），国际服差异太大排除。
+  // 国际服差异太大排除。
   const candidates = (game.servers || []).filter(
     (item) =>
       ['official', 'bilibili'].includes(String(item.channel || '')) &&
@@ -6256,7 +6644,7 @@ async function ensureKuroRuntime(game, server, options = {}) {
   });
 
   // 主程序在 Client\Binaries\Win64\ 下；写回必须用真实路径，否则下次启动会因
-  // server.path 不存在把这一行标成「需要重建」（用户 m28898 / m28935）。
+  // server.path 不存在把这一行标成「需要重建」。
   server.path =
     wuwaExeAt(runtime.target) ||
     path.join(runtime.target, 'Client', 'Binaries', 'Win64', result.executable || 'Client-Win64-Shipping.exe');
@@ -6671,7 +7059,7 @@ async function detectionChannel(game, exePath) {
   }
   const fromConfig = clientChannel.configChannelFromPath(exePath);
   /*
-   * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+   * 2026-11-17（）：
    * config.ini 会被第三方三服切换器改（官服本体的 cps 被写成 bilibili），
    * 光看 ini 会把官服本体判成 B服。所以对米哈游四款再叠一层「文件层」复核：
    * 真 B服客户端带 BLPlatform64 渠道 SDK，没有的就是官服本体被改了 ini。
@@ -6706,7 +7094,7 @@ async function detectionChannel(game, exePath) {
   if (key === 'wutheringwaves') {
     // WeGame 版（downloading\2002137 或已安装的 rail_apps\Wuthering Waves(2002137)）
     // 是独立渠道行，绝不落进官服：否则扫描到的 WeGame 客户端会被写进官服行，
-    // 「WeGame」那一行永远点不亮（用户 m28159/m28196）。kuro-packs 的
+    // 「WeGame」那一行永远点不亮。kuro-packs 的
     // detectChannelOfSync 只认 bilibili/global，不认 wegame，所以在这里先判。
     if (/WeGameApps/i.test(exePath)) return 'wegame';
     /*
@@ -6742,7 +7130,7 @@ function serverForDetected(game, channel) {
 /*
  * 这个目录是不是已经被别的渠道行占用了。
  *
- * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+ * 2026-11-17（）：
  * 每个渠道都该有一份独立的硬链接运行时，非官服渠道绝不能和官服指向同一个目录 ——
  * 否则「切到 B服」实际切的还是官服那份客户端，渠道配置、登录态、画质包全都串了。
  *
@@ -6851,8 +7239,7 @@ async function discoverBuiltinServers() {
       if (!server.path) continue;
       if (!targetExists(server.path)) {
         /*
-         * 鸣潮自愈（用户 m29419 / m29420「官服一点到 WeGame，官服的选项就灰掉了」
-         * 「要重新选路径」）：
+         * 鸣潮自愈：
          *
          * 官服 / B服 行曾被「硬链接生成一份」指到 VelaRuntimes 里的独立运行时，
          * 那个运行时目录后来被清理/搬家后，server.path 就悬在一条已经不存在的路径上，
@@ -6908,6 +7295,20 @@ async function discoverBuiltinServers() {
           changed += 1;
           continue;
         }
+        /*
+         * 置「不完整」之前先问一次权威判据：上面的识别逻辑可能漏了某条
+         * （历史上漏过 Yostar 三区 / 米哈游运行时 / 鸣潮官服 / 终末地运行时目录），
+         * 而 endfieldClientReady 只看文件系统事实，它说就绪就不该把这一行标坏。
+         */
+        if (game.builtinKey === 'endfield' && endfieldClientReady(game, server).ready) {
+          if (server.incomplete) {
+            server.incomplete = false;
+            server.packPath = '';
+            changed += 1;
+          }
+          continue;
+        }
+
         server.incomplete = true;
         if (!server.packPath) server.packPath = server.path;
         changed += 1;
@@ -6918,9 +7319,13 @@ async function discoverBuiltinServers() {
       // 只看我们自己写的标记；否则每次启动都会把 B服/国际服标成「需要重建」（红点）。
       // .hxl-endfield-runtime-v2 认所有渠道运行时目录；用户机器上改架构之前建的旧运行时
       // 用的也是这个标记，别让它突然变红。
+      /*
+       * 终末地「是不是完整客户端」统一走 endfieldClientReady（唯一权威判据）。
+       * 原来这里只看 runtimeLinked 字段 or 目录标记，和 needsRuntime、扫描路径
+       * 各有各的写法 —— 三套不一致正是「硬链接完还说不完整」的根源。
+       */
       const isEndfieldRuntime =
-        game.builtinKey === 'endfield' &&
-        (server.runtimeLinked === true || isEndfieldRuntimeDir(dir));
+        game.builtinKey === 'endfield' && endfieldClientReady(game, server).ready;
       // 明日方舟国际服 EN/JP/KR 是 Yostar 发行的独立客户端，没有米哈游式 config.ini，
       // 它自己的元数据是 game-launcher-config.json（官方启动器与我方下载都会写）。
       // 不把它算作「完整客户端」，每次启动都会被标成 incomplete，切服时又被
@@ -6986,6 +7391,20 @@ async function discoverBuiltinServers() {
           }
           continue;
         }
+        /*
+         * 置「不完整」之前先问一次权威判据：上面的识别逻辑可能漏了某条
+         * （历史上漏过 Yostar 三区 / 米哈游运行时 / 鸣潮官服 / 终末地运行时目录），
+         * 而 endfieldClientReady 只看文件系统事实，它说就绪就不该把这一行标坏。
+         */
+        if (game.builtinKey === 'endfield' && endfieldClientReady(game, server).ready) {
+          if (server.incomplete) {
+            server.incomplete = false;
+            server.packPath = '';
+            changed += 1;
+          }
+          continue;
+        }
+
         server.incomplete = true;
         if (!server.packPath) server.packPath = server.path;
         changed += 1;
@@ -7047,6 +7466,20 @@ async function discoverBuiltinServers() {
         (game.builtinKey === 'wutheringwaves' && Boolean(wuwaClientRootOf(exeDir)));
       if (!isCompleteClient) {
         if (!server.path || !targetExists(server.path)) {
+          /*
+           * 置「不完整」之前先问一次权威判据：上面的识别逻辑可能漏了某条
+           * （历史上漏过 Yostar 三区 / 米哈游运行时 / 鸣潮官服 / 终末地运行时目录），
+           * 而 endfieldClientReady 只看文件系统事实，它说就绪就不该把这一行标坏。
+           */
+          if (game.builtinKey === 'endfield' && endfieldClientReady(game, server).ready) {
+            if (server.incomplete) {
+              server.incomplete = false;
+              server.packPath = '';
+              changed += 1;
+            }
+            continue;
+          }
+
           server.incomplete = true;
           server.packPath = exePath;
         }
@@ -7054,7 +7487,7 @@ async function discoverBuiltinServers() {
       }
       if (server.path && targetExists(server.path)) continue;
       /*
-       * 2026-11-17：非官服渠道不能和别的渠道共用同一个安装目录。
+       * 非官服渠道不能和别的渠道共用同一个安装目录。
        * 扫到的官服本体（config.ini 被第三方切换器改成 cps=bilibili 那种半吊子配置）
        * 绝不能写进 B服 那一行 —— 写进去就是「两个渠道共用一个目录」，
        * 切到 B服 实际还是官服那份客户端。
@@ -7187,7 +7620,7 @@ async function repairServerChannels() {
        *   · 别的服务器用同一个 exe 或同一个目录：官服 / B服 共用一个安装目录是正常玩法；
        *   · 没有任何渠道相同的那一行。
        *
-       * 2026-11-17 修订（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+       * 修订（）：
        * 「共用目录」不再是合法玩法 —— 每个渠道都该有一份独立的硬链接运行时。
        * 所以「共用」本身不再豁免：只要这一行的 config.ini 强声明了别的渠道，
        * 就该把它清掉（而不是让它一直占着官服目录）。
@@ -7207,7 +7640,7 @@ async function repairServerChannels() {
          * 共用目录时也继续往下走，但只在「客户端自己声明了别的渠道」时改：
          * 判据是 config.ini + 文件层渠道 SDK 复核，可信；读不出声明就照旧不动。
          *
-         * 2026-11-17 新增「同一目录只能属于一个渠道」的迁移（用户口径：
+         * 新增「同一目录只能属于一个渠道」的迁移（用户口径：
          * 「官服和B服就不该有共用一个文件夹的情况」）：
          * 先问这个目录到底是谁的 —— resolveChannelFromRoot 会用 config.ini
          * 加上文件层渠道 SDK（BLPlatform64 / PCGameSDK.dll）复核，
@@ -7219,7 +7652,7 @@ async function repairServerChannels() {
         const resolvedShared = clientChannel.resolveChannelFromRoot(path.dirname(server.path));
         if (!resolvedShared.channel) continue;
         /*
-         * 2026-11-17 审查指出这里原来有两处死路，导致共用状态永远自愈不了：
+         * 审查指出这里原来有两处死路，导致共用状态永远自愈不了：
          *   ① `owner = servers.find(item => item !== server && item.channel === resolvedShared.channel)`
          *      —— 目录判给的正好是这一行自己时，owner 必 undefined，直接 continue；
          *   ② 官服行无条件 continue。
@@ -7292,6 +7725,20 @@ async function repairServerChannels() {
       server.path = '';
       server.root = '';
       server.packPath = '';
+      /*
+       * 置「不完整」之前先问一次权威判据：上面的识别逻辑可能漏了某条
+       * （历史上漏过 Yostar 三区 / 米哈游运行时 / 鸣潮官服 / 终末地运行时目录），
+       * 而 endfieldClientReady 只看文件系统事实，它说就绪就不该把这一行标坏。
+       */
+      if (game.builtinKey === 'endfield' && endfieldClientReady(game, server).ready) {
+        if (server.incomplete) {
+          server.incomplete = false;
+          server.packPath = '';
+          changed += 1;
+        }
+        continue;
+      }
+
       server.incomplete = true;
       server.unavailable = false;
       if (game.activeServerId === server.id) {
@@ -7358,7 +7805,7 @@ async function detectBuiltins(onlyMissing = true) {
         ? (wuwaClientRootOf(found) || detectedRoot)
         : detectedRoot;
       /*
-       * 2026-11-17：非官服渠道不能和别的渠道共用同一个安装目录。
+       * 非官服渠道不能和别的渠道共用同一个安装目录。
        * 真出现了（老数据里 B服 行指着官服本体）就不写这一行 ——
        * 让它保持「未配置」，用户点「硬链接生成一份」就能得到独立目录。
        */
@@ -7413,7 +7860,7 @@ function ensureServers(game) {
        * `Client\Binaries\Win64` 下，根目录才是本体（鸣潮靠
        * launcherDownloadConfig.json、异环靠 NTELauncher.exe 那些标记）。
        * 这里一律按 dirname(path) 填会把 root 指到 Binaries 层，后面
-       * 「点更新」就会判「这不是官方客户端」（用户 2026-11-17 报障）。
+       * 「点更新」就会判「这不是官方客户端」。
        */
       if (game.builtinKey === 'wutheringwaves') {
         const kuroRoot = wuwaClientRootOf(server.path);
@@ -7489,7 +7936,7 @@ function ensureServers(game) {
     /*
      * 异环三条渠道都要留：官服 / B服 / 国际服。
      *
-     * 2026-11-16 修正（用户：「异环的国际服选项咋没了？就算做不了硬链接，也留个口吧」）。
+     * 修正（用户：「异环的国际服选项咋没了？就算做不了硬链接，也留个口吧」）。
      * 之前这里被我改成只有官服 / B服，理由是国际服从头到尾没接过 —— 这个理由只对了
      * 一半：国际服确实没有 CHANNEL_CONFIG、没有 CDN 前缀、没有硬链接，但它仍然是
      * 异环的一个真渠道，玩家可能真的装了国际服客户端。渠道行不留，用户连「我有这份
@@ -7662,17 +8109,36 @@ function publicGame(game) {
        *
        * serverExistsForView 为了「老用户升级后还切得回 B服」把这种行也算 exists，
        * 于是界面一直按 ready 显示绿灯、按钮写「切换」。用户 2026-11-16 报障：
-       * 「终末地没弄硬链接、也没路径时，对应的服务器不应该全绿，应该是黄灯、
-       * 未选 exe 的状态，点了要出来和别的游戏一样的面板」。
+       *
        * 前端拿这个标记显示黄灯 + 「生成」入口，走 openServerSetupDialog 那套
        * （硬链接生成一份 → sophon 面板下差异分块 → 完成后才变绿可切）。
        * 官服直启本体，不算「缺运行时」。
        */
+      /*
+       * 「这一服到底有没有自己的独立运行时」必须以后端同一套判据为准。
+       *
+       * 原来这里只看 `server.runtimeLinked` 这一个配置字段，而同一个问题在别处
+       * 有两份更宽松的判据（`hasConfig` 里的 isEndfieldRuntime 认「字段 or 目录标记」，
+       * 扫描时的 isCompleteClient 只认目录标记）。三处不一致的后果很具体：
+       *
+       *   运行时目录明明生成好了、`.hxl-endfield-runtime-v2` 标记也在、后端也认它是
+       *   完整客户端 —— 只要 launcher-data.json 里的 runtimeLinked 字段丢了
+       *   （配置回滚、从旧版本升级上来、手工动过配置、activate 某些分支清过它），
+       *   界面就一直挂着「缺独立目录」，用户点「生成」重建一遍也没用，因为重建完
+       *   字段可能又没写回去。用户反馈的「硬链接完了还说客户端不完整」就是这条。
+       *
+       * 所以这里补上目录标记这一路：字段没了但目录在，同样算已生成。
+       */
+      /*
+       * 「缺独立目录」= 这一服的客户端现在不能直接启动。
+       * 统一走 endfieldClientReady（唯一权威判据），不再自己看字段。
+       */
+      const endfieldReady = endfieldClientReady(game, server);
       const needsRuntime =
         game.builtinKey === 'endfield' &&
         String(server.channel || '') !== 'official' &&
         exists &&
-        !server.runtimeLinked &&
+        !endfieldReady.ready &&
         ENDFIELD_PACK_NAMES[server.channel] != null;
       return {
         ...server,
@@ -8116,7 +8582,6 @@ function finalizeUpdateStatus(result, options = {}) {
    * 签名再把 version 写高一点就绕过去了。
    *
    * 代价是「以后每一版都必须签名」。pack.js 已经自动签了，换机器发版记得把
-   * H:\HXL-pack\keys\update-signing.pem 一起带走。
    *
    * 用户自己填了更新源（内网共享、自建静态站点）时不强求签名：那份清单本来就
    * 由他自己管，不该让自建源因为没签名而更不了。
@@ -9157,10 +9622,102 @@ function resizeWindowForScale(factor) {
 
 /** 主窗口基准尺寸：首启默认值。 */
 const WINDOW_BASE_SIZE = { width: 1400, height: 880 };
-/** 写死的最小尺寸（大屏够用）；小屏 / 高 DPI 屏由 adaptiveMinSize 收缩。 */
-const WINDOW_MIN_SIZE = { width: 1060, height: 680 };
-/** 屏幕再小也不低于这个值，纯粹是防呆。 */
-const WINDOW_MIN_ABS = { width: 320, height: 240 };
+
+/**
+ * 窗口最小尺寸。
+ *
+ * ── 这个值怎么定的（实测，不是拍脑袋）─────────────────────────────────
+ *
+ * 用户截图 1465×643 时说「从这里就开始丢按钮、也不好看」。按 CSS 实测：
+ *   · 抽卡页首屏「一屏看全」需要窗口高约 640px（titlebar 44 + 页头 110 +
+ *     游戏标签 40 + UID 行 44 + 池子标签 40 + 统计卡 120 + 图表卡 180 + padding 62）；
+ *   · 640 高时底部那张卡片刚好贴边，再矮就得滚动 —— 用户说的「不好看」就是这个；
+ *   · 宽度方面：1240 以下侧栏从 238 变 220，820 以下才变 76px 图标模式。
+ *     内容宽度掉到 700 以下时，抽卡页的 `.gacha-stat-row`（固定 4 列网格）
+ *     和图表三列会被压得很挤 —— 那是「难看」的来源。
+ *
+ * 所以最小值定 **1180×720**：
+ *   · 1180 宽：还在「侧栏 220 + 内容 ≥ 900」的区间，四列网格和图表三列都还舒展；
+ *   · 720 高：比「一屏看全」的 640 多 80px，留出首屏不贴边的呼吸空间。
+ *
+ * 为什么不再往下放：用户明确说 1465×643 那个尺寸已经「丢按钮 + 不好看」。
+ * 把下限压到 820×640（上一版的值）等于让用户随时能进那个难看的尺寸。
+ *
+ * ★ 光靠限制最小值是不够的 —— 用户也说了「或者你就要做最小值的适配」。
+ *   所以同时在 styles.css 里补了窄屏适配：见文件末尾「窄屏紧凑模式」那段。
+ *   即使以后迫不得已把窗口弄小（比如小屏笔记本 + 系统缩放），布局也不会散。
+ */
+const WINDOW_MIN_SIZE = { width: 1180, height: 720 };
+
+/**
+ * 窗口绝对下限（屏幕特别小的情况，比如 1024×600 的上网本）。
+ *
+ * 到这个尺寸界面已经偏紧了，但总比「窗口比屏幕大、永远够不着」强。
+ * 这时靠 styles.css 的窄屏紧凑模式兜住：
+ *   · 侧栏自动收成图标；
+ *   · 四列统计卡变两列；
+ *   · 图表三列变一列。
+ */
+const WINDOW_MIN_ABS = { width: 900, height: 600 };
+
+/**
+ * 窗口尺寸上限。
+ *
+ * ── 为什么不硬限面积（第一版做错了，记下来别再犯）────────────────────
+ *
+ * 我一开始按「面积封顶 220 万像素」来限制，理由是「拉太大 GPU 合成压力大、
+ * 界面会崩」。但那等于**把 4K 屏幕卡住**：
+ *   · 4K 屏在 150% 缩放下，工作区 DIP 是 2560×1440 = 369 万像素；
+ *   · 4K 屏在 100% 缩放下更是 3840×2160 = 830 万像素。
+ * 用户买了 4K 屏就是想拉满用，卡在 1920×1145 是明显不合理的限制。
+ *
+ * ── 正确做法：允许拉满，但大窗口自动降级视觉效果 ────────────────────
+ *
+ * 「拉太大崩」的根因不是尺寸本身，是**启动页那层全屏动态背景 + 几十个装饰动画**
+ * 在超大尺寸下同时合成。所以：
+ *   · 窗口该多大就多大，不人为限制（只防「超出工作区」和「超宽屏拉成一条」）；
+ *   · 尺寸大到一定程度（面积超过 LARGE_WINDOW_AREA）时，通知渲染层进入
+ *     「大窗口模式」：暂停动态背景视频、关掉装饰动画浮动。
+ *     这个降级动作已经在渲染层有现成机制（setIdleMode 那套），只是触发条件
+ *     从「窗口最小化」扩展到「窗口太大 + 最小化」。
+ *
+ * 这样 4K 用户能拉满，老显卡用户拉到 4K 也不会崩。
+ */
+/** 单边最大宽高：只防「超宽屏拉成一条」（5120 宽也够用）。 */
+const WINDOW_MAX_SIDE = { width: 5200, height: 3200 };
+
+/**
+ * 「大窗口模式」阈值 —— 按**物理像素面积**判定。
+ *
+ * ── 为什么必须用物理像素，不能用 DIP ────────────────────────────────
+ *
+ * 第一版我用的是 `win.getBounds()` 拿到的宽高（那是 DIP）× 直接乘，等于按 DIP 面积判。
+ * 但 DIP 面积区分不了两个负载差 2.25 倍的场景：
+ *
+ *   · 2560×1440 的 2K 屏（100% 缩放）：DIP 358 万，物理像素 358 万
+ *   · 3840×2160 的 4K 屏（150% 缩放）：DIP 工作区 2560×1440 = 358 万，
+ *     物理像素 3840×2160 = **830 万**
+ *
+ * 两者 DIP 一样，但 4K 那块屏要合成 2.25 倍的像素量。按 DIP 判会出现两个错误：
+ *   ① 2K 屏拉满（358 万 > 320 万）被误判成「大窗口」，好好的 2K 用户最大化就丢动态背景；
+ *   ② 4K 150% 和 2K 判成同一个量级，无法区分真负载。
+ *
+ * 所以改成：**DIP 尺寸 × scaleFactor² = 物理像素面积**，阈值按物理像素定。
+ *
+ * ── 阈值 600 万物理像素 ──────────────────────────────────────────────
+ *
+ * | 场景 | 物理像素 | 降级 |
+ * |---|---|---|
+ * | 1080p 100% 拉满 | 200 万 | ❌ |
+ * | 2560×1080 超宽 100% | 276 万 | ❌ |
+ * | 2K 2560×1440 100% | 358 万 | ❌ |
+ * | **4K 150% 缩放拉满** | **806 万** | **✅** |
+ * | 4K 100% 拉满 | 830 万 | ✅ |
+ * | 4K 200% 缩放（DIP 只有 1920×1080） | 200 万 | ❌（DIP 小，合成压力确实小）|
+ *
+ * 卡在「2K 及以下不打扰」和「4K 一定保护」之间。
+ */
+const LARGE_WINDOW_AREA = 6000000;
 
 /** 取能容纳某个矩形的工作区；匹配不到（屏拔了）就退主屏。 */
 function workAreaFor(bounds) {
@@ -9180,10 +9737,12 @@ function workAreaFor(bounds) {
 /**
  * 按当前屏幕算窗口最小尺寸。
  *
- * 原来 minWidth/minHeight 写死 1060×680，在 Windows 125% 缩放的 1366×768
- * 笔记本上直接翻车：工作区折合 DIP 只有 1092×614，最小高 680 超出屏幕，
- * 窗口既没法缩小、也不会被任务栏让位，界面底下一条永远够不着。
- * 现在按工作区夹取：大屏照旧 1060×680，小屏缩到「工作区减 24px」。
+ * 规则：大屏用 WINDOW_MIN_SIZE（1180×720），小屏缩到「工作区减 24px」，
+ * 但绝不低于 WINDOW_MIN_ABS（900×600）。
+ *
+ * 为什么小屏要缩：1366×768 的笔记本在 125% 缩放下工作区只有 1092×614，
+ * 如果硬要 1180×720，窗口比屏幕还大 —— 既缩不动也够不着底部，
+ * 这种情况下宁可让界面进「窄屏紧凑模式」（styles.css 里有适配）。
  */
 function adaptiveMinSize(bounds) {
   const area = workAreaFor(bounds);
@@ -9191,6 +9750,94 @@ function adaptiveMinSize(bounds) {
     width: Math.max(WINDOW_MIN_ABS.width, Math.min(WINDOW_MIN_SIZE.width, area.width - 24)),
     height: Math.max(WINDOW_MIN_ABS.height, Math.min(WINDOW_MIN_SIZE.height, area.height - 24)),
   };
+}
+
+/**
+ * 按当前屏幕算窗口最大尺寸。
+ *
+ * ── 规则：最大 = 工作区本身（能拉满）────────────────────────────────
+ *
+ * 用户明确要求「起码拉满到 2K」。所以**不做面积封顶** —— 屏幕工作区有多大，
+ * 窗口就允许拉多大。1080p / 2K / 4K / 超宽屏全都能拉满。
+ *
+ * 那「拉太大崩」怎么防？靠**大窗口降级**（isLargeWindow → 渲染层停掉全屏
+ * 背景视频与装饰动画），阈值按物理像素算：600 万。
+ *
+ *   屏型                  拉满物理像素    降级
+ *   1080p 100%            200 万          不触发
+ *   2K 2560x1440 100%     368 万          不触发  ← 用户要的就是能拉满
+ *   2560x1080 超宽        276 万          不触发
+ *   4K 150% 缩放          828 万          触发（保护）
+ *   4K 100%               814 万          触发（保护）
+ *
+ * ── 中间那段弯路（记下来别再绕）────────────────────────────────────
+ *
+ * 我一度把上限卡在「刚好是降级阈值」的尺寸上。那套在小屏上没问题，但
+ * 4K 150% 缩放的屏上会算出 2208 宽的 DIP 上限 —— 而那块屏的 DIP 工作区
+ * 就是 2560，用户会觉得「连 2K 都拉不满」。所以放弃，改回「允许拉满 + 降级兜底」。
+ *
+ * 降级是既有的成熟机制（窗口最小化时也在用），把背景视频和装饰动画停掉后，
+ * 4K 满屏也扛得住。
+ *
+ * 保留的两道保险：
+ *   · 上限 = 工作区（不超屏，避免窗口跑到屏幕外够不着鼠标）；
+ *   · 单边上限 WINDOW_MAX_SIDE（防 5120 宽超宽屏把窗口拉成一条细线）。
+ *
+ * @param {{x?:number,y?:number,width?:number,height?:number}} bounds 用来定位在哪个屏
+ * @returns {{width:number, height:number}}
+ */
+function adaptiveMaxSize(bounds) {
+  const area = workAreaFor(bounds);
+  const min = adaptiveMinSize(bounds);
+
+  // 能拉满：上限就是工作区本身；只叠单边上限防超宽屏
+  const limitW = Math.min(Math.floor(area.width), WINDOW_MAX_SIDE.width);
+  const limitH = Math.min(Math.floor(area.height), WINDOW_MAX_SIDE.height);
+
+  /*
+   * 最后一道保险：如果「最小」和「最大」挤在一起（小屏 + 高缩放的笔记本上会出现，
+   * 比如 1366x768 @125% 工作区只有 1092x614），窗口会变成「大小固定、拖不动」。
+   * 这时把最大再往上放一点，保证至少留出 120px 宽 / 80px 高的调节余地 ——
+   * 界面靠 styles.css 的「窄屏紧凑模式」兜住。
+   */
+  const MIN_ADJUST_ROOM = { width: 120, height: 80 };
+
+  return {
+    width: Math.max(min.width + MIN_ADJUST_ROOM.width, limitW),
+    height: Math.max(min.height + MIN_ADJUST_ROOM.height, limitH),
+  };
+}
+
+/**
+ * 这个尺寸算不算「大窗口」（需要让渲染层降级视觉效果）。
+ *
+ * @param {number} width  DIP 宽度（win.getBounds() 给的）
+ * @param {number} height DIP 高度
+ * @param {number} scaleFactor 该窗口所在屏的 scaleFactor（1.0 = 100%，1.5 = 150%）
+ */
+function isLargeWindow(width, height, scaleFactor) {
+  const sf = Number(scaleFactor) > 0 ? Number(scaleFactor) : 1;
+  // 物理像素面积 = DIP 面积 × scaleFactor²
+  return Number(width) * Number(height) * sf * sf >= LARGE_WINDOW_AREA;
+}
+
+/**
+ * 取某个 bounds 所在屏的 scaleFactor。
+ * 拿不到就按 1 处理（等于退回按 DIP 判，至少不会崩）。
+ */
+function scaleFactorFor(bounds) {
+  try {
+    const display = screen.getDisplayMatching({
+      x: Number(bounds?.x) || 0,
+      y: Number(bounds?.y) || 0,
+      width: Number(bounds?.width) || WINDOW_BASE_SIZE.width,
+      height: Number(bounds?.height) || WINDOW_BASE_SIZE.height,
+    });
+    const sf = Number((display || screen.getPrimaryDisplay()).scaleFactor);
+    return sf > 0 ? sf : 1;
+  } catch {
+    return 1;
+  }
 }
 
 /**
@@ -9346,10 +9993,31 @@ function createSplashWindow() {
   });
 }
 
+/*
+ * 启动页抽屉临时撑宽窗口期间，跳过窗口尺寸记忆（见 saveWindowBounds）。
+ * 必须放在模块级：createWindow 里的保存逻辑和 installIpc 里的抽屉逻辑是两个作用域。
+ */
+let startNavWindowExpanded = false;
+/*
+ * 抽屉展开前的窗口基准。**必须跨「收起」保留**：
+ * 以前 collapse 把 base 清成 null，若下一次展开在窗口真正缩回之前发生，
+ * applyStartNav 会把「还宽着的当前尺寸」当成新基准 —— 每开合一次就宽一条，
+ * 用户看到的就是「越点越大、界面像放大半屏」。只在窗口被拖动/缩放且抽屉没开时刷新。
+ */
+let startNavBase = null;
+
+function refreshStartNavBase() {
+  if (!win || win.isDestroyed() || startNavWindowExpanded) return;
+  if (win.isMaximized() || win.isFullScreen()) return;
+  const b = win.getBounds();
+  startNavBase = { x: b.x, y: b.y, width: b.width, height: b.height };
+}
+
 function createWindow() {
   // 启动尺寸/位置：还原上次记住的；超出的按当前屏夹取（适配每台电脑的屏幕）
   const bounds = initialWindowBounds();
   const minSize = adaptiveMinSize(bounds);
+  const maxSize = adaptiveMaxSize(bounds);
   win = new BrowserWindow({
     width: bounds.width,
     height: bounds.height,
@@ -9357,6 +10025,8 @@ function createWindow() {
     y: bounds.y,
     minWidth: minSize.width,
     minHeight: minSize.height,
+    maxWidth: maxSize.width,
+    maxHeight: maxSize.height,
     show: false,
     backgroundColor: '#0b060b',
     title: '花筱灵启动器',
@@ -9379,8 +10049,17 @@ function createWindow() {
   /* 窗口位置/尺寸记忆：拖动、缩放、最大化、隐藏到托盘前都记，
      下次启动按 initialWindowBounds 还原。store 自身有 400ms 防抖。 */
   let boundsSaveTimer = null;
+  /*
+   * 2026-11-26：启动页抽屉把窗口临时撑宽时，不要把「展开宽度」记成常规尺寸。
+   *
+   * 之前只在收起时还原窗口，但如果用户在抽屉开着时关掉启动器 / 进程被杀，
+   * 保存下来的就是 base+抽屉宽 的尺寸 —— 下次启动窗口凭空宽一条，而且再也
+   * 缩不回去（进程内的基准从头记，越开越宽）。抽屉开着期间直接跳过记忆，
+   * 保留上一次的正常尺寸；收起后 restore 会触发一次正常保存。
+   */
   const saveWindowBounds = (now = false) => {
     if (!win || win.isDestroyed() || !store?.data) return;
+    if (startNavWindowExpanded) return;
     try {
       const current = win.getBounds();
       store.data.window = {
@@ -9401,8 +10080,29 @@ function createWindow() {
     clearTimeout(boundsSaveTimer);
     boundsSaveTimer = setTimeout(() => saveWindowBounds(false), 400);
   };
-  win.on('move', scheduleBoundsSave);
-  win.on('resize', scheduleBoundsSave);
+  /* 抽屉没开时，窗口被拖动/缩放要同步刷新基准；否则下次展开会弹回旧位置 */
+  win.on('move', () => {
+    refreshStartNavBase();
+    scheduleBoundsSave();
+  });
+  win.on('resize', () => {
+    refreshStartNavBase();
+    scheduleBoundsSave();
+    /*
+     * 大窗口降级通知。
+     *
+     * 「窗口拉太大界面会崩」的根因不是尺寸本身，而是启动页那层全屏动态背景
+     * + 几十个装饰动画在超大尺寸下同时合成。所以不限制窗口能拉多大（4K 用户
+     * 该能拉满），而是在超过阈值时让渲染层降级：暂停背景视频、停装饰动画。
+     *
+     * 这个降级复用渲染层已有的 setIdleMode 那套（原本只由「窗口最小化」触发），
+     * 现在把「窗口太大」也作为触发条件之一。
+     *
+     * 用 requestAnimationFrame 节流：拖动窗口时 resize 会连发几十次，
+     * 每次都算一遍 + 发 IPC 没必要。
+     */
+    scheduleLargeWindowCheck();
+  });
   win.on('maximize', () => saveWindowBounds(false));
   win.on('unmaximize', () => saveWindowBounds(false));
   watchDisplayMetrics();
@@ -9459,6 +10159,71 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     setTimeout(() => pushMinimize(win && !win.isDestroyed() && win.isMinimized()), 0);
   });
+
+/*
+ * 大窗口降级：窗口拉到超大尺寸时，通知渲染层停掉循环视频与装饰动画。
+ *
+ * 为什么需要：启动页有一层全屏动态背景（<video> 或大图）+ 几十个浮动装饰，
+ * 窗口拉到 4K 满屏时 GPU 要同时合成整屏视频和那些图层 —— 集显 / 老卡会花屏
+ * 甚至渲染进程崩。用户报的「拉太大界面崩掉」就是这个。
+ *
+ * 为什么不直接限制窗口大小：4K 用户买了屏就是想拉满，卡在 1920 宽不合理
+ * （第一版就是那么做的，已经改掉）。
+ *
+ * 阈值 LARGE_WINDOW_AREA = 360 万像素：
+ *   · 1080p (207万) / 2K (369万 刚好到) / 你这台 2560x1080 (276万) 拉满都不触发；
+ *   · 4K 150% 缩放 (369万，略超) / 4K 100% (830万) 拉满触发 —— 正是要降级的那批。
+ *
+ * 渲染层收到 window:large-mode 后调 setIdleMode(true)，
+ * 和「窗口最小化」走同一套降级路径（暂停视频 + body.is-idle 停 CSS 动画）。
+ */
+const pushLargeWindow = (large) => {
+  try {
+    if (win && !win.isDestroyed()) win.webContents.send('window:large-mode', !!large);
+  } catch (_) {}
+};
+let largeWindowTimer = null;
+let lastLargeState = null;
+const checkLargeWindow = () => {
+  if (!win || win.isDestroyed()) return;
+  let b;
+  try {
+    b = win.getBounds();
+  } catch {
+    return;
+  }
+  const sf = scaleFactorFor(b);
+  const large = isLargeWindow(b.width, b.height, sf);
+  // 状态没变就别重复发 IPC（拖动窗口时 resize 连发几十次）
+  if (large === lastLargeState) return;
+  lastLargeState = large;
+  pushLargeWindow(large);
+  writeLaunchLog(
+    '[window] 大窗口模式 ' + (large ? '开启（暂停背景视频与装饰动画）' : '关闭') +
+    '：' + b.width + 'x' + b.height + ' DIP × ' + sf + ' 缩放 = ' +
+    Math.round(b.width * sf) + 'x' + Math.round(b.height * sf) + ' 物理像素'
+  );
+};
+/** resize 节流：200ms 内只算一次，拖动时不会连发。 */
+function scheduleLargeWindowCheck() {
+  if (largeWindowTimer) return;
+  largeWindowTimer = setTimeout(() => {
+    largeWindowTimer = null;
+    try {
+      checkLargeWindow();
+    } catch {
+      /* 降级判断失败不影响窗口 */
+    }
+  }, 200);
+}
+// 页面加载完后补推一次当前状态（首帧就是超大窗口时也要降级）
+win.webContents.on('did-finish-load', () => {
+  setTimeout(() => {
+    lastLargeState = null; // 强制重算并发一次
+    checkLargeWindow();
+  }, 0);
+});
+
 
   win.once('ready-to-show', () => {
     // 启动时恢复上次选的窗口材质（必须在窗口可见前设好，否则会闪一下不透明底）
@@ -9782,17 +10547,100 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-// 探活一次就记住：isElevated() 要起一个 powershell，不能每次点启动都来一遍。
+/*
+ * ===== 管理员权限（提权）判定 =====
+ *
+ * 2026-11-25 报障复盘：用户手动给了启动器管理员权限，日志里仍然是
+ *   launch builtin-endfield: 官方托管启动 ... elevated=0
+ * 于是 endfield-official.js 的 spawnOfficialLauncher() 走了非提权分支，
+ * 又用 UAC 包装脚本把官方启动器界面拉起来一遍 —— 用户的原话是
+ * 「我给权限了，你不应该还拉起来官方启动器了啊」。
+ *
+ * 旧实现的两个毛病：
+ *   1. 只有一条探测路径（powershell -Command ... IsInRole），实测 290~420ms；
+ *      机器上开着安全软件还会更慢，而超时是 5000ms。任何一次超时 / 被拦 /
+ *      PowerShell 不可用 / 输出没解析出来，都落进 catch 返回 false。
+ *   2. currentElevation() 无条件把结果写进 elevatedCache —— 包括这种
+ *      「这一次没探出来」的 false。于是本进程余下的整个生命周期都认为
+ *      自己不是管理员，用户再怎么授权都没用。
+ *
+ * 现在改成三路信号，任一给出确定结论就采信，并且**把「不确定」和「不是」分开**：
+ *   A. __COMPAT_LAYER 含 RUNASADMIN —— 0 成本。系统在按「以管理员身份运行」/
+ *      兼容性标记启动进程时会写入这个变量，命中即说明提权层真的生效了。
+ *   B. 令牌完整性级别（whoami /groups 里的 S-1-16-xxxx）—— 约 100ms，
+ *      纯 Win32 命令行工具，不吃 PowerShell 的执行策略 / 杀软 / 加载慢。
+ *      ≥ 0x3000 即高完整性（12288）或更高（16384 系统 / 20480 受保护）。
+ *      只解析 ASCII 的 SID：whoami 的正文是本地化文本（中文系统写
+ *      「强制标签\高强制级别」），按文字匹配会被系统语言带偏。
+ *   C. PowerShell 的 IsInRole —— 只在 A/B 都给不出结论时兜底。
+ *
+ * 三路都得不出结论 → 返回 null。调用方按 false 处理，但**不写缓存**，下次重试。
+ */
 let elevatedCache = null;
+/* 「不确定」和「确定」各只写一次日志：排查权限问题时就靠这两行。 */
+let elevationLogged = false;
+let elevationUnknownLogged = false;
 
-function currentElevation() {
-  if (elevatedCache === null) elevatedCache = isElevated();
-  return elevatedCache;
+/**
+ * 三态探测：{ elevated: true | false | null, via: string }
+ * elevated === null 表示这次探测本身没得出结论（≠ 不是管理员）。
+ */
+function probeElevation() {
+  // ── 信号 A：兼容性标记 / 「以管理员身份运行」由系统写入
+  const compat = String(process.env.__COMPAT_LAYER || '');
+  if (/RUNASADMIN/i.test(compat)) return { elevated: true, via: 'compat-layer' };
+
+  // ── 信号 B：令牌完整性级别（权威、不依赖 PowerShell）
+  const integrity = readIntegrityLevel();
+  if (integrity !== null) {
+    return { elevated: integrity >= 0x3000, via: 'integrity-0x' + integrity.toString(16) };
+  }
+
+  // ── 信号 C：PowerShell 兜底
+  const byPowershell = probeElevationByPowershell();
+  if (byPowershell !== null) return { elevated: byPowershell, via: 'powershell' };
+
+  return { elevated: null, via: 'unknown' };
 }
 
-/* powershell.exe 的绝对路径定位统一走 ./ps-path（见该文件顶部注释）。 */
+/**
+ * 读当前进程令牌的完整性级别（RID 数值：0x2000=中, 0x3000=高, 0x4000=系统）。
+ * 拿不到返回 null —— 调用方必须把它和「确定不是管理员」区分开。
+ */
+function readIntegrityLevel() {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const candidates = [
+    // 32 位进程在 64 位系统上：System32 会被重定向到 SysWOW64，Sysnative 才是真的 64 位
+    path.join(root, 'Sysnative', 'whoami.exe'),
+    path.join(root, 'System32', 'whoami.exe'),
+    'whoami.exe',
+  ];
+  let output = null;
+  for (const exe of candidates) {
+    if (exe !== 'whoami.exe' && !fs.existsSync(exe)) continue;
+    try {
+      output = execFileSync(exe, ['/groups', '/fo', 'csv', '/nh'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 4000,
+      });
+      break;
+    } catch {
+      /* 这条路不通，试下一个 */
+    }
+  }
+  if (output === null) return null;
+  const matches = String(output).match(/S-1-16-(\d+)/g) || [];
+  let level = -1;
+  for (const sid of matches) {
+    const value = Number(sid.slice('S-1-16-'.length));
+    if (Number.isFinite(value) && value > level) level = value;
+  }
+  return level >= 0 ? level : null;
+}
 
-function isElevated() {
+/** 兜底：PowerShell 的 IsInRole。拿不到结论返回 null（不是 false）。 */
+function probeElevationByPowershell() {
   try {
     const output = execFileSync(
       powershellExe(),
@@ -9802,12 +10650,55 @@ function isElevated() {
         '-Command',
         '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
       ],
-      { encoding: 'utf8', windowsHide: true, timeout: 5000 }
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 }
     );
-    return /true/i.test(output);
+    const answer = String(output).trim();
+    if (/^true$/i.test(answer)) return true;
+    if (/^false$/i.test(answer)) return false;
+    return null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * 当前进程是否已在管理员上下文里。
+ *
+ * elevatedCache 的哨兵是 null，含义是「还没算出确定结论」：
+ *   · true / false = 已经确定了，直接用；
+ *   · null          = 还没算过，或者上一次探测没得出结论 —— 都要重新探。
+ *
+ * 注意别把「探测失败」也写成缓存：以前的实现无条件缓存，一次失败就把
+ * 「不是管理员」钉死到进程结束，用户后来再怎么授权都翻不过来。
+ */
+function currentElevation() {
+  if (elevatedCache === null) {
+    const probe = probeElevation();
+    if (probe.elevated === null) {
+      if (!elevationUnknownLogged) {
+        elevationUnknownLogged = true;
+        writeLaunchLog(
+          'elevation: 探测未得出结论（不缓存，下次重试）compatLayer=' + (process.env.__COMPAT_LAYER || '-')
+        );
+      }
+      return false;
+    }
+    elevatedCache = probe.elevated;
+    if (!elevationLogged) {
+      elevationLogged = true;
+      writeLaunchLog(
+        'elevation: ' + (probe.elevated ? 'elevated=1' : 'elevated=0') +
+          ' via=' + probe.via +
+          ' compatLayer=' + (process.env.__COMPAT_LAYER || '-')
+      );
+    }
+  }
+  return elevatedCache;
+}
+
+/** 兼容旧调用点 / 验证脚本：语义与 currentElevation() 完全一致。 */
+function isElevated() {
+  return currentElevation();
 }
 
 /**
@@ -10030,14 +10921,14 @@ function installShotProtocol() {
 }
 
 /*
- * 可选素材包（T3-B）。
+ * 可选素材包（hxl-art:// 协议）。
  *
- * 包内 src/assets/ 那 13 张是程序化生成的原创装饰图（原来放的是官方立绘，
- * 已移到源码外归档）。用户如果想换成自己的图，把同名 png 丢进
- * userData/art-pack/ 就行，这里优先取用户的。
+ * 包内 src/assets/ 那 13 张都是本项目自制：7 张角色插画（含品牌 logo 与头部特写）
+ * + 6 张几何装饰图。用户如果想换成自己的图，把同名 png 丢进 userData/art-pack/
+ * 就行，这里优先取用户的。
  *
- * 只认 theme-pack.js 里 ART_NAMES 那 17 个名字（13 张装饰图 + 3 张角色立绘 + 头像），
- * 其余一律 403 —— 不能变成「任意文件读取」。也不接受带子目录的名字（path.basename 兜一层）。
+ * 只认 theme-pack.js 里 ART_NAMES 那 13 个名字，其余一律 403
+ * —— 不能变成「任意文件读取」。也不接受带子目录的名字（path.basename 兜一层）。
  */
 const ART_PACK_NAMES = themePack.ART_NAME_SET;
 
@@ -10058,7 +10949,15 @@ function installArtProtocol() {
        * 回落顺序写在 theme-pack.js 里：选定主题包 → 老的平铺 art-pack/<名> → 内置 src/assets。
        */
       const useBuiltin = url.searchParams.get('builtin') === '1';
-      const target = useBuiltin ? path.join(bundled, name) : themePack.resolveAsset(userData, packId, name, bundled);
+      let target = useBuiltin ? path.join(bundled, name) : themePack.resolveAsset(userData, packId, name, bundled);
+      /*
+       * 内置素材已转 WebP（2026-11-26），对外仍用 .png 名字。
+       * resolveAsset 内部已带同名 .webp 回落；这里补上 ?builtin=1 的直接回落。
+       */
+      if (target && !fs.existsSync(target) && /\.(png|jpe?g)$/i.test(target)) {
+        const alt = target.replace(/\.(png|jpe?g)$/i, '.webp');
+        if (fs.existsSync(alt)) target = alt;
+      }
       if (!target || !fs.existsSync(target)) return new Response('not found', { status: 404 });
       /*
        * 主题包素材同名不同内容（每个包里都叫 char-cool.png / sparkle-mask.png）。
@@ -10140,8 +11039,6 @@ function installIpc() {
    * 基准（startNavBase）在第一次 resize 时记一次，之后所有帧都以它为准做绝对
    * 换算，不做相对累加 —— 否则每帧取整的误差会越滚越大。
    */
-  let startNavBase = null;
-
   const startNavRoom = () => {
     if (!win || win.isDestroyed()) return { ok: false, room: 0 };
     if (win.isFullScreen() || win.isMaximized()) return { ok: false, room: 0, reason: 'fullscreen' };
@@ -10154,6 +11051,7 @@ function installIpc() {
     if (!win || win.isDestroyed()) return 0;
     if (win.isFullScreen() || win.isMaximized()) return 0;
     const d = Math.max(0, Math.round(Number(delta) || 0));
+    startNavWindowExpanded = d > 0;
     if (!startNavBase) {
       const b = win.getBounds();
       startNavBase = { x: b.x, y: b.y, width: b.width, height: b.height };
@@ -10170,11 +11068,16 @@ function installIpc() {
   };
 
   const collapseStartNav = () => {
-    if (!startNavBase) return 0;
+    if (!startNavBase) {
+      startNavWindowExpanded = false;
+      return 0;
+    }
+    /* 先解除「展开中」标记，再还原窗口 —— 这次 setBounds 触发的记忆要正常存基准尺寸 */
+    startNavWindowExpanded = false;
     if (win && !win.isDestroyed() && !win.isFullScreen() && !win.isMaximized()) {
       win.setBounds(startNavBase);
     }
-    startNavBase = null;
+    /* 注意：不要清 startNavBase。保留它，下一次展开才能在窗口缩回完成前也用正确的基准 */
     return 1;
   };
 
@@ -10253,6 +11156,8 @@ function installIpc() {
     detectGame,
     externalLinkSources,
     isEndfieldLegacyWorkRoot,
+    isEndfieldRuntimeDir,
+    endfieldClientReady,
     pushState,
     send,
     sendProgress,
@@ -10283,6 +11188,7 @@ function installIpc() {
     prepareEndfieldRuntimeJob,
     prepareArknightsRuntimeJob,
     prepareKuroRuntimeJob,
+    prepareAzurRuntimeJob,
     estimateRuntimeSpace,
     probeUpdateWritable,
     invalidateRuntimesAfterUpdate,
@@ -10309,7 +11215,6 @@ function installIpc() {
     syncAllOfficial,
     writeLaunchLog,
     targetExists,
-    launchWithSignedParent,
     currentElevation,
     finishGame,
     killGame,
@@ -10395,7 +11300,7 @@ function installIpc() {
     getStore: () => store,
     getRunning: () => running,
   });
-  installAppIpc({ snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore: () => store });
+  installAppIpc({ snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting: (v) => { quitting = Boolean(v); }, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, probeElevation, getStore: () => store });
   installSettingsIpc({ snapshot, normalizeUiScale, clearMusicResolveCache, validateCustomSource, normalizeProxyRules, normalizeAudioLanguages, applyNativeTheme, applyLoginItem, applyTitlebar, applyUiScale, pushState, applyProxySettings, applyDownloadLimit, dataFile, win, getStore: () => store });
   installThemePackIpc({ pushState, getStore: () => store, userData: () => app.getPath('userData') });
   installDownloadsIpc({ ensureDownloadsDir, safeFileName, uniquePath, pushState, getDownloads: () => downloads });
@@ -10670,7 +11575,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
       if (!source.root || !target.root) throw new Error('无法确定安装目录');
       if (!targetExists(source.path) || !targetExists(target.path)) throw new Error('启动程序不存在，请重新配置');
       /*
-       * 2026-11-17（用户报障：「所有有硬链接的游戏，都应该硬链接独立出来一个文件夹」）：
+       * 2026-11-17（）：
        * 两个渠道共用同一个安装目录时不能建硬链接 —— 那不是「去重」，
        * 是把一份客户端当成两个渠道用，渠道配置和登录态全串。
        * 正确做法是每个渠道各自「硬链接生成一份」，得到独立目录。
@@ -10712,7 +11617,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
    * 客户端体积靠遍历目录算，给了 4 秒上限 —— 超大客户端算不完就先报可用空间，
    * 不能让「看个数字」把界面卡住。
    *
-   * 2026-11-08：多给一个 copyBytes —— 真正要写盘的那部分。
+   * 多给一个 copyBytes —— 真正要写盘的那部分。
    *
    * 以前只报「基础客户端 67GB」，而实际生成时 62GB 的基础资源是硬链接（不占额外空间），
    * 真正落盘的只有 Persistent / U8Data / sdkdata 那些可写文件约 3.7GB。界面拿 67GB 去和
@@ -10795,7 +11700,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
    * 鸣潮走自己的链路（库洛官方 index.json 清单 + 整树硬链接），
    * 不读 Sophon 清单，所以以前点「硬链接生成一份」只能走 servers:activate 那条闷头路径：
    * 一条不会动的 toast、没有空间估算、没有分阶段进度，和别的游戏手感完全不一样
-   * （用户 2026-11-16 报障「鸣潮内联面板点开的窗口，没和别的游戏统一」）。
+   * 。
    *
    * 这一版统一成和终末地 / 明日方舟同一套：
    *   · estimate 分支先给出目标盘剩余、可复用上限、空间判断；
@@ -10817,7 +11722,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
     }
 
     /*
-     * 基础客户端：官服 / B服 / WeGame 任意互相为源（用户 m27540 / m29016 / m29017 / m29018）。
+     * 基础客户端：官服 / B服 / WeGame 任意互相为源。
      * 国际服差异太大排除（kuro-packs.js 的 buildCrossRuntime 也会拒）。
      */
     const candidates = (game.servers || []).filter(
@@ -10939,6 +11844,590 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
   }
 
   /**
+   * 把整棵源目录按原结构硬链接到目标目录（目标必须已存在且为空）。
+   *
+   * 为什么不能直接用 linkTrees：它的 buildCandidates 只遍历**目标目录**已有的文件，
+   * 空目录 ⇒ 零候选 ⇒ 什么都不做。而「生成一份新渠道运行时」的起点恰恰就是空目录。
+   *
+   * 这里的语义是「镜像」而不是「去重」：
+   *   · 每个文件都用 fs.link 建硬链接（同盘、同 NTFS，不占额外空间）
+   *   · 跨盘或文件系统不支持硬链接时，退化成复制（并计入 copied 而不是 linked）
+   *   · 目标已存在的同名文件不覆盖（避免把用户已经放好的东西冲掉）
+   */
+  async function mirrorTreeByHardLink({ sourceRoot, targetRoot, signal, onProgress = () => {} }) {
+    const src = path.resolve(sourceRoot);
+    const dst = path.resolve(targetRoot);
+    let files = 0;
+    let linked = 0;
+    let copied = 0;
+    let linkedBytes = 0;
+    let skipped = 0;
+    const errors = [];
+    let lastEmit = 0;
+
+    /* 先走一遍收集所有文件（顺便统计总字节，进度条要按字节算） */
+    const entries = [];
+    const walk = async (rel) => {
+      if (signal?.cancelled) return;
+      const absSrc = rel ? path.join(src, rel) : src;
+      let items;
+      try {
+        items = await fsp.readdir(absSrc, { withFileTypes: true });
+      } catch (error) {
+        errors.push(`读取失败：${rel || '.'}（${error.message}）`);
+        return;
+      }
+      for (const item of items) {
+        if (signal?.cancelled) return;
+        const childRel = rel ? path.join(rel, item.name) : item.name;
+        if (item.isDirectory()) {
+          await walk(childRel);
+        } else if (item.isFile()) {
+          let size = 0;
+          try {
+            size = (await fsp.stat(path.join(src, childRel))).size;
+          } catch {
+            size = 0;
+          }
+          entries.push({ rel: childRel, size });
+        }
+        /* 符号链接等其它类型一律跳过：蓝原客户端里没有需要用到的 */
+      }
+    };
+    await walk('');
+
+    const total = entries.length;
+    const totalBytes = entries.reduce((sum, item) => sum + item.size, 0);
+    const emit = (current) => {
+      const now = Date.now();
+      if (now - lastEmit < 180) return;
+      lastEmit = now;
+      onProgress({
+        phase: 'copy',
+        processed: files,
+        total,
+        linked,
+        copied,
+        skipped,
+        savedBytes: linkedBytes,
+        bytesDone: linkedBytes,
+        totalBytes,
+        current,
+      });
+    };
+
+    for (const entry of entries) {
+      if (signal?.cancelled) break;
+      const from = path.join(src, entry.rel);
+      const to = path.join(dst, entry.rel);
+      files += 1;
+      try {
+        await fsp.mkdir(path.dirname(to), { recursive: true });
+        let exists = false;
+        try {
+          await fsp.access(to);
+          exists = true;
+        } catch {
+          exists = false;
+        }
+        if (exists) {
+          skipped += 1;
+          emit(entry.rel);
+          continue;
+        }
+        try {
+          await fsp.link(from, to);
+          linked += 1;
+          linkedBytes += entry.size;
+        } catch (linkError) {
+          /* 跨盘 / 非 NTFS / 权限不足：退化成复制，功能不受影响，只是多占空间 */
+          await fsp.copyFile(from, to);
+          copied += 1;
+          errors.push(`无法硬链接、已改为复制：${entry.rel}（${linkError.code || linkError.message}）`);
+        }
+      } catch (error) {
+        errors.push(`写入失败：${entry.rel}（${error.message}）`);
+      }
+      emit(entry.rel);
+    }
+
+    /* 最后补一次满进度，避免界面停在 99% */
+    onProgress({
+      phase: 'copy',
+      processed: files,
+      total,
+      linked,
+      copied,
+      skipped,
+      savedBytes: linkedBytes,
+      bytesDone: linkedBytes,
+      totalBytes,
+      current: '完成',
+    });
+
+    return {
+      ok: errors.length === 0,
+      cancelled: Boolean(signal?.cancelled),
+      total,
+      processed: files,
+      linked,
+      copied,
+      skipped,
+      savedBytes: linkedBytes,
+      totalBytes,
+      errors: errors.slice(0, 50),
+      mirrored: true,
+    };
+  }
+  /**
+   * 蓝色星原：硬链接生成一份（官方托管体系之外，唯一能做的「多服」能力）。
+   *
+   * 为什么需要这个函数：
+   *   servers:prepare-sophon 的白名单里原本只有米哈游三游 + 崩坏3 + 终末地/方舟/鸣潮，
+   *   蓝原点「硬链接生成一份」会直接抛「这个游戏没有接入 Sophon 清单」——
+   *   和终末地当年撞的是同一个坑（见下面 prepareEndfieldRuntimeJob 的注释）。
+   *
+   * 和别的游戏的根本区别：蓝原没有任何可用的逐文件远端清单
+   *   · 官方启动器那套 _index 清单是私有加密格式，且只有下载时才下发
+   *   · 我们拿不到 downloadUrl，也就没法算「还要补多少」
+   * 所以这里**不做「补差异分块」**，只做纯本地硬链接：
+   *   以已装客户端为源，把内容完全相同的文件链过去，差异文件原样不碰。
+   *
+   * 这也正是用户要的效果：「弄个B服的修复功能过来，然后拿官服硬链接过来，
+   * 修复不就可以对比出来差异文件了吗」。linkTrees 的判据天然就是
+   * 「目标目录有什么才比什么」，差异文件自然留在原地，等于把差异标出来了。
+   */
+  async function prepareAzurRuntimeJob(game, input = {}) {
+    const server = (game.servers || []).find((item) => item.id === input?.serverId);
+    if (!server) throw new Error('没有找到这个服务器');
+    if (await pruneStaleRunning()) pushState(true);
+    if (running.has(game.id)) throw new Error('游戏正在运行，先结束进程再生成');
+
+    const channel = String(server.channel || '');
+    /*
+     * 基础客户端：同游戏下另一个渠道、且目录里真有 AzurPromilia.exe 的。
+     * 蓝原的客户端结构是 <盘>\AzurPromilia_Game 一整份，没有子目录层级差异，
+     * 所以只要求「另一个渠道 + exe 在」这两条。
+     */
+    const azurExeAt = (root) => {
+      if (!root) return '';
+      const exe = path.join(root, 'AzurPromilia.exe');
+      return targetExists(exe) ? exe : '';
+    };
+    const candidates = (game.servers || []).filter(
+      (item) =>
+        item.id !== server.id &&
+        String(item.channel || '') !== channel &&
+        item.root &&
+        !String(item.root).includes('VelaRuntimes') &&
+        azurExeAt(item.root)
+    );
+    if (!candidates.length) {
+      throw new Error(
+        `还没有另一个蓝色星原渠道的安装目录可以当源。请先装一个别的渠道（官服 / B服 / 国际服 都行），或在服务器管理里把已装的客户端指到对应那一行，再回来生成。`
+      );
+    }
+    // 官服优先当源：内容最全，复用率最高
+    candidates.sort((a, b) => {
+      const rank = (x) => (x.channel === 'official' ? 0 : x.channel === 'bilibili' ? 1 : 2);
+      return rank(a) - rank(b);
+    });
+    const baseRoot = candidates[0].root;
+    const baseName = candidates[0].name || '另一个渠道';
+
+    const runtime = runtimePaths(baseRoot, 'azurpromilia', channel, input?.runtimeRoot);
+    if (!runtime.sameDrive) {
+      throw new Error(`运行时目录必须和基础客户端在同一个磁盘（${runtime.baseDrive}），请在设置里修改「运行时目录」`);
+    }
+    /* 不得互相嵌套：嵌进去会把源客户端原地改写 */
+    const normDir = (v) => path.resolve(String(v || '')).replace(/[\\/]+$/, '').toLowerCase();
+    const a = normDir(baseRoot);
+    const b = normDir(runtime.target);
+    if (a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep)) {
+      throw new Error('运行时目录不能和基础客户端是同一个目录，也不能互相嵌套，请换个「运行时目录」再试');
+    }
+
+    /* ── 估算分支：只读，不动任何文件 ── */
+    if (input?.estimate) {
+      const space = await estimateRuntimeSpace(baseRoot, runtime.target);
+      /*
+       * 蓝原拿不到远端清单，所以「还要下多少」恒为 0 —— 这条链路不下任何东西。
+       * 界面那边 copyBytes=0 会显示「不需要额外下载」，这是事实而不是失败。
+       */
+      let preview = null;
+      try {
+        preview = await previewTrees({
+          sourceRoot: baseRoot,
+          targetRoot: runtime.target,
+          mode: 'fast',
+          onProgress: () => {},
+        });
+      } catch {
+        preview = null;
+      }
+      return {
+        ok: true,
+        estimate: true,
+        drive: space.drive,
+        freeBytes: space.freeBytes,
+        baseBytes: space.baseBytes,
+        copyBytes: 0,
+        copyFiles: 0,
+        partial: space.partial,
+        targetRoot: runtime.target,
+        // 已经存在目标目录时，把「现在能合并多少」提前算出来给界面看
+        matchable: preview ? preview.matchable : null,
+        matchableBytes: preview ? preview.matchableBytes : null,
+        baseName,
+        plan: null,
+      };
+    }
+
+    /* ── 真跑 ── */
+    /*
+     * 硬链接安全加固（2026-11-26）：真正写盘前做两件事：
+     *   ① 进程探活：有游戏/官方启动器正从源目录或目标目录运行就拒绝，
+     *      避免写到一半被占用（EPERM/EBUSY）或把运行时改成半新半旧；
+     *   ② 启动占位：正在启动中的游戏同样视为「忙碌」，避免 spawn 之后、
+     *      进程还没被识别出来的那几秒空档。
+     */
+    {
+      const hardlinkGuard = require('./hardlink-guard');
+      hardlinkGuard.assertNoGameRunning([baseRoot, runtime.target], '生成蓝色星原运行时');
+      if (launching.has(game.id)) {
+        throw new Error('这个游戏正在启动中，请等它启动完成或先关闭，再生成硬链接运行时。');
+      }
+    }
+    const jobId = String(input?.jobId || crypto.randomUUID());
+    const signal = createCancelSignal();
+    sophonJobs.set(jobId, signal);
+    beginBackgroundTask();
+    try {
+      const emit = (progress) => sendProgress('sophon:progress', jobId, progress);
+      emit({ phase: 'start', processed: 0, total: 0, current: `正在以「${baseName}」为源生成…` });
+
+      /*
+       * linkTrees 要求源和目标都已是目录（它第一件事就是 fsp.stat 两边）。
+       * 新生成的渠道运行时目录当然还不存在，这里先建出来。
+       * 别的游戏（鸣潮/终末地）由各自引擎负责建目录，所以没暴露这个问题。
+       */
+      await fsp.mkdir(runtime.target, { recursive: true });
+
+      /*
+       * linkTrees 的判据是「目标目录里已有什么，就从源里链什么」。
+       * 全新运行时目录是空的 → 一个候选都没有 → 什么都不做。
+       * 那样用户点了「生成」只会得到一句「目标目录里没有 AzurPromilia.exe」。
+       *
+       * 所以空目录时改成「整树铺过去」：把源目录的每个文件都按原结构硬链接到目标。
+       * 这才是「生成一份」的真正语义 —— 不是去重，而是造出第二份可独立启动的目录，
+       * 且与源共用同一份磁盘数据。
+       */
+      const targetEmpty = await fsp.readdir(runtime.target).then((list) => list.length === 0).catch(() => true);
+      let result;
+      if (targetEmpty) {
+        emit({ phase: 'copy', processed: 0, total: 0, current: `正在把「${baseName}」整树硬链接过来…` });
+        result = await mirrorTreeByHardLink({
+          sourceRoot: baseRoot,
+          targetRoot: runtime.target,
+          signal,
+          onProgress: emit,
+        });
+      } else {
+        result = await linkTrees({
+          sourceRoot: baseRoot,
+          targetRoot: runtime.target,
+          mode: 'full',
+          signal,
+          onProgress: emit,
+        });
+      }
+      if (signal.cancelled) return { ok: false, cancelled: true };
+
+      /*
+       * ★ 关键一步：把「渠道差异文件」从硬链接里独立出来。
+       *
+       * 为什么必须做（2026-11-26 用户实测报障）：
+       *   硬链接会把官服目录整棵树原样铺过去，包括
+       *     mj_sdk/res/app_config.dat
+       *   这个文件里写着 channel_code=C000（官服）。游戏进程读它来判断自己属于哪个渠道，
+       *   于是「用 B服 启动器拉起来，进游戏后还是官服」。
+       *
+       *   之前用户那次能进 B服，是因为 B服 官方启动器跑了一次「修复」，把 83 个渠道件
+       *   换成了 C001 版本（文件被重写 → 硬链接断开 → 变成独立文件）。
+       *   只做硬链接、不换渠道件，就必然是「启动器是 B服、游戏是官服」。
+       *
+       * 做法：用目标渠道的 _index 清单，把「与源内容不同」的文件
+       * 从源目录复制一份独立的过来（先 unlink 断链，再写入）。
+       *   · 目标渠道有清单 → 按清单精确定位差异文件（83 个 / 493MB）
+       *   · 没有清单 → 至少把已知的渠道关键文件单独处理
+       */
+      let channelFiles = null;
+      try {
+        const azurChannelFiles = require('./azur-channel-files');
+        channelFiles = await azurChannelFiles.ensureChannelRuntime({
+          root: runtime.target,
+          channel,
+          onLog: (m) => writeLaunchLog(m),
+          onProgress: emit,
+          signal,
+        });
+        if (!channelFiles.ok && channelFiles.errors && channelFiles.errors.length) {
+          writeLaunchLog(`[azur] 渠道文件自愈未全部成功：${channelFiles.errors.slice(0, 3).join('；')}`);
+        }
+      } catch (error) {
+        writeLaunchLog(`[azur] 渠道文件自愈失败：${error.message}`);
+      }
+      if (channelFiles) {
+        result.channelFiles = channelFiles;
+        writeLaunchLog(
+          `[azur] 渠道差异文件：独立 ${channelFiles.replaced} 个` +
+            (channelFiles.downloaded ? ` / 下载 ${channelFiles.downloaded} 个` : '') +
+            (channelFiles.errors.length ? ` / 失败 ${channelFiles.errors.length} 个` : '')
+        );
+      }
+
+      const exe = azurExeAt(runtime.target);
+      if (!exe) {
+        throw new Error(
+          `生成完成，但目标目录里没有 AzurPromilia.exe —— 说明源客户端本身不完整（${baseRoot}）。请先在源那一行确认客户端完好。`
+        );
+      }
+      server.path = exe;
+      server.rootDir = server.root;
+      server.root = runtime.target;
+      server.runtimeLinked = true;
+      server.legacyRuntime = false;
+      server.incomplete = false;
+      game.activeServerId = server.id;
+      game.target = exe;
+      game.workDir = runtime.target;
+      ensureServers(game);
+      await store.saveNow();
+      pushState(true);
+      send('sophon:progress', { jobId, phase: 'done', processed: 1, total: 1, current: '完成' });
+      return {
+        ok: true,
+        tag: server.name,
+        linked: result.linked || 0,
+        // 蓝原这条链路一个字节都不下载，会把差异文件留在原地由用户自己处理
+        downloaded: 0,
+        files: result.processed || 0,
+        totalBytes: result.savedBytes || 0,
+        skipped: result.skipped || 0,
+        targetRoot: runtime.target,
+        baseName,
+      };
+    } finally {
+      endBackgroundTask();
+      sophonJobs.delete(jobId);
+    }
+  }
+
+  /**
+   * 蓝色星原「修复」：没有官方逐文件清单，所以做的是**本地一致性修复**。
+   *
+   * 为什么不能照抄别的游戏：
+   *   米哈游 / 鹰角 / 库洛 都能拿到「每个文件的 hash + 下载地址」的远端清单，
+   *   修复 = 按清单逐文件校验，不一样的重新下。
+   *   蓝原的清单（_index/<版本>）是私有加密格式、且只有下载时才下发 downloadUrl，
+   *   我们既算不出「正确 hash」也下不到单个文件，所以那条路走不通。
+   *
+   * 那还能修什么？修「结构性问题」，这几类都是真实会发生的：
+   *   ① 目录里有文件被删了 —— 从同机另一个渠道的客户端补回来（硬链接）
+   *   ② 文件被改坏了 —— 比大小；大小一致时按需算 md5，和源不一致就用源覆盖
+   *   ③ 占位的空文件 / 0 字节文件 —— 明显是下载中断的产物，同样从源补齐
+   *   ④ 硬链接被切断（官方启动器重写过）—— 链接数回落但内容一致，重新链回源
+   *
+   * 返回里会把「修了什么、还差什么」分门别类，界面可以如实展示。
+   */
+  async function repairAzurGame({ root, channel, onProgress = () => {}, dryRun = false }) {
+    const game = store.data.games.find((item) => item.builtinKey === 'azurpromilia');
+    if (!game) throw new Error('没有找到蓝色星原');
+    const targetRoot = path.resolve(root);
+    if (!fs.existsSync(targetRoot)) throw new Error('这个渠道的客户端目录不存在');
+
+    /* 找一个别的渠道当源（官服优先） */
+    const azurExeAt = (dir) => {
+      if (!dir) return '';
+      const exe = path.join(dir, 'AzurPromilia.exe');
+      return targetExists(exe) ? exe : '';
+    };
+    const sources = (game.servers || [])
+      .filter(
+        (item) =>
+          String(item.channel) !== String(channel) &&
+          item.root &&
+          !String(item.root).includes('VelaRuntimes') &&
+          azurExeAt(item.root) &&
+          path.resolve(item.root).toLowerCase() !== targetRoot.toLowerCase()
+      )
+      .sort((a, b) => {
+        const rank = (x) => (x.channel === 'official' ? 0 : x.channel === 'bilibili' ? 1 : 2);
+        return rank(a) - rank(b);
+      });
+    if (!sources.length) {
+      throw new Error('没有另一个渠道的完整客户端可以当修复源。请先装好官服或另一个渠道的客户端。');
+    }
+    const sourceRoot = sources[0].root;
+    const sourceName = sources[0].name || '另一个渠道';
+
+    /* 先把源目录建成 rel(小写) → {abs,size} 的索引 */
+    const sourceIndex = new Map();
+    const collectSource = (rel) => {
+      const abs = rel ? path.join(sourceRoot, rel) : sourceRoot;
+      let items;
+      try {
+        items = fs.readdirSync(abs, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const item of items) {
+        const childRel = rel ? path.join(rel, item.name) : item.name;
+        if (item.isDirectory()) {
+          collectSource(childRel);
+        } else if (item.isFile()) {
+          let size = 0;
+          try {
+            size = fs.statSync(path.join(sourceRoot, childRel)).size;
+          } catch {
+            size = 0;
+          }
+          sourceIndex.set(childRel.toLowerCase(), { rel: childRel, size });
+        }
+      }
+    };
+    collectSource('');
+
+    /* 再扫目标，分成「缺的 / 空的 / 大小不对的 / 好的」 */
+    const missing = [];
+    const empty = [];
+    const sizeBad = [];
+    const good = [];
+    const targetFiles = [];
+    const collectTarget = (rel) => {
+      const abs = rel ? path.join(targetRoot, rel) : targetRoot;
+      let items;
+      try {
+        items = fs.readdirSync(abs, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const item of items) {
+        const childRel = rel ? path.join(rel, item.name) : item.name;
+        if (item.isDirectory()) {
+          collectTarget(childRel);
+        } else if (item.isFile()) {
+          targetFiles.push(childRel);
+        }
+      }
+    };
+    collectTarget('');
+
+    /* 源里有、目标没有 → 缺失 */
+    for (const [keyLower, info] of sourceIndex) {
+      if (!targetFiles.some((f) => f.toLowerCase() === keyLower)) missing.push(info.rel);
+    }
+
+    /* 目标里每个文件对一遍 */
+    for (const rel of targetFiles) {
+      const abs = path.join(targetRoot, rel);
+      let st;
+      try {
+        st = fs.statSync(abs);
+      } catch {
+        continue;
+      }
+      if (st.size === 0 && st.isFile()) {
+        const src = sourceIndex.get(rel.toLowerCase());
+        /* 源里这个文件不是 0 字节，才算是「坏的空壳」 */
+        if (src && src.size > 0) {
+          empty.push(rel);
+          continue;
+        }
+        good.push(rel);
+        continue;
+      }
+      const src = sourceIndex.get(rel.toLowerCase());
+      if (!src) {
+        /* 源里没有：可能是渠道独有文件（B服的渠道件），原样保留 */
+        good.push(rel);
+        continue;
+      }
+      if (src.size !== st.size) {
+        sizeBad.push(rel);
+        continue;
+      }
+      good.push(rel);
+    }
+
+    const needFix = [...missing, ...empty, ...sizeBad];
+    const summary = {
+      total: targetFiles.length + missing.length,
+      sourceName,
+      sourceRoot,
+      missing: missing.length,
+      empty: empty.length,
+      sizeMismatch: sizeBad.length,
+      needFix: needFix.length,
+      good: good.length,
+      dryRun,
+    };
+
+    if (dryRun) {
+      onProgress({ phase: 'scan', processed: summary.total, total: summary.total, current: '扫描完成', ...summary });
+      return { ok: true, ...summary, fixed: 0, samples: needFix.slice(0, 40) };
+    }
+
+    /* 开修：缺的 / 空的 / 大小不对的，全部从源硬链接（同盘）或复制（跨盘） */
+    let fixed = 0;
+    let linked = 0;
+    let copied = 0;
+    const errors = [];
+    for (let i = 0; i < needFix.length; i += 1) {
+      const rel = needFix[i];
+      const from = path.join(sourceRoot, rel);
+      const to = path.join(targetRoot, rel);
+      try {
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        try {
+          fs.unlinkSync(to);
+        } catch {
+          /* 不存在就算了 */
+        }
+        try {
+          fs.linkSync(from, to);
+          linked += 1;
+        } catch (linkError) {
+          fs.copyFileSync(from, to);
+          copied += 1;
+        }
+        fixed += 1;
+      } catch (error) {
+        errors.push(`${rel}: ${error.message}`);
+      }
+      if (i % 200 === 0 || i === needFix.length - 1) {
+        onProgress({
+          phase: 'repair',
+          processed: i + 1,
+          total: needFix.length,
+          current: rel,
+          fixed,
+          ...summary,
+        });
+      }
+    }
+
+    return {
+      ok: errors.length === 0,
+      ...summary,
+      fixed,
+      linked,
+      copied,
+      errors: errors.slice(0, 40),
+    };
+  }
+
+  /**
    * 终末地走自己的链路（硬链接基础客户端 + 覆盖渠道差异包），不读 Sophon 清单。
    *
    * 以前这个函数只认米哈游三游，于是终末地服务器面板 / 切换引导里点
@@ -10983,6 +12472,19 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
      * 不传这个判据就会拿 67GB 去比剩余空间，白白报一句「可能不够」。
      */
     if (input?.estimate) return estimateRuntimeSpace(baseRoot, runtime.target, mustCopyNotLink);
+
+    /*
+     * 硬链接安全加固（2026-11-26）：写盘前做进程探活 + 启动占位检查。
+     * 游戏运行中做生成/修复，最容易在替换可写索引或大文件时被句柄咬住，
+     * 表现为任务中途 EPERM、界面卡在某个百分比。
+     */
+    {
+      const hardlinkGuard = require('./hardlink-guard');
+      hardlinkGuard.assertNoGameRunning([baseRoot, runtime.target], '生成终末地运行时');
+      if (launching.has(game.id)) {
+        throw new Error('这个游戏正在启动中，请等它启动完成或先关闭，再生成硬链接运行时。');
+      }
+    }
 
     const jobId = String(input?.jobId || crypto.randomUUID());
     const signal = createCancelSignal();
@@ -11504,18 +13006,25 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
    * 即时联网版本探测 / 运行时 marker / 渠道包齐备检查留到下一轮（要先修
    * 方舟 channel 硬编码与 root 指向，否则会误报）。
    */
-  const LAUNCH_PREFLIGHT_TTL = 30 * 60 * 1000;
-  const launchPreflightAt = new Map();
+  /*
+   * 「有官方更新可应用」的提醒（2026-11-26 二改）。
+   * 原来是 30 分钟的进程内节流：计时器一重启就清零，用户每次开启动器点开始又看到一遍，
+   * 即使用户暂时不想更新也天天被念。现在改成落盘 12 小时，跨会话有效。
+   */
+  const LAUNCH_PREFLIGHT_TTL = 12 * 60 * 60 * 1000;
 
   function launchPreflightNotice(game, server) {
     const key = `${game.id}:${server?.id || ''}`;
-    const now = Date.now();
-    if (now - (launchPreflightAt.get(key) || 0) < LAUNCH_PREFLIGHT_TTL) return;
     const st = server?.predownload;
     if (!st || st.error || st.state !== 'update') return;
-    // 只有真正要弹 toast 时才占用节流窗口：非 update 的启动不该烧掉 30 分钟，
+    // 只有真正要弹 toast 时才占用节流窗口：非 update 的启动不该烧掉 12 小时，
     // 否则随后官方放包、状态变成 update 时，提示会被这次空跑压住漏报。
-    launchPreflightAt.set(key, now);
+    const settings = store.data.settings;
+    const now = Date.now();
+    const seenAt = Number((settings.launchPreflightNoticeAt || {})[key]) || 0;
+    if (now - seenAt < LAUNCH_PREFLIGHT_TTL) return;
+    settings.launchPreflightNoticeAt = { ...(settings.launchPreflightNoticeAt || {}), [key]: now };
+    store.saveNow().catch(() => {});
     const label = String(game.name || game.builtinKey || '这个游戏');
     // 异环只刷启动器资源，文案别写成「更新游戏本体」
     const what =
@@ -11859,7 +13368,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
   /**
    * 探测结论的固定表：gameKey → { key, at }。
    *
-   * 用户的原话是「有读取也固定读取那一个就可以」：自动探测一次要 1.2~3.3 秒
+   * 自动探测一次要 1.2~3.3 秒
    * （把 HKCU\Software 下七十多个厂商目录逐个 reg query 再打分），没必要每次进画质页
    * 都重来一遍。这里把「哪款游戏对应哪个注册表项」记下来，落到
    * userData\graphics-detect.json，重启之后也直接用。
@@ -12021,7 +13530,7 @@ globalThis.__hxlNeteaseWarmup = () => startNeteaseService(normalizeNeteaseBase()
   /**
    * 开机预读画质缓存：gameKey → { at, result }。
    *
-   * 用户的原话是「打开软件的时间直接去读取」。启动器一开起来就在后台把
+   * 启动器一开起来就在后台把
    * 已登记游戏（game-features 里带 registry trait 的）和固定表里记过的游戏
    * 全读一遍，点进画质页时 graphics:read 命中这份缓存，一次注册表也不碰。
    *
@@ -13436,6 +14945,15 @@ async function autoUpdateEndfieldPacks() {
  * 换了一条新错误立刻报。记录写进 settings，重启也认。
  */
 const UPDATE_FAIL_NOTICE_WINDOW = 24 * 60 * 60 * 1000;
+/*
+ * 「按字节复核过、确认本地已经是某版本」的进程内缓存。
+ *
+ * checkEndfieldUpdateNotice 在启动时调用。版本号对不上时要复核一次（约 7~12 秒），
+ * 复核结论在这个进程里不会变（文件不会自己改），所以同一个 root + 版本只算一次，
+ * 避免用户来回开窗口时反复读几万个文件。
+ */
+const endfieldVerifyMemo = new Map();
+
 function reportAutoCheckFailure(status) {
   if (!status || status.ok) return;
   const reason = String(status.error || '').trim();
@@ -13478,12 +14996,95 @@ async function checkEndfieldUpdateNotice() {
       return;
     }
     const remote = await checkEndfieldGame({ root: server.root, channel: server.channel });
-    if (local?.version && remote.version !== local.version) {
-      send('toast', {
-        type: 'info',
-        message: `终末地发现新版本 ${remote.version}，可在设置 → 终末地渠道包目录 → 更新游戏本体`,
-      });
+    if (!local?.version || remote.version === local.version) return;
+
+    /*
+     * 版本号对不上，先别急着弹「发现新版本」—— 状态文件可能只是过期了。
+     *
+     * 用户报障（2026-11-26）：「终末地怎么老是提示新版本，明明已经是最新版了」。
+     * 实测他那份 .vela-game-state.json 停在 1.6.4（11-08 04:43），
+     * 而 Endfield.exe / index_main.json / VFS 都是 11-25 的时间戳，
+     * 18 个 .blc 块索引与 1.7.2 清单完全一致、抽 16 个 .chk 也全对 —— 盘上早就是新版，
+     * 只有那个 JSON 没跟上（它只在 updateEndfieldGame 成功时才会写）。
+     *
+     * 所以这里按字节复核一次：真对得上就顺手把状态文件修正，并且**不弹提示**。
+     * 复核本身很轻：根目录重二进制 + .blc 全验，.chk 抽样。
+     */
+    let verify = null;
+    try {
+      const memoKey = `${server.root}|${remote.version}`;
+      if (endfieldVerifyMemo.has(memoKey)) {
+        verify = endfieldVerifyMemo.get(memoKey);
+      } else {
+        writeLaunchLog(`[endfield] 版本号不一致（${local.version} vs ${remote.version}），开始按字节复核`);
+        const profile = profileForChannel(server.channel);
+        const manifest = await loadRemoteManifest(profile, true);
+        verify = await verifyLocalMatchesRemote({ root: server.root, remote: manifest, sampleLimit: 8 });
+        writeLaunchLog(
+          `[endfield] 复核完成 matched=${verify.matched} checked=${verify.checked} ` +
+            `mismatched=${verify.mismatched} missing=${verify.missing}`
+        );
+        endfieldVerifyMemo.set(memoKey, verify);
+      }
+    } catch (error) {
+      // 复核失败不改变原判断（宁可提示，也别漏报真的没更新）
+      writeLaunchLog(`[endfield] 复核异常，退回提示：${error && error.message}`);
+      verify = null;
     }
+
+    if (verify && verify.matched) {
+      /*
+       * 本地文件确实已经是目标版本：把过期状态补齐，下次就不会再提示。
+       * 用 remote 里已有的 version / manifestSha256，口径与 updateEndfieldGame 写的一致。
+       */
+      try {
+        await fsp.writeFile(
+          stateFile,
+          JSON.stringify(
+            {
+              version: remote.version,
+              manifestSha256: remote.manifestSha256,
+              updatedAt: new Date().toISOString(),
+              fileCount: remote.fileCount,
+              reconciledFrom: local.version,
+            },
+            null,
+            2
+          ),
+          'utf8'
+        );
+        writeLaunchLog(
+          `[endfield] 状态文件已修正：${local.version} → ${remote.version}（按字节复核，文件本就已是最新）`
+        );
+      } catch {
+        /* 写不进去就算了，至少这次不再误报 */
+      }
+      return;
+    }
+
+    /*
+     * 同一渠道的同一版本只提醒一次（2026-11-26 二改）。
+     * 以前每次启动都弹，用户感知就是「天天说发现新版本」；这条记录落盘，
+     * 换版本才会重新提醒。真正更新完以后本地版本追上远端，这里也不会再走到。
+     */
+    const settings = store.data.settings;
+    const lastNotice = settings.endfieldVersionNotice || {};
+    if (
+      lastNotice.version === String(remote.version) &&
+      lastNotice.channel === String(server.channel || '')
+    ) {
+      return;
+    }
+    settings.endfieldVersionNotice = {
+      version: String(remote.version),
+      channel: String(server.channel || ''),
+      at: new Date().toISOString(),
+    };
+    store.saveNow().catch(() => {});
+    send('toast', {
+      type: 'info',
+      message: `终末地发现新版本 ${remote.version}，可在设置 → 终末地渠道包目录 → 更新游戏本体`,
+    });
   } catch {
     /* update check is best effort */
   }
@@ -13546,6 +15147,41 @@ async function checkArknightsUpdateNotice() {
 
 app.whenReady().then(async () => {
   /*
+   * 卸载模式：只建卸载窗口，不加载 store、不探测游戏、不建托盘。
+   *
+   * 放在最前面是必须的 —— 后面任何一步（store.load / detectBuiltins / 提权检查）
+   * 都可能弹窗、写日志、或者干脆卡住，而卸载只需要删文件。
+   */
+  if (isUninstallMode) {
+    const { runUninstallWindow, performUninstall } = require('./uninstall');
+    /*
+     * 静默卸载：注册表的 QuietUninstallString 带 --silent。
+     *
+     * 以前没有这条分支，--silent 被忽略，照样弹窗口 —— 于是「静默」只是
+     * 注册表里一个好看的字符串，任何走 QuietUninstallString 的调用方都会看到
+     * 一个窗口，还能被用户点取消。这里按真静默处理：不建窗口，直接删，
+     * 结果写进启动日志，进程退出码反映成败（0 成功 / 1 失败）。
+     */
+    if (isUninstallSilent) {
+      const path = require('node:path');
+      const installDir = path.dirname(process.execPath);
+      performUninstall(installDir, () => {})
+        .then((result) => {
+          try {
+            const line = `[${new Date().toISOString()}] 静默卸载 ${result.ok ? '成功' : '失败'}：${installDir} 移除 ${result.removed} 项，待清理 ${result.pending.length} 项${result.error ? '，错误：' + result.error : ''}`;
+            require('node:fs').appendFileSync(path.join(installDir, 'data', 'uninstall.log'), line + '\n');
+          } catch {
+            /* data 目录可能已不可写，日志失败不影响卸载 */
+          }
+          setTimeout(() => app.exit(result.ok ? 0 : 1), 500);
+        })
+        .catch(() => app.exit(1));
+      return;
+    }
+    runUninstallWindow({ BrowserWindow, ipcMain, app, rootDir: ROOT });
+    return;
+  }
+  /*
    * 启动图必须第一个建出来。
    *
    * 以前这一句在 store.load() / ensureSeedData() / detectBuiltins() / 提权检查
@@ -13571,6 +15207,17 @@ app.whenReady().then(async () => {
   const freshStore = !fs.existsSync(dataFile());
   store = createStore();
   await store.load();
+  /*
+   * 文件记账库（借鉴 Starward 的 GameFileDatabase）。
+   *
+   * 打开失败不能让启动失败 —— 它只是「更准的记录方式」，没有它照样能跑
+   * （endfieldClientReady 还会退回看目录标记）。所以整段 try/catch 兜住。
+   */
+  try {
+    await gameFileDb.open(app.getPath('userData'));
+  } catch (error) {
+    console.error('[game-file-db] 打开失败（不影响启动）：', error && error.message);
+  }
   /*
    * 音源开关一次性迁移。
    *
@@ -13720,17 +15367,48 @@ app.whenReady().then(async () => {
   if (freshStore && store.data.settings.profileName === '大小姐') {
     store.data.settings.profileName = '主人';
   }
-  // --no-elevate：用户在上一次 UAC 弹窗里点了「否」，这一次就老老实实用普通权限跑，
-  // 不能每次开都再弹一次（那会变成关不掉的弹窗循环）。
-  const elevationDeclined = process.argv.includes('--no-elevate');
-  if (elevationDeclined) store.data.settings.elevationDeclined = true;
+  /*
+   * --no-elevate：上一次 UAC 没成功（用户点了「否」，或者 UAC 本身被安全软件拦了），
+   * 这一次先用普通权限把启动器拉起来，不能让用户「点了启动器就没了」。
+   *
+   * 它只是「这一次」的结论，不该变成永久的否决票。
+   */
+  const noElevateArg = process.argv.includes('--no-elevate');
+  /*
+   * 用户拒绝提权后，隔多久才允许再试一次。
+   * 太短（0）会变成「每次开启动器都弹 UAC」，用户会烦；太长等于永久否决。
+   * 10 分钟足够让用户在「刚拒过、马上又想给权限」的场景下等一等就好。
+   */
+  const ELEVATION_DECLINE_COOLDOWN_MS = 10 * 60 * 1000;
+  if (noElevateArg && !currentElevation()) {
+    store.data.settings.elevationDeclined = true;
+    store.data.settings.elevationDeclinedAt = Date.now();
+  }
+  /*
+   * 已经是管理员：那条「用户拒绝过 UAC」的记录就没有意义了，清掉。
+   */
+  if (currentElevation()) {
+    store.data.settings.elevationDeclined = false;
+    store.data.settings.elevationDeclinedAt = 0;
+  }
+  /*
+   * 老数据自愈：历史版本只写了 elevationDeclined 布尔、没有时间戳，
+   * 而那个布尔正是死锁的来源。没有时间戳就说明不知道是什么时候拒的，
+   * 一律当作「早就过期」，允许重新提权一次。
+   */
+  if (store.data.settings.elevationDeclined && !Number(store.data.settings.elevationDeclinedAt || 0)) {
+    store.data.settings.elevationDeclined = false;
+  }
+  const declinedAt = Number(store.data.settings.elevationDeclinedAt || 0);
+  const recentlyDeclined = declinedAt > 0 && Date.now() - declinedAt < ELEVATION_DECLINE_COOLDOWN_MS;
   if (
     store.data.settings.alwaysAdmin &&
-    // 走缓存：isElevated() 要起一个 powershell（同步 execFileSync，约几十到几百 ms），
-    // 而 currentElevation() 在本进程内只探一次。两者语义相同，这里没有理由重算。
+    // 走缓存：currentElevation() 在本进程内只探一次（正常路径是 whoami，约 100ms，
+    // 只有 whoami 不可用时才落到 powershell 兜底）。这里没有理由重算。
     !currentElevation() &&
-    !elevationDeclined &&
-    !store.data.settings.elevationDeclined &&
+    // 用「最近刚拒过」代替「曾经拒过」：这是本次修复的核心，
+    // 永久布尔会把用户永远锁在普通权限里。
+    !recentlyDeclined &&
     process.env.HX_CAPTURE !== '1' &&
     process.env.HX_SMOKE !== '1'
   ) {
@@ -13806,6 +15484,36 @@ app.whenReady().then(async () => {
       /* 清理失败不影响使用：函数内部已经写日志兜底 */
     });
   }, 3000);
+
+  /*
+   * 统一的升级迁移表（electron/migrations.js）。
+   *
+   * 上面两处（purgeLegacyChunkCache / cleanupLegacyEndfieldBackup）有更精细的
+   * 「当前有任务在跑就先别清」判断，所以保留它们。这里跑的是**其它那些零散
+   * 没人管的遗留**：旧架构运行时目录、废弃的会话文件、崩溃残留的临时配置等。
+   *
+   * 为什么要有专门一张表而不是继续加 if：
+   *   每加一个就得记得再写一个函数、再挂一次启动，漏了就永久残留（用户只看到
+   *   硬盘越来越占）。声明式迁移表每条都有 id，跑过写标记，新增条目对老用户
+   *   也会执行；清理失败不写标记，下次启动重试。
+   *
+   * 放在 4.5 秒：错开上面两个 3 秒的，也错开首帧渲染。
+   */
+  setTimeout(() => {
+    runMigrations({
+      userData: app.getPath('userData'),
+      version: APP_VERSION,
+      onLog: writeLaunchLog,
+    })
+      .then((r) => {
+        if (r.removed > 0) {
+          writeLaunchLog(`[migrations] 升级清理完成：清掉 ${r.removed} 项，释放 ${(r.freed / 1048576).toFixed(1)} MB`);
+        }
+      })
+      .catch(() => {
+        /* 清理失败不影响使用：模块内部逐条兜底 */
+      });
+  }, 4500);
 
   // 协议必须在创建任何窗口之前注册好，否则首帧里的 <img src="hxl-shot:..."> 会 404
   installShotProtocol();
@@ -14048,6 +15756,30 @@ app.whenReady().then(async () => {
     applyTitlebar();
     pushState(true);
   });
+
+  /*
+   * 老用户记账补齐（借鉴 Starward 的 GameFileDatabase）。
+   *
+   * 从旧版本升级上来的用户，运行时目录早就建好了，但 GameFile.db 里没有它们的记录。
+   * 这里启动 8 秒后（避开启动高峰）在后台扫一遍，把文件补记进库。
+   * 补完以后就能用「查表验证完整性」替代「看 runtimeLinked 布尔字段」了。
+   *
+   * 为什么要等 8 秒：全盘 stat 上万个文件要几秒，虽然不阻塞主线程（异步 IO），
+   * 但会抢磁盘 IO，和启动时的资源扫描打架。等启动稳下来再做。
+   */
+  if (process.env.HX_CAPTURE !== '1' && process.env.HX_SMOKE !== '1') {
+    setTimeout(() => {
+      const efGame = (store?.data?.games || []).find((g) => g.builtinKey === 'endfield');
+      if (!efGame) return;
+      backfillGameFileDb(efGame)
+        .then((r) => {
+          if (r.channels) writeLaunchLog('[endfield] 记账补齐完成：' + r.channels + ' 个渠道 / ' + r.files + ' 个文件');
+        })
+        .catch((error) => {
+          writeLaunchLog('[endfield] 记账补齐异常（不影响启动）：' + (error && error.message));
+        });
+    }, 8000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

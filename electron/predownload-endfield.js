@@ -552,7 +552,7 @@ async function applyPatchNode({ installRoot, tempDir, stageDir, vfsBase, item, l
 
   /*
    * ⓪ 跨服复用：别的服更新完之后，这个文件在那边已经是目标版本了，直接硬链接过来，
-   *    连解压/打差分都省了（用户 2026-11-16「点更新游戏，就是重新硬链接，补齐差异文件」）。
+   *    连解压/打差分都省了。
    *
    *    判定口径只用目标 md5 —— patch.json 里给了 md5 才敢复用，没给就老老实实走原路。
    *    路径按「安装根目录 + 清单里的相对路径」找候选；找不到就是找不到，reuseFromSources
@@ -704,7 +704,7 @@ async function applyEndfieldPredownload({ channel, installRoot, signal, onProgre
    * patch 存在时它的包通常与 pre_patch 指向同一批分卷（官方就是这么发的），
    * 但校验口径必须跟下载口径一致，所以优先 pre_patch，没有才退 patch。
    */
-  const sourceList = latest.pre_patch?.patches?.length ? latest.pre_patch : latest.patch;
+  const sourceList = latest.prePatch?.patches?.length ? latest.prePatch : latest.patch;
   const packs = packList(sourceList);
   if (!packs.length) {
     throw new Error(

@@ -194,7 +194,7 @@ function compareVersion(a, b) {
 
 /**
  * checkPredownload 的 gate ③④ 纯判定，单独拎出来方便自测直接验证
- * 「3.8.0 > 3.7.1 才预下载、相等/本地更新都不预下载」。
+ *
  */
 function versionGate(targetVersion, localVersion) {
   if (!targetVersion || !localVersion) {
@@ -476,7 +476,7 @@ function pickCdnUrl(body, predownload) {
  * root 有时被填成了 exe 所在目录（手动选路径、自动扫描都踩过），
  * 只读 root 这一层就会判定「这不是库洛官方客户端」而直接拒绝更新。
  *
- * 2026-11-17 用户报障：极致画质（UHD）的鸣潮客户端识别出来后，点「更新游戏」
+ * 用户报障：极致画质（UHD）的鸣潮客户端识别出来后，点「更新游戏」
  * 报「这个目录不是库洛官方客户端」，但游戏其实已经是最新版了 —— 就是这里
  * 只读一层导致的。
  *
@@ -568,7 +568,7 @@ const EMPTY_CHECK = {
   packs: [],
   reason: '',
   // 官方撤掉 predownload 槽时把「线上正式版本 / 本地版本」带出去，
-  // 让 predownload.js kuroReport 能点亮「更新游戏」（用户 m28959）。
+  // 让 predownload.js kuroReport 能点亮「更新游戏」。
   liveVersion: '',
   localVersion: '',
 };
@@ -620,7 +620,7 @@ async function checkPredownload({ channel, installRoot, localVersion } = {}) {
       // 官方把 predownload 槽撤成 null，通常就是新版本已经从「预下载」转「正式更新」
       // （实测 2026-11-12：predownload=null，resourcePacks.*.version 全是 3.8.0，
       //  而本机还停在 3.7.1）。除了给中文提示，还要把线上/本地版本带出去，
-      //  让上层点亮「更新游戏」徽标（用户 m28959）。
+      //  让上层点亮「更新游戏」徽标。
       const live = body && body.resourcePacks;
       const liveVersion = live
         ? String((live.common || Object.values(live)[0] || {}).version || '')
@@ -1802,7 +1802,7 @@ async function updateGameFromBundle({
  * **统一走 `kuro-packs.writeLauncherConfig`**：预下载应用（applyPredownload）、真升级
  * （updateGameFromBundle）、下载游戏 / 更新 / 硬链接切服三处都会写这份记账，
  * 必须字字一致。以前这里自己抄了一份，一旦两边的字段口径跑偏，就会出现
- * 「预下载说我到 3.8.0 了、真升级说本地还是 3.7.1、于是又全量下一遍」。
+ *
  */
 async function writeLocalVersion(installRoot, bundle, packs, version) {
   await kuroPacks.writeLauncherConfig({

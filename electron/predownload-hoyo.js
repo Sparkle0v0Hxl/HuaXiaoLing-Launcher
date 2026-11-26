@@ -823,7 +823,7 @@ async function startHoyoPredownload({
   onProgress,
   // 只给自检 / 真机验证脚本用来「只下前 N 个补丁包」；正式链路不传 = 下全部
   maxPatches = 0,
-  // 别的服已经预下载过的同类文件可以直接硬链接复用（用户 2026-11-16「预下载功能也是」）
+  // 别的服已经预下载过的同类文件可以直接硬链接复用
   linkSources = [],
 }) {
   if (!supported(gameKey)) throw new Error('这个游戏不支持米哈游预下载');

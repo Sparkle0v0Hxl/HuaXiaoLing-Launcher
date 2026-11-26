@@ -17,7 +17,7 @@ const { loadSecret, saveSecret } = require('./secret-store');
  */
 
 function installAppIpc(ctx) {
-  const { snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore } = ctx;
+  const { snapshot, normalizeUiScale, applyUiScale, win, updateTempBase, APP_VERSION, describeRunningProcesses, setQuitting, ensureDownloadsDir, updateLogDirs, currentElevation, relaunchElevated, getStore, probeElevation } = ctx;
 
   /* quitting 是 main.js 的模块级 let，只能通过 setter 改（按值解构是 const，赋值会抛 TypeError） */
   const markQuitting = () => {
@@ -155,6 +155,30 @@ function installAppIpc(ctx) {
       const ok = shell.writeShortcutLink(shortcutPath, existed ? 'replace' : 'create', options);
       if (!ok) throw new Error('系统未能创建桌面快捷方式');
       return { ok: true, path: shortcutPath, existed };
+    });
+
+    /*
+     * 当前进程到底是不是管理员，给设置页显示用。
+     *
+     * 为什么单开一个接口：用户反复报「明明给了权限，界面还是说没提权」。
+     * 界面上如果只是一句静态提示，用户根本没法判断到底是「启动器没探到」
+     * 还是「自己其实点了否」。这里把探测来源（integrity/compat-layer/
+     * powershell/unknown）也一起返回，出问题时看这一个字段就够了。
+     *
+     * probeElevation 每次真探（不走 elevatedCache），因为可能刚被 UAC 提升过。
+     */
+    ipcMain.handle('app:elevation', () => {
+      try {
+        const probe = typeof probeElevation === 'function' ? probeElevation() : { elevated: currentElevation(), via: 'cached' };
+        return {
+          elevated: probe.elevated, // true / false / null（null = 没得出结论）
+          via: probe.via,
+          alwaysAdmin: Boolean(getStore().data.settings.alwaysAdmin),
+          declinedAt: Number(getStore().data.settings.elevationDeclinedAt || 0),
+        };
+      } catch (error) {
+        return { elevated: null, via: 'error', error: error.message };
+      }
     });
 
     ipcMain.handle('app:relaunch-admin', async (_event, input) => {

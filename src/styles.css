@@ -1,4 +1,4 @@
-��筱灵启动器 — 原创界面样式 */
+/* 花筱灵启动器 — 原创界面样式 */
 :root {
   /* 强调色当文字用时走这一组：深色主题＝原色，浅色主题会在下面加深。
      背景 / 边框 / 阴影仍然用 --accent，不跟着变。 */
@@ -2267,6 +2267,68 @@ button.recent-row {
 }
 .modal-body {
   padding: 22px 24px;
+}
+/*
+ * 提权询问弹窗里的「开启 / 不开」对照行。
+ * 两行并排，用左侧色条区分（开启=强调色，不开=灰），一眼就能比出差别，
+ * 不用读一大段文字。
+ */
+.elev-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 12px;
+}
+.elev-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border-left: 3px solid var(--line);
+  background: var(--surface-2);
+}
+.elev-row.elev-on {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+}
+.elev-tag {
+  flex: 0 0 auto;
+  min-width: 30px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+.elev-row.elev-on .elev-tag {
+  color: var(--accent);
+  opacity: 1;
+}
+.elev-row p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.elev-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.72;
+}
+
+/*
+ * 弹窗里的小节标题（提权询问那种「为什么/开启后/不开会怎样」的分段）。
+ * 用左侧竖条 + 强调色，跟正文段落拉开层次，避免一大坨文字。
+ */
+.modal-section-title {
+  margin: 16px 0 6px;
+  padding-left: 9px;
+  border-left: 3px solid var(--accent);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.modal-section-title:first-child {
+  margin-top: 0;
 }
 .modal-foot {
   display: flex;
@@ -4985,6 +5047,68 @@ body.sidebar-collapsed .sidebar-scroll > .nav {
 .modal-body {
   padding: 22px 24px;
 }
+/*
+ * 提权询问弹窗里的「开启 / 不开」对照行。
+ * 两行并排，用左侧色条区分（开启=强调色，不开=灰），一眼就能比出差别，
+ * 不用读一大段文字。
+ */
+.elev-compare {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 12px;
+}
+.elev-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border-left: 3px solid var(--line);
+  background: var(--surface-2);
+}
+.elev-row.elev-on {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+}
+.elev-tag {
+  flex: 0 0 auto;
+  min-width: 30px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+.elev-row.elev-on .elev-tag {
+  color: var(--accent);
+  opacity: 1;
+}
+.elev-row p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.elev-tip {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.72;
+}
+
+/*
+ * 弹窗里的小节标题（提权询问那种「为什么/开启后/不开会怎样」的分段）。
+ * 用左侧竖条 + 强调色，跟正文段落拉开层次，避免一大坨文字。
+ */
+.modal-section-title {
+  margin: 16px 0 6px;
+  padding-left: 9px;
+  border-left: 3px solid var(--accent);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+.modal-section-title:first-child {
+  margin-top: 0;
+}
 .modal-foot {
   display: flex;
   align-items: center;
@@ -6561,7 +6685,7 @@ html[data-theme="light"] body {
 /*
  * 更新游戏面板的头部：大百分比 + 剩余时间。
  *
- * 用户的原话是「加个百分比和覆盖了多少」——百分比必须在最显眼的位置，
+ * ——百分比必须在最显眼的位置，
  * 不能只是一行小字里的「第 3/5 步」。
  */
 .gu-head {
@@ -7565,8 +7689,7 @@ body.sidebar-collapsed .nav-item.active::before {
   left: -8px;
 }
 
-/* 收起态这颗箭头 = 展开态「收起侧栏」的同款样式（用户 2026-10-31 澄清：
- * 「只是和收起侧栏一样的样式」——指配色/悬停那套语言，不是加文字）。
+/* 收起态这颗箭头 = 展开态「收起侧栏」的同款样式。
  * 共用基础规则的 muted 默认 + 悬停火花金/gold-soft，这里只做小尺寸适配。
  * 加文字 pill 方案（侧栏放宽到 120px 容「展开侧栏」）已否决：窄栏放
  * 文字太散，还不如原版，回退到 72px 窄栏 + 纯箭头。 */
@@ -14272,7 +14395,7 @@ body.start-mode .start-games {
 /* 界面缩放                                                             */
 /* ------------------------------------------------------------------ */
 
-/* :root 里默认 1，缩放比例写在 html 的 --ui-scale 上 */
+/* root 里默认 1，缩放比例写在 html 的 --ui-scale 上 */
 :root {
   --ui-scale: 1;
 }
@@ -21784,8 +21907,8 @@ body:not(.sidebar-collapsed) .nav-item.active::after {
 }
 
 /* 只有徽章真的显示出来才让位：下载项的徽章常驻 DOM、只是 hidden，
- * :has(.nav-badge) 不看可见性，会把水印永久挪到 30px，和其它页不统一
- * （用户 2026-10-31 反馈「下载的星星去对上动态页的统一」）。 */
+ * has(.nav-badge) 不看可见性，会把水印永久挪到 30px，和其它页不统一
+ * 。 */
 body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge:not([hidden]))::after {
   right: 30px;
 }
@@ -22408,7 +22531,7 @@ body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge:not([hidden]))::aft
 }
 
 /*
- * 主视觉右侧：和侧栏底部是同一张 sparxie-fullbody.png，只是放大摆到画面上。
+ * 主视觉右侧：和侧栏底部是同一张 sparkle-hero.png，只是放大摆到画面上。
  *
  * 左边那一列是标题和正文，她放左怎么调都会压在字上；挪到正文和头像卡之间的空档里，
  * 脸、双马尾、红黑衣服一眼就能认出来，文字区一点没碰。
@@ -22483,13 +22606,19 @@ body:not(.sidebar-collapsed) .nav-item.active:has(.nav-badge:not([hidden]))::aft
   flex: 0 0 auto;
   width: 100%;
   /* 150~230 那档会把导航挤到必须滚动才看得到「设置」；
-   * 收到 140~196：常规窗口（≥800 高）里导航能整块放下，矮窗口才需要滚。 */
-  height: clamp(160px, 22vh, 210px);
+   * 收到 150~196：常规窗口（≥800 高）里导航能整块放下，矮窗口才需要滚。
+   *
+   * 2026-11-26：22vh 在默认 858 高窗口算出 189px，导航区只剩 497px，
+   * 比内容少 13px —— 于是展开侧栏时右边挂出一条几乎占满高度的细滚动条
+   * （.sidebar-scroll 的 gutter 常显 + 滑块 0.42 透明度，很显眼）。
+   * 实测立绘 ≤176px 时 510px 内容刚好放得下；这里按 20vh 收一档，
+   * 858 高得到 ~172px，留 4px 余量。 */
+  height: clamp(150px, 20vh, 196px);
   margin: 8px 0 0;
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
-  /* 2026-11-22：用户要求侧栏立绘完整显示，不再做上下渐隐/裁切。 */
+  /* 用户要求侧栏立绘完整显示，不再做上下渐隐/裁切。 */
   -webkit-mask-image: none;
   mask-image: none;
 }
@@ -24623,7 +24752,6 @@ body.charbg-on .page-deco-bg { display: block; }
 
 /* 挂饰：和启动页 dock 同一套轻摆逻辑。受 charms-on 控制
  *
- * 2026-11-20（用户 m370647「图3的挂饰不好看」）：
  * 原来是 44×44 小方块 + 圆角 + 4px padding + 金边 + 深底 + 毛玻璃，
  * 等于把「徽章」缩到 46px —— 里面塞着 3 朵玫瑰和碎星，缩小后只剩一团模糊紫球，
  * 金边反而成了视觉主体。
@@ -25291,7 +25419,7 @@ body.charms-on .page-deco-sprite { display: block; }
 /* 按键手感 & 开关动画：统一收口（写在文件最后，收掉前面几版零散定义）       */
 /*                                                                     */
 /* 为什么必须放最后：styles.css 里 .switch 被改过多版，而浅色主题那一套是   */
-/* :root[data-theme="light"] .switch.on，特异性 (0,4,0)，比普通的          */
+/* root[data-theme="light"] .switch.on，特异性 (0,4,0)，比普通的          */
 /* .switch.on (0,2,0) 更高——写在文件中段的浅色分支会把后面补的普通定义     */
 /* 重新盖掉，于是「深色修好了、浅色还是老样子」。所以基础态和浅色态必须     */
 /* 成对地写在文件末尾，两个主题才长得一样。                                */
@@ -26204,7 +26332,7 @@ body.charms-on .page-deco-sprite { display: block; }
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-  /* 2026-11-22：主区窄时动作条会换到第二行，靠右收住，别在标题下面左对齐悬着 */
+  /* 主区窄时动作条会换到第二行，靠右收住，别在标题下面左对齐悬着 */
   margin-left: auto;
 }
 
@@ -27818,7 +27946,7 @@ body.charms-on .page-deco-sprite { display: block; }
 
 /*
  * 酷狗 / 酷我的兜底提示条。
- * 用户原话是「不能扫码或者登录账号获取歌单的话，你要在登录界面写清楚，用歌单链接导入」，
+ * 所以这块不能做成一坨灰色小字：左边一条竖色条 + 图标 + 加粗标题，再加一颗能直接跳过去的按钮。
  * 所以这块不能做成一坨灰色小字：左边一条竖色条 + 图标 + 加粗标题，再加一颗能直接跳过去的按钮。
  */
 .kr-login-tip {
@@ -29625,7 +29753,7 @@ body.is-subpage .page-deco {
 }
 
 /* hero 左下氛围光：硬编码红金 → 主题色
- * 2026-11-20 T3-B：底色也改走 --hero-mask-* 变量（原来写死近黑 rgba(10,3,8,…)，
+ * 底色也改走 --hero-mask-* 变量（原来写死近黑 rgba(10,3,8,…)，
  * 浅色主题下会盖掉整块 hero，详见文件末尾 40004 处的说明）。 */
 .home-page .hero-shade {
   background:
@@ -29851,18 +29979,121 @@ body.start-mode.start-nav-collapsing .start-top .start-window-controls {
   transition: none;
 }
 
-/* 画面被推出来之后，左上角那颗菜单键和「花筱灵 / HANABI STAGE」就重复了——
-   侧栏里本来就有一份同样的品牌名，两个并排看着像复制粘贴出错。
-   这两块随画面推开一起淡出（点画面任意处、Esc 照样能收回）。 */
-body.start-mode .start-top .chrome-menu,
-body.start-mode .start-brand {
+/*
+ * 启动页唤出侧栏时，左上角那颗菜单键怎么处理（2026-11-26，做成可配置开关）。
+ *
+ * 设置项「启动页菜单键固定」= 开（默认）：
+ *   · 菜单键**留在原位**，图标翻成左箭头，再点一下就收回抽屉。
+ *   · logo 图 + 「花筱灵 / HANABI STAGE」往左飞进抽屉、缩小淡出，落点正好是
+ *     侧栏顶部那个 logo 头像 —— 视觉上就是「出去成侧栏上面那个 logo 了」。
+ *   关掉后回到原来的样子：两块都跟着画面让开、淡出，收起靠抽屉自己的入口
+ *   （底部「收起侧栏」/ 头像 / 点画面 / Esc）。
+ *
+ * 为什么要单独的浮层键（.start-nav-pin-btn）：
+ *   抽屉一展开，画面整体让开 push。原来那颗键长在 .start-screen 里，随之落到
+ *   start-screen 的边界外 —— 位置看着还在左上角，但 overflow:hidden 把超出的
+ *   部分连命中测试一起裁掉，点不到了（用户反馈的「固定回来不能直接收起来」）。
+ *   浮层键挂在 body 下、位置与尺寸和收起态那颗完全重合，展开时接替它上阵。
+ */
+
+/* ── 关掉（原样）：菜单键和品牌一起淡出 ───────────────────────── */
+body.start-mode .start-top .chrome-menu {
   transition: opacity 0.2s ease;
 }
-body.start-mode.start-nav-open .start-top .chrome-menu,
-body.start-mode.start-nav-open .start-brand {
+body.start-mode.start-nav-open:not(.start-nav-pin) .start-top .chrome-menu {
   opacity: 0;
   pointer-events: none;
 }
+
+/* ── 开 / 关都用同一条淡出；开着时原键让位给浮层键（视觉上是同一颗）── */
+body.start-mode .start-top .chrome-menu {
+  transition: opacity 0.2s ease;
+}
+body.start-mode.start-nav-pin.start-nav-open .start-top .chrome-menu {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*
+ * 浮层「收回」键：位置/尺寸对齐收起态那颗原键（量出来 left 28 / top 18 / 42×42）。
+ * 层级要压过抽屉(.sidebar z0) < 画面(.main z1) < 遮罩(118) < 它(130)。
+ *
+ * 默认不显示 —— 只有「启动页 + 固定开着 + 抽屉展开」三个条件同时成立才上阵。
+ * 这里不用 [hidden] 属性：UA 的 [hidden]{display:none} 会被下面的 display:grid
+ * 盖掉（同一类坑项目里踩过好几次）。
+ */
+.start-nav-pin-btn {
+  display: none;
+  /*
+   * 2026-11-26：它落点和启动页顶栏（.start-top 是 -webkit-app-region: drag）
+   * 完全重合。不加 no-drag 的话，系统会把这一下当成「拖窗口」而吞掉点击 ——
+   * CDP 注入的点击能过，真实鼠标点了没反应，正是用户反馈的「箭头失效」。
+   */
+  -webkit-app-region: no-drag;
+}
+body.start-mode.start-nav-pin.start-nav-open .start-nav-pin-btn {
+  position: fixed;
+  left: 28px;
+  top: 18px;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  /* 尺寸由 JS 按原键实测值写入；这里只管外观，和收起态那颗保持一致：
+     透明底、圆角方块、同样的图标色 —— 展开时只是图标从三横变成左箭头，
+     不该让人看出「换了个按钮」 */
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.78);
+  /* 展开后这颗键落在深色侧栏上（不再是启动页的亮插画），全透明会看不见 ——
+     给一层很淡的底 + 细描边，一眼能认出「这里能点」，悬停再提亮。
+     这就是用户说的「别的用户不知道能点哪儿」的反面。 */
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+body.start-mode.start-nav-pin.start-nav-open .start-nav-pin-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+}
+body.start-mode .start-nav-pin-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/*
+ * 品牌跟着抽屉「飞进去」：横纵位移和缩放都由 syncStartNavPinBtn() 实测写入
+ * （--pin-fly-x / --pin-fly-y / --pin-fly-scale），落点就是抽屉顶部那个 logo
+ * 现在所在的位置 —— 视觉上「logo 图和文字出去，变成侧栏上面那个 logo 了」。
+ *
+ * 不写死数字：侧栏宽度（72 / 238）、界面缩放、窗口宽度都会改变这两个落点，
+ * 写死就会飞偏。收起时同一段倒放，回到左上角原位。
+ */
+body.start-mode .start-brand {
+  transform-origin: left center;
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+body.start-mode.start-nav-pin.start-nav-open .start-brand {
+  transform: translate(var(--pin-fly-x, -69px), var(--pin-fly-y, 0px))
+    scale(var(--pin-fly-scale, 0.34));
+  opacity: 0;
+}
+body.start-mode.start-nav-open:not(.start-nav-pin) .start-brand {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*
+ * 抽屉展开时不再把顶部 logo 下移：收回键已经跟随启动页画面、不会进入侧栏，
+ * 两者不会重叠。之前下移 46px 会把导航整体压低，用户反馈「排序都乱了」。
+ */
+
+
 
 /* 遮罩：同一条时长淡入；打开后吃掉画面上的点击，点哪儿都只在收侧栏。
    画面已经被整块推开、不再被侧栏压着，所以这里只留很淡的一层压暗，
@@ -29880,6 +30111,18 @@ body.start-mode.start-nav-open .start-brand {
 body.start-mode.start-nav-open .start-screen::before {
   opacity: 1;
   pointer-events: auto;
+}
+/*
+ * 固定模式（2026-11-26）：抽屉钉住时启动页必须还能操作。
+ *
+ * 上面那层遮罩是为「点画面任意处收侧栏」设计的：它铺满整个画面、吃掉所有点击，
+ * 还压暗插画。固定模式不靠点画面收回（收回走返回箭头 / 收起侧栏 / Esc），
+ * 这层就成了纯障碍 —— 用户反馈「展开时不能操作启动页，还有渐暗」。
+ * 所以固定模式下整层让开：不压暗、不接点击，画面上的按钮全部按正常层级工作。
+ */
+body.start-mode.start-nav-pin.start-nav-open .start-screen::before {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* 唤出时窗口按钮仍可点：压在遮罩之上。
@@ -29906,7 +30149,7 @@ body.start-mode.start-nav-open .start-top .start-window-controls {
   width: 320px;
   /* 角色图 character.png 是 1536×1536 正方形：容器必须同为正方形。
      早前高度写成 356，object-fit:contain + 居中靠底会把图压在下方，
-     卡片顶部凭空空出 36px 深色带（用户 2026-10-31 反馈「空出来了」）。 */
+     卡片顶部凭空空出 36px 深色带。 */
   height: 320px;
   border-radius: 20px;
   overflow: hidden;
@@ -30653,7 +30896,7 @@ body.sidebar-collapsed .sidebar::after {
 }
 
 /* ---- 分段头：改成吸顶分组条 ----
- * 原来是一条贴底的细线，滚两屏就分不清自己在哪一段（用户反馈「很乱」）。
+ * 原来是一条贴底的细线，滚两屏就分不清自己在哪一段（）。
  * 吸顶后段名一直在，段与行也有了明确的块状层级。 */
 .song-queue-seg-head {
   position: sticky;
@@ -31433,7 +31676,7 @@ body.sidebar-collapsed .sidebar::after {
    * 千万别把 opacity 交给动画 —— styles.css L34981 的 `body.is-idle *`
    * 会 animation-play-state: paused !important，窗口失焦 / 最小化回来后
    * 动画一旦冻在第 0 帧，opacity:0 就让菜单「加了 is-menu-open 却看不见」，
-   * 表现正是用户说的「所有游戏的服务器选择点击都没反应或者反应慢」(m02332)。
+   * 表现正是用户说的「所有游戏的服务器选择点击都没反应或者反应慢」。
    */
   opacity: 1;
   animation: startDockMenuIn 0.15s cubic-bezier(0.22, 1, 0.36, 1);
@@ -35929,7 +36172,7 @@ body.is-idle .modal-backdrop {
 }
 
 /*
- * 「还有 N 项 / 展开其余 N 项」。
+ *
  * 用 details 而不是自己写开关：无需 JS、键盘可达、展开状态浏览器自己记住。
  */
 .record-page .record-more {
@@ -37737,7 +37980,6 @@ body.is-idle .modal-backdrop {
 
 /* ═══════════════════════════════════════════════════════════════════
  * 弹窗毛玻璃 v1（2026-11-11 用户反馈）
- *  用户原话：「我们界面有很多这样的窗口，感觉不好看，能不能搞毛玻璃之类的」
  *
  *  原来 .modal 是纯实心 var(--surface)，只有它背后的 .modal-backdrop 在模糊，
  *  所以看着就是一块实心深色板。这里让弹窗本体半透明、并自己带一层模糊，
@@ -39740,7 +39982,7 @@ body.is-idle .modal-foot {
 
 /* ── 输入控件不再用全局红框（2026-11-18） ───────────────────────────
  * 全站 :focus-visible 是 2px solid var(--accent)，而这个主题的 accent 是红色，
- * 于是点一下搜索框就冒出一个扎眼的红方块 —— 用户原话「点一下还会出来个大红方块框」。
+ * 于是点一下搜索框就冒出一个扎眼的红方块 ——
  * 输入类控件统一去掉 outline，改用柔和的边框/阴影表达焦点。
  */
 input:focus-visible,
@@ -40478,7 +40720,7 @@ select:focus-visible {
 /* ══════════════════════════════════════════════════════════════════
  * 弹窗 / 更新窗口跟随主题（2026-11-18）
  *
- * 用户要求「弹窗更新的窗口也得跟着动」。
+ * 。
  * 弹窗本体的底已经用 color-mix(--surface) 跟着主题走了，问题在：
  *   · 阴影与内高光写死成深色 / 白色；
  *   · 服务器选择弹窗里的行卡片用 rgba(255,255,255,x) 描边和底色，
@@ -40516,7 +40758,7 @@ select:focus-visible {
 /* ══════════════════════════════════════════════════════════════════
  * 浅色主题全局对比度提升（2026-11-18）
  *
- * 用户反馈「目前只有深色主题是最完美的」。浅色的问题不是某一处，
+ * 。浅色的问题不是某一处，
  * 而是历史硬编码（#fff 文字、rgba(255,255,255,x) 描边）太多，
  * 逐个补丁效率低且容易漏。
  *
@@ -40573,7 +40815,7 @@ select:focus-visible {
  *
  * 图4 主页 hero：白字压浅色立绘 → 文字改深
  * 图3/5 顶部栏与「添加游戏」：白字 → 深字
- * 注：图1（服务器选择弹窗）用户要求「维持原样」，这里不做任何覆盖。
+ * 注：图1（服务器选择弹窗），这里不做任何覆盖。
  * ══════════════════════════════════════════════════════════════════ */
 
 /* ── 主页 hero 文字 ───────────────────────────────────────────── */
@@ -41021,7 +41263,6 @@ select:focus-visible {
 /* ══════════════════════════════════════════════════════════════════
  * 启动页整页固定深色（2026-11-18 用户要求）
  *
- * 用户原话：「你干脆浅色系也不会改变启动页，启动页整页就留深色系那样」。
  *
  * 做法：在 .start-screen 自身上重设一整套深色变量，覆盖从 html 继承来的
  * 浅色值。因为启动页内部所有元素都用 var(--surface) / var(--text) 之类，
@@ -41661,3 +41902,282 @@ select:focus-visible {
   box-shadow: 0 18px 38px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(var(--gold-rgb), 0.28);
 }
 
+
+/* ================================================================== */
+/* 窄屏紧凑模式（2026-11-24）                                          */
+
+/* ================================================================== */
+/* 窄屏紧凑模式（2026-11-24）                                          */
+/* ================================================================== */
+/*
+ * 为什么加这一段：
+ *   用户报「窗口拉小之后有些按钮收缩没了、也不好看了」，截图 1465×643。
+ *   查下来根因不是滚动（#view 本来就是 overflow-y:auto，内容能滚），
+ *   而是几处**固定列数**的网格在窄屏被压扁：
+ *
+ *   · .gacha-kpi-grid   repeat(4, 1fr) —— 4 列的 KPI 卡片挤成每列几十 px，
+ *                        数字和标签叠在一起，这是用户说的「不好看」
+ *   · .gacha-stat-row   repeat(4, 1fr) —— 同上（老版统计条）
+ *   · .gacha-game-tabs  flex 不换行 —— 窄屏时后面的游戏标签被挤没
+ *
+ * 注意 .gacha-charts 用的是 repeat(auto-fit, minmax(268px, 1fr))，本身自适应，
+ * 不用改；窄屏它会自动从三列变两列再变一列。
+ *
+ * 断点依据（对应 main.js 的 WINDOW_MIN_SIZE = 1180×720）：
+ *   1180 以下 —— 侧栏 238→220，内容区开始吃紧，先收页边距
+ *   1080 以下 —— 4 列 KPI 该变 2 列
+ *    960 以下 —— 游戏标签行允许横向滚动
+ *    900 以下 —— 按钮和卡片进一步收紧
+ */
+
+/* ── 1180px：收页边距与卡片内距 ── */
+@media (max-width: 1180px) {
+  /*
+   * ★ 必须排除启动模式：启动页要 padding: 0 让背景图铺满整窗。
+   *   原来写成裸 #view（1 个 ID）会盖掉 ody.start-mode .view { padding: 0 }
+   *   （2 类 + 1 元素）—— 特异性 ID 更高，结果启动页左右各多出 22px 深色边。
+   */
+  body:not(.start-mode) #view {
+    padding: 8px 22px 44px;
+  }
+  .gacha-kpi-grid {
+    gap: 8px;
+  }
+  .gacha-kpi {
+    padding: 4px 2px;
+  }
+  .gacha-content {
+    padding: 14px 14px;
+  }
+}
+
+/* ── 1080px：4 列 KPI → 2 列 ── */
+@media (max-width: 1080px) {
+  body:not(.start-mode) #view {
+    padding: 8px 18px 40px;
+  }
+  .gacha-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* 老版统计条同样是 4 列 */
+  .gacha-stat-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .gacha-stat-row > div:nth-child(2n) {
+    border-right: 0;
+  }
+  .gacha-stat-row > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+  /* 顶部操作区允许换行，按钮不会被压成小方块 */
+  .page-head-actions {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  /* 设置页「标签 + 控件」行改上下排 */
+  .setting-row {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .setting-control {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* ── 960px：游戏标签行改成可横向滚动（而不是被挤没） ── */
+@media (max-width: 960px) {
+  .gacha-game-tabs {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .gacha-game-tabs > * {
+    flex: none;
+  }
+  /* 池子筛选标签本来就会换行，这里只收紧间距 */
+  .gacha-scope-tabs {
+    gap: 6px;
+  }
+  .gacha-scope-tabs button {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+}
+
+/* ── 900px：按钮与卡片进一步收紧，保点得动、看得清 ── */
+@media (max-width: 900px) {
+  body:not(.start-mode) #view {
+    padding: 8px 14px 36px;
+  }
+  .btn {
+    min-height: 30px;
+    padding-inline: 12px;
+    white-space: nowrap;
+  }
+  .gacha-content {
+    padding: 12px 12px;
+  }
+  /* 图表卡片最小宽度下调一档，让 900 宽还能塞两列 */
+  .gacha-charts {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+  }
+}
+
+
+/* ================================================================== */
+/* 启动页窄屏适配（2026-11-24）                                        */
+/* ================================================================== */
+/*
+ * 触发原因：用户把窗口拉到最小（1182×721）后，启动页明显失衡：
+ *   · 标题 clamp(44px, 6vw, 78px) 在 1182 宽算出 71px，一个字半个屏幕，
+ *     而左侧还有 7vw 内边距，视觉上「左边空一大片、字又太大」；
+ *   · 右侧服务器面板 max-width: min(520px, 46vw) 在 1182 宽占 544px，
+ *     加上 right: 3.4vw 的边距，把背景主视觉（终末地那条龙）压掉大半；
+ *   · 标题 + 副标题 + 版本标签 + 公告列表堆在一起，垂直方向挤满。
+ *
+ * 修法：在 1240 / 1100 / 900 三档里，逐档缩小字号、收内边距、
+ * 让面板变窄。全部是同优先级后置声明，不加 !important。
+ */
+
+/* ── 1240px：标题字号封顶、左边距收紧 ── */
+@media (max-width: 1240px) {
+  .start-main {
+    padding: 0 5vw 4vh;
+  }
+  /* 上限从 78px 压到 58px —— 小窗口里 71px 的标题太抢 */
+  .start-main h1 {
+    font-size: clamp(38px, 4.6vw, 58px);
+    margin-top: 12px;
+  }
+  .start-dock {
+    right: clamp(18px, 2.4vw, 40px);
+    bottom: clamp(88px, 12vh, 130px);
+    padding: 11px 13px;
+  }
+  .start-dock-panel {
+    min-width: 300px;
+    max-width: min(440px, 42vw);
+  }
+}
+
+/* ── 1100px：标题再降一档，公告列表限高，面板继续收窄 ── */
+@media (max-width: 1100px) {
+  .start-main {
+    padding: 0 4vw 3.5vh;
+    max-width: none;
+  }
+  .start-main h1 {
+    font-size: clamp(32px, 4vw, 48px);
+    letter-spacing: -0.03em;
+  }
+  /* 游戏公告在窄屏下先别全展开，限高 + 滚动，别把标题挤上去 */
+  .start-notices {
+    width: min(520px, 100%);
+    max-height: 152px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  .start-dock-panel {
+    min-width: 272px;
+    max-width: min(380px, 40vw);
+  }
+  /* 底部游戏抽屉的左右内距跟着收 */
+  .start-games {
+    padding: 0 14px;
+  }
+}
+
+/* ── 900px：面板改为贴右下角紧凑布局，主视觉优先 ── */
+@media (max-width: 900px) {
+  .start-main {
+    padding: 0 3vw 3vh;
+    /* 给右侧面板让出位置，不然标题和面板会叠 */
+    padding-right: min(300px, 34vw);
+  }
+  .start-main h1 {
+    font-size: clamp(28px, 3.4vw, 38px);
+  }
+  .start-dock {
+    right: 14px;
+    bottom: clamp(80px, 11vh, 110px);
+    gap: 10px;
+    padding: 9px 11px;
+    border-radius: 16px;
+  }
+  .start-dock-panel {
+    min-width: 240px;
+    max-width: 280px;
+  }
+  /* 公告在 900 以下折叠成一个条，点开再看 */
+  .start-notices {
+    max-height: 116px;
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ * 搜索类型切换：搜单曲 / 搜歌单（2026-11-25）
+ *
+ * 用户需求原话：「搜索能分类一下吗？目前歌名/歌手/专辑嘛，得分吧？
+ * 然后再加个歌单上去搜索」。这两颗按钮就是那个「分一下」——
+ * 点左边的搜单曲（按歌名/歌手/专辑），点右边的搜公开歌单。
+ *
+ * 做成胶囊分段而不是 <select>：这一行已经有一个平台下拉了，再加一个
+ * 下拉用户得分两次才看清「我在搜什么」；两个并排的按钮一眼就分得清。
+ * 样式沿用 .song-search-btn 的色调，尺寸比它小一档（它是次要切换）。
+ * ══════════════════════════════════════════════════════════════════ */
+.song-search-mode {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.song-search-mode-btn {
+  flex: none;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.song-search-mode-btn:hover {
+  color: var(--text-2);
+}
+
+.song-search-mode-btn.on {
+  color: var(--accent-ink);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+:root[data-theme='light'] .song-search-mode {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* 窄屏：两个按钮的文字收窄，别把输入框挤没了 */
+@media (max-width: 1180px) {
+  .song-search-mode-btn {
+    padding: 0 7px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 980px) {
+  .song-search-mode {
+    display: none;
+  }
+}

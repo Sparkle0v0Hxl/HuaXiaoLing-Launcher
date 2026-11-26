@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { ipcMain, app, shell, dialog } = require('electron');
 const path = require('node:path');
@@ -12,7 +12,7 @@ const installManager = require('./install-manager');
 const predownload = require('./predownload');
 const { createCancelSignal } = require('./cancel-signal');
 // 渠道能力表：哪些游戏在哪些渠道支持 link/repair/update/predownload 全在这里定义，
-// 不要在下面各 handler 里再写死渠道数组（用户 2026-11-16 定的规则）。
+// 不要在下面各 handler 里再写死渠道数组。
 const gameChannels = require('./game-channels');
 
 /*
@@ -55,7 +55,7 @@ function kuroClientRootOf(dirOrExe) {
  */
 
 function installServersIpc(ctx) {
-  const { getStore, getRunning, getLaunching, getLinkJobs, getLinkTrees, ENDFIELD_PACK_NAMES, applyHdiffPrepass, beginBackgroundTask, endBackgroundTask, buildEndfieldChannelRuntime, ensureEndfieldChannelRuntime, ensureArknightsRuntime, ensureKuroRuntime, channelPackNeededFor, channelPackStatus, clientChannel, currentElevation, detectGame, externalLinkSources, isEndfieldLegacyWorkRoot, pushState, send, sendProgress, targetExists, writeLaunchLog, storyResourcesEnabled, syncOfficialGame } = ctx;
+  const { getStore, getRunning, getLaunching, getLinkJobs, getLinkTrees, ENDFIELD_PACK_NAMES, applyHdiffPrepass, beginBackgroundTask, endBackgroundTask, buildEndfieldChannelRuntime, ensureEndfieldChannelRuntime, ensureArknightsRuntime, ensureKuroRuntime, channelPackNeededFor, channelPackStatus, clientChannel, currentElevation, detectGame, externalLinkSources, isEndfieldLegacyWorkRoot, isEndfieldRuntimeDir, endfieldClientReady, pushState, send, sendProgress, targetExists, writeLaunchLog, storyResourcesEnabled, syncOfficialGame } = ctx;
   /*
    * 下面这批是从 main.js 顶层直接传进来的（函数提升 / require 的常量）。
    * 之前它们没进 ctx，于是调用到这些 IPC 时就 ReferenceError —— 例如
@@ -68,7 +68,7 @@ function installServersIpc(ctx) {
     findSevenZip, downloadAndExtractSplit, updateEndfieldGame,
     // 同一批漏掉的其余依赖
     resetServerState, refreshPredownloadAfterSwitch, resolveLinkRoots,
-    prepareEndfieldRuntimeJob, prepareArknightsRuntimeJob, prepareKuroRuntimeJob, estimateRuntimeSpace,
+    prepareEndfieldRuntimeJob, prepareArknightsRuntimeJob, prepareKuroRuntimeJob, prepareAzurRuntimeJob, estimateRuntimeSpace,
     probeUpdateWritable, invalidateRuntimesAfterUpdate,
     serverForDownload, engineFor, estimateDownloadBytes,
     driveFreeBytes, assertDirWritable, downloadPackProfile,
@@ -90,13 +90,13 @@ function installServersIpc(ctx) {
   /*
    * 这一行能不能被「切过去」。
    *
-   * 2026-11-17：鸣潮的国际服与 WeGame 版不生成独立运行时（ensureKuroRuntime
+   * 鸣潮的国际服与 WeGame 版不生成独立运行时（ensureKuroRuntime
    * 对这两个渠道直接 return false），所以它们必须自己已经有客户端目录，
    * 否则切过去 target 是空的 —— 界面显示绿灯、点启动启动不了，
    * 而且 active 落在空行上再也切不回官服。
    *
    * ★位置很重要：必须放在 installServersIpc 内部（targetExists 是从 ctx 解构的）。
-   *   2026-11-17 审查发现同名实现有两份：main.js:6124 用 targetExists、
+   *   审查发现同名实现有两份：main.js:6124 用 targetExists、
    *   这里原来用 fs.existsSync —— server.path 指向目录时两份结论相反。
    *   现在统一用 targetExists 这一个语义，main.js 那份已挂进 ctx 作为唯一来源。
    */
@@ -164,7 +164,7 @@ function installServersIpc(ctx) {
       if (serverPath) {
         if (!targetExists(serverPath)) throw new Error('这个启动程序不存在');
         /*
-         * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+         * 2026-11-17（）：
          * 内置渠道的行不许指向另一个渠道的客户端目录。
          *
          * 客户端的 config.ini 是它自己写的身份声明 —— 第三方三服切换器把官服目录
@@ -261,7 +261,7 @@ function installServersIpc(ctx) {
       const server = game.servers.find((item) => item.id === input?.serverId);
       if (!server) throw new Error('没有找到这个服务器');
       // 鸣潮：这个渠道还没配置启动程序时，允许先由 ensureKuroRuntime 生成一份硬链接
-      // 运行时（用户 m29011「未配置，点开才是出来选项，然后点硬链接生成的」）。
+      // 运行时。
       const kuroCanGenerate =
         game.builtinKey === 'wutheringwaves' &&
         ['official', 'bilibili'].includes(String(server.channel || '')) &&
@@ -270,7 +270,7 @@ function installServersIpc(ctx) {
       const arknightsTaiwanCanGenerate =
         game.builtinKey === 'arknights' && server.channel === 'taiwan';
       /*
-       * 2026-11-17：鸣潮的国际服 / WeGame 版不生成独立运行时（ensureKuroRuntime
+       * 鸣潮的国际服 / WeGame 版不生成独立运行时（ensureKuroRuntime
        * 对这两个渠道直接 return false）。以前这里只看 path 存不存在就放行，
        * 切过去以后 target 指向空路径 —— 界面显示绿灯、点启动启动不了，
        * 而且 active 落在空行上，再也切不回官服。
@@ -326,6 +326,30 @@ function installServersIpc(ctx) {
           server.root = prepared.runtimeRoot;
           // 官服直启自己客户端、没有生成独立运行时时不贴「差异运行时」标签
           server.runtimeLinked = !prepared.directBase;
+        } else if (hadPath) {
+          /*
+           * 「尽力而为」分支：已经有可用路径，重建过程中出错就被 catch 成了 null。
+           *
+           * 这时 server.runtimeLinked 会停在旧值 —— 如果它的旧值是 false（配置回滚、
+           * 从旧版本升级上来、手工动过 launcher-data.json），界面就会显示「缺独立目录」，
+           * 可目录明明好好的。用户反馈的「硬链接完了还说不完整」有一部分就是这里：
+           * 切服时悄悄把字段留成了 false。
+           *
+           * 判据统一走 endfieldClientReady（唯一权威），不再自己拼条件。
+           */
+          try {
+            if (endfieldClientReady(game, server).ready) {
+              if (server.runtimeLinked !== true || server.incomplete) {
+                server.runtimeLinked = true;
+                server.incomplete = false;
+                writeLaunchLog(
+                  `activate ${game.id}: ${server.name || server.id} 客户端已就绪，补回 runtimeLinked / incomplete 标记（${server.root}）`
+                );
+              }
+            }
+          } catch {
+            /* 兜底修正失败不影响切服 */
+          }
         }
       }
       // 明日方舟（2.4.0 合并）：官服 / B服 在同一套安装目录里，按终末地那套运行时
@@ -369,7 +393,7 @@ function installServersIpc(ctx) {
         const iniChannel = clientChannel.configChannelFromPath(server.path) || '';
         const hintChannel = clientChannel.pathChannelHint(server.path) || '';
         /*
-         * 2026-11-17：鸣潮的渠道不在 config.ini 里，写在
+         * 鸣潮的渠道不在 config.ini 里，写在
          * ThirdParty\KrPcSdk_Mainland\KRSDKRes\KRSDKConfig.json 里（KR_ChannelId
          * 19=官服 / 46=B服），国际服则是 ThirdParty\KrPcSdk_Global 目录。
          * 以前体检名单只有米哈游四款 → 鸣潮切服永远 ini=- hint=-，
@@ -380,7 +404,7 @@ function installServersIpc(ctx) {
             ? (kuroPacks.detectChannelOfSync(kuroClientRootOf(server.path) || '') || '')
             : '';
         /*
-         * 2026-11-17：米哈游四款不能只看 config.ini。
+         * 米哈游四款不能只看 config.ini。
          * 第三方三服切换器会把官服目录的 ini 改成 cps=bilibili，纯 ini 判定会
          * 把官服目录认成 B服 → 真机 zzz 官服目录 ini=bilibili、实际=official，
          * 于是点切换必弹「那个目录里是B服客户端，账号会串到另一个服」。
@@ -428,6 +452,33 @@ function installServersIpc(ctx) {
         }
       } else if (getStore().data.settings.autoUpdateEndfieldPacks == null) {
         getStore().data.settings.autoUpdateEndfieldPacks = true;
+      }
+      /*
+       * 蓝色星原：切换渠道 = 换启动器的 res/app_config.dat（整份复制 192/368 字节）。
+       *
+       * 蓝原的渠道身份完全由这个文件决定，用户实测只换它就能进另一个渠道，
+       * launcher.exe 和其余 79 个文件都不用动。
+       *
+       * 必须在「保存 activeServer 之前」做：切不过去就别把 activeServerId 改掉，
+       * 否则界面显示切到了 B服、实际启动器还是官服，用户会看到「切了但进的是官服」。
+       */
+      if (game.builtinKey === 'azurpromilia') {
+        const azurSwitch = require('./azur-switch');
+        const outcome = await azurSwitch.applyChannelToLauncher({
+          userData: app.getPath('userData'),
+          channel: String(server.channel || 'official'),
+          launcherDir: String((getStore().data.settings || {}).azurLauncherDir || '').trim() || undefined,
+          onLog: (msg) => writeLaunchLog(msg),
+        });
+        if (!outcome.ok) {
+          throw new Error(
+            `切换到「${server.name || server.channel}」失败：${outcome.error}` +
+              '（这一步要改官方启动器的渠道配置，改不了就没法用这个渠道启动游戏）'
+          );
+        }
+        writeLaunchLog(
+          `[azur] 渠道已切到 ${outcome.channelCode}（${outcome.changed ? '已写入' : '本来就对'}，配置来源 ${outcome.source}）`
+        );
       }
       game.activeServerId = server.id;
       game.target = server.path;
@@ -487,6 +538,31 @@ function installServersIpc(ctx) {
             });
           },
         });
+        /*
+         * 2026-11-26：给「运行时目录」补基本体记录。
+         * 以前用「硬链接生成一份」把目标指到 VelaRuntimes\<游戏>\<渠道> 后，
+         * originalRoot 是空的 —— 之后的一致性检查、预下载复用都找不到本体，
+         * 只能静默跳过。这里在链接成功后补上源目录（只补空值，不覆盖用户已有记录）。
+         */
+        try {
+          const target = (game.servers || []).find((s) => s.id === input?.targetId);
+          const source = (game.servers || []).find((s) => s.id === input?.sourceId);
+          const targetRoot = String(target?.root || '');
+          if (
+            target &&
+            source &&
+            source.root &&
+            /[\\/]velaruntimes[\\/]/i.test(targetRoot) &&
+            !String(target.originalRoot || '').trim()
+          ) {
+            target.originalRoot = source.root;
+            target.runtimeLinked = true;
+            await getStore().saveNow();
+            pushState(true);
+          }
+        } catch {
+          /* 记账失败不影响链接结果 */
+        }
         send('link:done', { jobId, gameId: game.id, ...result });
         return { ok: true, jobId, ...result };
       } catch (error) {
@@ -580,6 +656,14 @@ function installServersIpc(ctx) {
        * 界面那一屏（openSophonModal）自己负责阶段条与完成后收起。
        */
       if (game.builtinKey === 'wutheringwaves') return prepareKuroRuntimeJob(game, input);
+      /*
+       * 蓝色星原：官方托管体系里唯一能做的「多服」能力就是本地硬链接。
+       * 它没有可用的远端逐文件清单，所以只链相同文件、不补差异分块 ——
+       * 差异文件留在原地，正好当成「哪些文件两渠道不一样」的清单。
+       * 不加这一行的话，蓝原点「硬链接生成一份」会掉进下面那句
+       * 「这个游戏没有接入 Sophon 清单」，界面只把按钮置灰。
+       */
+      if (game.builtinKey === 'azurpromilia') return prepareAzurRuntimeJob(game, input);
       /*
        * 崩坏3 也要能「生成差异客户端」：用户 2026-11-16 定的规则是崩坏3 的 link（硬链接）
        * 对 official / bilibili / global 三个渠道全开 —— 硬链接只是本地文件操作，
@@ -800,9 +884,19 @@ function installServersIpc(ctx) {
        * 而 prepareSophon 收尾会用这个 channel 整份重写 config.ini ——
        * 只要标签错一次，就会把玩家的官服客户端改写成 B服，之后每次登录都要先弹一次
        * 「二级地址解析失败」再回退。config.ini 里读不到渠道时才回退到行标签。
+       *
+       * 2026-11-26 补：只看 config.ini 会被第三方三服切换器的残留骗到 ——
+       * 官服目录的 cps 被改成 bilibili、目录里却没有 B站渠道件（本机绝区零就是这个
+       * 形状：ini=bilibili、无 BLPlatform64）。纯 ini 会把官服客户端当 B服，
+       * 按 B服清单更新、收尾还把 config.ini 整份重写成 cps=bilibili，等于改坏官服。
+       * 米哈游四款先走文件层复核（ini + 渠道 SDK），取不到再退回 ini / 行标签。
        */
-      const actualChannel =
-        (server.channel !== 'custom' && clientChannel.configChannelFromPath(server.path)) || server.channel;
+      let actualChannel = '';
+      if (server.channel !== 'custom') {
+        const byFile = clientChannel.resolveChannelFromRoot(path.dirname(server.path));
+        actualChannel = (byFile && byFile.channel) || clientChannel.configChannelFromPath(server.path) || '';
+      }
+      actualChannel = actualChannel || server.channel;
       if (actualChannel !== server.channel) {
         writeLaunchLog(
           `update ${game.id}: 行标签 ${server.channel} 与客户端实际渠道 ${actualChannel} 不一致，按客户端渠道更新`

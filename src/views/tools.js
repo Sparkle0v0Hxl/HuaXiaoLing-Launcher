@@ -302,6 +302,8 @@ const SHOT_GAME_LABEL = {
   endfield: '明日方舟：终末地',
   neverness: '异环',
   arknights: '明日方舟',
+  wutheringwaves: '鸣潮',
+  azurpromilia: '蓝色星原：旅谣',
   other: '其他截图',
 };
 
@@ -819,7 +821,7 @@ function openPluginPermissionDialog(plugin) {
     /*
      * 点遮罩 = 取消安装。
      *
-     * 2026-11-17 审查发现这里原来写的是 `handleAction('plugin-cancel-install', undefined, modalPlaceholder)`，
+     * 审查发现这里原来写的是 `handleAction('plugin-cancel-install', undefined, modalPlaceholder)`，
      * 而 modalPlaceholder 全仓库从来没有定义过 → 点一下遮罩就 ReferenceError，
      * modals.js 里 closeModal() 执行不到，弹窗关不掉、「取消并撤销」那条（含删插件文件）整个跳过。
      * 那个分支只需要 action 名，第三参传的就是 element，这里本来就没有元素可传。
@@ -914,7 +916,6 @@ function graphicsGames() {
 /**
  * 画质页的数据缓存，按 gameKey 存。
  *
- * 用户的原话是「终末读取配置时间过长，第一次读取完成后如果没有变动就不二次读取了」。
  * 一次自动探测 + 读值实测 1.2~3.3 秒，前端以前每次进画质页都重新 IPC，用户来回点
  * 两下标签就要重新等一遍。现在分两层：
  *
@@ -3321,7 +3322,7 @@ function newsPinnedSkeletonList() {
  * 从时间倒序的公告里挑一批，但不许某一家游戏包场。
  *
  * 以前是「全局最新 8 条」再按类型排。鸣潮 3.8 当天一口气发了 8 条公告，
- * 最新 8 条全是它，别的游戏的版本更新根本挤不进来（用户反馈「咋都给鸣潮独占了」）。
+ * 最新 8 条全是它，别的游戏的版本更新根本挤不进来（）。
  * 现在按游戏轮流取：每轮每家最多出 1 条，一轮取不满再进第二轮，同一条不会重复。
  * 各家内部先按「公告 > 活动 > 资讯」再按时间，保证每家先出自己最重要的那条。
  *

@@ -1494,7 +1494,7 @@ async function buildCrossRuntime({ sourceRoot, targetProfile, installRoot, signa
          * ⚠ 这里以前直接 copyFile(item.src, dest) —— 那是**原地截断写**：
          * 如果 dest 是上一次从别的渠道硬链过来的（同一个 inode），这一下会顺着
          * inode 写穿到另一边，把那个渠道的文件也改成这次的内容。
-         * 2026-11-17 同型问题在 runtime.js 的 hardlinkTree 里已复现修复，
+         * 同型问题在 runtime.js 的 hardlinkTree 里已复现修复，
          * 这里一并对齐：先 unlink 断链，再重试 link；实在链不上才拷贝（拷贝前也已断链）。
          */
         await fsp.unlink(dest).catch(() => {});

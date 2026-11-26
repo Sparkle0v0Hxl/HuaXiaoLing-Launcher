@@ -199,7 +199,6 @@ function mergeAllPlaylistGroups(logged, incoming) {
 }
 
 /**
- * 「上次同步：3 分钟前 · 耗时 1.2s」。
  *
  * 主进程返回 syncedAt / durationMs 就是给这个用的：
  * 歌单同步慢起来要几十秒，没有时间戳用户没法判断该不该再点一次。
@@ -818,7 +817,7 @@ async function refreshPlaylistDetailSilently(platform, playlistId) {
 async function openMyPlaylist(platform, playlistId) {
   if (!platform || !playlistId) return;
   /*
-   * 2026-11-19：记下「这次是从广场点开的」。
+   * 记下「这次是从广场点开的」。
    *
    * 广场（tab=song-plaza）和「我的歌单」共用同一个 state.myPlaylists.detail
    * 钻取态，但两边是不同的入口：从广场点开要能返回广场列表，
@@ -849,7 +848,7 @@ async function openMyPlaylist(platform, playlistId) {
       state.myPlaylists.detail = { ...result.detail, fromPlaza };
       state.myPlaylists.error = '';
       /*
-       * 2026-11-18：记住上次打开的歌单，重启后自动回到这里。
+       * 记住上次打开的歌单，重启后自动回到这里。
        * 只存标识（platform/id/name），曲目下次打开时再拉，避免 localStorage 存几千首。
        */
       try {
@@ -885,7 +884,7 @@ async function openMyPlaylist(platform, playlistId) {
 /**
  * 只解析、不入队。
  *
- * 2026-11-18：从 insertChartSongToQueue 里抽出来，供批量导入使用 ——
+ * 从 insertChartSongToQueue 里抽出来，供批量导入使用 ——
  * 批量时先并发解析出 entry，再按歌单顺序一次性插入，避免「边解析边 splice」把顺序打乱。
  * 返回 null 表示这首暂时没有可播放版本。
  */
@@ -938,7 +937,7 @@ async function resolveChartSongEntry(song, options = {}) {
 /**
  * 只把曲目元信息塞进队列，**不解析播放地址**（懒解析）。
  *
- * 2026-11-18 按用户要求重写：整张歌单入队应该是瞬间完成的 ——
+ * 按用户要求重写：整张歌单入队应该是瞬间完成的 ——
  * 队列里存 title / artist / cover / hash / mid，轮到播放时再由 playSongAt 解析。
  * 这样点「整张播放」立刻就有 1900+ 首在列表里，第一首几秒内出声，
  * 后面再按预取窗口（后 10 首）慢慢补，不会出现「点了没反应 / 导入一半没了」。
@@ -1034,7 +1033,7 @@ function savePicked() {
 /**
  * 把手动添加的歌记进「我的队列」（2026-11-18）。
  *
- * 用户要求：「队列改成可以自己添加歌曲进去的那种，不要我点了歌单就全进去了」。
+ * 。
  * 所以手动加的（＋、直链、本地文件、最近播放）都进这里，点歌单播放只替换
  * state.songs（当前播放上下文），不会动 pickedSongs。
  */
@@ -1098,7 +1097,7 @@ function moveQueueItem(from, to) {
 /**
  * 批量把一批曲目加进点歌队列。
  *
- * 2026-11-18 二次修正：改成「分批并发 + 每批立刻落盘」。
+ * 二次修正：改成「分批并发 + 每批立刻落盘」。
  *
  * 上一版是「全部解析完再一次性插入」，1944 首的酷狗歌单要空跑一两分钟，
  * 期间队列一首都没有 —— 用户看到的就是「导入没反应 / 点别的就没了」。
@@ -1217,7 +1216,7 @@ async function playPlaylist(platform, playlistId) {
     state.songIndex = 0;
     state.songTab = 'queue';
     /*
-     * 2026-11-18：不再清空 detail。
+     * 不再清空 detail。
      *
      * 用户要的是「点了哪个歌单，主区就固定显示那个歌单」——
      * 之前这里一开播就把钻取态清掉，主区立刻弹回队列，看着像歌单没选中。
@@ -1290,7 +1289,7 @@ async function fillPlaylistQueueFrom({ songs, start, platform, fromName, cursor,
   const total = Math.max(0, songs.length - start);
   const seen = buildQueuedKeySet();
   /*
-   * 2026-11-18：改成「分批并发 + 每批立刻 splice」。
+   * 改成「分批并发 + 每批立刻 splice」。
    * 原来逐首串行解析，1944 首要排十几分钟，播放器放完一首就得干等；
    * 现在每批 10 首并发解析，按原顺序插入，token 变了立刻收手（用户点了别的歌）。
    */
@@ -1463,7 +1462,7 @@ async function playPlaylistFromIndex(platform, playlistId, index) {
   const fromName = detail.name || '歌单';
 
   /*
-   * 2026-11-18：点歌单里的某一首 → 把「这首 + 后面所有」以**元数据**铺进队列，
+   * 点歌单里的某一首 → 把「这首 + 后面所有」以**元数据**铺进队列，
    * 立刻播这首，其余交给预取窗口懒解析。
    *
    * 以前是「逐首解析后再插」，1900 首要排十几分钟；而且点别的歌会作废整轮续播，
@@ -1478,7 +1477,7 @@ async function playPlaylistFromIndex(platform, playlistId, index) {
   }
 
   /*
-   * 2026-11-18：先摘掉「别的歌单」留在列表里的曲目，再把这张歌单铺进去。
+   * 先摘掉「别的歌单」留在列表里的曲目，再把这张歌单铺进去。
    *
    * 用户要的规则很明确：「正常是跟着选择的歌单来，除非弹幕点歌点歌进来了，
    * 才能插进这个播放列表排序下去」。
@@ -1737,34 +1736,94 @@ async function insertChartSongToQueue(song, options = {}, seen = null) {
 
 /**
  * 执行一次点歌台搜索。
- * 三平台并发，任一平台失败只记进 errors，不影响其它平台的结果。
+ *
+ * 分两种模式（2026-11-25 新增歌单搜索）：
+ *   · mode='song'     —— 找单曲。三平台并发，任一平台失败只记进 errors，不影响其它平台。
+ *   · mode='playlist' —— 找歌单。目前只有网易云给了干净的公开接口，其它平台如实报「不支持」。
+ *
+ * 两种模式共用同一个 keyword/platform，结果分开存在 list / playlistList 里，
+ * 切 tab 不用重搜。
  */
 async function runSongSearch() {
   const keyword = String(state.songSearch.keyword || '').trim();
+  const mode = state.songSearch.mode === 'playlist' ? 'playlist' : 'song';
   if (!keyword) {
-    toast('先输入歌名或歌手', 'info');
+    toast(mode === 'playlist' ? '先输入歌单关键词' : '先输入歌名或歌手', 'info');
     return;
   }
   const platform = state.songSearch.platform || 'all';
   const apiBase = localStorage.getItem('vela:netease-api') || 'http://127.0.0.1:3100';
-  state.songSearch = { ...state.songSearch, keyword, platform, loading: true, done: false, list: [], errors: [] };
+  state.songSearch = {
+    ...state.songSearch,
+    keyword,
+    platform,
+    mode,
+    loading: true,
+    done: false,
+    list: mode === 'song' ? [] : state.songSearch.list,
+    playlistList: mode === 'playlist' ? [] : state.songSearch.playlistList,
+    playlistError: '',
+    errors: [],
+  };
   if (state.songTab !== 'search') state.songTab = 'search';
   render({ preserveScroll: true });
+
+  if (mode === 'playlist') {
+    /*
+     * 歌单搜索：一次只查一个平台（接口只支持网易云），失败就把原因写进 playlistError，
+     * 界面显示「这个平台搜不到歌单」而不是一片空白。
+     */
+    const plat = platform === 'all' ? 'netease' : platform;
+    try {
+      const result = await api.musicSearchPlaylists({ platform: plat, keyword, page: 1 });
+      state.songSearch = {
+        ...state.songSearch,
+        loading: false,
+        done: true,
+        playlistList: result?.ok ? result.lists || [] : [],
+        playlistError: result?.ok ? '' : (result?.reason || '搜索歌单失败'),
+      };
+    } catch (error) {
+      state.songSearch = {
+        ...state.songSearch,
+        loading: false,
+        done: true,
+        playlistList: [],
+        playlistError: humanError(error),
+      };
+    }
+    render({ preserveScroll: true });
+    return;
+  }
+
   try {
     // 网易云那一路要求本地 API 服务在跑，先尝试拉起；失败也没关系，另外两家照样能搜
     await api.netease.startService(apiBase).catch(() => {});
     const result = await api.musicSearch({ platform, keyword, apiBase, limit: 30 });
     state.songSearch = {
-      keyword,
-      platform,
+      ...state.songSearch,
       loading: false,
       done: true,
       list: result?.songs || [],
       errors: result?.errors || [],
     };
   } catch (error) {
-    state.songSearch = { keyword, platform, loading: false, done: true, list: [], errors: [humanError(error)] };
+    state.songSearch = {
+      ...state.songSearch,
+      loading: false,
+      done: true,
+      list: [],
+      errors: [humanError(error)],
+    };
   }
+  render({ preserveScroll: true });
+}
+
+/** 切换搜索类型（搜单曲 / 搜歌单）。切完保留关键词，不自动重搜。 */
+function setSongSearchMode(mode) {
+  const next = mode === 'playlist' ? 'playlist' : 'song';
+  if (state.songSearch.mode === next) return;
+  state.songSearch = { ...state.songSearch, mode: next };
   render({ preserveScroll: true });
 }
 
@@ -1790,7 +1849,7 @@ const LIVE_SONG_CMD = '点歌|点播|点一首|点首|来一首|来首|加一首
 // 命令词必须在「开头」：这样「别点歌了 聊会天」这类闲聊不会被误判成点歌。
 const LIVE_SONG_HEAD_RE = new RegExp('^(?:' + LIVE_SONG_CMD + ')\\s*[:：,，、.。\\-—!！~～【】\\[\\]（）()]*\\s*([\\s\\S]+)$');
 // 开头常见的装饰/礼貌前缀，逐层剥掉（最多 4 层）后再试一次严格匹配：
-// 「@主播 点歌 晴天」「【点歌】晴天」「求点歌 晴天」「能不能点歌 晴天」。
+//
 const LIVE_SONG_LEADIN_RE = /^(?:@[^\s:：,，、.。]{1,16}\s+|【|\[|（|\(|能不能|可以|麻烦|帮忙|帮我|劳驾|求|请|想|给|主播|要)\s*/;
 // 只认「像是以点歌命令开头」的，避免「别点歌了」也弹提示。
 const LIVE_SONG_LIKE_RE = new RegExp('^\\s*[【\\[（(@]?\\s*(?:' + LIVE_SONG_CMD + ')');
@@ -1813,7 +1872,7 @@ function parseSongRequest(message) {
     .trim()
     .slice(0, 60);
   /*
-   * 2026-11-18：单个语气词不算歌名。
+   * 单个语气词不算歌名。
    * 「点歌了」「点歌吧」这类闲聊会被 `点歌` + 捕获组拿到一个孤零零的「了/吧」，
    * 正好又是真实歌名（极其罕见），导致搜一次毫无意义还弹一句"找不到"。
    * 单字中文歌名本来就少，宁可放过也不要误报。
@@ -1848,7 +1907,7 @@ let lastLiveNoteAt = 0;
 /**
  * 点歌链路日志：同时写 console 与主进程 launch.log。
  *
- * 2026-11-18：用户报「弹幕点歌没效果」时，主进程日志里只有「已连上」一条，
+ * 用户报「弹幕点歌没效果」时，主进程日志里只有「已连上」一条，
  * 后面解析、搜索、兜底全在渲染层，DevTools 之外看不到。现在每个关键节点都落盘，
  * reopen 一次日志就能看出是「没解析出歌名」「网易云没起来」还是「多平台都没结果」。
  */

@@ -514,7 +514,7 @@ function openAddSongLinkModal() {
     addToPicked({ title, artist, url, source: 'url' });
     closeModal();
     /*
-     * 2026-11-18：以前这里直接 playCurrentSong()，跳过了 hydrateSong ——
+     * 以前这里直接 playCurrentSong()，跳过了 hydrateSong ——
      * 直链歌曲的歌词搜索就从来没触发过，界面上永远写着「直链歌曲没有歌词」。
      * 改走 playSongAt：它会补元数据、按歌名+歌手去酷我/QQ 搜 LRC。
      */
@@ -556,7 +556,7 @@ const MUSIC_SOURCE_DEFAULTS = { netease: true, migu: true, kuwo: true, qq: false
 
 /**
  * 已导入的第三方音源脚本（主进程扫描脚本目录得到）。
- * 2026-11-21：之前从安装包拆出去的脚本改为「导入后落盘」，这里只负责展示与删除。
+ * 之前从安装包拆出去的脚本改为「导入后落盘」，这里只负责展示与删除。
  */
 let SCRIPT_LIST = [];
 
@@ -575,12 +575,19 @@ const MUSIC_SOURCE_KEYS = MUSIC_SOURCE_LABELS.map(([key]) => key);
 /**
  * 功能开关（不对应任何平台，只控制某条换源链路）。
  *
- * 2026-11-20（风险整改 T2-B）：同名换源会把别的平台上的同名曲地址拿来用，
- * 默认关闭。这里单独一行开关，不混进上面的平台标签，避免被当成「又一个音源」。
+ * 同名换源会把别的平台上的同名曲地址拿来用，默认关闭。
+ * 这里单独一行开关，不混进上面的平台标签，避免被当成「又一个音源」。
  */
 const MUSIC_SOURCE_FEATURES = [
   ['swap', '同名换源', '允许用其它平台上的同名曲地址'],
 ];
+
+/*
+ * 这两个表要跨文件用（actions.js 的 toggle-music-source 要按 key 找标签和提示），
+ * 而各个 view 是独立 <script>，const 不会自动挂到 window 上，所以显式导出一次。
+ */
+window.MUSIC_SOURCE_LABELS = MUSIC_SOURCE_LABELS;
+window.MUSIC_SOURCE_FEATURES = MUSIC_SOURCE_FEATURES;
 
 /**
  * 归一化后的音源开关。
@@ -756,7 +763,7 @@ function liveRoomsListMarkup() {
         const statusLine = room.status ? `<p class="song-live-status">${esc(room.status)}</p>` : '';
         // 拿不到鉴权时给一个登录入口（B站偶尔对未登录会话加码）。
         // -352 是接口签名问题，登录解决不了，别再把用户往死路上引。
-        // 2026-11-18：轮播/未开播房间走聊天区轮询，B站未登录时 gethistory 返回空数组，
+        // 轮播/未开播房间走聊天区轮询，B站未登录时 gethistory 返回空数组，
         // 所以「轮询已开但一条都没抓到」也把登录入口亮出来，并说明原因。
         const failedText = String(room.status || '');
         const needBiliLogin =
@@ -1005,7 +1012,7 @@ function karaokeViewMarkup() {
         <main class="song-app-main">
           ${
             /*
-             * 2026-11-18：进了某张歌单，主区顶部不该再挂着「队列标题条 + 搜索框」——
+             * 进了某张歌单，主区顶部不该再挂着「队列标题条 + 搜索框」——
              * 那是队列页的东西。歌单页只需要它自己的头部（返回 / 标题 / 整张播放 …）。
              */
             state.myPlaylists.detail || state.localDetailId
@@ -1174,7 +1181,7 @@ function playlistCardMarkup(item, platform, active) {
 /**
  * 歌单详情一次最多渲染多少首。
  *
- * 2026-11-18：1944 首的酷狗歌单全量渲染会直接把渲染进程撑崩
+ * 1944 首的酷狗歌单全量渲染会直接把渲染进程撑崩
  * （crash.log 实测 render-process-gone exitCode=-2147483645）。
  * 200 首足够覆盖绝大多数浏览场景，剩下的用「显示全部」按需展开。
  */
@@ -1184,7 +1191,7 @@ const DETAIL_RENDER_LIMIT = 200;
  * 点开的某张歌单：整块主区换成「返回 / 标题 / 整张播放 / 加入队列 + 全量曲目」。
  *
  * 以前曲目详情是挂在卡片墙下面的，歌单多的时候要一路滑到底才看得到曲目，
- * 用户反馈「点进去没反应」。现在改成钻取：点卡片 → 主区只剩这张歌单，
+ * 。现在改成钻取：点卡片 → 主区只剩这张歌单，
  * 头部常驻四个动作，进来第一眼就能整张播放。
  *
  * 曲目数据仍然完整保留（不再截断到 100 首），只是渲染分批：
@@ -1243,7 +1250,7 @@ function playlistDetailMarkup(detail, platform) {
   }
   const current = state.songs[state.songIndex] || null;
   /*
-   * 2026-11-18 防崩溃：歌单详情分段渲染。
+   * 防崩溃：歌单详情分段渲染。
    *
    * 用户点开 1944 首的酷狗歌单后，渲染进程直接崩溃
    * （crash.log: render-process-gone exitCode=-2147483645）。
@@ -1279,7 +1286,9 @@ function playlistDetailMarkup(detail, platform) {
             const playing = sameSongKey(song, current);
             return `
           <div class="kr-detail-row${(state.detailSelected || []).includes(index) ? ' is-brush-selected' : ''}">
-            <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}${locateFlashClass(song)}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${playing ? '正在播放这一首' : '播放这首，后面按歌单顺序接着放'}">
+            <button class="song-chart-song kr-detail-song${playing ? ' is-current' : ''}${locateFlashClass(song)}" data-action="my-playlist-song" data-platform="${esc(platform)}" data-index="${index}" title="${esc(
+              `${song.title || ''}${song.artist ? ' · ' + song.artist : ''}${playing ? '（正在播放）' : ''}`
+            )}">
               <span class="song-chart-index">${playing ? '♪' : index + 1}</span>
               <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
               <span class="song-chart-copy">
@@ -1486,8 +1495,8 @@ function allPlaylistsMarkup() {
 /**
  * 歌单广场独立面板（2026-11-18）。
  *
- * 以前它被拼在「我的歌单」页面最底部，歌单一多就得往下滚很久，用户原话
- * 「歌单广场难看到」。现在它是左栏「发现」里独立的一项，进来就是它本身。
+ * 以前它被拼在「我的歌单」页面最底部，歌单一多就得往下滚很久才看得到。
+ * 现在它是左栏「发现」里独立的一项，进来就是它本身。
  * 点开广场里的某张歌单同样走钻取态（playlistDetailMarkup）。
  */
 function plazaPanelMarkup() {
@@ -1575,7 +1584,9 @@ function chartPanelMarkup() {
                 .slice(0, 20)
                 .map(
                   (song, index) => `
-                <button class="song-chart-song" data-action="chart-to-netease" data-platform="${esc(c.platform)}" data-index="${index}">
+                <button class="song-chart-song" data-action="chart-to-netease" data-platform="${esc(c.platform)}" data-index="${index}" title="${esc(
+                  `${song.title || ''}${song.artist ? ' · ' + song.artist : ''}（点一下去网易云找这首）`
+                )}">
                   <span class="song-chart-index">${index + 1}</span>
                   <span class="song-chart-cover">${song.cover ? `<img src="${esc(song.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : icon('music')}</span>
                   <span class="song-chart-copy">

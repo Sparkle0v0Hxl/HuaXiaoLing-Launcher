@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const { ipcMain, app, dialog } = require('electron');
 const path = require('node:path');
@@ -9,8 +9,62 @@ const fs = require('node:fs');
 const { loadSecret, saveSecret } = require('./secret-store');
 
 const endfieldPacks = require('./endfield-packs');
-const endfieldLaunch = require('./endfield-launch');
 const predownloadEndfield = require('./predownload-endfield');
+const endfieldOfficial = require('./endfield-official');
+const gameHeat = require('./game-heat');
+
+/**
+ * 从用户选中的文件出发，找出真正能拉起游戏的官方 Games.exe。
+ *
+ * 用户点「选择 Games.exe」时手指头多半落在启动器根目录那个 Launcher.exe 上，
+ * 而真正能拉起游戏的是版本子目录里的 Games.exe（如 1.6.0\Games.exe）。
+ * 所以这里不苛求文件名：收到什么就顺着它的位置找。
+ */
+function resolveOfficialGamesExe(picked) {
+  const raw = String(picked || '').trim();
+  if (!raw) return { ok: false, reason: '没有选中任何文件' };
+  const abs = path.resolve(raw);
+  if (!fs.existsSync(abs)) return { ok: false, reason: `这个文件不存在：${abs}` };
+
+  // 选中的就是 Games.exe
+  if (/^Games\.exe$/i.test(path.basename(abs))) return { ok: true, exe: abs };
+
+  // 从选中位置往上三级，逐层往下找 Games.exe
+  const bases = [];
+  let cur = path.dirname(abs);
+  for (let i = 0; i < 3; i += 1) {
+    if (!cur) break;
+    if (!bases.includes(cur)) bases.push(cur);
+    const up = path.dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+  for (const base of bases) {
+    const queue = [{ dir: base, depth: 0 }];
+    while (queue.length) {
+      const node = queue.shift();
+      let entries = [];
+      try { entries = fs.readdirSync(node.dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          if (/^Games\.exe$/i.test(entry.name)) return { ok: true, exe: path.join(node.dir, entry.name) };
+          continue;
+        }
+        if (node.depth < 2) queue.push({ dir: path.join(node.dir, entry.name), depth: node.depth + 1 });
+      }
+    }
+  }
+
+  // 兜底：走一遍自动发现
+  try {
+    const found = endfieldOfficial.findOfficialGames();
+    if (found && found.ok) return { ok: true, exe: found.exe, fallback: true };
+  } catch { /* 忽略 */ }
+  return {
+    ok: false,
+    reason: `没在这个位置找到 Games.exe：${abs}。请选鹰角官方启动器安装目录里的 Games.exe（通常在某个版本号子目录下），或直接选启动器根目录也行。`,
+  };
+}
 
 /**
  * 终末地渠道包 / 运行时 / 更新。
@@ -144,6 +198,24 @@ function installEndfieldIpc(ctx) {
             pushState(true);
             // 预下载内容落进真实安装目录后，链接运行时要失效（与 predownload:apply 同一语义）
             invalidateRuntimesAfterUpdate(game);
+            /*
+             * ★ 预下载路径原来在这里直接 return，**跳过了热更层处理**（2026-11-25 修）。
+             *
+             * 这正是用户报「我预下载包下载了，用不了，甚至还在给我重下的样子」的一半原因：
+             * 预下载把基础资源铺进 StreamingAssets 了，但 Persistent 里的 IFix 热更补丁
+             * 还是上一版的 → 游戏启动仍然报「获取资源失败」，用户以为预下载没生效。
+             *
+             * 走逐文件更新那条路有 heat 处理，预下载这条也必须补上，否则两条路行为不一致。
+             */
+            try {
+              await gameHeat.healAfterUpdate({
+                gameKey: 'endfield',
+                root: predownloadRoot,
+                onLog: (msg) => writeLaunchLog(msg),
+              });
+            } catch {
+              /* 善后失败不影响预下载结果 */
+            }
             return applied;
           }
         } catch (error) {
@@ -193,6 +265,27 @@ function installEndfieldIpc(ctx) {
       }
       // 与其余逐文件更新落点统一：skipped（本地已是最新）时不触发无谓的运行时重建
       if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+      /*
+       * ★ 关键善后（2026-11-25）：更新完必须处理 Persistent 热更层。
+       *
+       * updateEndfieldGame 只校验 StreamingAssets（基础资源），Persistent 里的
+       * IFix 热更清单和补丁它完全不碰。基础包换新版、热更层还是旧版 →
+       * 游戏启动时 IFix 抛 can not load field [handleCache] → 界面报
+       * 「获取资源失败，请检查网络状态重试」（这句是误导文案，跟网络无关）。
+       *
+       * healHeatLayerAfterUpdate 会把旧热更层改名归档，让游戏按新基础包重建。
+       */
+      if (result?.ok && !result?.skipped) {
+        try {
+          await gameHeat.healAfterUpdate({
+            gameKey: 'endfield',
+            root: server.root,
+            onLog: (msg) => writeLaunchLog(msg),
+          });
+        } catch {
+          /* 善后失败不影响更新结果 */
+        }
+      }
       return result;
     });
 
@@ -381,6 +474,8 @@ function installEndfieldIpc(ctx) {
       const { game, channel } = input || {};
       return { ok: cancelChannelPack(String(game || ''), String(channel || '')) };
     });
+
+    ipcMain.handle('endfield:resolve-official-games-exe', async (_event, picked) => resolveOfficialGamesExe(picked));
 
     ipcMain.handle('endfield:channel-pack-list', async () => {
       const rows = [];

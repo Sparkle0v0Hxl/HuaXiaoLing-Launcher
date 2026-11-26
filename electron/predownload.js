@@ -35,7 +35,7 @@ const endfield = require('./predownload-endfield');
 const neverness = require('./neverness-predownload');
 const kuroPredownload = require('./kuro-predownload');
 // 渠道能力表 + 渠道中文名：预下载在哪些渠道有官方清单，统一由 game-channels.js 定，
-// 不要在下面 SUPPORT 里再写死渠道（用户 2026-11-16 定的规则）。
+// 不要在下面 SUPPORT 里再写死渠道。
 const gameChannels = require('./game-channels');
 const clientChannel = require('./client-channel');
 
@@ -105,11 +105,11 @@ function describe(gameKey, channel = '') {
     }
   }
   /*
-   * 统一的渠道判据（用户 2026-11-16 定的规则）：预下载要看官方有没有对这个渠道发清单，
+   * 统一的渠道判据：预下载要看官方有没有对这个渠道发清单，
    * 这件事 game-channels.js 的能力表里已经写好了，这里不再各游戏各写一套。
    *   崩坏3  —— 官服 bh3_cn 与国际服 bh3_global 都有 Hoyoverse 预下载清单
    *     （国际服本体 game_id=5TIVvvcwtM，2026-11-17 实测），B服得用 B 站官方启动器；
-   *   鸣潮   —— official / bilibili / global / wegame 四个渠道都在表里（用户 2026-11-16 定的是全渠道）；
+   *   鸣潮   —— official / bilibili / global / wegame 四个渠道都在表里；
    *   原神 / 星铁 / 绝区零 —— 三个渠道都有。
    * 三个前提缺一不可：
    *   1. channel 非空 —— describe() 还被 hasCache / clear 这类只关心「有没有缓存」的
@@ -208,7 +208,7 @@ function stateFromReport(report) {
  * 往里写 Diffs/ 会污染运行时，而且鹰角官方的更新流程认的是真实安装目录。
  * 运行时目录的特征是带标记文件，需要排除掉。
  *
- * 2026-11-08：架构是「每个渠道一份独立的硬链接运行时」（<运行时根>\endfield\<渠道>），
+ * 架构是「每个渠道一份独立的硬链接运行时」（<运行时根>\endfield\<渠道>），
  * 标记就是 .hxl-endfield-runtime-v2。不认它的话，运行时目录会被当成「真实安装目录」，
  * 更新包直接写进运行时里，下一次重建就被渠道包覆盖掉，白下一次。
  */
@@ -333,7 +333,7 @@ async function kuroReport({ channel, installRoot } = {}) {
     return { ...base, state: 'not-installed', reason };
   }
   // 官方已把新版本转正式（predownload 槽撤销）时，即使本机没下过预下载包，
-  // 也要把「更新游戏」点亮（对标 predownload-hoyo.js:526-528，用户 m28959）。
+  // 也要把「更新游戏」点亮（对标 predownload-hoyo.js:526-528，）。
   const liveVersion = String(info.liveVersion || '');
   const currentVersion = String(info.localVersion || localVersion || '');
   if (liveVersion && kuroPredownload.compareVersion(liveVersion, currentVersion) > 0) {

@@ -246,7 +246,7 @@ const ARKNIGHTS_BILIBILI_PROFILE = {
 /*
  * 明日方舟台服（繁中，Gryphline 直营）。
  *
- * 2026-11-17 用户要求「台服也能弄」，实测后确认它**不是** Yostar 服：
+ * 2026-11-17 ，实测后确认它**不是** Yostar 服：
  *   · 接口：POST https://launcher.gryphline.com/api/proxy/batch_proxy
  *     body 与国服官服同构：{seq:'3', proxy_reqs:[{kind:'get_latest_game',
  *     get_latest_game_req:{appcode:'uiCaUeGDB2htwXSv', launcher_appcode:'TiaytKBUIEdoEwRT',
@@ -1069,6 +1069,225 @@ async function checkEndfieldGame({ root, channel }) {
   };
 }
 
+/*
+ * 「本地其实已经是这个版本了吗」—— 不看状态文件，直接验字节。
+ *
+ * 为什么需要它（2026-11-26 用户报障「终末地老是提示新版本，明明已经是最新版」）：
+ *
+ * .vela-game-state.json 只有 updateEndfieldGame 自己成功跑完才会写。用户那份停在
+ * 1.6.4（11-08 04:43），可 Endfield.exe / index_main.json / VFS 全是 11-25 06:54~
+ * 07:05 的时间戳 —— 中间游戏被别的途径更新过（官方启动器亲自更新、或手工替换目录），
+ * 我们的状态文件没参与，就一直停在老版本号。
+ *
+ * 于是 checkEndfieldUpdateNotice 拿 remote(1.7.2) !== state(1.6.4) 就弹提示，
+ * 每次启动都弹，而实际上：
+ *   · 18 个 .blc 块索引全部与 1.7.2 清单的 size+md5 一致
+ *   · 抽样 16 个 .chk 全部一致，0 个不符
+ * 也就是磁盘上早就是 1.7.2 了，只有那个 JSON 是旧的。
+ *
+ * 判据只看「清单里那些真的能读到的文件」：
+ *   · .blc 块索引必须全部吻合 —— 它决定客户端认不认这批资源
+ *   · .chk 资源块抽一批验 md5（全量 120GB 逐个算太慢，启动时不能那么干）
+ *   · 根目录的重二进制（exe / dll）按清单逐个验，它们小、数量少
+ *
+ * 只要这三类都对上，就认定「本地已经是目标版本」，把状态文件补齐后返回 matched。
+ */
+async function verifyLocalMatchesRemote({ root, remote, sampleLimit = 24 }) {
+  const files = remote.files || [];
+  if (!files.length) return { matched: false, reason: '清单为空' };
+  const rootAbs = path.resolve(root);
+  const inside = (rel) => {
+    const abs = path.resolve(rootAbs, rel);
+    if (!abs.startsWith(rootAbs + path.sep)) return null;
+    return abs;
+  };
+
+  let checked = 0;
+  let mismatched = 0;
+  let missing = 0;
+  const problems = [];
+
+  const checkOne = async (file) => {
+    const abs = inside(file.path);
+    if (!abs) return 'illegal';
+    let stat;
+    try {
+      stat = await fsp.stat(abs);
+    } catch {
+      return 'missing';
+    }
+    if (stat.size !== file.size) return 'size';
+    try {
+      const digest = await md5File(abs);
+      return digest === file.md5 ? 'ok' : 'md5';
+    } catch {
+      return 'error';
+    }
+  };
+
+  /* ① 根目录的重二进制（exe / dll / db）—— 数量少、体积适中，全验 */
+  const rootBinaries = files.filter(
+    (file) => !String(file.path).includes('/') && /\.(exe|dll|db)$/i.test(String(file.path))
+  );
+  /* ② .blc 块索引 —— 决定客户端认不认这批资源，必须全对 */
+  const blcFiles = files.filter((file) => String(file.path).endsWith('.blc'));
+  /* ③ .chk 资源块 —— 体积大，按步长抽样 */
+  const chkFiles = files.filter((file) => String(file.path).endsWith('.chk'));
+
+  const mustCheck = [...rootBinaries, ...blcFiles];
+  for (const file of mustCheck) {
+    const state = await checkOne(file);
+    checked += 1;
+    if (state === 'ok') continue;
+    if (state === 'missing') missing += 1;
+    else mismatched += 1;
+    if (problems.length < 8) problems.push(`${file.path} (${state})`);
+  }
+
+  const step = Math.max(1, Math.ceil(chkFiles.length / Math.max(1, sampleLimit)));
+  for (let i = 0; i < chkFiles.length; i += step) {
+    const file = chkFiles[i];
+    const state = await checkOne(file);
+    checked += 1;
+    if (state === 'ok') continue;
+    if (state === 'missing') missing += 1;
+    else mismatched += 1;
+    if (problems.length < 8) problems.push(`${file.path} (${state})`);
+  }
+
+  return {
+    matched: checked > 0 && mismatched === 0 && missing === 0,
+    checked,
+    mismatched,
+    missing,
+    problems,
+    blcTotal: blcFiles.length,
+    chkTotal: chkFiles.length,
+    chkSampled: Math.ceil(chkFiles.length / step),
+  };
+}
+
+/**
+ * 算「这次更新实际还要写多少字节」。
+ *
+ * 口径与下面的主循环一致：size 已对上但 md5 不对的文件要整份重写，
+ * 缺失的文件也要整份写。只按 size 估算会低估（同 size 不同内容很常见），
+ * 所以 size 相同的一律按「要重写」算，宁可多清一点也不要再撞 ENOSPC。
+ */
+async function measureUpdateGap(root, remoteFiles) {
+  let need = 0;
+  for (const file of remoteFiles) {
+    const target = path.resolve(root, file.path);
+    let size = -1;
+    try {
+      size = (await fsp.stat(target)).size;
+    } catch {
+      size = -1;
+    }
+    need += size === file.size ? 0 : Number(file.size) || 0;
+  }
+  return need;
+}
+
+const VFS_REL_PREFIX = 'Endfield_Data/StreamingAssets/VFS/';
+
+/*
+ * 找出「块索引已经对齐目标版本」的 VFS 子目录。
+ *
+ * 判据只有一个：该目录的 `<目录名>.blc`（块索引）与目标清单里的 size **和** md5
+ * 都完全一致。索引已经是新版，就意味着该目录里「不在清单中的 .chk」是客户端
+ * 永远读不到的死块。
+ *
+ * 索引对不上的目录一律跳过 —— 那说明这个目录本身还没更新完，此时删文件会有风险。
+ */
+async function indexAlignedVfsDirs(root, remoteFiles) {
+  const byPath = new Map(remoteFiles.map((file) => [file.path, file]));
+  const vfsDir = path.join(root, 'Endfield_Data', 'StreamingAssets', 'VFS');
+  let entries = [];
+  try {
+    entries = await fsp.readdir(vfsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const aligned = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dirName = entry.name;
+    const want = byPath.get(`${VFS_REL_PREFIX}${dirName}/${dirName}.blc`);
+    if (!want) continue;
+    const blcPath = path.join(vfsDir, dirName, `${dirName}.blc`);
+    try {
+      const stat = await fsp.stat(blcPath);
+      if (stat.size !== want.size) continue;
+      if ((await md5File(blcPath)) !== want.md5) continue;
+    } catch {
+      continue;
+    }
+    aligned.push({ dirName, absDir: path.join(vfsDir, dirName) });
+  }
+  return aligned;
+}
+
+/**
+ * 清掉「索引已对齐」目录里那些目标清单之外的旧资源块。
+ *
+ * 为什么需要它（2026-11-25 真实故障）：
+ *   updateEndfieldGame 是**只增不删**的 —— 新清单删掉的旧 .chk 永远留在盘上。
+ *   1.7.2 把 469 个旧文件判成删除，但盘上仍留着 341 个旧 .chk 共 52.9 GB。
+ *   结果更新需要的 35.9 GB 装不下（盘只剩 32.5 GB），「修复」一路爬到 ~90%
+ *   才因 ENOSPC 停下，又留下一个半成品，客户端就报「获取资源失败，请检查网络
+ *   状态重试」并退出。
+ *
+ * 为什么删了是安全的：
+ *   这正是官方下载器自己的做法。G:\Arknights Endfield\sdklogs\HGDownloadLog.log
+ *   在每次启动时跑 [RemoveUselessFiles]：按 .blc 索引算出白名单，白名单外的块
+ *   直接 "prepare remove file" / "remove file success"。我们只是把同一件官方
+ *   本来就会做的事，提前到「盘不够用」这个时刻做一次。
+ *
+ * 保留 .vela-download 半成品：那是本模块自己的续传临时件，目标文件还在清单里
+ * 时留着能省一次重下。
+ */
+async function pruneStaleVfsBlocks(root, remoteFiles, onProgress) {
+  const wanted = new Set(remoteFiles.map((file) => file.path));
+  const aligned = await indexAlignedVfsDirs(root, remoteFiles);
+  let removed = 0;
+  let bytes = 0;
+  for (const { dirName, absDir } of aligned) {
+    let names = [];
+    try {
+      names = await fsp.readdir(absDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of names) {
+      if (!entry.isFile()) continue;
+      const rel = `${VFS_REL_PREFIX}${dirName}/${entry.name}`;
+      if (wanted.has(rel)) continue;
+      // 续传临时件：目标仍要就留着（下一步会接着下），目标不要了就没价值
+      if (/\.vela-download$/i.test(entry.name)) {
+        const baseRel = rel.slice(0, -'.vela-download'.length);
+        if (wanted.has(baseRel)) continue;
+      }
+      const full = path.join(absDir, entry.name);
+      let size = 0;
+      try {
+        size = (await fsp.stat(full)).size;
+      } catch {
+        continue;
+      }
+      try {
+        await fsp.rm(full, { force: true });
+        removed += 1;
+        bytes += size;
+        onProgress?.({ phase: 'prune', current: rel, removed, bytes });
+      } catch {
+        /* 删不掉就算了，交给后面的容量复核去报错 */
+      }
+    }
+  }
+  return { removed, bytes };
+}
+
 async function updateEndfieldGame({ root, channel, onProgress, force, linkSources = [] } = {}) {
   const profile = profileForChannel(channel);
   if (!profile) throw new Error('没有对应的终末地渠道');
@@ -1108,6 +1327,40 @@ async function updateEndfieldGame({ root, channel, onProgress, force, linkSource
    * 判定口径与「本地是否已就位」一致：size + 整份 md5。
    */
   const usableSources = linkSource.usableSources(linkSources, { targetRoot: root });
+  /*
+   * 开跑前先算「这次到底还要写多少」，空间不够就先清掉没用的旧资源块。
+   *
+   * 为什么必须先清而不是直接开跑（2026-11-25 真实故障）：
+   *   本函数只增不删，旧清单删掉的 .chk 会一直躺在盘上。1.7.2 相对 1.6.4 删了
+   *   469 个文件，盘上残留 341 个旧 .chk 共 52.9 GB；而这次要补 35.9 GB，
+   *   盘只剩 32.5 GB。没有这一手，就会一路下到 ~90% 才 ENOSPC 中断，
+   *   留下半成品，客户端报「获取资源失败，请检查网络状态重试」并退出。
+   *
+   * 清的是「块索引（.blc）已对齐目标版本」目录里、目标清单之外的块 ——
+   * 正是鹰角官方下载器每次启动自己也在做的 [RemoveUselessFiles]。
+   */
+  let pruned = null;
+  try {
+    const needBytes = await measureUpdateGap(root, remote.files);
+    const guard = diskSpace.createSpaceGuard({
+      dirs: [root],
+      label: '游戏所在盘',
+      reserveBytes: 256 * 1024 ** 2,
+    });
+    const room = await guard.check(needBytes);
+    if (room && room.ok === false) {
+      const result = await pruneStaleVfsBlocks(root, remote.files, onProgress);
+      pruned = result;
+      if (result.removed > 0) {
+        console.warn(
+          `[endfield] 空间不足，已清理 ${result.removed} 个旧资源块（${(result.bytes / 1024 ** 3).toFixed(2)} GB）`
+        );
+      }
+    }
+  } catch (error) {
+    // 预检只是优化，绝不能因为它失败而挡住更新
+    console.warn('[endfield] 更新前空间预检跳过：' + (error && error.message));
+  }
   /*
    * 空间守卫：每个要下的文件都先写 `.vela-download` 临时文件再 rename，临时文件在时
    * 新旧两份同时存在，所以要按文件大小预留。空间不够就在这个文件开始前停下，
@@ -1649,6 +1902,8 @@ module.exports = {
   ARKNIGHTS_TW_READY,
   updateEndfieldGame,
   checkEndfieldGame,
+  // 不看状态文件、按字实验证「本地是否已等于远端版本」（启动提示用）
+  verifyLocalMatchesRemote,
   fetchLatest,
   loadRemoteManifest,
   downloadAndExtractSplit,

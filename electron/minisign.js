@@ -27,7 +27,7 @@ const fs = require('node:fs');
 
 /**
  * 内置公钥。换成自己的密钥时改这两行即可（脚本：scripts/release/sign-manifest.js）。
- * 私钥不在这里、也不在仓库里——它只存在于打包机的 H:\HXL-pack\keys\。
+ * 私钥不在这里、也不在仓库里——它只存在于打包机的
  */
 const PUBLIC_KEY_B64 = '7fJAF5ITWXRu8oVpr3YCr6v9W7UmdtWOAZ2MhdGjNAI=';
 const KEY_ID = 'dff6dc4c71f12733';

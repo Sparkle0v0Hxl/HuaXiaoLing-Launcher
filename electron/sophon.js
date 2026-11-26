@@ -918,7 +918,7 @@ async function fetchChunk(chunk, prefix, chunkCacheDir, signal) {
   /*
    * 第三个返回值 cachePath：这一块在磁盘上「确实躺着」的绝对路径，没有就 null。
    *
-   * 2026-11-19 用户决定「边下边清」「之前别的用户下出来的缓存，也得清了」：
+   * 2026-11-19 「之前别的用户下出来的缓存，也得清了」：
    * 分块缓存只是组装的中间物，硬链接链路（runtime / kuro-packs / link-source /
    * link.js / hdiff.js）完全不碰 sophon-cache，所以文件一旦校验通过，缓存里那一份
    * 就没有留的必要。要让调用方知道删哪个文件，就得在这里把路径带出去。
@@ -956,7 +956,7 @@ async function fetchChunk(chunk, prefix, chunkCacheDir, signal) {
 /*
  * best-effort 清掉分块缓存目录里的残留分块。
  *
- * 2026-11-19 用户决定：「边下边清才是合理的情况吧」「而且之前别的用户下出来的缓存，
+ * 2026-11-19 「而且之前别的用户下出来的缓存，
  * 也得清了这个缓存吧，没留的必要」。所以安装收口处不再保留 chunks 目录 ——
  * 包括上一版（或别的用户那份）安装留下来的旧缓存，一并在这次收口里清掉。
  *
@@ -982,7 +982,7 @@ async function clearChunkCache(chunkCacheDir) {
  * 版本内反复装/更新还能命中，省一次下载；但一旦过了版本，旧 zip 就再也不会被读到，
  * 却一直占着盘。本机实测 sophon-cache 根目录躺着 3 个这样的 zip，各 81.05MB，
  * 合计 243.15MB，全是白占。
- * 2026-11-19 用户明确说：「而且之前别的用户下出来的缓存，也得清了这个缓存吧，
+ * 用户明确说：「而且之前别的用户下出来的缓存，也得清了这个缓存吧，
  * 没留的必要」—— 所以按时间老化，而不是一刀全删：留最近 keep 个，老的才清。
  *
  * 保守口径：
@@ -1039,7 +1039,7 @@ async function installChannelSdk(info, targetRoot, cacheDir, onProgress, signal)
   const sdk = (data.game_channel_sdks || [])[0];
   if (!sdk || !sdk.channel_sdk_pkg) {
     /*
-     * 2026-11-17：以前这里静默返回空串，接着照样写一份 cps=bilibili 的
+     * 以前这里静默返回空串，接着照样写一份 cps=bilibili 的
      * config.ini —— 结果生成出一个「说是 B服、其实没有 B站渠道件」的目录，
      * 启动会失败，界面还显示绿灯。以后宁可当场报错，让用户知道没装成。
      */
@@ -1134,7 +1134,7 @@ async function writeFileIsolated(target, content) {
  * 先 unlink 再新建：两边从此各持一份，谁更新都不影响对方。
  * 只读属性的包体（从压缩包解出来的）先去掉只读，否则 Windows 上 unlink 会 EPERM。
  *
- * 2026-11-11 补充：还有一种 unlink 不了的文件 —— 官方安装器用管理员身份写的文件，
+ * 补充：还有一种 unlink 不了的文件 —— 官方安装器用管理员身份写的文件，
  * ACL 上普通用户没给 DELETE。这种 `chmod` 也没用（chmod 改的是只读属性，改不了 ACL），
  * unlink 照样 EPERM，而 Node 在 Windows 上把「权限不足」和「被占用」都报成 EPERM，
  * 用户看到的就是「文件被其它程序占用」（实际关掉所有程序也没用）。
@@ -1232,6 +1232,14 @@ function readGameVersion(root) {
  * 现在判不出就返回 ''，调用方保留原渠道，不硬猜。
  */
 function detectLocalChannel(root) {
+  /*
+   * 2026-11-26：先做文件层复核（config.ini + 渠道 SDK）。
+   * 第三方三服切换器会把官服目录的 cps 改成 bilibili 却不带渠道件，
+   * 纯 ini 判定会让本地分块索引按 B服 清单去查 —— 版本对不上就退化成整包重下，
+   * 甚至和上面的更新渠道一起把 config.ini 改写成 B服。
+   */
+  const resolved = clientChannel.resolveChannelFromRoot(String(root || ''));
+  if (resolved && resolved.channel) return resolved.channel;
   const config = clientChannel.readClientConfig(root);
   if (config) {
     const byIni = clientChannel.classifyIni(config.fields);
@@ -1275,7 +1283,7 @@ async function prepareBilibiliRuntime({
   const info = CHANNELS[gameKey].bilibili;
   if (!info) {
     /*
-     * 2026-11-17：崩坏3 官方没有 B服渠道（HoYoPlay 三个 B服 launcher 下都查不到
+     * 崩坏3 官方没有 B服渠道（HoYoPlay 三个 B服 launcher 下都查不到
      * bh3 —— B服走 B站自有启动器）。以前这里是 undefined 传给 installChannelSdk，
      * 它静默返回空串，接着照样写一份 cps=bilibili 的 config.ini，
      * 生成出一个「说是 B服、其实没有渠道件」的目录。现在当场报错。
@@ -1307,7 +1315,7 @@ async function prepareBilibiliRuntime({
 /*
  * prepareSophon 的对外壳：负责「边下边清」的最后一道收口。
  *
- * 2026-11-19 用户决定：「边下边清才是合理的情况吧」「而且之前别的用户下出来的缓存，
+ * 2026-11-19 「而且之前别的用户下出来的缓存，
  * 也得清了这个缓存吧，没留的必要」。所以这次安装无论成功还是中途失败（校验不过、
  * 空间不足、用户取消……），都把 sophon-cache/chunks 整个清掉：本次用到的分块已经
  * 写进目标文件了，上一版安装（或别的用户那时候）留下的分块也没有留的必要。
@@ -1613,7 +1621,7 @@ async function prepareSophonInner({
       /*
        * 这条链**故意**不看 runtime.mustCopyNotLink()，与 hardlinkTree 的口径不同。
        *
-       * 2026-11-17 实测过本机星铁官服 ↔ 国际服：两边同名 11931 个文件里，有 411 个
+       * 实测过本机星铁官服 ↔ 国际服：两边同名 11931 个文件里，有 411 个
        * / 12.14 GB 是「mustCopyNotLink 说要拷贝、实际共享了 inode」的 —— 350 个是
        * Persistent/Audio 下的语音包 .pck（12.05 GB），其余 61 个 / 380 MB 是
        * RawConfig/*.dat、Plugins/*.dat、il2cpp_data/*.dat、boot.config 这类只读资源。
@@ -1731,7 +1739,7 @@ async function prepareSophonInner({
   /*
    * 分块引用计数：还有多少个「待组装文件」需要某个分块。
    *
-   * 2026-11-19 用户决定「边下边清」，但删分块必须躲开并发：FILE_CONCURRENCY 路文件
+   * 2026-11-19 ，但删分块必须躲开并发：FILE_CONCURRENCY 路文件
    * 同时在跑，同一个分块完全可能被 A、B 两个文件共用（官方清单里相同内容的分块
    * 在多个文件间复现）。如果 A 一校验通过就把分块删了，B 之后再去 fetchChunk 就
    * 读不到了 —— 白白重下，还可能把 B 拖成校验失败。
@@ -1769,7 +1777,7 @@ async function prepareSophonInner({
       /*
        * 本文件从缓存里拿到的分块（md5 → 磁盘路径），等整文件 md5 校验通过后再删。
        *
-       * 2026-11-19 用户决定：「边下边清才是合理的情况吧」。缓存只是组装的中间物，
+       * 2026-11-19 。缓存只是组装的中间物，
        * 硬链接链路完全不碰 sophon-cache，所以文件落地后缓存里那份就是多余的。
        *
        * 为什么攒到这里而不是写完一块就删：
@@ -1846,7 +1854,7 @@ async function prepareSophonInner({
       /*
        * 校验通过了，这个文件才算真的落地 —— 现在才可以考虑回收它用到的分块缓存。
        *
-       * 2026-11-19 用户决定：「边下边清才是合理的情况吧」。放在 md5File 通过之后
+       * 2026-11-19 。放在 md5File 通过之后
        * 是硬要求：校验失败时上面的 throw 会跳过这里，缓存原样留着，重试还能命中。
        *
        * 回收口径（并发安全的关键）：

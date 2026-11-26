@@ -12,11 +12,69 @@ const { loadSecret, saveSecret } = require('./secret-store');
 const gameFeatures = require('./game-features');
 const clientChannel = require('./client-channel');
 const { createCancelSignal } = require('./cancel-signal');
+
+/**
+ * 写终末地自动模式的熔断计数（2026-11-25）。
+ *
+ * 为什么不复用 settings:update 那条 IPC：那是给渲染层用的，入口还要过白名单校验、
+ * 还要回推快照。这里只是主进程内部记账，直接写 store 更直接，也不会因为
+ * 白名单漏项而静默失败。
+ */
+/**
+ * 修复完本体后，检查各渠道的硬链接运行时是否落后。
+ *
+ * 为什么要单独抽出来：原来只有米哈游四款的分支里调了 checkAllRuntimes，
+ * 终末地 / 鸣潮 / 明日方舟的运行时（同样靠硬链接生成）从来没被检查过。
+ * 用户 2026-11-25 追问「硬链接出来的服务器也会有这些问题吧」—— 确实会。
+ *
+ * @param {object} game
+ * @param {string} gameKey
+ * @param {Function} send IPC 推送（用来发提示）
+ * @param {Function} writeLaunchLog
+ */
+async function auditRuntimesAfterRepair(game, gameKey, send, writeLaunchLog) {
+  try {
+    if (!runtimeCheck.KEY_FILES[gameKey]) return;
+    const problems = runtimeCheck.checkAllRuntimes(game, writeLaunchLog).problems;
+    if (!problems.length) return;
+    const names = problems.map((p) => p.server).join('、');
+    writeLaunchLog(
+      `[runtime] ${gameKey}：${names} 的独立运行时与本体不一致，建议在对应服务器上点「重新生成」`
+    );
+    try {
+      send('toast', {
+        type: 'warning',
+        message: `${game.name || ''}：${names} 的独立运行时里有文件落后于本体，建议点「重新生成」`,
+      });
+    } catch {
+      /* 提示失败不影响修复结果 */
+    }
+  } catch {
+    /* 一致性检查失败不影响修复结果 */
+  }
+}
+
+async function bumpEndfieldAutoFail(getStore, patch) {
+  const settings = getStore().data.settings;
+  if (Object.prototype.hasOwnProperty.call(patch, 'endfieldAutoFailCount')) {
+    settings.endfieldAutoFailCount = Math.max(0, parseInt(patch.endfieldAutoFailCount, 10) || 0);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'endfieldAutoFailReason')) {
+    settings.endfieldAutoFailReason = String(patch.endfieldAutoFailReason || '').slice(0, 200);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'endfieldAutoFailAt')) {
+    settings.endfieldAutoFailAt = Number(patch.endfieldAutoFailAt || 0);
+  }
+  await getStore().saveNow();
+}
 // 渠道能力表：哪个游戏在哪个渠道能修 / 能更新 / 能硬链接，全在 game-channels.js 里定，
-// 这里的 handler 只查表，不再自己写死渠道数组（用户 2026-11-16 定的规则）。
+// 这里的 handler 只查表，不再自己写死渠道数组。
 const gameChannels = require('./game-channels');
 // 终末地官方托管启动：真的跑官方 Games.exe，由它亲自 CreateProcess 拉起游戏。
 const endfieldOfficial = require('./endfield-official');
+const azurLauncher = require('./azur-launcher');
+const gameHeat = require('./game-heat');
+const runtimeCheck = require('./runtime-check');
 
 /**
  * 鸣潮客户端的「本体根」：主程序在 Client\Binaries\Win64 下（三层深），
@@ -59,34 +117,16 @@ const CHANNEL_PROBE_KEYS = ['official', 'bilibili', 'global'];
 /**
  * 终末地「官方托管启动」：真的跑官方 Games.exe，由它亲自拉起游戏。
  *
- * 为什么优先这条：官方客户端会校验「直接父进程是不是官方启动了」，
- * 而旧方案（VelaEndfield 复制官方签名 exe 当父进程）本质是伪装进程身份。
- * 这条链路不伪装任何东西 —— 官方启动器自己拉起游戏，我们只替用户点了那颗按钮。
+ * 为什么优先这条：官方客户端会校验「直接父进程是不是官方启动器」，只有真的由
+ * 官方启动器拉起才通过。我们只替用户点了那颗按钮，别的什么都不做。
  *
  * 返回 {handled:true, result} 表示已经处理完（成功或明确失败都算）；
- * 返回 null 表示这条路不适用（没装官方启动器），调用方退回旧链路。
+ * 返回 null 表示这条路不适用（没装官方启动器），调用方走普通启动方式。
  */
 async function tryOfficialLaunch(game, target, cwd, args, deps) {
-  const { writeLaunchLog, getLaunching, currentElevation, markLaunched, trackGameProcess, send, getOfficialGamesExe } = deps;
+  const { writeLaunchLog, getLaunching, currentElevation, markLaunched, trackGameProcess, send, getOfficialGamesExe, getStore } = deps;
   const id = game.id;
   const launching = getLaunching();
-
-  /*
-   * 官方托管启动前的知情提示（2026-11-23）：这条链路确实要求本机装了
-   * 鹰角官方启动器，Games.exe 本身要管理员权限（首次会弹一次 UAC），
-   * 杀软首次可能拦一次要放行。以前一句都没说，用户遇到 UAC/杀软弹窗会
-   * 以为是启动器出问题。放在函数内部，只要尝试官方托管就先说清楚。
-   */
-  try {
-    if (typeof send === 'function') {
-      send('toast', {
-        type: 'info',
-        message: '终末地官方托管启动：需已安装鹰角官方启动器；首次运行会弹 UAC 请求管理员权限，杀软可能提示放行一次（加白名单即可）。',
-      });
-    }
-  } catch {
-    /* 提示失败不影响启动 */
-  }
 
   // 官方启动器认的安装目录：优先官方日志里自己写的，其次服务器记录的原始目录。
   const gameRoot =
@@ -111,8 +151,8 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
         send('toast', {
           type: 'warning',
           message: customExe
-            ? '手填的官方启动器路径无效（要指向 Games.exe），自动搜索也没找到。请在「设置 → 行为」里重新指定鹰角官方启动器的位置；这次先临时用旧的启动方式。'
-            : '没找到鹰角官方启动器（Games.exe），官方托管这次不可用，已临时改用旧的启动方式。要在「设置 → 行为」里手填 Games.exe 路径，或先装好鹰角官方启动器。',
+            ? '手填的官方启动器路径无效（要指向 Games.exe），自动搜索也没找到。请在「设置 → 行为」里重新指定鹰角官方启动器的位置。'
+            : '没找到鹰角官方启动器（Games.exe）。终末地必须由官方启动器拉起，请在「设置 → 行为」里指定 Games.exe 的位置，或先装好鹰角官方启动器。',
         });
       }
     } catch {
@@ -123,10 +163,55 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
 
   const runRoot = String(cwd || path.dirname(target)).trim();
   const elevated = typeof currentElevation === 'function' ? Boolean(currentElevation()) : false;
+  /*
+   * 官方托管启动前的知情提示（2026-11-26 二改）。
+   *
+   * 这条链路要求本机装了鹰角官方启动器，Games.exe 要管理员权限（首次弹 UAC），
+   * 杀软首次可能拦一次要放行。但提示只在**真正的第一次**说一遍：
+   *   · 以前只记在进程内，重启启动器又会说一次，和文案里的「之后不会再提示」不符；
+   *   · 现在放在确认官方启动器存在之后，且当前已提权时不提示 —— 提权启动不会弹 UAC，
+   *     找不到 Games.exe 时另有失败提示，不该再叠一条；
+   *   · 已经用这个游戏跑过（launchCount / lastPlayed 有值）的老用户直接记为已提示，
+   *     不补弹 —— 他们早就见过，再弹一次只是噪音。
+   * 「已提示」落到 settings，只有换机器或重装才会再说。
+   */
+  try {
+    const settings = getStore().data.settings || {};
+    if (settings.endfieldOfficialHintShown !== true) {
+      const everLaunched = Number(game.launchCount) > 0 || Boolean(game.lastPlayed);
+      settings.endfieldOfficialHintShown = true;
+      getStore().saveNow().catch(() => {});
+      if (!everLaunched && !elevated && typeof send === 'function') {
+        send('toast', {
+          type: 'info',
+          message: '首次用官方托管启动终末地会弹一次 UAC（需管理员权限），杀软可能要放行一次。之后不会再提示。',
+        });
+      }
+    }
+  } catch {
+    /* 提示失败不影响启动 */
+  }
   launching.set(id, Date.now());
   writeLaunchLog(
     `launch ${id}: 官方托管启动 gameRoot=${gameRoot} runRoot=${runRoot} elevated=${elevated ? 1 : 0}`
   );
+  /*
+   * 启动方式：默认全自动（full），可在设置里切成手动（manual）。
+   * 手动模式不碰调试口 —— 是「万一官方开始查启动链路」时的退路。
+   */
+  const settings = (getStore().data.settings || {});
+  const launchMode = settings.endfieldLaunchMode === 'manual' ? 'manual' : 'full';
+  /** 自动模式连续失败次数；达到阈值就自动退回手动，避免用户一直卡着 */
+  const AUTO_FAIL_LIMIT = 3;
+  const autoFailCount = Number(settings.endfieldAutoFailCount || 0);
+  const effectiveMode = launchMode === 'full' && autoFailCount >= AUTO_FAIL_LIMIT ? 'manual' : launchMode;
+  if (effectiveMode !== launchMode) {
+    writeLaunchLog(
+      `launch ${id}: 自动模式已连续失败 ${autoFailCount} 次，本次自动退回手动模式（原因：${settings.endfieldAutoFailReason || '未记录'}）`
+    );
+  }
+  writeLaunchLog(`launch ${id}: 启动方式 mode=${effectiveMode}（设置值 ${launchMode}）`);
+
   let result;
   try {
     result = await endfieldOfficial.launchViaOfficial({
@@ -134,6 +219,7 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
       runRoot,
       elevated,
       customExe,
+      launchMode: effectiveMode,
       onProgress: (msg) => writeLaunchLog(`launch ${id}: [官方托管] ${msg}`),
       onLog: (msg) => writeLaunchLog(`launch ${id}: ${msg}`),
     });
@@ -142,6 +228,15 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
   }
 
   if (result && result.ok) {
+    /*
+     * 成功了就把熔断计数清零 —— 那几次失败可能只是当时 UAC 被拒 / 启动器没起来，
+     * 不该让它累积到把后面的启动全降级成手动。
+     */
+    if (Number(settings.endfieldAutoFailCount || 0) > 0) {
+      try {
+        await bumpEndfieldAutoFail(getStore, { endfieldAutoFailCount: 0, endfieldAutoFailReason: '', endfieldAutoFailAt: 0 });
+      } catch { /* 清理失败不影响启动 */ }
+    }
     try {
       await markLaunched(game);
       trackGameProcess(id, path.basename(target), Date.now()).catch(() => {});
@@ -155,6 +250,37 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
   launching.delete(id);
   const message = (result && result.error) || '官方托管启动失败';
   writeLaunchLog(`launch ${id}: 官方托管启动失败：${message}`);
+
+  /*
+   * 熔断计数：只统计「自动模式下的技术性失败」。
+   * 更新态 / 用户拒绝提权 / 已经开着一个启动器，这些都不是我们的链路坏了，
+   * 计进去会误判成「自动模式不可用」而白白降级。
+   */
+  if (
+    effectiveMode === 'full' &&
+    result &&
+    !result.ok &&
+    result.reason !== 'update' &&
+    result.reason !== 'not-startable' &&
+    result.reason !== 'already-running'
+  ) {
+    const next = Number(settings.endfieldAutoFailCount || 0) + 1;
+    try {
+      await bumpEndfieldAutoFail(getStore, {
+        endfieldAutoFailCount: next,
+        endfieldAutoFailReason: String(message).slice(0, 200),
+        endfieldAutoFailAt: Date.now(),
+      });
+      if (next >= AUTO_FAIL_LIMIT) {
+        writeLaunchLog(
+          `launch ${id}: 自动模式已连续失败 ${next} 次，下次启动自动改用手动模式` +
+            `（可在设置 → 行为 → 终末地启动方式 里手动切回全自动）`
+        );
+      }
+    } catch {
+      /* 记账失败不影响本次结果 */
+    }
+  }
   /*
    * 更新态 / 不可启动态属于「官方启动器说了现在不能点」，这是明确结论，
    * 不该再退回旧链路白试一次（旧链路也过不了官方校验，只会多弹一次 UAC）。
@@ -164,21 +290,44 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
     return { handled: true, result: { ok: false, error: message, endfieldUpdate: result.reason === 'update' } };
   }
   /*
+   * ★ 已经帮用户把官方启动器拉出来了，就到此为止（2026-11-25 加）。
+   *
+   * 这两种失败（没拿到管理员权限 / 官方启动器页面渲染不出来）里，endfield-official
+   * 已经把 Games.exe 正常打开并让用户自己点「开始游戏」。此时如果继续 return null
+   * 退回旧链路，会再起一次游戏进程 —— 又一个过不了官方校验的失败 + 一次多余的动作，
+   * 用户看到的是「启动器打开了、又报一次错」。
+   * 所以这里直接当「已处理」返回，把提示原样交给界面。
+   */
+  if (result && (result.reason === 'need-elevation' || result.reason === 'manual-required')) {
+    return {
+      handled: true,
+      result: {
+        ok: false,
+        manualOpened: Boolean(result.manualOpened),
+        reason: result.reason,
+        error: message,
+      },
+    };
+  }
+  /*
    * 第三步：其它失败按原因给一条能看懂的中文提示，别让日志里那串英文/内部术语
    * 直接砸到用户脸上。分类只看 message 里已经有的关键措辞，不改动失败判定本身。
    * 仍保留 return null 退回旧链路兜底（回归脚本也断言这个分支存在）。
    */
   try {
     if (typeof send === 'function') {
-      let hint = `官方托管启动失败：${message}。这次会退回旧的启动方式再试一次。`;
+      let hint = `终末地启动失败：${message}`;
+      if (result && (result.reason === 'need-elevation' || result.reason === 'manual-required')) {
+        hint = message; // 这条已经是给人看的完整说明（含「请在官方启动器上点开始游戏」）
+      } else
       if (/安全软件|白名单|环境变量注入|调试口/.test(message)) {
-        hint = '官方启动器被安全软件拦了，或它的调试接口没打开。请把鹰角官方启动器加入杀软白名单后重试；这次先退回旧的启动方式。';
+        hint = '官方启动器起来了，但没能接管它（调试接口没打开）。常见原因是安全软件拦了环境变量注入，把鹰角官方启动器加入杀软白名单后重试；也可以在「设置 → 行为」里手动指定 Games.exe 的位置。';
       } else if (/管理员|UAC|RunAs|拒绝/.test(message)) {
-        hint = '没有拿到管理员权限（UAC 被拒绝或提权失败）。请在弹 UAC 时点「是」，或以管理员身份运行启动器；这次先退回旧的启动方式。';
+        hint = '没有拿到管理员权限（UAC 被拒绝或提权失败）。请在弹 UAC 时点「是」，或以管理员身份运行启动器。';
       } else if (/已经在运行/.test(message)) {
         hint = '终末地已经在运行了，不用重复启动。';
       } else if (/安装目录/.test(message)) {
-        hint = '没拿到终末地的安装目录，请先在设置里检测一次游戏路径；这次先退回旧的启动方式。';
+        hint = '没拿到终末地的安装目录，请先在设置里检测一次游戏路径。';
       }
       send('toast', { type: 'error', message: hint });
     }
@@ -189,7 +338,7 @@ async function tryOfficialLaunch(game, target, cwd, args, deps) {
 }
 
 function installGamesIpc(ctx) {
-  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, launchWithSignedParent, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame, clearRegistryCache, currentElevation } = ctx;
+  const { getStore, getRunning, getLaunching, pushState, send, detectServerExecutable, fetchAllGameNotices, syncAllOfficial, writeLaunchLog, targetExists, finishGame, killGame, markLaunched, updater, ensureServers, detectBuiltins, detectGame, clearRegistryCache, currentElevation } = ctx;
   /*
    * 下面这批是从 main.js 顶层直接传进来的（函数提升 / require 的常量）。
    * 拆分时漏掉过，导致 games:launch / games:update / games:detect 一调用就 ReferenceError。
@@ -228,6 +377,23 @@ function installGamesIpc(ctx) {
       }
       if (getRunning().has(game.id)) throw new Error('游戏正在运行，先结束进程再修复');
       const key = game.builtinKey;
+      /*
+       * 蓝色星原：没有官方逐文件清单，走「本地一致性修复」——
+       * 从同机另一个渠道的客户端把缺失 / 空壳 / 大小不符的文件补回来。
+       * 详见 main.js 的 repairAzurGame 注释。
+       */
+      if (key === 'azurpromilia') {
+        const result = await repairAzurGame({
+          root: server.root,
+          channel: server.channel,
+          dryRun: Boolean(input?.dryRun),
+          onProgress: (progress) => send('repair:progress', progress),
+        });
+        if (!result?.dryRun && result?.ok) {
+          pushState(true);
+        }
+        return result;
+      }
       if (key === 'endfield') {
         const result = await updateEndfieldGame({
           root: server.root,
@@ -239,7 +405,10 @@ function installGamesIpc(ctx) {
         });
         // 逐文件 rm+rename 换了 inode，硬链接运行时镜像必须失效重建
         if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+        /* 修复完也要处理热更层：修的是基础包，IFix 补丁可能还是旧的 */
+        if (result?.ok) await gameHeat.healAfterUpdate({ gameKey: key, root: server.root, onLog: writeLaunchLog });
         return result;
+        await auditRuntimesAfterRepair(game, key, send, writeLaunchLog);
       }
       if (key === 'arknights') {
         /*
@@ -266,6 +435,8 @@ function installGamesIpc(ctx) {
             game.versionName = game.version;
             await getStore().saveNow();
             pushState(true);
+            await gameHeat.healAfterUpdate({ gameKey: key, root: server.root, onLog: writeLaunchLog });
+            await auditRuntimesAfterRepair(game, key, send, writeLaunchLog);
           }
           return { ...result, repaired: true };
         }
@@ -283,6 +454,8 @@ function installGamesIpc(ctx) {
           onProgress: (progress) => send('repair:progress', progress),
         });
         if (result?.ok && !result?.skipped) invalidateRuntimesAfterUpdate(game);
+        if (result?.ok) await gameHeat.healAfterUpdate({ gameKey: key, root: server.root, onLog: writeLaunchLog });
+        if (result?.ok) await auditRuntimesAfterRepair(game, key, send, writeLaunchLog);
         return result;
       }
       if (key === 'wutheringwaves') {
@@ -300,7 +473,7 @@ function installGamesIpc(ctx) {
           onProgress: (progress) => send('repair:progress', progress),
           /*
            * 修复也复用同机别的鸣潮客户端（同内容文件硬链接过来，只下缺的），
-           * 2026-11-16 用户要求「没更新的服点更新可以直接硬链接补齐」。
+           * 2026-11-16 。
            */
           linkSources: externalLinkSources(game, server, server.root),
         });
@@ -313,6 +486,8 @@ function installGamesIpc(ctx) {
           invalidateRuntimesAfterUpdate(game);
           await getStore().saveNow();
           pushState(true);
+          await gameHeat.healAfterUpdate({ gameKey: key, root: server.root, onLog: writeLaunchLog });
+          await auditRuntimesAfterRepair(game, key, send, writeLaunchLog);
         }
         return { ...result, repaired: true };
       }
@@ -353,6 +528,21 @@ function installGamesIpc(ctx) {
         pushState(true);
         // 修复换了本体文件，链接运行时若有标记也应失效（非终末地当前为 no-op）
         invalidateRuntimesAfterUpdate(game);
+        /* 米哈游三款有内建版本自愈（archive:false），这里调用是安全的空操作；
+           将来若要接管它们的热更层，只需改 HEAT_PROFILES 一处 */
+        await gameHeat.healAfterUpdate({ gameKey: key, root: server.root, onLog: writeLaunchLog });
+        /*
+         * 硬链接运行时一致性检查（2026-11-25 新增）。
+         *
+         * 每个渠道的「独立运行时」里大部分文件是硬链接，但生成时源校验没通过的
+         * 会退化成独立副本 —— 那批文件本体更新后**不会跟着变**，用户切到那个渠道
+         * 用的就是旧文件。本机实测：原神 50 个、星铁 243 个。
+         *
+         * 这里在修复后检查一遍，有落后/缺失就写日志并提示用户去「重新生成」。
+         * 只检查关键文件（metadata / globalgamemanagers / config.ini），不扫全量，
+         * 免得一次修复多花几分钟。
+         */
+        await auditRuntimesAfterRepair(game, key, send, writeLaunchLog);
         return { ok: true, version: result.tag, updated: result.files, root: server.root };
       }
       if (key === 'neverness') {
@@ -491,7 +681,7 @@ function installGamesIpc(ctx) {
           const detected = serverForDetected(game, channel);
           if (detected) {
             /*
-             * 2026-11-17 审查：这里是第四条写 server.path 的路，也是唯一没有占用检查的一条
+             * 审查：这里是第四条写 server.path 的路，也是唯一没有占用检查的一条
              * （另外三处 main.js 的 discoverBuiltinServers / detectBuiltins 和本文件的
              *  games:detect-server 都有）。「自动检测」按钮走的就是这里 —— 只要官服目录的
              * config.ini 被第三方三服切换器改成 cps=bilibili，就会把官服路径写进 B服 行，
@@ -560,7 +750,7 @@ function installGamesIpc(ctx) {
         };
       }
       /*
-       * 2026-11-17（用户报障：「绝区零 B服和官服共用一个文件夹」）：
+       * 2026-11-17（）：
        * 非官服渠道不能和别的渠道共用同一个安装目录 —— 扫到的这个 exe 所在的目录
        * 如果已经被别的渠道行占了，就不写这一行，改成提示用户「硬链接生成一份」。
        *
@@ -636,6 +826,126 @@ function installGamesIpc(ctx) {
        */
       if (activeServer && activeServer.channel === 'wegame' && game.builtinKey === 'wutheringwaves') {
         target = WEGAME_LAUNCH_URI;
+      }
+      /*
+       * 蓝色星原：必须由官方 launcher.exe 拉起（2026-11-26 接入）。
+       *
+       * 实测：直接 spawn AzurPromilia.exe 会触发 ACE「安全组件发生异常」，
+       * 且运行中读游戏进程确认父进程就是 launcher.exe、ACE 拒绝外部 OpenProcess。
+       * 所以这里不直接启动游戏，交给 azurLauncher 走官方托管：
+       *   提权起 launcher.exe → CDP 触发 r2m.gameEntry → 检测到游戏 → 关掉启动器。
+       */
+      if (game.builtinKey === 'azurpromilia' && !getRunning().has(id)) {
+        /*
+         * 这里必须走 getLaunching()，不能裸写 `launching`。
+         *
+         * 本函数是 installGamesIpc(ctx) 的作用域，`launching` 只在
+         * tryOfficialLaunch() 内部由 `const launching = getLaunching()` 声明过，
+         * 这里拿不到 —— 裸用会抛 ReferenceError，被 Electron 包成
+         * 「Error invoking remote method 'games:launch'」，表现为蓝原点开始游戏毫无反应。
+         * （2026-11-26 实测复现）
+         */
+        const launching = getLaunching();
+        launching.set(id, Date.now());
+        /*
+         * 启动前先把启动器的渠道配置换成这一行对应的渠道。
+         *
+         * 蓝原的渠道身份完全由 <启动器目录>/res/app_config.dat 决定
+         * （官服 C000=192 字节 / B服 C001=368 字节，整份复制即可，不解密不改字段）。
+         * 用户实测：只换这一个文件，launcher.exe 和其余 79 个文件都不动，就能进 B服。
+         *
+         * 拿不到对应渠道的配置时不阻断启动 —— 至少还能用当前渠道跑起来，
+         * 只是提示一句，别让「没装另一个启动器」变成「游戏打不开」。
+         */
+        try {
+          const azurSwitch = require('./azur-switch');
+          const activeChannel = String(
+            (activeServer && activeServer.channel) || game.servers.find((s) => s.id === game.activeServerId)?.channel || 'official'
+          );
+          const switched = await azurSwitch.applyChannelToLauncher({
+            userData: app.getPath('userData'),
+            channel: activeChannel,
+            launcherDir: String((getStore().data.settings || {}).azurLauncherDir || '').trim() || undefined,
+            onLog: (msg) => writeLaunchLog(`launch ${id}: ${msg}`),
+          });
+          if (switched.ok) {
+            writeLaunchLog(`launch ${id}: 渠道配置已就绪 ${switched.channelCode}（来源 ${switched.source}）`);
+          } else {
+            writeLaunchLog(`launch ${id}: 渠道配置未切换（${switched.error}），用当前配置继续`);
+          }
+        } catch (error) {
+          writeLaunchLog(`launch ${id}: 渠道配置切换异常 ${error.message}，用当前配置继续`);
+        }
+        /*
+         * 渠道文件自愈：硬链接生成出来的运行时，游戏目录里仍是官服的
+         * mj_sdk/res/app_config.dat 与 Plugins/mj_sdk/*。启动前按 B服 官方清单
+         * 把这批文件换成 C001 版本（已有且正确时只做一次快速校验，开销很小）。
+         * 这样「切到 B服 → 开始游戏」不会因为目录仍是官服而进错服。
+         */
+        try {
+          const azurServer =
+            activeServer || (game.servers || []).find((s) => s.id === game.activeServerId);
+          const azurRoot = String((azurServer && azurServer.root) || '').trim();
+          const azurChannel = String((azurServer && azurServer.channel) || '');
+          if (azurRoot && azurChannel === 'bilibili') {
+            const azurChannelFiles = require('./azur-channel-files');
+            const healed = await azurChannelFiles.ensureChannelRuntime({
+              root: azurRoot,
+              channel: azurChannel,
+              onLog: (m) => writeLaunchLog(`launch ${id}: ${m}`),
+            });
+            if (healed && healed.skipped) {
+              writeLaunchLog(`launch ${id}: 渠道文件已就绪（${healed.note || 'skip'}）`);
+            }
+          }
+        } catch (error) {
+          writeLaunchLog(`launch ${id}: 渠道文件自愈异常 ${error.message}，继续尝试启动`);
+        }
+        writeLaunchLog(`launch ${id}: 蓝色星原走官方启动器托管`);
+        let azurResult;
+        try {
+          /* 按当前渠道挑启动器：官服 C000 / B服 C001 是两个独立安装，挑错就串渠道 */
+          const azurChannelCode =
+            String(
+              (activeServer && activeServer.channel) ||
+                game.servers.find((s) => s.id === game.activeServerId)?.channel ||
+                'official'
+            ) === 'bilibili'
+              ? 'C001'
+              : 'C000';
+          azurResult = await azurLauncher.launchViaAzurLauncher({
+            customLauncher: String((getStore().data.settings || {}).azurLauncherExe || '').trim(),
+            channelCode: azurChannelCode,
+            elevated: typeof currentElevation === 'function' ? Boolean(currentElevation()) : false,
+            onProgress: (msg) => writeLaunchLog(`launch ${id}: [蓝色星原] ${msg}`),
+            onLog: (msg) => writeLaunchLog(`launch ${id}: ${msg}`),
+          });
+        } catch (error) {
+          azurResult = { ok: false, error: '蓝色星原启动异常：' + error.message };
+        }
+
+        if (azurResult && azurResult.ok) {
+          try {
+            await markLaunched(game);
+            trackGameProcess(id, path.basename(target), Date.now()).catch(() => {});
+          } catch {
+            /* 记账失败不影响已经起来的游戏 */
+          }
+          writeLaunchLog(`launch ${id}: 蓝色星原启动成功 pid=${azurResult.pid || 0}`);
+          return { handled: true, result: { ok: true, pid: azurResult.pid, official: true, managed: true } };
+        }
+
+        launching.delete(id);
+        const azurMsg = (azurResult && azurResult.error) || '蓝色星原启动失败';
+        writeLaunchLog(`launch ${id}: 蓝色星原启动失败：${azurMsg}`);
+        /* 已经替用户把官方启动器打开了，就到此为止，不要退回旧链路再起一次 */
+        if (azurResult && (azurResult.reason === 'need-elevation' || azurResult.reason === 'manual-required')) {
+          return {
+            handled: true,
+            result: { ok: false, manualOpened: true, reason: azurResult.reason, error: azurMsg },
+          };
+        }
+        return { handled: true, result: { ok: false, error: azurMsg } };
       }
       if (game.builtinKey === 'endfield' && !getRunning().has(id)) {
         // 所有渠道统一先走自动生成：该渠道的独立运行时已建好且签名未变就只复用（很快），
@@ -856,7 +1166,7 @@ function installGamesIpc(ctx) {
          * 鸣潮：客户端启动后会做一条 UE4 断言
          *   Fatal error: [File:Unknown] [Line: 54] kuro: Use launcher to start game!
          * 缺了启动器给的上下文（画质档位 -krqlv=）就自杀，进程十几秒后自己退掉，
-         * 表现就是「点了开始游戏，弹一下就没了」（用户 2026-11-16 报障「提示要官方启动器」）。
+         * 表现就是「点了开始游戏，弹一下就没了」。
          *
          * 本机 A/B 实测（_wuwa-ab-test.ps1）：同一个父进程、同一个 exe，
          * 不带参数 → 退出；带 -krqlv=hd → 存活。客户端二进制里也没有读父进程路径的
@@ -931,6 +1241,9 @@ function installGamesIpc(ctx) {
             markLaunched,
             trackGameProcess,
             send,
+            /* tryOfficialLaunch 内部要读 settings（启动方式/失败计数），以前没传进来，
+               path 走到 191 行就 ReferenceError: getStore is not defined —— 终末地打不开的真因 */
+            getStore,
             getOfficialGamesExe: () => {
               try {
                 return String((getStore().data.settings || {}).endfieldOfficialGamesExe || '').trim();
@@ -940,14 +1253,13 @@ function installGamesIpc(ctx) {
             },
           });
           if (officialLaunch && officialLaunch.handled) return officialLaunch.result;
-
-          const signed = await launchWithSignedParent(game, target, cwd, {
-            requireElevation: true,
-            strict: true,
-            // 渲染后端参数也要一起传：这条链路绕过了下面的 spawn，漏传等于 DX 开关对终末地无效
-            args: args.join(' '),
-          });
-          if (signed.handled) return signed.result;
+          /* 官方托管启动没成功（没装官方启动器 / 用户没指定它的位置）：如实报错。
+           * 终末地要求父进程是官方启动器，普通方式拉起必然在登录界面之前退出，
+           * 与其让用户对着黑屏猜，不如直接告诉他去装官方启动器。 */
+          return {
+            ok: false,
+            error: '没找到鹰角官方启动器（Games.exe）。请先安装官方启动器，或在「设置 → 行为」里指定它的位置。',
+          };
         }
 
         /*
@@ -966,7 +1278,7 @@ function installGamesIpc(ctx) {
         try {
           const chosenChannel = String((activeServer && activeServer.channel) || '');
           /*
-           * 2026-11-17：这里原来只看 config.ini（configChannelFromPath）。
+           * 这里原来只看 config.ini（configChannelFromPath）。
            * 但第三方三服切换器会把官服目录的 ini 改成 cps=bilibili，
            * 于是点启动必弹「那个目录里是B服客户端，账号会串到另一个服」——纯误报。
            *

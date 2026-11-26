@@ -38,7 +38,7 @@
  * · 只读旧文件，绝不原地改；所有产物先写临时目录，校验通过后才落位。
  * · 临时目录必须能容纳「最大一组旧文件 + 新文件」，用完即删。
  * · 只认 `official` / `bilibili` / `global` 三渠道的清单，WeGame 不走这里。
- * · 新增顶层 require 已在 `H:\HXL-pack\pack.js` 的 ASAR_MUST_HAVE 登记。
+ * · 新增顶层 require 已在 `
  */
 
 const fs = require('node:fs');

@@ -10,7 +10,11 @@ const { app } = require('electron');
 // 老存档会在下一次 ensureSeedData 时补齐这两个条目和它们的渠道行。
 // v8：新增鸣潮（官服/B服/国际服三渠道）。老存档升级后由 ensureSeedData 补齐。
 // v9：鸣潮渠道表加 WeGame 行（转换功能的渠道目标）。老存档补渠道行走 :858 的缺失渠道逻辑。
-const SEED_VERSION = 9;
+// v10：新增蓝色星原（官服/B服）。v9 之前就装过的存档里没有这个条目，启动页也就没有它的卡片和
+//      「官方启动器」按钮；升到 10 让 ensureSeedData 把它们补齐。
+// v11：蓝色星原加 B服 / 国际服两条渠道行（2026-11-26 官方已开放，用户确认）。
+//      老存档补渠道行走下面「缺失渠道」那段逻辑，不会动用户已配好的官服行。
+const SEED_VERSION = 11;
 
 const GENSHIN = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
   <defs>
@@ -525,11 +529,78 @@ const BUILTIN_GAMES = [
     launchCount: 0,
     playSeconds: 0,
   },
+  {
+    /*
+     * 蓝色星原：旅谣（2026-11-26 接入）。
+     *
+     * 官方名称「蓝色星原：旅谣」，开发商 上海蛮奈网络科技（Manjuu）。
+     * 关键约束（实测确认，和终末地同类）：
+     *   · 游戏进程的父进程必须是官方 launcher.exe（实测确认），否则触发 ACE
+     *     「安全组件发生异常」；ACE 还拒绝外部 OpenProcess（OPEN_FAILED:5）
+     *   · 所以不做「直接启动游戏」，走官方启动器托管（electron/azur-launcher.js）
+     *   · launcher.exe 的清单是 highestAvailable → 必须提权才能启动（EACCES 实测过）
+     *
+     * 游戏本体默认在 <盘>\AzurPromilia_Game，主程序 AzurPromilia.exe（asInvoker）。
+     * 官方启动器默认在 <盘>\AzurPromilia\<版本号>\launcher.exe。
+     */
+    id: 'builtin-azurpromilia',
+    builtinKey: 'azurpromilia',
+    builtin: true,
+    name: '蓝色星原：旅谣',
+    subtitle: 'Azur Promilia',
+    description: '在澜汐大陆的云海与浮岛之间航行，与旅伴一起改写这片天地的命运。启动器会自动寻找已经安装的游戏。',
+    version: '',
+    tags: ['开放世界', '冒险', '幻想'],
+    target: '',
+    args: '',
+    workDir: '',
+    cover: 'covers/official-azurpromilia-clean3.jpg',
+    /*
+     * 蓝原没有米哈游那套 getAllGameBasicInfo 接口，BACKGROUND_CATEGORIES 里也没有它，
+     * 所以「官方横版封面」这条自动链路走不到（其他游戏是靠它拿到 official-*-clean3.png 的）。
+     * 这里直接把官网挖到的 3840x2160 主视觉当封面用，并命名成 -clean3 结尾 ——
+     * 那个后缀是既有清理逻辑的通行证（main.js:3572 会把不带 clean2/clean3 的 startCover 清空）。
+     *
+     * 之前用的是 builtin-azurpromilia.svg（600x800 竖版占位图），
+     * 塞进 190x132 的横框里被拉得很难看，用户报障「主页的游戏封面也没放图」。
+     */
+    startCover: 'covers/official-azurpromilia-clean3.jpg',
+    accent: '#5fc7e8',
+    favorite: false,
+    demo: false,
+    siteUrl: 'https://azurpromilia.manjuu.com/',
+    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString(),
+    lastPlayed: null,
+    launchCount: 0,
+    playSeconds: 0,
+  },
 ];
 
 const SERVER_CHANNELS = [
   ['official', '官服'],
   ['bilibili', 'B服'],
+  ['global', '国际服'],
+];
+
+/**
+ * 蓝色星原：旅谣的渠道谱系（2026-11-26 接入）。
+ *
+ * 当前官方只发一条线：注册表 HKCU\Software\AzurPromilia\ 下只有
+ *   35_C000            （gameId=35, channelCode=C000）
+ *   Game_35_C000_SC1003V（subChannelCode=SC1003V）
+ * 官网/启动器日志里 channelCode 恒为 C000、subChannelCode 恒为 SC1003V。
+ *
+ * 但这**不是写死只能一个渠道** —— 渠道列表本身就是给「以后做硬链接 / 多服」
+ * 留的口子：等官方开国际服或 B服，或者我方接了硬链接互切，只要往下面数组
+ * 里加一行就行，界面、服务器管理、切换逻辑都是照着这份列表渲染的，
+ * 不需要改别处。当前只有官方一条线，所以只有一行。
+ */
+const AZUR_CHANNELS = [
+  ['official', '官服'],
+  // 2026-11-26：B站已开放下载（用户确认），渠道行先建出来，
+  // 让「以官服为源硬链接生成一份 B服」这条路能走通。
+  ['bilibili', 'B服'],
+  // 国际服同样已开放；硬链接是纯本地操作，不依赖官方清单。
   ['global', '国际服'],
 ];
 
@@ -556,7 +627,7 @@ const KURO_CHANNELS = [
   ['official', '官服'],
   ['bilibili', 'B服'],
   ['global', '国际服'],
-  // WeGame 版：同为「切换服务器」语境下的一个渠道目标（用户 m27642「wegame直接做到国际服下面」）。
+  // WeGame 版：同为「切换服务器」语境下的一个渠道目标。
   // 它没有独立的下载链路（转换走 wegame-convert），但作为渠道行参与排序与状态展示。
   ['wegame', 'WeGame'],
 ];
@@ -582,6 +653,7 @@ function channelsFor(game) {
   if (game.builtinKey === 'arknights') return ARKNIGHTS_CHANNELS;
   if (game.builtinKey === 'neverness') return NTE_CHANNELS;
   if (game.builtinKey === 'wutheringwaves') return KURO_CHANNELS;
+  if (game.builtinKey === 'azurpromilia') return AZUR_CHANNELS;
   return SERVER_CHANNELS;
 }
 
@@ -722,7 +794,7 @@ async function ensureSeedData(store, userData) {
   }
 
   // 随包内置的官方主视觉 / 占位封面：新用户首次启动直接落到 userData/covers，
-  // 不必等联网下载（下载失败就长期看不到图，见用户反馈「新用户获取不了图」）。
+  // 不必等联网下载（下载失败就长期看不到图，见）。
   // 只拷贝确实随包内置的文件；联网生成的（*-clean2 / *-clean3）不在此列。
   // 读源用 readFileSync 而非 copyFileSync：源可能在 asar 内，asar 的 fs 不支持
   // copyFile 跨协议拷贝，但读缓冲再写一定可行。
@@ -824,6 +896,31 @@ async function ensureSeedData(store, userData) {
     }
   }
   if (renamed) await store.saveNow();
+
+  /*
+   * 蓝色星原封面修正（2026-11-26）。
+   *
+   * 老存档里蓝原的 cover / startCover 指向占位图 builtin-azurpromilia.svg（600x800 竖版）
+   * 和 official-azurpromilia.jpg（不带 -clean 后缀，会被 main.js 的清空逻辑干掉），
+   * 结果启动页卡片位显示成拉伸的竖图。这里统一改成官方横版主视觉（3840x2160）。
+   *
+   * 幂等：只认那两个旧值，用户自己换过封面就不动。
+   */
+  let azurCoverFixed = false;
+  for (const game of Array.isArray(store.data.games) ? store.data.games : []) {
+    if (game.builtinKey !== 'azurpromilia') continue;
+    const cover = String(game.cover || '');
+    const startCover = String(game.startCover || '');
+    if (cover === 'covers/builtin-azurpromilia.svg' || cover === 'covers/official-azurpromilia.jpg') {
+      game.cover = 'covers/official-azurpromilia-clean3.jpg';
+      azurCoverFixed = true;
+    }
+    if (startCover === 'covers/official-azurpromilia.jpg' || startCover === 'covers/builtin-azurpromilia.svg') {
+      game.startCover = 'covers/official-azurpromilia-clean3.jpg';
+      azurCoverFixed = true;
+    }
+  }
+  if (azurCoverFixed) await store.saveNow();
 
   if ((store.data.seedVersion || 0) >= SEED_VERSION) return;
 

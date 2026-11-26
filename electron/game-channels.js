@@ -8,14 +8,9 @@
  * DOWNLOADABLE_KEYS / engineFor / ensureKuroRuntime 的渠道判断、electron/sophon.js 的
  * CHANNELS…… 每加一个渠道就要改一圈，改漏一处就是「这个服按钮没了 / 点了报错」。
  *
- * 2026-11-16 用户把规则一次说清（原话见下），这里按他的话固化成表：
- *   「原神是全都可以硬链接的，星铁也是全都可以，绝区零也是全都可以，崩坏三我没有，
- *     但是做的时候，应该也是全都可以的，终末地也是全都可以，明日方舟是官服B服可以硬链接，
- *     然后国际服的三个可以硬链接，鸣潮官服B服wegame都可以硬链接，异环是可以官服B服切的，
- *     然后鸣潮国际服和异环都需要能能下载什么的」
- *   「这些硬链接，都可以互相为源，只要有一个服是全的，就可以随便硬链接别的服和官服」
- *   「wegame不是国际服，是另外的一个平台」
- *   「异环国际服和鸣潮国际服需要能下载，刚刚异环说少了国际服三个字」
+ * 用户把规则一次说清（原话见下），这里按他的话固化成表：
+ *
+ *
  *
  * 注意两条边界（是能力缺口的真实原因，不是偷懒）：
  *   · 崩坏3 的 B服 / 国际服：HoYoPlay 官方接口只给 bh3_cn（已用 getGameBranches 实网验证，
@@ -27,7 +22,7 @@
  *     所以台服能下载、能更新、能修复，也能以国服客户端为源硬链接生成一份；
  *     但它与 Yostar 三区（EN/JP/KR）不能互源 —— 那三区是 CRC64 清单、不同 CDN、不同发行商。
  *   · 异环的国际服：官方 Config.ini 只有 publish_ob / publish_ob_B 两套渠道配置与 CDN
- *     前缀，没有第三套。用户要求「国际服要能下载」——能做的部分是「以已装的官服/B服
+ *     前缀，没有第三套。—能做的部分是「以已装的官服/B服
  *     客户端为源，硬链接相同文件、把国际服目录铺出来」（不需要官方清单，走 linkTrees），
  *     做不了的是「从官方 CDN 拉国际服增量包」。
  */
@@ -94,7 +89,7 @@ const GAME_CHANNEL_CAPS = {
     /*
      * 用户：「崩坏三我没有，但是做的时候，应该也是全都可以的」。
      *
-     * 2026-11-17 实测修正（参考本机 Starward 源码 H:\_research\Starward
+     * 实测修正（参考本机 Starward 源码 H:\_research\Starward
      * src/Starward.Core/HoYoPlay/GameId.cs:25-30 + getGameBranches 实网验证）：
      *   · 官服 bh3_cn   game_id=osvnlOc0S8  launcher=jGHBHlcOq1  server=cn
      *   · 国际服 bh3_global game_id=5TIVvvcwtM launcher=VYTpXlbWo8 server=global
@@ -105,7 +100,7 @@ const GAME_CHANNEL_CAPS = {
      *     两份清单（game 1.42GB + asb 35.27GB）都能正常下载并 zstd 解码。
      *   · B服确实没有：三个 B服 launcher（umfgRO5gh5 / 6P5gHMNyK3 / xV0f4r1GT0）
      *     下都查不到崩坏3 —— B服走 B站自有启动器，不在 HoYoPlay 分发体系里。
-     *     2026-11-17 补测 getGameChannelSDKs：原神 / 星铁 / 绝区零 三个 B服
+     *     补测 getGameChannelSDKs：原神 / 星铁 / 绝区零 三个 B服
      *     launcher 都能拿到 84MB 的渠道 SDK，**崩坏3 拿不到**（invalid params）。
      * 所以 download / repair / update / predownload 现在官服 + 国际服都通。
      *
@@ -194,6 +189,33 @@ const GAME_CHANNEL_CAPS = {
     update: CH_NTE,
     predownload: ['official', 'bilibili'],
     switchIni: ['official', 'bilibili'],
+  },
+  azurpromilia: {
+    label: '蓝色星原：旅谣',
+    /*
+     * 用户 2026-11-26：「B站有放下载了，国际服也有的」。
+     *
+     * 所以蓝原现在是三渠道：官服 / B服 / 国际服（seed.js 的 AZUR_CHANNELS）。
+     * 硬链接三条都放行 —— 它本身是纯本地文件操作，只要两个目录同盘、且不是
+     * 同一个目录（resolveLinkRoots 已有这两道校验），完全不依赖远端清单。
+     * 蓝原的安装结构就是 <盘>\AzurPromilia_Game 一整份，和其它游戏没有区别。
+     *
+     * 其余能力一个都不放，原因都是「拿不到可用的逐文件清单」：
+     *   · download / update —— 蓝原的更新必须由官方启动器（launcher.exe）自己拉，
+     *     它校验父进程，我们没有能用的清单（见 azur-launcher.js 开头）。
+     *     给它挂「一键下载」只会得到一个点了必然失败的入口。
+     *   · repair —— 同理，没有清单就没法做文件级 hash 校验。
+     *   · predownload —— 官方没有预下载分支。
+     *
+     * 注意：硬链接生成出来的 B服 / 国际服目录里，游戏本体文件是复用的，
+     * 但渠道 SDK 件（mj_sdk 那一套）必须由各自渠道的安装包提供 ——
+     * 这一点和崩坏3 B服 是同一类情况，调用方要在结果里如实说明。
+     */
+    link: ['official', 'bilibili', 'global'],
+    download: [],
+    repair: [],
+    update: [],
+    predownload: [],
   },
 };
 

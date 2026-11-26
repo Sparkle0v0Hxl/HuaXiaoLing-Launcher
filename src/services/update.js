@@ -4,7 +4,7 @@
  * 更新域服务：「发现新版本」下载弹窗、升级后的「更新内容」公告、
  * 版本配图挑选、更新进度显示。
  *
- * 2026-10-31 从 app.js 拆出 —— 「前后端分离」第 3 批。
+ * 从 app.js 拆出 —— 「前后端分离」第 3 批。
  *
  * 依赖（均在 app.js / 其他 services，全局作用域，调用时解析）：
  *   state / dom / api / openModal / closeModal / render /
@@ -171,45 +171,28 @@ function versionHash(text) {
  *
  * 取图顺序：
  *   1. news.json 里这一版自己的 `image`；
- *   2. 下面这张按版本号挑的**内置原创装饰图**（hxl-art://，包内文件，不联网）；
- *   3. 再没有就用游戏库里那款游戏已经下载好的封面（用户自己的游戏数据）。
+ *   2. 按版本号稳定挑一款游戏，直接用**这款游戏的官方封面图**
+ *      （`game.startCoverUrl` / `game.coverUrl` —— 启动器联网时从官方页面
+ *      拉下来缓存到本机的那些 `covers/official-*`，和游戏卡片上是同一张）；
+ *   3. 游戏库里一个封面都还没有 → 返回空 image，弹窗退化成纯文字。
  *
- * 2026-11-20 风险整改 T3-B：原来第 2 步写的是五款游戏的**官网宣发美术图**，
- * 靠远程 URL 直接引用；另外还有一段「米游社画师图优先」会去抓二次创作。
- * 两者都属于第三方美术作品，不该随启动器分发或默认展示，已全部换成本地原创图。
+ * 这里前后两版走法都改掉了 ——
+ *   · 最早是五款游戏的**官网宣发美术图**远程 URL，外加一段「米游社画师图优先」抓同人图；
+ *   · 后来（T3-B）换成本地内置的自制装饰图，还顺手把 5 张官方立绘塞进了包。
+ * 两者都不对：游戏封面本来就该是官方游戏封面图，这里直接用游戏库已经拉好的
+ * 那一张，既不自己画、也不另引第三方美术，更不往包里塞官方立绘。
  */
-const HERO_ART = {
-  genshin: { image: 'hxl-art://character.png', source: '', credit: '' },
-  starrail: { image: 'hxl-art://sparkle-hero.png', source: '', credit: '' },
-  neverness: { image: 'hxl-art://sparkle-mask.png', source: '', credit: '' },
-  zzz: { image: 'hxl-art://sparkle-fullbody.png', source: '', credit: '' },
-  endfield: { image: 'hxl-art://sparxie-fullbody.png', source: '', credit: '' },
-  arknights: { image: 'hxl-art://sparxie-charm.png', source: '', credit: '' },
-  bh3: { image: 'hxl-art://charm-stars.png', source: '', credit: '' },
-  wutheringwaves: { image: 'hxl-art://charm-fireworks.png', source: '', credit: '' },
-};
-
-/** 认不出的作品（将来新增游戏）也要有图，不许再退回官方封面。 */
-const HERO_ART_DEFAULT = { image: 'hxl-art://sparkle-hero.png', source: '', credit: '' };
-
 function versionHero(version) {
   const entry = releaseEntry(version);
   if (entry && entry.image) return entry;
   const games = (state.games || []).filter((game) => game.coverUrl || game.startCoverUrl);
-  /*
-   * 2026-11-20 T3-B：这里原本还有一段「米游社画师图优先」——
-   * 去米游社抓别人画的同人图放进更新弹窗。同属第三方美术作品，已移除。
-   *
-   * 按游戏挑图：每款游戏一张内置原创装饰图（hxl-art://，包内文件，不联网）。
-   * ★没有任何一台机器会因为「游戏库封面」而显示官方美术图 —— 最后一级回落也是原创图。
-   */
   const pick = games.length ? games[versionHash(version) % games.length] : null;
-  const art = (pick && HERO_ART[pick.builtinKey]) || HERO_ART_DEFAULT;
+  if (!pick) return { ...(entry || {}), image: '', imageSource: '', imageCredit: '' };
   return {
     ...(entry || {}),
-    image: art.image,
-    imageSource: art.source,
-    imageCredit: art.credit,
+    image: pick.startCoverUrl || pick.coverUrl || '',
+    imageSource: pick.officialSite || pick.siteUrl || '',
+    imageCredit: pick.name || pick.builtinKey || '',
   };
 }
 
@@ -319,7 +302,6 @@ function openUpdateModal(info) {
 /* ------------------------------------------------------------------ */
 
 /*
- * 「这次更新改了什么」。
  *
  * 和上面那个「发现新版本」弹窗是两回事：那个是有新版本可装时的下载入口，
  * 这个是升级装好之后、告诉用户这一版干了什么。数据直接来自 latest.json 的

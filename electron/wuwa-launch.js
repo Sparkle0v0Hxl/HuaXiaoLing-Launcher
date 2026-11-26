@@ -3,7 +3,7 @@
 /**
  * 鸣潮（Wuthering Waves）启动参数。
  *
- * 为什么需要这个模块（2026-11-16 用户报障「鸣潮父进程的功能没了」「提示要官方启动器」）：
+ * 为什么需要这个模块（2026-11-16 「提示要官方启动器」）：
  *
  * 库洛客户端 `Client-Win64-Shipping.exe` 启动后会做一条 UE4 断言：
  *   Fatal error: [File:Unknown] [Line: 54] kuro: Use launcher to start game!

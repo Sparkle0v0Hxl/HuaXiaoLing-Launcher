@@ -3,7 +3,7 @@
 /**
  * 抽卡数据的读写 IPC：记录加载、UIGF 导入、数据库选择、图鉴刷新、云备份、NTE 抓取。
  *
- * 2026-11-14 从 main.js 的 installIpc() 里整段搬出来（与 gacha-ipc.js 同一次重构）。
+ * 从 main.js 的 installIpc() 里整段搬出来（与 gacha-ipc.js 同一次重构）。
  * 拆分理由见 gacha-ipc.js 文件头：installIpc() 原本 8700 多行、225 个 IPC 全塞里面。
  *
  * ★★★ 本文件目前是**死代码**，不要接线（2026-11-17 审查确认）★★★

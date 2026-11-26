@@ -36,6 +36,7 @@ const {
   LIKED_ID,
   publicPlaza,
   publicPlaylistSongs,
+  searchPlaylists,
   parseSharedPlaylistLink,
 } = require('./music-playlists');
 
@@ -748,10 +749,9 @@ function installMusicIpc(ctx) {
     /*
      * 把曲目解析成可播放地址（multi-source fallback）。
      *
-     * 说明（2026-11-20 风险整改 T2-B）：这条回退链只做「同名曲换源」——
-     * 也就是在这首歌「本来就有公开可播版本」时换一条能放的地址
-     * （例如同一首歌的免费版本、其它平台的同曲目），不针对会员曲目做绕行，
-     * 也不做任何解密或破解。
+     * 这条回退链只做「同名曲换源」—— 也就是在这首歌「本来就有公开可播版本」时
+     * 换一条能放的地址（例如同一首歌的免费版本、其它平台的同曲目），
+     * 不针对会员曲目做绕行，也不做任何解密或破解。
      */
     /*
      * 顺序（见 electron/music-source.js）：
@@ -763,7 +763,7 @@ function installMusicIpc(ctx) {
      */
     /*
      * ── 第三方音源脚本（.js / 伪 .json）──
-     * 2026-11-21 用户要求：之前从安装包里拆出去的音源，必须能通过导入识别到。
+     * 用户要求：之前从安装包里拆出去的音源，必须能通过导入识别到。
      * 这里只负责把脚本落进用户脚本目录，并清掉运行时缓存；
      * 真正的执行仍然在脚本运行时的沙箱里（on/request/send 那套）。
      */
@@ -828,7 +828,7 @@ function installMusicIpc(ctx) {
     ipcMain.handle('music:sources-import', async (_event, input) => {
       /*
        * 在线音源（订阅地址）下载。
-       * 2026-11-21：用户反馈「有些音源是网址的在线音源」，把常见拦路的情况都处理掉：
+       * 把常见拦路的情况都处理掉：
        * - GitHub / Gitee 网页地址（…/blob/…）自动换成 raw 下载地址；
        * - 带浏览器 UA / Accept，部分 CDN 会拒绝默认 UA；
        * - 跟随跳转，HTTP 状态码原样报出来（404 / 403 一眼能看出）。
@@ -1187,7 +1187,7 @@ function installMusicIpc(ctx) {
          * 平台白名单校验（musicPlatformConfig）必须排在网易云分支之后：
          * PLATFORM_CONFIG 里只有 qq / kugou，这句以前写在 try 外面先执行，
          * 网易云一进来就抛「不支持的平台：netease」，界面上就变成了
-         * 「我的歌单里有网易云，点进去永远是空的」。
+         *
          */
         if (key === 'netease') {
           // 本地服务可能要先启动，再加上逐次请求的超时，整体给个硬上限，
@@ -1368,6 +1368,30 @@ function installMusicIpc(ctx) {
         return { ok: true, lists, page };
       } catch (error) {
         return { ok: false, reason: String(error.message || '读取歌单广场失败') };
+      }
+    });
+
+    /*
+     * 搜歌单（2026-11-25 用户需求：「再加个歌单上去搜索」）。
+     *
+     * 和 music:search 是两件事：那边找「单曲」，这边找「整张歌单」。
+     * 结果结构和 music:plaza 一致，界面直接复用广场那张卡片。
+     * 不支持的平台返回 ok:false + 一句原因，让界面说清楚而不是空着。
+     */
+    ipcMain.handle('music:search-playlists', async (_event, input) => {
+      const platform = String(input?.platform || 'netease');
+      const keyword = String(input?.keyword || '').trim();
+      const page = Math.max(1, Number(input?.page) || 1);
+      if (!keyword) return { ok: true, lists: [], keyword: '', platform };
+      try {
+        const lists = await playlistDeadline(
+          searchPlaylists(platform, keyword, page),
+          20000,
+          '搜索歌单'
+        );
+        return { ok: true, lists, keyword, platform, page };
+      } catch (error) {
+        return { ok: false, reason: String(error.message || '搜索歌单失败'), keyword, platform };
       }
     });
 

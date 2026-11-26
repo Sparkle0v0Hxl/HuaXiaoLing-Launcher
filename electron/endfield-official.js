@@ -6,20 +6,45 @@ const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
 const { powershellExe } = require('./ps-path');
 
-const endfieldLaunch = require('./endfield-launch');
+/**
+ * 一个「提权脚本一定能读到」的目录。
+ *
+ * 不用 os.tmpdir()：在 Git Bash / 某些便携启动方式下它会给 POSIX 风格的 `/tmp`，
+ * PowerShell 打不开，提权脚本直接空跑（2026-11-25 实测踩到，表现为点了没反应）。
+ * 优先用 Electron 的 userData（已存在、权限稳），拿不到就退到程序目录。
+ */
+function runtimeScriptDir() {
+  try {
+    // 延迟 require：这个模块也会被纯 Node 脚本（回归测试）直接加载，那时没有 electron
+    const { app } = require('electron');
+    if (app && typeof app.getPath === 'function') {
+      const dir = path.join(app.getPath('userData'), 'run');
+      fs.mkdirSync(dir, { recursive: true });
+      return dir;
+    }
+  } catch {
+    /* 跑在纯 Node 里，没有 app */
+  }
+  const fallback = path.join(path.dirname(process.execPath), 'run');
+  try {
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  } catch {
+    return process.env.TEMP || process.env.TMP || '.';
+  }
+}
+
+const endfieldOfficialDirs = require('./endfield-official-dirs');
 
 /*
  * 终末地「官方托管启动」——用官方启动器自己去拉游戏。
  *
- * ── 这条链路不伪装任何东西 ───────────────────────────────────────
+ * ── 为什么必须这样 ──────────────────────────────────────────────
  * 终末地的客户端（U8SDK.dll）会取自己的**直接父进程**的小写全路径，再拿它去比对
  * 官方启动器的路径；对不上就弹「游戏启动失败 / 请通过官方启动器打开游戏」。
- * 之前我们的做法是复制官方签名 exe 当父进程（VelaEndfield.exe +
- * PROC_THREAD_ATTRIBUTE_PARENT_PROCESS）—— 那是让游戏「以为」自己是官方拉起来的，
- * 属于伪装进程身份。
  *
- * 现在的做法反过来：**真的去跑官方启动器**，由它亲自 CreateProcess 拉起游戏。
- * 父进程是真的 Games.exe，游戏侧的任何校验都天然通过，我们唯一做的事相当于
+ * 所以这里**真的去跑官方启动器**，由它亲自 CreateProcess 拉起游戏。
+ * 父进程是真的 Games.exe，游戏侧的校验天然通过，我们唯一做的事相当于
  * 「替用户点了那个按钮」。官方启动器在 `--game=<uuid>` 模式下本来就是托盘常驻、
  * 窗口隐藏，用户看不到界面。
  *
@@ -95,6 +120,179 @@ const BASE_HOLD_SUFFIX = '.hxl-base';
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/* ── 官方启动器窗口隐身 ─────────────────────────────────────────────
+ *
+ * 用户诉求（2026-11-25 原话）：「还是会拉起官方启动器的话，就没意义了，
+ * 缺你那用官方启动器点一下吗？大伙都是不喜欢官方启动器，肯定希望设置后，
+ * 点了就能进」。
+ *
+ * 实测结论（当天验证过，见下）：终末地的启动授权由 U8 SDK 强校验，直接跑
+ * Endfield.exe 一定会弹「游戏启动失败，请通过官方启动器打开游戏」
+ * （Player.log: `PC launch auth extraInfo failed ... errorCode: 10100`）。
+ * 不带 --game 参数也一样。也就是说官方启动器**必须存在**，绕不过去。
+ *
+ * 但「必须存在」不等于「必须让用户看见」。实测（Qt WebEngine 的调试端口）：
+ *   · ShowWindow(SW_HIDE) 之后 CDP 依然可用，能查状态、能点按钮
+ *   · 点击后 3 秒 Endfield.exe 就起来了，窗口全程不可见
+ * 所以链路改成：起启动器 → 连调试口 → **立刻隐身** → 点按钮 → 游戏起来。
+ *
+ * 隐身失败绝不能影响启动（比如找不到窗口句柄），只记日志、继续走原来的点击。
+ */
+
+/** 取某进程的主窗口句柄；没有窗口返回 0。 */
+function mainWindowHandle(processName) {
+  try {
+    const ps = [
+      `$p = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue |`,
+      '  Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1',
+      'if ($p) { $p.MainWindowHandle } else { 0 }',
+    ].join('\n');
+    const out = execFileSync(powershellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 8000,
+    });
+    return parseInt(String(out).trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 把官方启动器窗口最小化（用户 2026-11-25 拍的方案：「启动后你秒最小化缩了不就完事了嘛」）。
+ *
+ * 为什么最小化而不是隐藏：
+ *   · 隐藏（SW_HIDE / 移到屏幕外）是纯视觉把戏，窗口还在、渲染还在跑，
+ *     而且用户完全找不到它，出问题时连手动点一下的余地都没有；
+ *   · 最小化是系统原生行为，任务栏上留一个可还原的按钮，行为可解释、可回退。
+ *
+ * 句柄拿不到（还没建窗口）就等下一轮，不报错 —— 这一步失败绝不影响启动。
+ */
+function minimizeWindow(hwnd) {
+  if (!hwnd) return false;
+  const ps = [
+    'Add-Type @"',
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public class HxlMin {',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);',
+    '}',
+    '"@',
+    `[HxlMin]::ShowWindow([IntPtr]${hwnd}, 6) | Out-Null`, // 6 = SW_MINIMIZE
+    "'ok'",
+  ].join('\n');
+  try {
+    execFileSync(powershellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 8000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 游戏起来后把官方启动器收掉（进程结束，任务栏与托盘一起消失）。
+ *
+ * 用户诉求（2026-11-25）：「进去游戏后，直接把官方启动器关掉，托盘都不残留」。
+ *
+ * 判定「该关了」用两条，任一满足即可 —— 只认窗口太脆（游戏全屏切换、无边框
+ * 窗口、多显示器都可能让 MainWindowHandle 瞬时为 0，实测就漏过一次）：
+ *   · Endfield.exe 的主窗口句柄出现
+ *   · Endfield.exe 进程已经存活超过 12 秒（窗口还没建，但启动校验早已通过）
+ *
+ * ★ 绝不能 taskkill /T：
+ *   官方启动器是游戏进程的父进程，/T 会顺着进程树把 Endfield.exe 一起杀掉。
+ *   实测第一次就撞上：接口返回 ok、pid 也有，但几秒后游戏进程为 0。
+ *
+ * ★ 只关「我们自己起的那个 pid」：用户本来开着官方启动器的话，那不是我们的进程。
+ */
+async function retireOfficialLauncher(launcherPid, gamePid, onLog) {
+  if (!launcherPid && !isPidAlive(findProcessByName(OFFICIAL_PROCESS_NAME))) return false;
+
+  const started = Date.now();
+  const deadline = started + 40000;
+  let ready = false;
+  let reason = '';
+  while (Date.now() < deadline) {
+    if (!isPidAlive(gamePid)) return false; // 游戏自己没了，交给上层
+    if (mainWindowHandle(GAME_PROCESS_NAME)) {
+      reason = '窗口已出现';
+      ready = true;
+      break;
+    }
+    if (Date.now() - started > 12000) {
+      reason = '进程已稳定 12 秒';
+      ready = true;
+      break;
+    }
+    const hwnd = mainWindowHandle(OFFICIAL_PROCESS_NAME);
+    if (hwnd) minimizeWindow(hwnd);
+    await delay(500);
+  }
+  if (!ready) {
+    onLog?.('[endfield] 40 秒内没等到游戏就绪，暂不关闭官方启动器');
+    return false;
+  }
+  /* 关之前再确认一次游戏还活着，避免关在它崩溃的瞬间 */
+  if (!isPidAlive(gamePid)) return false;
+  await delay(1500);
+
+  const targetPid =
+    launcherPid || (countProcess(OFFICIAL_PROCESS_NAME) === 1 ? findProcessByName(OFFICIAL_PROCESS_NAME) : 0);
+  if (!targetPid) {
+    onLog?.('[endfield] 没有可收的官方启动器进程（可能用户自己开着一个，不动它）');
+    return false;
+  }
+  if (!isPidAlive(targetPid)) {
+    onLog?.('[endfield] 官方启动器已经自己退出了');
+    return true;
+  }
+
+  /* 只杀这一个 pid，不带 /T */
+  try {
+    execFileSync('taskkill', ['/PID', String(targetPid), '/F'], { windowsHide: true, timeout: 15000, stdio: 'ignore' });
+  } catch {
+    /* 下一轮再试 */
+  }
+  for (let i = 0; i < 15; i += 1) {
+    await delay(400);
+    if (!isPidAlive(targetPid)) break;
+  }
+  if (isPidAlive(targetPid)) {
+    try {
+      execFileSync('taskkill', ['/PID', String(targetPid), '/F'], { windowsHide: true, timeout: 10000, stdio: 'ignore' });
+    } catch {
+      /* 还杀不掉就留给游戏退出后的 cleanup */
+    }
+  }
+
+  const gone = !isPidAlive(findProcessByName(OFFICIAL_PROCESS_NAME));
+  onLog?.(
+    gone
+      ? `[endfield] 游戏已就绪（pid=${gamePid}，${reason}），官方启动器已关闭，托盘不残留`
+      : '[endfield] 官方启动器关闭失败，将在游戏退出后重试'
+  );
+  return gone;
+}
+
+/** 数同名进程个数（用于「只有一个才敢动」的保守判断）。 */
+function countProcess(name) {
+  try {
+    const output = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 8000,
+    });
+    return (output.match(new RegExp(`"${name.replace(/\./g, '\\.')}"`, 'gi')) || []).length;
+  } catch {
+    return 0;
+  }
+}
+
 
 /** 目录是 junction / 符号链接吗（只看 reparse 属性，不解引用）。 */
 function isReparse(dir) {
@@ -311,7 +509,7 @@ function findOfficialGames(customExe) {
   }
   let dirs = [];
   try {
-    dirs = endfieldLaunch.officialLauncherDirs();
+    dirs = endfieldOfficialDirs.officialLauncherDirs();
   } catch {
     dirs = [];
   }
@@ -561,25 +759,49 @@ async function withCdpPage(wsUrl, fn) {
 /**
  * 问官方启动器：这颗「开始游戏」按钮现在是什么状态。
  * 对应前端源码 `Hu({event:'main_btn_state_req', callbackEvent:'main_btn_state_rsp'})`。
+ *
+ * ★ payload 形状必须照抄官方（2026-11-25 实测）：
+ *   官方 fetchQtCallback 发出去的是 `{ data: {...}, callbackEvent: 'xxx_rsp' }`，
+ *   Qt 端靠 callbackEvent 决定回包挂在哪个事件名下。以前这里只发了 `{uuid}`，
+ *   Qt 收不到 callbackEvent 就不回报 —— 表现就是「等了 6 秒没任何回调」，
+ *   于是每次都被判成「无法向官方启动器查询状态」，官方托管启动必然失败。
  */
 async function readButtonState(page, uuid) {
-  const hooked = await page.evaluate(`(function(){
-    window.__hxlNative = [];
-    if (!window.jsbridge || !window.jsbridge.SendMsgToWeb) return 'no-signal';
-    try {
-      window.jsbridge.SendMsgToWeb.connect(function(type, payload){
-        window.__hxlNative.push({ type: String(type), payload: String(payload).slice(0, 4000) });
-      });
-      return 'ok';
-    } catch (e) { return 'err:' + e.message; }
-  })()`);
-  if (hooked !== 'ok' && hooked !== 'no-signal') {
-    return { ok: false, error: `无法监听官方启动器消息：${hooked}` };
+  /*
+   * 先等前端把 window.jsbridge 挂上。
+   *
+   * 官方启动器的 Qt WebEngine 页面是异步加载的：CDP 目标一出现（devtools
+   * 能连上）不代表页面脚本已经跑完 —— 这时 window.jsbridge 还不存在，
+   * 直接发消息会拿到 `Cannot read property 'SendMsgToNative' of undefined`。
+   * 以前这里只发一次就判失败，表现就是「点了开始游戏，几秒后报无法查询状态」。
+   */
+  let hooked = 'no-signal';
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    hooked = await page.evaluate(`(function(){
+      if (!window.jsbridge) return 'no-signal';
+      if (typeof window.jsbridge.SendMsgToNative !== 'function') return 'no-method';
+      try {
+        window.__hxlNative = [];
+        if (typeof window.jsbridge.SendMsgToWeb === 'object' || typeof window.jsbridge.SendMsgToWeb === 'function') {
+          try { window.jsbridge.SendMsgToWeb.disconnect && window.jsbridge.SendMsgToWeb.disconnect(); } catch (e) {}
+          window.jsbridge.SendMsgToWeb.connect(function(type, payload){
+            window.__hxlNative.push({ type: String(type), payload: String(payload).slice(0, 4000) });
+          });
+        }
+        return 'ok';
+      } catch (e) { return 'err:' + e.message; }
+    })()`);
+    if (hooked === 'ok') break;
+    await delay(500);
+  }
+  if (hooked !== 'ok') {
+    return { ok: false, error: `官方启动器前端还没准备好（jsbridge=${hooked}），请重试一次` };
   }
 
   const sent = await page.evaluate(`(function(){
     try {
-      window.jsbridge.SendMsgToNative('main_btn_state_req', JSON.stringify({ uuid: ${JSON.stringify(uuid)} }));
+      var payload = JSON.stringify({ data: { uuid: ${JSON.stringify(uuid)} }, callbackEvent: 'main_btn_state_rsp' });
+      window.jsbridge.SendMsgToNative('main_btn_state_req', payload);
       return 'sent';
     } catch (e) { return 'err:' + e.message; }
   })()`);
@@ -611,7 +833,14 @@ async function readButtonState(page, uuid) {
   return { ok: false, error: '官方启动器没有回报按钮状态（可能还没加载完）' };
 }
 
-/** 让官方启动器真正启动游戏：调它自己那颗按钮的 onClick。 */
+/**
+ * 让官方启动器真正启动游戏：走它自己的按钮逻辑。
+ *
+ * 官方前端那颗按钮的 onClick 走的是 `ku({event:'click_main_btn', data:{uuid}})`，
+ * 而 ku 内部是 `fetchQt`（只发不等回包），payload 就是 `bu(data)` = `{uuid}`。
+ * 所以这里 payload 保持 `{uuid}` —— 和 readButtonState 不一样，别改成带
+ * callbackEvent 的形状，Qt 端在 click_main_btn 上不看那个字段。
+ */
 async function clickStart(page, uuid) {
   const clicked = await page.evaluate(`(function(){
     try {
@@ -669,12 +898,49 @@ function killTree(pid) {
 }
 
 /**
+ * 兜底：把官方启动器正常拉出来，交给用户自己点。
+ *
+ * 为什么需要（用户 2026-11-25 提的场景，也是真实用户最多的情形）：
+ *   整套自动启动依赖三件事同时成立 —— UAC 提权被同意、官方启动器能起来、
+ *   它的页面能渲染出 jsbridge。任何一件不成立（用户点了「否」、公司电脑禁提权、
+ *   杀软拦了环境变量注入、显卡/驱动导致 WebEngine 白屏），我们就点不到那颗按钮。
+ *   这时候**绝不能只说一句「启动失败」** —— 用户的诉求是「我要进游戏」，
+ *   不是「我要看你的报错」。
+ *
+ * 所以这里退回最原始的路径：把 Games.exe 正常拉起来（带 --game 参数让它直接
+ * 定位到这个游戏），让用户自己在界面上点「开始游戏」。这条路不需要我们的
+ * 环境变量注入，也不需要调试口，是官方完全支持的正常使用方式。
+ *
+ * @returns {{ok:boolean, mode:string, error?:string}}
+ */
+function openOfficialLauncherManually(exe, uuid, onLog) {
+  const args = uuid ? [`--game=${uuid}`] : [];
+  try {
+    // 用 Start-Process 而不是 spawn：它走 ShellExecute，会按 exe 的清单一并触发 UAC
+    const ps = [
+      `Start-Process -FilePath '${String(exe).replace(/'/g, "''")}'` +
+        (args.length ? ` -ArgumentList '${args[0].replace(/'/g, "''")}'` : ''),
+    ].join('\n');
+    execFileSync(powershellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      windowsHide: true,
+      timeout: 20000,
+      stdio: 'ignore',
+    });
+    onLog?.('[endfield] 已改用「手动模式」：把官方启动器正常拉出来，由用户自己点开始游戏');
+    return { ok: true, mode: 'manual' };
+  } catch (error) {
+    return { ok: false, mode: 'manual', error: (error && error.message) || String(error) };
+  }
+}
+
+/**
  * 提权起官方启动器并打开 DevTools 端口。
  *
  * Games.exe 是 requireAdministrator；两种情形分开处理：
  *   · 当前启动器已经是管理员 → 直接 spawn，环境变量天然继承；
- *   · 不是管理员 → 用 PowerShell Start-Process -Verb RunAs 走一次 UAC。
- *     环境变量得靠一个临时 .cmd 兜一下（runas 起的进程不保证继承我们的 env）。
+ *   · 不是管理员 → 提权一个「设好环境变量再拉起 Games.exe」的包装脚本本身
+ *     （UAC 提升出的进程不继承父进程 live env，所以必须让包装脚本在管理员
+ *     进程内部设 $env:，再由它拉起的 Games.exe 继承，调试口才开得出来）。
  */
 function spawnOfficialLauncher(exe, uuid, port, elevated) {
   const portText = String(port);
@@ -693,46 +959,175 @@ function spawnOfficialLauncher(exe, uuid, port, elevated) {
     return { ok: true, mode: 'direct' };
   }
 
-  // 非提权：写一个临时 .cmd，里面设好 env 再 start。
-  // runas 起的进程不保证继承调用方的环境变量，写进脚本里最稳。
-  const script = path.join(os.tmpdir(), `Vela-Endfield-Official-${Date.now()}.cmd`);
+  /*
+   * 非提权：走一次 UAC 把官方启动器拉起来。
+   *
+   * ★ 关键坑（2026-11-24 报障实锤）：Games.exe 的清单是 requireAdministrator，必须提权。
+   *   但「在非提权的 PowerShell 里设好 $env:，再 Start-Process -Verb RunAs Games.exe」
+   *   会把环境变量丢掉 —— UAC 提升出的 Games.exe 不继承父进程的 live env，
+   *   QTWEBENGINE_REMOTE_DEBUGGING 传不进去，调试口永远开不出来，游戏也起不来。
+   *
+   *   正确做法：把「设环境变量 + 拉起 Games.exe」写进一个包装脚本，**提权的是这个
+   *   包装脚本本身**。脚本进程是管理员，脚本里设的 $env: 就在管理员进程内部，
+   *   再由它 Start-Process（不带 -Verb RunAs）拉起的 Games.exe 作为它的子进程，
+   *   天然继承这套环境变量，调试口才能开出来。
+   */
+  /*
+   * ★ 脚本落在「启动器自己旁边」而不是 %TEMP%（2026-11-25 实测问题）。
+   *
+   * 原因：Electron 里 `os.tmpdir()` 在某些启动方式下返回的是 POSIX 风格的 `/tmp`
+   * （Git Bash 环境变量 TMPDIR 影响），PowerShell 完全不认这个路径 → 提权脚本
+   * 「文件不存在」，UAC 一闪而过什么都不做，表现为「点了没反应」。
+   * 存到 userData 下的子目录，路径确定、普通权限可写、提权进程也读得到。
+   */
+  let scriptDir;
+  try {
+    scriptDir = path.join(app.getPath('userData'), 'run');
+    fs.mkdirSync(scriptDir, { recursive: true });
+  } catch {
+    scriptDir = path.dirname(process.execPath);
+  }
+  const script = path.join(scriptDir, `Vela-Endfield-Official-${Date.now()}.ps1`);
+  /*
+   * ★ 包装脚本承担三件事（2026-11-25 按用户要求简化）：
+   *   ① 设调试口环境变量（必须在本进程内设，才能被它拉起的 Games.exe 继承）
+   *   ② 拉起 Games.exe，窗口一出现就最小化（用户：「启动后你秒最小化缩了不就完事了嘛」）
+   *   ③ 等 Endfield.exe 出窗口后，直接关掉 Games.exe，托盘不残留
+   *
+   * 为什么必须在这个提权脚本里做，而不是主进程：
+   *   Games.exe 的清单是 requireAdministrator，我们的启动器通常不是管理员。
+   *   非管理员进程去 ShowWindow / 结束它，会被 Windows 的 UIPI 静默拒绝 ——
+   *   实测四种手法（ShowWindow / SWP_HIDEWINDOW / MoveWindow / WS_EX_TOOLWINDOW）
+   *   全部无效，窗口坐标一个像素都没动。这个脚本本身是管理员，改自己子进程没阻碍。
+   *
+   * 为什么最小化而不是隐藏：隐藏是纯视觉把戏，窗口和渲染都还在，用户还找不到它；
+   * 最小化是系统原生行为，任务栏留一个可还原的按钮，能解释、能回退。
+   *
+   * 为什么关启动器要等「游戏窗口出现」：进程起来时游戏还没建窗口，
+   * 太早关会让游戏拿不到后续启动上下文。实测等窗口出来再关，游戏继续跑 90 秒无异常。
+   */
   const body = [
-    '@echo off',
-    `set "QTWEBENGINE_REMOTE_DEBUGGING=${portText}"`,
-    'set "QTWEBENGINE_CHROMIUM_FLAGS=--remote-allow-origins=*"',
-    `start "" "${exe}" "--game=${uuid}"`,
-    'exit /b 0',
+    `$env:QTWEBENGINE_REMOTE_DEBUGGING = '${portText}'`,
+    `$env:QTWEBENGINE_CHROMIUM_FLAGS = '--remote-allow-origins=*'`,
+    `Start-Process -FilePath '${exe.replace(/'/g, "''")}' -ArgumentList '--game=${uuid}'`,
+    '',
+    'Add-Type @"',
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public class HxlWin {',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);',
+    '}',
+    '"@',
+    '',
+    '$deadline = (Get-Date).AddSeconds(180)',
+    '$launcherPid = 0',
+    '$gameWindowSeen = $false',
+    '',
+    'while ((Get-Date) -lt $deadline) {',
+    '  if ($launcherPid -eq 0) {',
+    "    $g = Get-Process -Name 'Games' -ErrorAction SilentlyContinue | Select-Object -First 1",
+    '    if ($g) { $launcherPid = $g.Id }',
+    '  }',
+    '',
+    '  # 游戏窗口出现 → 这次启动已经成功，启动器可以退场',
+    "  $game = Get-Process -Name 'Endfield' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1",
+    '  if ($game) { $gameWindowSeen = $true; break }',
+    '',
+    '  # 启动器窗口一出现就最小化（6 = SW_MINIMIZE）',
+    "  $lg = Get-Process -Name 'Games' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1",
+    '  if ($lg) { [HxlWin]::ShowWindow($lg.MainWindowHandle, 6) | Out-Null }',
+    '  Start-Sleep -Milliseconds 150',
+    '}',
+    '',
+    '# 进游戏后：留 2 秒缓冲，然后关掉启动器',
+    '# 只 Stop-Process 这一个 pid，绝不用 taskkill /T —— 那会顺着进程树把游戏一起杀',
+    'if ($gameWindowSeen -and $launcherPid -ne 0) {',
+    '  Start-Sleep -Seconds 2',
+    '  try { Stop-Process -Id $launcherPid -Force -ErrorAction Stop } catch { }',
+    '}',
     '',
   ].join('\r\n');
   try {
-    fs.writeFileSync(script, body, 'ascii');
+    // PowerShell 5.1 读 .ps1 默认按 ANSI，路径里有中文会乱码，所以写成 UTF-8 BOM
+    fs.writeFileSync(script, '\uFEFF' + body, 'utf8');
   } catch (error) {
     return { ok: false, error: `写启动脚本失败：${error.message}` };
   }
 
   const powershell = powershellExe();
+  const psQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;
   try {
-    const child = spawn(
-      powershell,
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        `Start-Process -FilePath '${script}' -Verb RunAs -WindowStyle Hidden`,
-      ],
-      { detached: true, windowsHide: true, stdio: 'ignore' }
-    );
+    let child;
+    const elevateExe = process.resourcesPath
+      ? path.join(process.resourcesPath, 'elevate.exe')
+      : '';
+    if (fs.existsSync(elevateExe)) {
+      /*
+       * 优先用项目自带的 elevate.exe 提权包装脚本（与启动器自身提权同一套工具，
+       * 稳、不依赖 PowerShell -Command 的引号/编码）。elevate.exe 提升的是
+       * `powershell.exe -File wrapper.ps1` 这个包装进程本身。
+       */
+      child = spawn(
+        elevateExe,
+        [
+          powershell,
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          script,
+        ],
+        { detached: true, windowsHide: true, stdio: 'ignore' }
+      );
+    } else {
+      /*
+       * elevate.exe 缺失时退回 PowerShell RunAs：用一个 runner 脚本把
+       * `powershell.exe -File wrapper.ps1` 整体提权，等价于上面的包装进程提权。
+       * runner 也写成 UTF-8 BOM，规避中文路径在 -Command 里乱码。
+       */
+      const runner = path.join(scriptDir, `Vela-Endfield-Official-Run-${Date.now()}.ps1`);
+      const runBody = [
+        `Start-Process -FilePath ${psQuote(powershell)} -Verb RunAs -ArgumentList @(`,
+        `  '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',`,
+        `  ${psQuote(script)}`,
+        `)`,
+        '',
+      ].join('\r\n');
+      fs.writeFileSync(runner, '\uFEFF' + runBody, 'utf8');
+      child = spawn(
+        powershell,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-WindowStyle',
+          'Hidden',
+          '-File',
+          runner,
+        ],
+        { detached: true, windowsHide: true, stdio: 'ignore' }
+      );
+      setTimeout(() => {
+        try {
+          fs.rmSync(runner, { force: true });
+        } catch {
+          /* ignore */
+        }
+      }, 40000);
+    }
     child.unref();
-    // 脚本本身过 30 秒才清，避免 start 还没拉起来就被删
+    // 脚本过 40 秒才清，避开 UAC 弹窗等待期
     setTimeout(() => {
       try {
         fs.rmSync(script, { force: true });
       } catch {
         /* ignore */
       }
-    }, 30000);
+    }, 40000);
     return { ok: true, mode: 'runas' };
   } catch (error) {
     return { ok: false, error: `请求管理员权限失败：${error.message}` };
@@ -750,6 +1145,118 @@ function spawnOfficialLauncher(exe, uuid, port, elevated) {
  * @param {(msg:string)=>void} [options.onProgress]
  * @returns {Promise<{ok:boolean, pid?:number, error?:string, reason?:string, state?:string}>}
  */
+/**
+ * 手动模式：只把官方启动器拉起来并最小化，让用户自己点「开始游戏」。
+ *
+ * 用户 2026-11-25 定的兜底路线。为什么需要它：
+ *   自动模式（full）要给官方启动器开 QTWEBENGINE 调试端口、用 CDP 在它页面里
+ *   执行 JS 点按钮。逆向 ACE 后确认它目前不认这些（ACE-Base64.dll 里搜不到
+ *   QTWEBENGINE / remote-debug 之类字符串，调试检测只在 AntiDbg/UserDbg 下、
+ *   作用域是游戏进程自身）。但鹰角的判定规则是服务端下发的，万一哪天加了
+ *   「启动链路异常」这类检测，必须有一条不碰调试口的路能立刻切过去。
+ *
+ * 这条路做的事：正常 Start-Process 拉起 Games.exe（不设任何环境变量），
+ * 然后把它的窗口最小化（提权脚本里做，因为 Games.exe 是 requireAdministrator，
+ * UIPI 会拦非管理员的窗口操作）。用户自己点开始游戏，进游戏后我们再把启动器关掉。
+ */
+async function launchViaOfficialManual(options, games, uuid, onLog) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  const scriptDir = runtimeScriptDir();
+  const script = path.join(scriptDir, `Vela-Endfield-Manual-${Date.now()}.ps1`);
+
+  /*
+   * 脚本职责：
+   *   ① 拉起 Games.exe（不注入任何调试环境变量）
+   *   ② 循环把它窗口最小化，直到 Endfield.exe 出窗口
+   *   ③ 游戏进界面后关掉启动器（只杀自己 pid，绝不 /T）
+   */
+  const body = [
+    `Start-Process -FilePath '${String(games.exe).replace(/'/g, "''")}' -ArgumentList '--game=${uuid}'`,
+    '',
+    'Add-Type @"',
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public class HxlMan {',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);',
+    '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+    '}',
+    '"@',
+    '',
+    '$deadline = (Get-Date).AddSeconds(300)',
+    '$launcherPid = 0',
+    '$gameSeen = $false',
+    'while ((Get-Date) -lt $deadline) {',
+    '  if ($launcherPid -eq 0) {',
+    "    $g = Get-Process -Name 'Games' -ErrorAction SilentlyContinue | Select-Object -First 1",
+    '    if ($g) { $launcherPid = $g.Id }',
+    '  }',
+    "  $game = Get-Process -Name 'Endfield' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1",
+    '  if ($game) { $gameSeen = $true; break }',
+    "  $lg = Get-Process -Name 'Games' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1",
+    '  if ($lg) {',
+    '    $lh = $lg.MainWindowHandle',
+    '    # 6 = SW_MINIMIZE。Qt 加载完会自己 show 一次，所以每轮都压一遍。',
+    '    [HxlMan]::ShowWindow($lh, 6) | Out-Null',
+    '    # 有些 Qt 窗口对 SW_MINIMIZE 不响应，用 7（SW_SHOWMINNOACTIVE）再试一次',
+    '    if (-not [HxlMan]::IsIconic($lh)) { [HxlMan]::ShowWindow($lh, 7) | Out-Null }',
+    '  }',
+    '  Start-Sleep -Milliseconds 300',
+    '}',
+    'if ($gameSeen -and $launcherPid -ne 0) {',
+    '  Start-Sleep -Seconds 2',
+    '  try { Stop-Process -Id $launcherPid -Force -ErrorAction Stop } catch { }',
+    '}',
+    '',
+  ].join('\r\n');
+
+  try {
+    fs.writeFileSync(script, '\uFEFF' + body, 'utf8');
+  } catch (error) {
+    return { ok: false, error: `写手动启动脚本失败：${error.message}` };
+  }
+
+  onProgress('正在打开官方启动器（手动模式）…');
+  onLog?.('[endfield] 手动模式：不注入调试口，只拉起官方启动器并最小化');
+
+  try {
+    const elevateExe = process.resourcesPath
+      ? path.join(process.resourcesPath, 'elevate.exe')
+      : '';
+    const powershell = powershellExe();
+    const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script];
+    const child = fs.existsSync(elevateExe)
+      ? spawn(elevateExe, [powershell, ...args], { detached: true, stdio: 'ignore', windowsHide: true })
+      : spawn(powershell, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+  } catch (error) {
+    return { ok: false, error: `拉起官方启动器失败：${error.message}` };
+  }
+
+  /* 等游戏进程出现（用户手动点之后） */
+  let gamePid = 0;
+  for (let i = 0; i < 240; i += 1) {
+    await delay(500);
+    gamePid = findProcessByName(GAME_PROCESS_NAME);
+    if (gamePid) break;
+  }
+  if (!gamePid) {
+    return {
+      ok: false,
+      reason: 'manual-required',
+      error: '已打开官方启动器（窗口最小化在任务栏），请在它上面点「开始游戏」。点完还没进游戏的话，再点一次启动器图标即可。',
+    };
+  }
+
+  return {
+    ok: true,
+    pid: gamePid,
+    uuid,
+    state: 'in_game',
+    via: 'manual',
+    note: '手动模式：用户自己点的开始游戏',
+  };
+}
+
 async function launchViaOfficial(options = {}) {
   const gameRoot = String(options.gameRoot || '').trim();
   const runRoot = String(options.runRoot || gameRoot).trim() || gameRoot;
@@ -763,6 +1270,15 @@ async function launchViaOfficial(options = {}) {
 
   const uuid = String(options.uuid || '').trim() || readGameUuid() || UUID_FALLBACK;
 
+  /*
+   * 启动方式分流（2026-11-25 用户定：默认全自动，但要能一键退回手动）。
+   * options.launchMode 由上层（games-ipc）从设置里读出来传进来，
+   * 这样这个模块不依赖 store，纯 Node 单测也能跑。
+   */
+  if (String(options.launchMode || 'full') === 'manual') {
+    return launchViaOfficialManual(options, games, uuid, options.onLog);
+  }
+
   const sameRoot =
     path.resolve(runRoot).toLowerCase() === path.resolve(gameRoot).toLowerCase();
 
@@ -773,9 +1289,20 @@ async function launchViaOfficial(options = {}) {
 
   let swapped = null;
   let launcherPid = 0;
+  /*
+   * 本次启动的游戏进程。
+   *
+   * 为什么单独记：junction 复原（把安装目录从渠道运行时指回真实目录）**绝不能**
+   * 在游戏还活着的时候做。客户端启动后还会持续按安装目录路径读资源，中途换回来
+   * 会让它读到另一套文件 —— 表现就是「卡很久，然后提示文件损坏」。
+   * 2026-11-26 国际服实测就是这个问题：进程刚出现 3 秒就复原，游戏随即报损坏。
+   * 现在改成「游戏退出后才复原」，由下面的守卫间隔和 finally 共同保证。
+   */
+  let runningPid = 0;
   const cleanup = async (restore) => {
     if (launcherPid) {
       // 官方启动器是我们起的，游戏结束后不该留在托盘里
+      // （这里游戏已经退出了，用 killTree 连子进程一起收是安全的）
       try {
         const stillAlive = isPidAlive(launcherPid);
         if (stillAlive) killTree(launcherPid);
@@ -788,6 +1315,8 @@ async function launchViaOfficial(options = {}) {
       if (!restored.ok) {
         // 复位失败很重要，必须留痕
         options.onLog?.(`[endfield] 安装目录复位失败：${restored.error}`);
+      } else if (restored.changed) {
+        options.onLog?.('[endfield] 游戏已退出，安装目录已复原为真实目录');
       }
     }
   };
@@ -829,19 +1358,74 @@ async function launchViaOfficial(options = {}) {
     }
     if (!launcherPid) launcherPid = findProcessByName(OFFICIAL_PROCESS_NAME);
     if (!target) {
+      /*
+       * 调试口没开不等于一定失败。
+       *
+       * `--game=<uuid>` 这个参数本身就是「直接开这个游戏」，官方启动器拿到后可以
+       * 不初始化 Qt WebEngine 界面、直接走它自己的启动流程 —— 那种情况下调试口
+       * 永远不出现，但游戏照样被拉起来了。所以先等一会儿看游戏进程有没有起来。
+       */
+      onProgress('调试口没开，检查官方启动器是否已经自己拉起游戏…');
+      let liftedPid = 0;
+      for (let i = 0; i < 40; i += 1) {
+        await delay(500);
+        liftedPid = findProcessByName(GAME_PROCESS_NAME);
+        if (liftedPid) break;
+      }
+      if (liftedPid) {
+        return {
+          ok: true,
+          pid: liftedPid,
+          state: 'in_game',
+          via: 'direct',
+          note: '官方启动器已通过 --game 参数直接拉起游戏（调试口未开，但游戏进程已就绪）',
+        };
+      }
+      /*
+       * 两条都没成。这里把话说准：
+       *
+       * Games.exe 的 PE 清单是 requireAdministrator —— 必须提权才起得来。
+       * 非提权时 spawnOfficialLauncher 已经改为「提权包装脚本本身、脚本内注入
+       * 环境变量」，正常情况下调试口应该能开出来；走到这里说明提权本身没成功
+       * （UAC 被拒绝、安全软件拦截，或官方启动器没正常启动）。
+       */
+      /*
+       * 自动启动没成 —— 不让用户卡在这里。
+       * 把官方启动器正常拉出来，让用户在它上面自己点「开始游戏」。
+       */
+      const manual = openOfficialLauncherManually(games.exe, uuid, (m) => options.onLog?.(m));
       return {
         ok: false,
-        error:
-          '官方启动器起来了但没开出调试口（QTWEBENGINE_REMOTE_DEBUGGING 没生效）。' +
-          '多半是安全软件拦了环境变量注入，把它加入白名单后重试。',
+        reason: 'need-elevation',
+        manualOpened: manual.ok,
+        error: manual.ok
+          ? '已帮你打开官方启动器：请在它上面点「开始游戏」。' +
+            '想让启动器下次全自动（不弹启动器、进游戏后自动关掉它），' +
+            '请在弹 UAC 时点「是」，或在「设置 → 行为」里打开「始终以管理员身份启动」。'
+          : '官方启动器需要管理员权限，自动拉起也没成功：' +
+            ((manual.error && manual.error.slice(0, 120)) || '未知原因') +
+            '。请手动打开鹰角官方启动器，点「开始游戏」。',
       };
     }
 
     // ── 闸门 1 / 2：先问状态，再决定点不点
     onProgress('正在向官方启动器确认状态…');
+    let bridgeFailed = false;
     const stateResult = await withCdpPage(target.webSocketDebuggerUrl, async (page) => {
       const state = await readButtonState(page, uuid);
-      if (!state.ok) return { ok: false, error: state.error };
+      if (!state.ok) {
+        /*
+         * 这里最常见的原因不是「启动器坏了」，而是**页面没渲染出来**：
+         * 老显卡 / 驱动异常 / 硬件加速被禁 / 杀软拦 WebEngine / 企业策略，
+         * 都会让官方启动器的界面白屏 —— 调试口能连上，但 window.jsbridge 永远
+         * 不出现，于是我们发不出那颗按钮的点击（用户 2026-11-25 专门问过这个场景）。
+         *
+         * 这种机器上「自动点击」这条路本身就走不通，必须让用户自己点。
+         * 打标记后统一在下面走手动兜底，不在这里直接返回。
+         */
+        bridgeFailed = true;
+        return { ok: false, error: state.error };
+      }
 
       if (IN_GAME_STATES.has(state.state)) {
         return { ok: true, alreadyRunning: true, state: state.state };
@@ -867,7 +1451,24 @@ async function launchViaOfficial(options = {}) {
       return { ok: true, clicked: true, state: state.state };
     });
 
-    if (!stateResult.ok) return stateResult;
+    if (!stateResult.ok) {
+      /* 页面渲染不出来 → 无法自动点击。把启动器留给用户，并给一条看得懂的说明 */
+      if (bridgeFailed) {
+        onLog?.('[endfield] 官方启动器页面未就绪（jsbridge 未挂载），改由用户手动点击');
+        const manual = openOfficialLauncherManually(games.exe, uuid, (m) => options.onLog?.(m));
+        return {
+          ok: false,
+          reason: 'manual-required',
+          manualOpened: manual.ok,
+          error:
+            '官方启动器没能渲染出界面（这是官方启动器在这台机器上的显示问题，不是启动器本身出错），' +
+            '所以没法替你点「开始游戏」。' +
+            (manual.ok ? '已经把官方启动器打开，请在它上面点一次「开始游戏」。' : '请手动打开鹰角官方启动器点「开始游戏」。') +
+            '若它的窗口是白屏，可尝试：①把鹰角官方启动器加入杀软白名单 ②更新显卡驱动 ③重启电脑。',
+        };
+      }
+      return stateResult;
+    }
     if (stateResult.alreadyRunning) {
       return { ok: false, error: '终末地已经在运行了。' };
     }
@@ -887,20 +1488,16 @@ async function launchViaOfficial(options = {}) {
       };
     }
 
-    // ── 游戏起来了：立刻把 junction 换回来（游戏已经加载完 exe，后续操作不依赖路径）
-    //    这里必须等游戏真正把 exe 映进内存，否则换回来会让它读不到自己的资源。
-    if (swapped) {
-      await delay(3000);
-      const restored = restoreBase(gameRoot);
-      if (restored.ok) {
-        swapped = null;
-        onProgress('安装目录已复原。');
-      } else {
-        options.onLog?.(`[endfield] 游戏起来后复位失败：${restored.error}`);
-      }
-    }
+    /*
+     * 游戏起来了：**不要立刻复原 junction**。
+     *
+     * 以前这里等 3 秒就 restoreBase，国际服客户端加载慢，刚起进程还在读资源，
+     * 安装目录一换回真实目录，它后续读到的就是另一套文件 → 提示「文件损坏」。
+     * 现在只记下 pid，等游戏退出后由下面的守卫间隔调 cleanup(true) 复原。
+     */
+    runningPid = gamePid;
 
-    // ── 后台守着：游戏退出后清掉官方启动器
+    // ── 兜底守着：万一游戏之后才退出，再清一次（通常上面已经清干净了）
     const guard = setInterval(() => {
       if (isPidAlive(gamePid)) return;
       clearInterval(guard);
@@ -908,12 +1505,30 @@ async function launchViaOfficial(options = {}) {
     }, 5000);
     if (typeof guard.unref === 'function') guard.unref();
 
+    /*
+     * ── 收掉官方启动器：游戏起来后不留后台进程、不留托盘图标
+     *
+     * 2026-11-26：收尾不再挡「启动成功」。
+     * retireOfficialLauncher 要等游戏窗口句柄（抓不到就等满 12 秒兜底）、
+     * 再关官方启动器并等它退出，最多能拖十几秒 —— 用户看到的就是
+     * 「游戏都开出来了，启动器还显示启动中」。现在改成后台收尾：
+     *   · 游戏进程已经出现，立即返回成功；
+     *   · 官方启动器照常最小化/关闭，失败只落日志；
+     *   · 游戏退出后的 junction 复原由上面的 guard 负责，顺序不变。
+     */
+    const retiring = retireOfficialLauncher(launcherPid, gamePid, options.onLog);
+    if (retiring && typeof retiring.catch === 'function') retiring.catch(() => {});
+
     return { ok: true, pid: gamePid, uuid, state: stateResult.state };
   } catch (error) {
     return { ok: false, error: `官方托管启动失败：${error.message}` };
   } finally {
-    // 走到这里还没换成游戏（中途失败），必须把 junction 复原
-    if (swapped) {
+    /*
+     * 走到这里还没换成游戏（中途失败），必须把 junction 复原。
+     * 但如果游戏已经在跑，就保持「安装目录指向渠道运行时」—— 中途复原会让它
+     * 读到另一套资源。交给 cleanup(true) / healBaseOnBoot 在游戏退出后复原。
+     */
+    if (swapped && !(runningPid && isPidAlive(runningPid))) {
       const restored = restoreBase(gameRoot);
       if (!restored.ok) options.onLog?.(`[endfield] 失败回滚时复位失败：${restored.error}`);
       swapped = null;
@@ -987,5 +1602,7 @@ module.exports = {
   WRITE_RISK_STATES,
   BASE_HOLD_SUFFIX,
   UUID_FALLBACK,
+  openOfficialLauncherManually,
+  launchViaOfficialManual,
   _internal: { pickPort, fetchTargets, makeJunction, removeJunction, needsUpdateMessage },
 };

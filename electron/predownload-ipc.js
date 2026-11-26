@@ -45,7 +45,7 @@ function installPredownloadIpc(ctx) {
       beginBackgroundTask();
       send('predownload:progress', { jobId, phase: 'start', current: '正在读取官方清单…' });
       /*
-       * 跨服复用（用户 2026-11-16「预下载功能也是」）：别的服已经预下载过的
+       * 跨服复用：别的服已经预下载过的
        * 分块 / 补丁包 / 分包，直接硬链接过来，不必再从网上拉一遍。
        *
        * 与 predownload:apply 不同，这里**不排除 endfield** —— 终末地预下载的

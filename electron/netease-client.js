@@ -19,16 +19,23 @@ const { app } = require('electron');
 /*
  * 下面这些原本在 main.js 作用域里，搬运时被直接引用却没在模块里引入，
  * 一调用就 ReferenceError（跨平台换源、音源开关、启动本地服务全都走不通）。
- * music-source / music-resolve 都不反向依赖本模块，直接 require 不会成环。
+ *
+ * ★ 必须惰性 require，不能在这里解构（2026-11-25 实测的循环依赖 bug）：
+ *   music-source.js 第 29 行有 `require('./netease-client')`（取登录 cookie），
+ *   于是加载顺序是 main.js → music-source（执行到一半）→ netease-client（本文件）
+ *   → 回来再 require('./music-source')。这时 music-source 的 module.exports
+ *   还没赋值，拿到的是空对象 {}，解构出来的 6 个符号全成了 undefined。
+ *   后果是音乐搜索直接报 `normalizeSourceFlags is not a function`，
+ *   换源、取网易云地址、音源开关判断全部不可用 —— 而且它是静默的：
+ *   模块能正常加载，只有调用时才炸。
+ *
+ *   改成「用到时才 require」以后，那一刻 music-source 一定已经加载完毕。
  */
-const {
-  normalizeSourceFlags,
-  DEFAULT_SOURCE_FLAGS,
-  disabledSourceOfUrl,
-  pickBest,
-  qqSearch,
-  qqSongUrl,
-} = require('./music-source');
+let musicSourceModule = null;
+function ms() {
+  if (!musicSourceModule) musicSourceModule = require('./music-source');
+  return musicSourceModule;
+}
 const { sameSongEnough } = require('./music-resolve');
 
 /* 音源开关要读 store，但 store 由 main.js 持有，这里用注入的方式拿 */
@@ -185,10 +192,11 @@ const NETEASE_URL_BATCH = 200;
 
 function currentMusicSourceFlags() {
   /* 用 music-source 里那份 DEFAULT_SOURCE_FLAGS，别再抄一份硬编码的默认值 —— 抄了就会各改各的 */
+  const src = ms();
   return Object.assign(
     {},
-    DEFAULT_SOURCE_FLAGS,
-    normalizeSourceFlags(storeRef()?.data?.settings?.musicSources) || {}
+    src.DEFAULT_SOURCE_FLAGS,
+    src.normalizeSourceFlags(storeRef()?.data?.settings?.musicSources) || {}
   );
 }
 
@@ -204,10 +212,11 @@ async function crossSourceFallbackUrl(title, artist, flags) {
     tries.push([
       'QQ 音乐',
       async () => {
-        const best = pickBest(await qqSearch(keyword, 5), wants);
+        const src = ms();
+        const best = src.pickBest(await src.qqSearch(keyword, 5), wants);
         if (!best) throw new Error('没搜到同名曲');
         if (!sameSongEnough(name, artist, best.title, best.artist)) throw new Error('搜到的不是同一首歌');
-        const info = await qqSongUrl(best.mid);
+        const info = await src.qqSongUrl(best.mid);
         return { ...info, title: best.title, artist: best.artist, matched: `${best.title} - ${best.artist}` };
       },
     ]);
@@ -256,7 +265,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
     const item = json?.data?.[0];
     if (!item?.url) continue;
     // 换源可能把地址换成被停用平台的直链，撞上就当这条音质没拿到
-    if (disabledSourceOfUrl(item.url, flags)) continue;
+    if (ms().disabledSourceOfUrl(item.url, flags)) continue;
     const payload = {
       url: String(item.url),
       level: String(item.level || quality),
@@ -275,7 +284,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
   // 2) 换源：默认不走，用户明确打开「同名换源」后才调用（结果同样按开关过滤）
   if (neteaseAllowed && flags.swap === true) {
     const matched = await neteaseMatchUrl(apiBase, id);
-    if (matched && !disabledSourceOfUrl(matched, flags)) {
+    if (matched && !ms().disabledSourceOfUrl(matched, flags)) {
       return { url: matched, level: 'standard', br: 0, size: 0, type: 'flac', swapped: true };
     }
   }
@@ -307,7 +316,7 @@ async function fetchNeteaseSongUrl(apiBase, id, level = 'exhigh', meta = {}) {
         try {
           const alt = await neteaseGet(apiBase, '/song/url/v1', { id: song.id, level: 'standard' });
           const item = alt?.data?.[0];
-          if (!item?.url || item.freeTrialInfo || disabledSourceOfUrl(item.url, flags)) continue;
+          if (!item?.url || item.freeTrialInfo || ms().disabledSourceOfUrl(item.url, flags)) continue;
           return {
             url: String(item.url),
             level: String(item.level || 'standard'),

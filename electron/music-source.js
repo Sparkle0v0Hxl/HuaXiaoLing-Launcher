@@ -19,6 +19,41 @@
  */
 
 const { probeAudioUrl } = require('./audio-probe');
+/*
+ * 登录态：网易云取播放地址必须把用户的 MUSIC_U 带上，否则接口当游客，
+ * VIP / 高音质曲目只回试听片段（freeTrialInfo 非空），表现为「登录了也听不了 VIP」。
+ * netease-client 里维护着登录后的 cookie，这里直接取来用。
+ */
+let neteaseClient = null;
+try {
+  neteaseClient = require('./netease-client');
+} catch {
+  /* 没有这个模块时按游客处理 */
+}
+
+/** 取当前网易云登录 cookie 串。没登录返回空串。 */
+function neteaseCookieFor(apiBase) {
+  try {
+    const session = typeof (neteaseClient && neteaseClient.getNeteaseSession) === 'function'
+      ? neteaseClient.getNeteaseSession()
+      : null;
+    if (!session || !session.cookie) return '';
+    const saved = String(session.apiBase || '').trim().replace(/\/+$/, '');
+    if (!saved) return String(session.cookie);
+    const want = String(apiBase || '').trim().replace(/\/+$/, '');
+    return saved === want ? String(session.cookie) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 网易云请求的公共头：带上登录 cookie。 */
+function neteaseHeaders(apiBase) {
+  const headers = { accept: 'application/json' };
+  const cookie = neteaseCookieFor(apiBase);
+  if (cookie) headers.cookie = cookie;
+  return headers;
+}
 
 /*
  * 第三方音源脚本是可选的：只有用户导入脚本后才有东西可查。
@@ -358,7 +393,7 @@ function neteaseBase(apiBase) {
 async function neteaseSearch(apiBase, keyword, limit = 10) {
   const json = await fetchJson(
     `${neteaseBase(apiBase)}/search?keywords=${encodeURIComponent(keyword)}&limit=${Math.min(limit, 30)}&type=1`,
-    { headers: { accept: 'application/json' }, timeout: 12000 }
+    { headers: neteaseHeaders(apiBase), timeout: 12000 }
   );
   const list = json?.result?.songs || [];
   return list.map((item) => ({
@@ -373,7 +408,7 @@ async function neteaseSearch(apiBase, keyword, limit = 10) {
 async function neteaseLyric(apiBase, id) {
   if (!id) return '';
   const json = await fetchJson(`${neteaseBase(apiBase)}/lyric?id=${encodeURIComponent(id)}`, {
-    headers: { accept: 'application/json' },
+    headers: neteaseHeaders(apiBase),
     timeout: 12000,
   });
   return String(json?.lrc?.lyric || '');
@@ -462,7 +497,7 @@ async function miguSongUrl(item) {
  */
 async function neteaseUrlById(apiBase, id, level, flags) {
   const base = neteaseBase(apiBase);
-  const jsonHeaders = { accept: 'application/json' };
+  const jsonHeaders = neteaseHeaders(base);
   const want = String(level || 'exhigh');
   // 同一首歌按「请求音质 → 更高 → 标准」依次试，拿到完整曲就收
   const levels = want === 'standard' ? ['standard'] : [want, 'standard'];
@@ -690,7 +725,7 @@ const RESOLVE_RACE_TIMEOUT = 12000;
  * 第三方音源脚本不在默认值里：用户导入后由 resolveSourceUrl 单独挂进当轮解析。
  */
 /*
- * 2026-11-21：第三方音源脚本彻底从内置音源表里移除。
+ * 第三方音源脚本彻底从内置音源表里移除。
  * 安装包和源码都不带任何脚本，默认值里也不再保留第三方音源键；
  * 用户在「音源」卡导入脚本后，由 resolveSourceUrl 单独把它挂进本轮解析。
  */
@@ -709,8 +744,8 @@ const LEGACY_DEFAULT_SOURCE_FLAGS = { netease: true, migu: true, kuwo: false, qq
 /**
  * 「同名曲换源」是否允许。
  *
- * 2026-11-20（风险整改 T2-B）：这条路径会把别的平台上的同名曲地址拿过来用，
- * 属于「换源」，默认关闭。用户需要时在音源卡里自己打开 swap 开关。
+ * 这条路径会把别的平台上的同名曲地址拿过来用，属于「换源」，默认关闭。
+ * 用户需要时在音源卡里自己打开 swap 开关。
  * 默认关闭时：/song/url/match 一律不调用，只走各家自己的公开直链。
  */
 function swapAllowed(flags) {
@@ -755,7 +790,7 @@ const SOURCE_HOST_PATTERNS = {
   qq: /qq\.com|qqmusic/i,
   migu: /migu/i,
   netease: /music\.126\.net|music\.163\.com|netease/i,
-  // 2026-11-18：酷狗恢复为可选音源（酷狗歌单里的歌有 hash，可直接出链）。
+  // 酷狗恢复为可选音源（酷狗歌单里的歌有 hash，可直接出链）。
   // 保留宿主特征，这样用户在设置里关掉酷狗时仍然能把它拦下来。
   kugou: /kugou|kgimg|kglink/i,
 };
@@ -763,7 +798,7 @@ const SOURCE_HOST_PATTERNS = {
 /*
  * 已彻底删除、不再使用的音源宿主特征。命中就一律不认，不看开关。
  *
- * 2026-11-18：酷狗从这里移除 —— 用户要求「酷狗歌单能点歌播放」，
+ * 酷狗从这里移除 —— ，
  * 现在酷狗是默认开启的可选音源（kugouSongUrl 直链可用，VIP 曲会抛「需要付费」
  * 并由同名换源接手）。要不要用酷狗由 flags.kugou 控制，和酷我/QQ 同一套逻辑，
  * 不再是无条件拉黑。表保留结构，将来真有要彻底删除的音源往这里加即可。
@@ -803,7 +838,6 @@ function resolveCacheKey(song, level) {
 const PROBE_TIMEOUT_MS = 3000;
 
 /**
- * 「已经收到结果之后，再等其余音源多久」。
  *
  * 严格执行「等所有 task 结束」会把整轮拖到最慢那个源（12 秒）才能开始探测，
  * 界面上就是「点了歌要愣十几秒」。所以拿到第一个可用地址后再给 3 秒汇总窗口：
@@ -871,7 +905,7 @@ function settleAllTasks(tasks, timeout = RESOLVE_RACE_TIMEOUT) {
 /**
  * 音源优先级名次（越小越优先）。
  *
- * 2026-11-21 用户要求：自己导入的音源排第一，然后才是内置源。
+ * 用户要求：自己导入的音源排第一，然后才是内置源。
  * 自定义音源没有固定 id，统一用 custom 标记判在第一档；同档之间保持导入顺序。
  */
 function priorityRank(candidate) {
@@ -1038,7 +1072,7 @@ async function resolveSourceUrl(song, options = {}) {
     push('migu', async () => ({ ...(await miguSongUrl(song)), matched: '原生' }));
   }
   /*
-   * 2026-11-18：酷狗原生直链恢复。
+   * 酷狗原生直链恢复。
    *
    * 酷狗歌单里的曲目自带 32 位 hash，getSongInfo.php 直连就能出地址（实测 ~55ms，
    * 免费曲目返回标准 MP3）。之前这里没有这一条、BLOCKED 表还无条件拦 kugou 域名，

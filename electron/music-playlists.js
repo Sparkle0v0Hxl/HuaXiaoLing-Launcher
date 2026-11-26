@@ -517,7 +517,7 @@ async function qqMyPlaylists(session) {
 
   const errors = [];
   /*
-   * 2026-11-18：三个候选接口改成**并发**。
+   * 三个候选接口改成**并发**。
    *
    * 以前是 for + await 串行试：第一个超时（默认十几秒）才轮到第二个，
    * 用户看到的就是「QQ 音乐一直在同步中」。三个接口互相独立，
@@ -759,7 +759,7 @@ async function kugouPlaylistSongs(session, listId) {
   const seen = new Set();
   let total = 0;
   /*
-   * 2026-11-18：与自建歌单同一套改法 —— 首页探总数，其余页 5 路并发。
+   * 与自建歌单同一套改法 —— 首页探总数，其余页 5 路并发。
    * 终止条件仍保留「空页 / 不满一页 / 重复行」三重判断，但并发时不再边拉边 break，
    * 改为并发结束后按页序合并；空页或重复页在合并阶段自然被跳过。
    */
@@ -1009,7 +1009,7 @@ async function kugouCollectPlaylistSongs(info) {
   const songs = [];
   const seen = new Set();
   /*
-   * 2026-11-18：改成「先取首页 → 算页数 → 并发拉剩余页」。
+   * 改成「先取首页 → 算页数 → 并发拉剩余页」。
    *
    * 之前是逐页 await，每页 100 条，1944 首的歌单要排 20 次往返，
    * 实测整张 3.4 秒（用户点开就是一段白屏）。首页已经带 count，
@@ -1082,6 +1082,55 @@ async function kugouCollectPlaylistSongs(info) {
 
 function plazaCover(url) {
   return httpsify(String(url || '').replace('{size}', '400'));
+}
+
+/**
+ * 搜索公开歌单（2026-11-25 新增）。
+ *
+ * 用户需求：「音乐页搜索能分类一下吗？目前歌名/歌手/专辑嘛，得分吧？然后再加个歌单上去搜索」。
+ * 所以搜索除了「找歌」，还要能「找歌单」——找到一张歌单可以直接点开当播放列表用。
+ *
+ * 只有网易云给了干净的免登录歌单搜索接口（`/api/search/get?type=1000`，实测三组
+ * 关键词都回 200 且字段齐）；QQ 那个 `client_search_cp?t=2` 现在固定回空
+ * （只有 `zhida`/`tab` 元信息，没有 disslist），酷狗的 special 搜索接口全部
+ * fetch failed / 404 —— 两家都不做假数据，直接告诉界面「这个平台不支持歌单搜索」。
+ *
+ * 返回结构与歌单广场一致（id/name/cover/count/playcount/creator/plaza），
+ * 界面可以复用同一张卡片，点开也走同一个 playlistDetail。
+ */
+async function searchPlaylists(platform, keyword, page = 1) {
+  const kw = String(keyword || '').trim();
+  if (!kw) return [];
+  const plat = String(platform || '').trim();
+  const current = Math.max(1, page | 0);
+  const size = 30;
+  const offset = (current - 1) * size;
+
+  if (plat === 'netease') {
+    const json = await fetchJson(
+      `https://music.163.com/api/search/get?s=${encodeURIComponent(kw)}&type=1000&limit=${size}&offset=${offset}`,
+      { referer: 'https://music.163.com/' }
+    );
+    const rows = Array.isArray(json?.result?.playlists) ? json.result.playlists : [];
+    return rows
+      .map((row) => ({
+        id: String(row.id ?? ''),
+        name: String(row.name ?? ''),
+        cover: plazaCover(row.coverImgUrl ?? row.picUrl ?? ''),
+        count: Number(row.trackCount) || 0,
+        playcount: Number(row.playCount) || 0,
+        creator: String(row.creator?.nickname ?? row.creator_name ?? ''),
+        platform: 'netease',
+        plaza: true,
+      }))
+      .filter((item) => item.id && item.name);
+  }
+
+  /*
+   * 其它平台如实返回空数组 + 一句原因，界面按「这个平台搜不到歌单」渲染。
+   * 不抛异常：歌单搜索失败不该把整页搜索（找歌）一起拖垮。
+   */
+  throw new Error(plat === 'qq' ? 'QQ 音乐的公开歌单搜索接口已关闭' : plat === 'kugou' ? '酷狗的公开歌单搜索接口已关闭' : '这个平台不支持歌单搜索');
 }
 
 /** 酷狗歌单广场：m.kugou.com/plist/index，按页翻（每页固定 30 条，pagesize 参数无效）。 */
@@ -1292,7 +1341,7 @@ async function kuwoPublicPlaylistSongs(listId) {
   };
   push(info.musicList);
   /*
-   * 2026-11-18：剩余页并发（原来 for + await 串行，最多 20 页排队）。
+   * 剩余页并发（原来 for + await 串行，最多 20 页排队）。
    * 首页给了 total，直接算页数；中间页失败只跳过该页，保留已拿到的曲目。
    */
   const pages = Math.min(Math.ceil(total / 30) || 1, 20);
@@ -1487,7 +1536,7 @@ async function neteasePublicPlaylistSongs(listId) {
   let tracks = embedded;
   if (trackIds.length > embedded.length) {
     /*
-     * 2026-11-18：分批补全改成 4 路并发（原来逐批 await）。
+     * 分批补全改成 4 路并发（原来逐批 await）。
      * 每批 200 首，2000 首的歌单要排 10 次；并发后一次发完，按批次顺序合并。
      * 单批失败只丢那一批，其余照样返回。
      */
@@ -1599,7 +1648,7 @@ async function qqPublicPlaylistSongs(dissId) {
   };
   collect(body.songlist || []);
   /*
-   * 2026-11-18：剩余分页改成并发拉取（原来是一页一页串行 await）。
+   * 剩余分页改成并发拉取（原来是一页一页串行 await）。
    *
    * 服务端每页写死 30 条，一张 1200 首的歌单要翻 40 页；串行 = 40 次往返排队，
    * 高延迟线路上就是几十秒，用户感知到的就是「QQ 歌单加载很慢」。
@@ -2680,5 +2729,6 @@ module.exports.withLikedPlaylist = withLikedPlaylist;
 module.exports.webLikedSongs = webLikedSongs;
 module.exports.pickSongsFromJson = pickSongsFromJson;
 module.exports.publicPlaza = publicPlaza;
+module.exports.searchPlaylists = searchPlaylists;
 module.exports.publicPlaylistSongs = publicPlaylistSongs;
 module.exports.parseSharedPlaylistLink = parseSharedPlaylistLink;

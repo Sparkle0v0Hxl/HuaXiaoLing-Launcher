@@ -115,7 +115,7 @@ function performRequest(url, options = {}, redirects = 0) {
         // 同 host 复用空闲连接：小文件下载省掉每次的 TCP/TLS 握手。
         // 走代理时用隧道的 Agent（每个代理一个池，同样是 keep-alive）
         agent: options.agent || (isHttps ? httpsAgent : httpAgent),
-        // 默认校验证书（风险整改 T5）。只有调用方显式传 insecure: true 才关校验。
+        // 默认校验证书：只有调用方显式传 insecure: true 才关校验。
         // 更新链（清单 / 更新包）在 updater.js 里强制 insecure: false，不接受降级。
         rejectUnauthorized: options.insecure === true ? false : true,
         timeout: options.timeout || 120000,

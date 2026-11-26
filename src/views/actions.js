@@ -245,7 +245,7 @@ case 'music-accounts':
       /*
        * 离开承载钻取态的 tab 时退出钻取（再切回来应该看到列表，而不是上次那张歌单）。
        *
-       * 2026-11-19：广场（plaza）和「我的歌单」（mine）都各自带钻取态，
+       * 广场（plaza）和「我的歌单」（mine）都各自带钻取态，
        * 所以「离开」要按来源判：从广场点开的歌单回到广场时仍是钻取态，
        * 切到别处才清。以前只写了 next !== 'mine'，从广场点开歌单后
        * 切到别的 tab 不会被清掉，于是广场一直停在旧详情上 ——
@@ -332,7 +332,7 @@ case 'music-accounts':
       const url = await api.mediaUrl(source);
       const fileName = source.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
       /*
-       * 2026-11-18：和直链一样走 playSongAt，让它触发 hydrateSong 去搜歌词。
+       * 和直链一样走 playSongAt，让它触发 hydrateSong 去搜歌词。
        * 文件名里带「歌手 - 歌名」的顺手拆开，没有就只用歌名。
        */
       const meta = guessSongMetaFromUrl(url) || { title: fileName, artist: '' };
@@ -406,7 +406,7 @@ case 'music-accounts':
       if (state.detailSelectMode) {
         /*
          * 批量选择模式：点行只切换勾选。
-         * 2026-11-18：改成局部更新，不再整页 render ——
+         * 改成局部更新，不再整页 render ——
          * 之前每点一下都重绘整页，视觉上就是「闪一下才选中」。
          */
         const selected = new Set(state.detailSelected || []);
@@ -459,7 +459,7 @@ case 'music-accounts':
       const songs = state.myPlaylists.detail?.songs || [];
       if (!songs.length) break;
       /*
-       * 2026-11-18：整张入队改成「只写元数据」。
+       * 整张入队改成「只写元数据」。
        * 以前是逐首解析完再插，1900 首要跑十几分钟；现在瞬间入队，
        * 播放到哪首才解析哪首（playSongAt 懒解析 + 后 10 首预取）。
        */
@@ -504,12 +504,15 @@ case 'music-accounts':
       next[sourceKey] = !next[sourceKey];
       await applySettingLocally({ musicSources: next });
       if (state.route === 'song') render({ preserveScroll: true });
-      const feature = (typeof MUSIC_SOURCE_FEATURES !== 'undefined' ? MUSIC_SOURCE_FEATURES : []).find((item) => item[0] === sourceKey);
+      // 这两张表定义在 views/song-view.js，通过 window 取（classic script 的 const 不共享）
+      const features = window.MUSIC_SOURCE_FEATURES || [];
+      const feature = features.find((item) => item[0] === sourceKey);
       if (feature) {
         toast(next[sourceKey] ? `已开启 ${feature[1]}` : `已关闭 ${feature[1]}`, 'success');
         break;
       }
-      const label = (MUSIC_SOURCE_LABELS.find((item) => item[0] === sourceKey) || [sourceKey, sourceKey])[1];
+      const labels = window.MUSIC_SOURCE_LABELS || [];
+      const label = (labels.find((item) => item[0] === sourceKey) || [sourceKey, sourceKey])[1];
       toast(next[sourceKey] ? `已启用 ${label} 音源` : `已停用 ${label} 音源`, 'success');
       break;
     }
@@ -601,7 +604,7 @@ case 'music-accounts':
     }
     case 'plaza-platform': {
       /*
-       * 2026-11-19 修「切几下平台就没反应」：
+       * 修「切几下平台就没反应」：
        *
        * ensurePlaza() 在「这个平台已经加载过」时会直接 return（它内部只在
        * 真正发起请求的前后才 render），于是切回加载过的平台时 ——
@@ -900,7 +903,7 @@ case 'music-accounts':
         .filter(Boolean);
       if (!chosen.length) break;
       /*
-       * 2026-11-18：批量选择的去处可选 —— 我的队列，或用户自己新建的本地歌单。
+       * 批量选择的去处可选 —— 我的队列，或用户自己新建的本地歌单。
        */
       const target =
         element.closest('.song-queue-brush')?.querySelector('[data-detail-target]')?.value || 'queue';
@@ -1047,6 +1050,17 @@ case 'music-accounts':
     case 'mini-mute':
     case 'song-search-run': {
       await runSongSearch();
+      break;
+    }
+    /*
+     * 切「搜单曲 / 搜歌单」（2026-11-25）。切完保留关键词，不自动重搜：
+     * 用户可能只是想先看看这个分类能搜出什么形态，而不是立刻打一发请求。
+     *
+     * 注意这里读 element.dataset.mode 而不是 id —— 分发器只解出
+     * `{ action, id }`（`data-action` / `data-id`），data-mode 不在里面。
+     */
+    case 'song-search-mode': {
+      setSongSearchMode(element.dataset.mode);
       break;
     }
     case 'song-search-add': {
@@ -1274,7 +1288,7 @@ case 'music-accounts':
     }
     case 'song-clear': {
       /*
-       * 2026-11-18：队列页的「清空」清的是「我的队列」（pickedSongs），
+       * 队列页的「清空」清的是「我的队列」（pickedSongs），
        * 以前只清 state.songs，界面上看着像点了没反应。
        * 同时停掉当前播放列表，避免头歌词还挂着已删的歌。
        */
@@ -1362,18 +1376,32 @@ case 'music-accounts':
         if (result.elevationRequired) {
           /*
            * 终末地的 740 是官方客户端硬限制（非提权创建进程直接 failed to create
-           * game process 740），绕不过去。能省掉的只有「每次都问」：让启动器自己以
-           * 管理员运行，提权一次、整场免问。只问一次，选哪边都记住（elevationAsked）。
+           * game process 740），绕不过去。
+           *
+           * 2026-11-25 改造：这里原来直接 confirmDialog 问「要不要以管理员重启」，
+           * 用户的原话是「不要是我一点启动游戏，右下角就一堆提示了」——
+           * 一个确认框 + 一条错误 toast + 可能的第二条 toast，三样一起来。
+           *
+           * 现在改成：只有「没开过开关 + 没点过不再提醒 + 确实不是管理员」时，
+           * 才用那个三选一的询问框问一次；问过了/被叫停了就直接按普通权限继续
+           * （普通权限下终末地会退到「把官方启动器打开，你自己点一下」）。
+           * 全程最多一条提示，不再堆叠。
            */
-          const useAdmin = await confirmDialog({
-            title: '以后开游戏不再每次问权限',
-            message: `${result.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
-            confirmText: '以管理员重启',
-          });
-          await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
-          if (useAdmin) {
+          const asked = await maybeAskElevationForGame();
+          if (asked) {
             const relaunched = await api.relaunchAdmin({ launchGameId: id });
-            if (!relaunched.ok) toast(relaunched.error, 'error');
+            if (relaunched && relaunched.ok === false && relaunched.error) {
+              toast(relaunched.error, 'error');
+            }
+            break;
+          }
+          /* 用户选择暂不提权：按普通权限再试一次，走「手动打开官方启动器」兜底 */
+          try {
+            const retry = await api.games.launch(id);
+            if (!retry.ok && retry.error) toast(retry.error, 'error');
+            else if (retry.ok) playUiSound('launch');
+          } catch (e) {
+            toast((e && e.message) || '启动失败', 'error');
           }
         } else {
           toast(result.error, 'error');
@@ -1728,7 +1756,7 @@ case 'music-accounts':
       break;
     }
     case 'wegame-convert': {
-      // 鸣潮 WeGame 版转换（用户 2026-11-11 拍板的功能）：
+      // 鸣潮 WeGame 版转换：
       // 把官方启动器版客户端硬链接进 WeGame 的 downloading\2002137\，
       // 之后在 WeGame 里点「继续下载」补齐渠道件（TPS 登录件那 <1GB）即可启动。
       // 这条链路只写 WeGame 自己的目录，绝不碰官方版本体。
@@ -1741,7 +1769,12 @@ case 'music-accounts':
       break;
     /* 启动页唤出原生侧栏：窗口态把窗口向左外扩一块放它，扩不出去就浮在上面 */
     case 'toggle-start-nav':
-      setStartNavOpen(!state.startNavOpen).catch(() => {});
+      /*
+       * 以画面为准：只要抽屉现在看起来是开的，这颗键就是「收起」。
+       * 不用 state.startNavOpen —— 一旦状态和画面错位，按状态取反会变成再开一次，
+       * 表现就是「点箭头没反应」。
+       */
+      setStartNavOpen(!document.body.classList.contains('start-nav-open')).catch(() => {});
       break;
     case 'close-start-nav':
       setStartNavOpen(false).catch(() => {});
@@ -2016,7 +2049,7 @@ case 'music-accounts':
       const server = game && (game.servers || []).find((item) => item.id === element.dataset.server);
       if (!game || !server) break;
       /*
-       * 2026-11-16：终末地不再单独走「直接 prepare-endfield」那条闷头路径。
+       * 终末地不再单独走「直接 prepare-endfield」那条闷头路径。
        * 那条路径只有一条不会动的 toast、没有空间估算、没有分阶段进度，
        * 和别的游戏点「重建」弹出面板（硬链接生成一份 / 下载游戏 / 选路径 / 扫描）
        * 的手感完全不一样。统一进 openServerSetupDialog —— 里面的「硬链接生成一份」
@@ -2475,15 +2508,15 @@ case 'music-accounts':
         playUiSound('launch');
         if (!target.demo) toast(`正在启动 ${target.name}`, 'info');
       } else if (started.elevationRequired) {
-        const useAdmin = await confirmDialog({
-          title: '以后开游戏不再每次问权限',
-          message: `${started.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
-          confirmText: '以管理员重启',
-        });
-        await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
-        if (useAdmin) {
+        /* 统一走「只问一次」的询问框（见 maybeAskElevationForGame 的说明） */
+        const asked = await maybeAskElevationForGame();
+        if (asked) {
           const relaunched = await api.relaunchAdmin({ launchGameId: target.id });
-          if (!relaunched.ok) toast(relaunched.error, 'error');
+          if (relaunched && relaunched.ok === false && relaunched.error) toast(relaunched.error, 'error');
+        } else {
+          const retry = await api.games.launch(target.id);
+          if (retry && retry.ok) playUiSound('launch');
+          else if (retry && retry.error) toast(retry.error, 'error');
         }
       } else {
         toast(started.error, 'error');
@@ -2521,19 +2554,17 @@ case 'music-accounts':
         if (result.elevationRequired) {
           /*
            * 终末地的 740 是官方客户端的硬限制（实测：非提权创建进程直接
-           * failed to create game process 740），绕不过去。能省掉的只有「每次
-           * 都问」：让启动器自己以管理员运行，提权一次、整场免问。
-           * 这里只问一次，选哪边都记住（elevationAsked），别每次开都再问一遍。
+           * failed to create game process 740），绕不过去。
+           * 2026-11-25 统一改成「只问一次」的询问框，不再弹出确认框 + 错误提示两条。
            */
-          const useAdmin = await confirmDialog({
-            title: '以后开游戏不再每次问权限',
-            message: `${result.error}\n\n点「以管理员重启」：现在弹一次 Windows 确认，启动器以管理员重开并自动把游戏打开，之后这一场都不再弹。\n点「取消」：就按现在的样子，每开一次游戏弹一次。`,
-            confirmText: '以管理员重启',
-          });
-          await api.updateSettings({ elevationAsked: true, alwaysAdmin: useAdmin === true });
-          if (useAdmin) {
+          const asked = await maybeAskElevationForGame();
+          if (asked) {
             const relaunched = await api.relaunchAdmin({ launchGameId: id });
-            if (!relaunched.ok) toast(relaunched.error, 'error');
+            if (relaunched && relaunched.ok === false && relaunched.error) toast(relaunched.error, 'error');
+          } else {
+            const retry = await api.games.launch(id);
+            if (retry && retry.ok) playUiSound('launch');
+            else if (retry && retry.error) toast(retry.error, 'error');
           }
         } else {
           toast(result.error, 'error');
@@ -2682,14 +2713,16 @@ case 'music-accounts':
     }
     case 'toggle-sidebar': {
       /*
-       * 启动页抽屉开着的时候，侧栏底下那颗「收起侧栏」= 把抽屉收回去。
-       *
-       * 以前这里不分场合，直接走全局的「侧栏收成 72px 图标条」：抽屉是露出一条
-       * 238px 的面板，缩成 72 之后窗口还停在展开后的宽度，左边空出一大条 —— 看着
-       * 就像侧栏被搞掉了。抽屉里的收起，语义本来就该是收抽屉。
+       * 启动页抽屉开着时：
+       *   · 「启动页菜单键固定」开着 → 底部键只切侧栏自己的宽度（238 ↔ 72），不关抽屉；
+       *   · 固定关着 → 回到改动前的老逻辑：这颗键就是收起抽屉（配合遮罩点画面收起）。
        */
       if (state.startNavOpen) {
-        setStartNavOpen(false).catch(() => {});
+        if (state.settings?.startNavPinMenu === true) {
+          toggleStartNavDrawerWidth();
+        } else {
+          setStartNavOpen(false).catch(() => {});
+        }
         break;
       }
       /*
@@ -2832,7 +2865,7 @@ case 'music-accounts':
        * 进度同时进左下角任务坞。
        *
        * 弹窗只在「点立即更新」那一下存在：切到别的页面、或者手滑关掉弹窗，
-       * 两百多 MB 的下载就一点反馈都没有了（用户原话：「更新没进度条」「总得给个
+       * 两百多 MB 的下载就一点反馈都没有了（「总得给个
        * 看到下载过程的东西吧」）。坞是全局的，和游戏预下载走同一套显示——
        * 阶段文字、进度条、已下 / 总量、速度都在那一行里。
        */
@@ -3540,22 +3573,59 @@ case 'music-accounts':
       }
       break;
     }
-    case 'pick-endfield-official-games': {
-      const exe = await api.pick.executable();
-      if (exe) {
-        if (!/Games\.exe$/i.test(exe)) {
-          toast('请选鹰角官方启动器的 Games.exe（文件名要对）', 'error');
-          break;
-        }
-        await api.updateSettings({ endfieldOfficialGamesExe: exe });
-        toast('终末地官方启动器路径已设置', 'success');
-        render();
+    case 'pick-endfield-official-games':
+    case 'start-pick-official-games': {
+      /*
+       * 两个入口共用这一段：设置页那一行（pick-endfield-official-games）和
+       * 启动页服务器菜单同一排的那个按钮（start-pick-official-games）。
+       * 逻辑一模一样，只是入口不同，所以合并成一个 case 分支。
+       */
+      const picked = await api.pick.executable();
+      if (!picked) break;
+      /*
+       * 官方启动器有两个常见可执行文件：
+       *   · <根目录>\Launcher.exe（用户最容易点到的那个）
+       *   · <根目录>\<版本号>\Games.exe（真正拉起游戏的那个，带 requireAdministrator）
+       * 所以不能只认 Games.exe 文件名 —— 交给主进程去它周围找真正能用的。
+       */
+      const result = await api.endfield
+        .resolveOfficialGamesExe(picked)
+        .catch((error) => ({ ok: false, reason: error && error.message ? error.message : '' }));
+      if (!result || !result.ok) {
+        toast((result && result.reason) || `没在这个位置找到 Games.exe：${picked}`, 'error');
+        break;
       }
+      await api.updateSettings({ endfieldOfficialGamesExe: result.exe });
+      toast(`终末地官方启动器已设置：${result.exe}`, 'success');
+      render();
       break;
     }
     case 'reset-endfield-official-games': {
       await api.updateSettings({ endfieldOfficialGamesExe: '' });
       toast('已恢复自动搜索官方启动器', 'success');
+      render();
+      break;
+    }
+    case 'pick-azur-launcher': {
+      /*
+       * 蓝色星原官方启动器（launcher.exe）。
+       * 它和终末地不同：只有一个 launcher.exe，不像 Games.exe 藏在版本号子目录里，
+       * 所以这里直接校验文件名就行，不需要主进程再解析一遍。
+       */
+      const picked = await api.pick.executable();
+      if (!picked) break;
+      if (!/launcher\.exe$/i.test(String(picked).trim())) {
+        toast(`请选择 launcher.exe（蓝色星原官方启动器），而不是：${picked}`, 'error');
+        break;
+      }
+      await api.updateSettings({ azurLauncherExe: String(picked).trim() });
+      toast(`蓝色星原官方启动器已设置：${picked}`, 'success');
+      render();
+      break;
+    }
+    case 'reset-azur-launcher': {
+      await api.updateSettings({ azurLauncherExe: '' });
+      toast('已恢复自动搜索蓝色星原官方启动器', 'success');
       render();
       break;
     }
@@ -3611,6 +3681,25 @@ case 'music-accounts':
      * 所以切完要整页无缓存重绘一次 —— 只 preserveScroll 的话浏览器会拿旧的图片缓存。
      * 配色由主进程写进 settings.themePackColors，回推后 applySettings() 统一注入。
      */
+    case 'set-endfield-launch-mode': {
+      /*
+       * 终末地启动方式：全自动 / 手动。
+       * 手动模式不碰调试口 —— 万一哪天官方开始查启动链路，这是退路。
+       * 切换时会顺便清掉熔断计数（settings-ipc 里统一处理），给自动模式重新开始的机会。
+       */
+      const mode = element.dataset.value === 'manual' ? 'manual' : 'full';
+      if ((state.settings || {}).endfieldLaunchMode === mode) break;
+      await api.updateSettings({ endfieldLaunchMode: mode });
+      state.settings = { ...(state.settings || {}), endfieldLaunchMode: mode };
+      render({ preserveScroll: true });
+      toast(
+        mode === 'manual'
+          ? '已改为手动：点开始游戏后，在官方启动器里自己点一次「开始游戏」，进去后它会被自动关掉。'
+          : '已改为全自动：点一下就进游戏，官方启动器会自动最小化并在进游戏后关掉。',
+        'success'
+      );
+      break;
+    }
     case 'set-theme-pack': {
       const id = element.dataset.value;
       if (!id) break;
@@ -3910,6 +3999,17 @@ case 'music-accounts':
       expectSettingsEcho({ ...state.settings, charBg: next });
       await applySettingLocally({ charBg: next });
       toast(next ? '角色背景水印已开启' : '角色背景水印已关闭', next ? 'success' : 'info');
+      break;
+    }
+    case 'toggle-start-nav-pin': {
+      const next = !(state.settings.startNavPinMenu === true);
+      paintSwitch(element, next);
+      expectSettingsEcho({ ...state.settings, startNavPinMenu: next });
+      await applySettingLocally({ startNavPinMenu: next });
+      toast(
+        next ? '启动页菜单键已固定：点开侧栏后原键变返回箭头' : '启动页菜单键改回跟随画面收起',
+        next ? 'success' : 'info'
+      );
       break;
     }
     case 'toggle-sidebar-char': {
