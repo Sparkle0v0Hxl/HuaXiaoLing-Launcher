@@ -1,31 +1,32 @@
 {
-  "version": "2.13.1",
-  "title": "花筱灵启动器 2.13.1",
-  "date": "2026-11-23",
+  "version": "2.14.0",
+  "title": "花筱灵启动器 2.14.0",
+  "date": "2026-11-26",
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
-    "2.13.1。",
-    "修复：B服生成后误报目录丢失与不完整。",
-    "修复：硬链接时找不到 PowerShell 报 ENOENT。",
-    "修复：增量更新后旧文件没清，看起来没变化。",
-    "修复：下完完整包偶尔卡住不重启。",
-    "改进：PowerShell 改按系统目录定位，不再靠 PATH。"
+    "2.14.0。",
+    "新增：自绘安装器，体积降到约 175MB。",
+    "新增：卸载改为程序内置窗口，只保留 data。",
+    "修复：应用列表的卸载入口指向新窗口。",
+    "修复：管理员判定改三路探测，解决死不提权。",
+    "修复：终末地官方托管与预下载两个必挂问题。",
+    "修复：音乐搜索加分类，长歌名不再溢出。"
   ],
-  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.13.1/HuaXiaoLing-2.13.1-Portable.zip",
+  "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/HuaXiaoLing-2.14.0-Portable.zip",
   "deltas": [
     {
-      "from": "2.13.0",
-      "to": "2.13.1",
-      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.13.1/delta-2.13.0-to-2.13.1.zip",
-      "sha256": "a6bc9de87d77716429c60092be02129a7845d7d5683e6a86938a96b64de1629b",
-      "size": 13308
+      "from": "2.13.1",
+      "to": "2.14.0",
+      "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/delta-2.13.1-to-2.14.0.zip",
+      "sha256": "27925f8afa87b5e4245d2edf5e0316dc4fc94de6620cfbdcdbaeea79872ed083",
+      "size": 22687211
     }
   ],
-  "sha256": "7360f5c4310431ebc721496a3a486a0c8645b16d48be3c43996408f8eb2f83f1",
-  "size": 211886627,
+  "sha256": "9fc1a039cc59d9a09f903555b9494078203c5d997d82f4757da5b4271b88d4f2",
+  "size": 213323757,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "RPaUX3jlQtU/GrP3rJlR26WxCeQNA0ajc1+j6jyO+j16XyoRQY+Ak5bsJDnQAkakfEwzXWEZMs6N/t2ekKBXCg=="
+    "value": "7KI94ekq+pkOcTl6EDLuO2B/RX1NBPTrHHtt9WUEAsPQXI2zw8A9Y0OeRmsxEoAyQifCibV7bCA9zjHS5TtODQ=="
   }
 }
