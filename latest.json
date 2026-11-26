@@ -5,12 +5,24 @@
   "notes": [
     "未签名程序：升级前请先把安装目录整个（重点是 resources 子目录）加进杀毒软件排除项，否则更新包可能被拦截或隔离。",
     "2.14.0。",
-    "新增：自绘安装器，体积降到约 175MB。",
-    "新增：卸载改为程序内置窗口，只保留 data。",
-    "修复：应用列表的卸载入口指向新窗口。",
+    "新增：蓝色星原：旅谣，官服与B服一键切换。",
+    "新增：蓝原启动走官方启动器托管，不伪造父进程。",
+    "新增：蓝原B服渠道件自愈，86条自动补齐。",
+    "新增：自绘安装器，体积降到约175MB。",
+    "新增：卸载改为程序内置窗口，只保留data。",
+    "新增：运行时一致性检查，区分版本差异与真损坏。",
+    "新增：热更层善后，只对终末地生效，米哈游三款不动。",
+    "改进：卸载入口统一指向新窗口，清理旧残留。",
+    "改进：硬链接加进程探活与占用探测，运行中不写坏。",
+    "改进：全部素材转WebP，界面不变体积更小。",
+    "改进：设置页补管理员状态显示，一眼看到当前权限。",
     "修复：管理员判定改三路探测，解决死不提权。",
-    "修复：终末地官方托管与预下载两个必挂问题。",
-    "修复：音乐搜索加分类，长歌名不再溢出。"
+    "修复：终末地官方托管超时，改由脚本自己设环境。",
+    "修复：终末地预下载字段名笔误，不再全量重下。",
+    "修复：音乐搜索加单曲与歌单分类，长歌名不再溢出。",
+    "修复：音乐模块循环依赖，搜索换源取地址恢复。",
+    "修复：星铁与绝区零国际服被判官服，改多字段判定。",
+    "清理：同步脚本备份只留最近3份，不再堆满磁盘。"
   ],
   "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/HuaXiaoLing-2.14.0-Portable.zip",
   "deltas": [
@@ -18,15 +30,15 @@
       "from": "2.13.1",
       "to": "2.14.0",
       "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/delta-2.13.1-to-2.14.0.zip",
-      "sha256": "27925f8afa87b5e4245d2edf5e0316dc4fc94de6620cfbdcdbaeea79872ed083",
-      "size": 22687211
+      "sha256": "5d1003e2b60e21054b977c5c815b2824e2b079531a9b84f3e19bd72ef5aa288b",
+      "size": 22662967
     }
   ],
-  "sha256": "9fc1a039cc59d9a09f903555b9494078203c5d997d82f4757da5b4271b88d4f2",
-  "size": 213323757,
+  "sha256": "958e0d6f50ddcf2011767ee2b8c4f0b0341c96902589a117c0c98430a801d00c",
+  "size": 213338121,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "7KI94ekq+pkOcTl6EDLuO2B/RX1NBPTrHHtt9WUEAsPQXI2zw8A9Y0OeRmsxEoAyQifCibV7bCA9zjHS5TtODQ=="
+    "value": "SzomCSUIW7JuvO29RsXcQOqbbGltWHTTUf4Sim/hEQIYnv+rhwJogD7Veom7gO6jcKq26ZXwW7i4EHpqsCHYCw=="
   }
 }
