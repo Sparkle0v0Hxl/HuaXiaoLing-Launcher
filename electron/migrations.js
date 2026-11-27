@@ -117,7 +117,13 @@ const MIGRATIONS = [
     registryRepair: true,
   },
   {
-    id: 'uninstall-shortcut-v2',
+    /*
+     * id 带 v3 而不是沿用 v2：v2 那版有个真 bug —— 只要安装目录里「有」同名 exe 就跳过，
+     * 而老用户目录里躺着的是 2.8.0 时代 NSIS 安装器留下的 363KB 旧卸载器，
+     * 于是 v2 判定「已存在」、写入 ok 标记、从此永不重跑，用户点卸载永远是旧界面。
+     * 换成新 id 才能让这批人重新执行一次（条目级标记，改 id 等于新增条目）。
+     */
+    id: 'uninstall-shortcut-v3',
     since: '2.14.0',
     desc: '安装目录里少一个能双击的卸载入口（用户习惯在文件夹里找 Uninstall）。'
       + '新装用户由安装器直接建；老用户走完整包更新时不会重跑安装器，所以这里补建。'
@@ -277,14 +283,43 @@ async function runMigrations(options = {}) {
           result.skipped += 1;
           continue;
         }
-        // 已存在就不动（不覆盖用户可能自己放的东西）
+        /*
+         * 已存在时要分清「是谁的」：
+         *  - 老版本（≤2.13.1）是 NSIS 安装器留在安装目录里的 Uninstall xxx.exe，只有几百 KB，
+         *    点它跑的是旧 NSIS 卸载逻辑，会删不干净、也换不成新窗口 —— 必须删掉重建。
+         *  - 已经是我们自己的入口（硬链接或复制的主程序本体，大小和主 exe 一样）→ 不动。
+         * 早先这里写的是「存在就跳过」，结果是老用户永远卡在旧卸载器上（标记一旦写成 ok 就不再重跑）。
+         */
         if (fs.existsSync(uninstExe)) {
-          result.skipped += 1;
-          if (!dryRun) {
-            markers[entry.id] = { ok: true, at: new Date().toISOString(), version, note: 'already exists' };
-            changed = true;
+          let ours = false;
+          try {
+            const a = fs.statSync(appExe);
+            const b = fs.statSync(uninstExe);
+            ours = a.size === b.size && Number(a.ino) === Number(b.ino) && Number(a.ino) !== 0;
+            if (!ours && a.size === b.size) ours = true; // 非 NTFS 退回复制时 ino 不同，大小相等也认
+          } catch {
+            ours = false;
           }
-          continue;
+          if (ours) {
+            result.skipped += 1;
+            if (!dryRun) {
+              markers[entry.id] = { ok: true, at: new Date().toISOString(), version, note: 'already exists' };
+              changed = true;
+            }
+            continue;
+          }
+          if (dryRun) {
+            onLog(`[migrations] ${entry.id}：安装目录里那个卸载入口是旧版本的（将替换）`);
+            result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 0, removed: 0 });
+            continue;
+          }
+          try {
+            fs.rmSync(uninstExe, { force: true });
+          } catch (removeError) {
+            onLog(`[migrations] ${entry.id}：旧卸载入口删不掉（${removeError && removeError.message}），下次再试`);
+            result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 1, removed: 0 });
+            continue;
+          }
         }
         if (dryRun) {
           result.entries.push({ id: entry.id, desc: entry.desc, freed: 0, failed: 0, removed: 0 });
