@@ -25,11 +25,11 @@
     "清理：同步脚本备份只留最近3份，不再堆满磁盘。"
   ],
   "url": "https://github.com/Sparkle0v0Hxl/HuaXiaoLing-Launcher/releases/download/v2.14.0/HuaXiaoLing-2.14.0-Portable.zip",
-  "sha256": "2ee3412f310856542c6c5311bdf155b11adb76331e55922fd1ca98f0aeeb3c71",
+  "sha256": "a6a2a3dc81089631c315f9554fe3b10195e49b1c44b8727e4b379fd4b379a4f1",
   "size": 213424945,
   "sig": {
     "alg": "ed25519",
     "keyId": "dff6dc4c71f12733",
-    "value": "B7eaN+Ar0Pwb16iHoJX9wX+160qHGo6hD5IuXZ6Nmm4OguwpbyqtJR2fgEmwgCq/7vAA5QgUeKPaCWixkgLIAA=="
+    "value": "YXCBtwkUn9ZlvBKnnvYKaLp8VyXznBmwqgWdqFS5fWHhnrtvKs7gfz4pDdMbxEppROL2sV1e2YOfcz0+0yseBw=="
   }
 }
